@@ -118,7 +118,10 @@ pub fn run(command: &str, flags: &HashMap<String, String>) -> Result<String, Str
     }
     let ids = models
         .iter()
-        .map(|m| string(get(m, "id").expect("model id")))
+        .map(|m| match get(m, "id").expect("model id") {
+            V::Null => String::new(),
+            id => omni_control::cli_cell::scalar_string(id),
+        })
         .collect::<Vec<_>>();
     let mut mapping = Vec::new();
     for (i, (label, _, _)) in SLOTS.iter().enumerate() {
@@ -284,6 +287,9 @@ fn describe(model: &V, credentials: &[V]) -> Result<V, String> {
         _ => return Err("{} is not iterable".into()),
     };
     for t in targets {
+        if matches!(t, V::Null) {
+            return Err("null is not an object (evaluating 'target.provider')".into());
+        }
         let provider = get(t, "provider").map(string).unwrap_or_default();
         let choice = omni_control::catalog::rows(Some(&provider))
             .into_iter()
