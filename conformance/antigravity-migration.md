@@ -119,6 +119,13 @@ contradiction was found in the decoder reading.
 
 ### Literal and branch audit
 
+Rust-only counter bound: indices `0..=4294967295` may be emitted. Checked
+increments retain an exhaustion flag instead of wrapping; the next new block
+(or exhausted tool counter) closes any open block and emits terminal UPSTREAM,
+retryable false, `Antigravity stream exceeded u32 block/tool index bound 4294967295`.
+Later frames are ignored. `decode::tests::counter_exhaustion_is_terminal` seeds
+both counters at MAX-1 and checks text alternation and tool calls through MAX.
+
 Locations below are in `crates/omni-providers/src/antigravity/decode.rs`;
 pinning rows are named by `tests/antigravity_decode-reference.ts`.
 

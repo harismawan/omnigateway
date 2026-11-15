@@ -18,6 +18,8 @@ pub struct AntigravityDecoder {
     terminal: bool,
     next_index: u32,
     tool_calls: u32,
+    index_exhausted: bool,
+    tools_exhausted: bool,
     open: Option<(bool, u32)>,
 }
 fn nonnull(v: Option<&Value>) -> Option<&Value> {
@@ -57,6 +59,24 @@ fn length(v: &Value) -> Value {
     }
 }
 impl AntigravityDecoder {
+    fn allocate_index(&mut self, tool: bool, out: &mut VecDeque<StreamEvent>) -> Option<u32> {
+        if self.index_exhausted || (tool && self.tools_exhausted) {
+            self.close(out);
+            self.error(
+                out,
+                ErrorCode::Upstream,
+                "Antigravity stream exceeded u32 block/tool index bound 4294967295".into(),
+                false,
+            );
+            return None;
+        }
+        let index = self.next_index;
+        match self.next_index.checked_add(1) {
+            Some(next) => self.next_index = next,
+            None => self.index_exhausted = true,
+        }
+        Some(index)
+    }
     pub fn new(cloak: ToolCloak) -> Self {
         Self {
             cloak,
@@ -196,8 +216,9 @@ impl AntigravityDecoder {
                     }
                     if let Some(name) = call.get("name").and_then(Value::as_str) {
                         self.close(out);
-                        let index = self.next_index;
-                        self.next_index += 1;
+                        let Some(index) = self.allocate_index(true, out) else {
+                            return Ok(Flow::Stop);
+                        };
                         let id = call
                             .get("id")
                             .and_then(Value::as_str)
@@ -218,7 +239,10 @@ impl AntigravityDecoder {
                             delta: Delta::ToolJson { partial },
                         });
                         out.push_back(StreamEvent::BlockEnd { index });
-                        self.tool_calls += 1;
+                        match self.tool_calls.checked_add(1) {
+                            Some(next) => self.tool_calls = next,
+                            None => self.tools_exhausted = true,
+                        }
                         continue;
                     }
                 }
@@ -226,21 +250,25 @@ impl AntigravityDecoder {
                     continue;
                 };
                 let thinking = part.get("thought") == Some(&Value::Bool(true));
-                if self.open.is_none_or(|(kind, _)| kind != thinking) {
-                    self.close(out);
-                    let index = self.next_index;
-                    self.next_index += 1;
-                    self.open = Some((thinking, index));
-                    out.push_back(StreamEvent::BlockStart {
-                        index,
-                        block: if thinking {
-                            ContentBlockStart::Thinking { signed: None }
-                        } else {
-                            ContentBlockStart::Text
-                        },
-                    });
-                }
-                let index = self.open.expect("open block").1;
+                let index =
+                    if let Some((_, index)) = self.open.filter(|(kind, _)| *kind == thinking) {
+                        index
+                    } else {
+                        self.close(out);
+                        let Some(index) = self.allocate_index(false, out) else {
+                            return Ok(Flow::Stop);
+                        };
+                        self.open = Some((thinking, index));
+                        out.push_back(StreamEvent::BlockStart {
+                            index,
+                            block: if thinking {
+                                ContentBlockStart::Thinking { signed: None }
+                            } else {
+                                ContentBlockStart::Text
+                            },
+                        });
+                        index
+                    };
                 out.push_back(StreamEvent::BlockDelta {
                     index,
                     delta: if thinking {
@@ -290,6 +318,61 @@ impl AntigravityDecoder {
             vendor: None,
         });
         Ok(Flow::Stop)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counter_exhaustion_is_terminal() {
+        for tool in [false, true] {
+            let mut decoder = AntigravityDecoder {
+                next_index: u32::MAX - 1,
+                tool_calls: u32::MAX - 1,
+                ..Default::default()
+            };
+            let mut out = VecDeque::new();
+            for (step, expected) in [(0, Flow::Continue), (1, Flow::Continue), (2, Flow::Stop)] {
+                let part = if tool {
+                    serde_json::json!({"functionCall":{"name":"x"}})
+                } else {
+                    serde_json::json!({"text":"x","thought":step == 1})
+                };
+                let msg = SseMessage { event: "message".into(), data: serde_json::json!({"response":{"candidates":[{"content":{"parts":[part]}}]}}).to_string() };
+                assert_eq!(decoder.message(&msg, &mut out).unwrap(), expected);
+            }
+            let indices: Vec<_> = out
+                .iter()
+                .filter_map(|e| match e {
+                    StreamEvent::BlockStart { index, .. } => Some(*index),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(indices, [u32::MAX - 1, u32::MAX]);
+            assert!(
+                matches!(out.get(out.len()-2), Some(StreamEvent::BlockEnd { index }) if *index == u32::MAX)
+            );
+            assert!(
+                matches!(out.back(), Some(StreamEvent::Error {code:ErrorCode::Upstream,message,retryable:false}) if message == "Antigravity stream exceeded u32 block/tool index bound 4294967295")
+            );
+            let before = out.len();
+            assert_eq!(
+                decoder
+                    .message(
+                        &SseMessage {
+                            event: String::new(),
+                            data: "{}".into()
+                        },
+                        &mut out
+                    )
+                    .unwrap(),
+                Flow::Stop
+            );
+            decoder.finish(&mut out);
+            assert_eq!(out.len(), before);
+        }
     }
 }
 impl StreamDecoder for AntigravityDecoder {
