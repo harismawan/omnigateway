@@ -50,7 +50,7 @@ fn oauth_codec_matches_frozen_ts() {
             Credentials {
                 access_token: Some("oauth-token".into()),
                 provider_data: serde_json::from_str(r#"{"accountId":"account"}"#).unwrap(),
-                ..Default::default()
+                api_key: None,
             }
         };
         let got = OpenAiCodec

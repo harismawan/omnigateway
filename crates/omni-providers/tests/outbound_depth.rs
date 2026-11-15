@@ -30,7 +30,7 @@ fn anthropic_outbound_depth() {
                         "vendor"=>request.vendor.as_mut().expect("vendor")["anthropic"]["x"]=payload,
                         _=>request.vendor.as_mut().expect("vendor")["anthropic"]["output_config"]["format"]["schema"]["default"]=payload,
                     }
-                    let creds=Credentials{api_key:Some("k".into()),..Default::default()};
+                    let creds=Credentials{api_key:Some("k".into()),access_token:None,provider_data:Default::default()};
                     eprintln!("parsed {depth} {carrier}");
                     let built=omni_providers::anthropic::codec::AnthropicCodec.build_request(&CodecInput{request:&request,model:"m",credentials:&creds,request_id:None,auto_cache_enabled:Some(true),max_output_tokens:None,request_started_at:None}).expect("build");
                     assert!(built.request.body.contains(&nested),"lost {carrier} depth {depth}");
@@ -71,7 +71,7 @@ fn ingress_to_custom_build_depth() {
                     let mut ids = ingress::random_tool_use_id;
                     let request = ingress::ingest(Surface::OpenAi, &body, &Headers::new(), &mut IngressOptions {new_tool_use_id: &mut ids}).expect("ingress accepted");
                     eprintln!("accepted {protocol} bound={bound} carrier={tail}");
-                    let credentials = Credentials { api_key: Some("k".into()), provider_data: serde_json::json!({"origin":"http://localhost", "protocol":protocol}).as_object().unwrap().clone(), ..Default::default() };
+                    let credentials = Credentials { api_key: Some("k".into()), provider_data: serde_json::json!({"origin":"http://localhost", "protocol":protocol}).as_object().unwrap().clone(), access_token: None };
                     let before = deep::grows();
                     let built = CustomCodec.build_request(&CodecInput { request: &request.request, model: "m", credentials: &credentials, request_id: None, auto_cache_enabled: None, max_output_tokens: None, request_started_at: None }).expect("build");
                     assert!(built.request.body.contains(&nested), "deep value lost");

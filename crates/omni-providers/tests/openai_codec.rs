@@ -21,7 +21,8 @@ fn request_state_reaches_decoder() {
         let request = serde_json::from_value(row["request"].clone()).expect("IR");
         let credentials = Credentials {
             api_key: Some("sk".into()),
-            ..Default::default()
+            access_token: None,
+            provider_data: Default::default(),
         };
         let codec = OpenAiApiKeyCodec;
         let built = codec

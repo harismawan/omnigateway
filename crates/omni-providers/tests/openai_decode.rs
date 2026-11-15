@@ -140,7 +140,8 @@ fn compare_decoder_mode(malformed_usage: bool, codec: bool) {
                 let request = serde_json::from_value(row["request"].clone()).expect("request");
                 let credentials = Credentials {
                     access_token: Some("oauth-token".into()),
-                    ..Default::default()
+                    api_key: None,
+                    provider_data: Default::default(),
                 };
                 let built = OpenAiCodec
                     .build_request(&CodecInput {

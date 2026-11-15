@@ -37,7 +37,7 @@ fn build_with(
     let credentials = Credentials {
         access_token: Some("oa-tok".into()),
         provider_data: serde_json::from_value(data).unwrap(),
-        ..Default::default()
+        api_key: None,
     };
     OpenAiCodec
         .build_request(&CodecInput {

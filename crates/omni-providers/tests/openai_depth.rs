@@ -86,7 +86,8 @@ fn exercise(case: &str) {
     }
     let credentials = Credentials {
         api_key: Some("key".into()),
-        ..Default::default()
+        access_token: None,
+        provider_data: Default::default(),
     };
     let result = build_api_key_request(CodecInput {
         request: &req,

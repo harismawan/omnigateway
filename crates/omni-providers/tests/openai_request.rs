@@ -78,7 +78,8 @@ fn api_key_codec_matches_frozen_ts() {
         };
         let credentials = Credentials {
             api_key: Some("sk-oa".into()),
-            ..Default::default()
+            access_token: None,
+            provider_data: Default::default(),
         };
         let before = omni_ir::jsjson::to_string(&serde_json::to_value(&request).unwrap());
         let got = build_api_key_request(CodecInput {

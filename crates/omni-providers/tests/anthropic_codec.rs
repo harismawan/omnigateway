@@ -68,7 +68,7 @@ fn frozen_ts_codec_wire_bytes() {
                 .as_str()
                 .map(str::to_owned),
             api_key: row["credentials"]["apiKey"].as_str().map(str::to_owned),
-            ..Default::default()
+            provider_data: Default::default(),
         };
         let result = omni_providers::anthropic::codec::AnthropicCodec
             .build_request(&CodecInput {

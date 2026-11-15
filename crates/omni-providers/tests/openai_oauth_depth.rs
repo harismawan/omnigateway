@@ -31,7 +31,14 @@ fn exercise(case: &str) {
     for _ in 0..39_990 {
         value = Value::Array(vec![value]);
     }
-    if case == "ignored_provider_tool" {
+    let mut credentials = Credentials {
+        access_token: Some("token".into()),
+        api_key: None,
+        provider_data: Default::default(),
+    };
+    if let Some(field) = case.strip_prefix("credential_") {
+        deep::insert(&mut credentials.provider_data, field.into(), value);
+    } else if case == "ignored_provider_tool" {
         if let ToolDef::Provider(tool) = &mut req.tools.as_mut().expect("tools")[0] {
             deep::insert(&mut tool.wire, "payload".into(), value);
         }
@@ -198,10 +205,6 @@ fn exercise(case: &str) {
             _ => panic!("unknown carrier"),
         }
     }
-    let credentials = Credentials {
-        access_token: Some("token".into()),
-        ..Default::default()
-    };
     let built = OpenAiCodec
         .build_request(&CodecInput {
             request: &req,
@@ -226,6 +229,10 @@ fn exercise(case: &str) {
             | "ignored_foreign"
             | "ignored_system"
             | "ignored_provider_tool"
+            | "credential_accountId"
+            | "credential_installationId"
+            | "credential_idSalt"
+            | "credential_extension"
     ) {
         assert!(built.request.body.len() < 4000);
     } else {
@@ -233,6 +240,10 @@ fn exercise(case: &str) {
     }
     drop(built);
     drop(req);
+    if case.starts_with("credential_") {
+        drop(credentials.clone());
+    }
+    drop(credentials);
 }
 
 #[test]
@@ -268,6 +279,10 @@ fn vendor_carriers_on_small_stack() {
         "ignored_foreign",
         "ignored_system",
         "ignored_provider_tool",
+        "credential_accountId",
+        "credential_installationId",
+        "credential_idSalt",
+        "credential_extension",
         "native_reasoning",
         "native_metadata",
         "native_message",

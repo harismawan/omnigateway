@@ -1,5 +1,20 @@
 # OpenAI request depth evidence (A1)
 
+## D7 credential data (group 5)
+
+| Carrier | Source | Evidence |
+|---|---|---|
+| Credential arbitrary provider data / owner drop | codec.rs:23–29,46–50; openai/mod.rs:132–138 | DEFECT: unmodified accountId case SIGABRT; iterative Drop fixes it; plain-drop mutation SIGABRT for accountId, installationId, idSalt, extension |
+| Credential installationId/idSalt borrowed filtering | openai/identity.rs:30–46; openai/oauth.rs:53–58 | Structurally borrowed, type-filtered strings only; deep values retained solely by credential owner, destruction proven above |
+| Credential clone | codec.rs:30–39 | DEFECT: adding clone/drop to fixed accountId case SIGABRT with derived Clone; manual deep clone fixes it |
+
+Four cases now pass at 39,990 levels / 2 MiB, including credential clone/drop.
+No credential JSON enters builder ownership. New Drop requires explicit fields
+instead of struct-update Default in ten test fixtures; wire comparisons unchanged.
+Logs `s4e-g5-baseline.log`, `s4e-g5-drop-credential_*.log`,
+`s4e-g5-clone-first.log`, `s4e-g5-clone-fixed.log`. Drop mutations restored.
+Derived PartialEq remains: not used on this codec path; no equality-depth claim.
+
 ## D6 ignored payloads (group 4)
 
 | Carrier | Source | Evidence |
@@ -62,11 +77,10 @@ defect found; no protection-removal crash claimed. Mutations restored.
 Logs: `/tmp/opencode/b3/s4e-group1-baseline.log` and
 `s4e-noscope-{ordinary_input,ordinary_result_native,ordinary_result_string,ordinary_result_media}.log`.
 
-Next group is **(5) credential arbitrary data**. Remaining:
+Next group is **(6) explicit non-lite schema control and complete helper inventory**. Remaining:
 
 | Group/carrier | Source | Status |
 |---|---|---|
-| 5 credential provider data | openai/identity.rs:30–40; openai/oauth.rs:53–58; openai/mod.rs:132–138 | Pending |
 | 6 explicit non-lite schema control | openai/wire.rs:234–253 | Pending |
 | 6 shared helper ownership inventory | response_format.rs, system.rs, tool_result_files.rs (line expansion pending); openai/wire.rs:79–89,135–155,202; openai/lite.rs:22–29,200–206 | Pending |
 
