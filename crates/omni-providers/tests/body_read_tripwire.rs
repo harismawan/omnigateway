@@ -165,7 +165,7 @@ fn normalise(text: &str) -> String {
                 continue;
             }
         }
-        let c = compact[i..].chars().next().unwrap();
+        let c = compact[i..].chars().next().expect("remaining character");
         out.push(c);
         i += c.len_utf8();
     }
@@ -330,7 +330,7 @@ fn mutations_are_caught() {
         let (_, open, _) = functions(&blanked)
             .into_iter()
             .find(|(n, _, _)| *n == "next_chunk")
-            .unwrap();
+            .expect("next_chunk body");
         let mut mutated = SOURCE.to_string();
         mutated.insert_str(open + 1, &format!("\nlet _ = {inserted};\n"));
         mutated.push_str("\nfn sneaky() { let _ = Box::new(1); }\n");
