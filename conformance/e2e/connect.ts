@@ -100,7 +100,7 @@ async function run(label: string, binary: string): Promise<Row[]> {
       for (const body of [undefined, "{", "null", "[]", "1", "{}"])
         await row(`${route}/body/${body}`, route, body);
     }
-    for (const provider of ["unknown", "plugin-fixture", "custom", "kimi", "kilo", "qwen", "xai", "constructor", null, 1])
+    for (const provider of ["unknown", "plugin-fixture", "custom", "kimi", "kilo", "grok", "antigravity", "muse", "qoder", "qwen", "xai", "constructor", null, 1])
       await row(`start/provider/${provider}`, "start", JSON.stringify({ provider }));
     for (const route of ["finish", "poll"])
       for (const flowId of ["", "unknown", null, 1])
@@ -170,6 +170,7 @@ function masked(rows: Row[]): Row[] {
   return rows.map(row => {
     const r = structuredClone(row);
     const body = (r.response as any).body;
+    if (["grok", "antigravity", "muse", "qoder"].some(p => r.name === `start/provider/${p}`)) return r;
     if (body?.flowId) {
       const url = validateStart(body);
       body.flowId = "<flow>";
@@ -190,6 +191,13 @@ try {
     const a = ts.find(r => r.name === name), b = rust.find(r => r.name === name);
     const ar = a?.response as any, br = b?.response as any;
     const frozen = "provider must be one of anthropic, openai, kimi, kilo, grok, antigravity, muse, qoder";
+    if (name === "start/provider/grok" || name === "start/provider/muse") {
+      const expected = name === "start/provider/grok" ? "grok oauth start threw" : "muse oauth begin threw";
+      if (ar?.status === 502 && ar.body.error.code === "UPSTREAM" && ar.body.error.message === expected && br?.status === 400 && br.body.error.code === "BAD_REQUEST" && br.body.error.message === "provider must be one of anthropic, openai") { expectedDivergences++; continue; }
+    }
+    if (["grok", "antigravity", "muse", "qoder"].some(p => name === `start/provider/${p}`)) {
+      if (ar?.status === 200 && typeof ar.body.authorizeUrl === "string" && /^[\w-]{43}$/.test(ar.body.flowId) && br?.status === 400 && br.body.error.code === "BAD_REQUEST" && br.body.error.message === "provider must be one of anthropic, openai") { expectedDivergences++; continue; }
+    }
     if (ar?.body?.error?.message === frozen || name === "start/provider/kimi" || name === "start/provider/kilo") {
       const expected = name === "start/provider/kimi" ? "kimi oauth begin threw" : name === "start/provider/kilo" ? "kilo oauth begin threw" : frozen;
       if (ar.body.error.message === expected && br?.status === 400 && br.body.error.code === "BAD_REQUEST" && br.body.error.message === "provider must be one of anthropic, openai") { expectedDivergences++; continue; }
