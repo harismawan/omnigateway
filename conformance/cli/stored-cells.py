@@ -2,7 +2,7 @@
 import pathlib, subprocess, os, sqlite3, json, tempfile, collections
 import driver_env
 
-base = pathlib.Path(tempfile.mkdtemp(prefix='/tmp/opencode/cli-fix2/cells-'))
+base = pathlib.Path(tempfile.mkdtemp(prefix='/tmp/opencode/cli-fix5/c-cells-'))
 repo = pathlib.Path.cwd()
 env = {k:v for k,v in os.environ.items() if not k.startswith('OMNI_')}
 env.update(HOME=str(base), XDG_STATE_HOME=str(base/'state'), OMNI_ENCRYPTION_KEY='review-secret-long-enough', NO_COLOR='1')
