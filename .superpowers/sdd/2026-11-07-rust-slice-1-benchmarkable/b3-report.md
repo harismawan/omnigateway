@@ -1,5 +1,59 @@
 # B3 OpenAI / Codex
 
+## D1 vendor-depth checkpoint — HEAD `8ec4c4a5`
+
+**D partially complete: six vendor carriers committed; remaining D below.**
+Source unchanged after scratch restoration; no product defect found in these
+six baseline cases. `openai_oauth_depth.rs` builds/drops each request/result
+with 39,990 nested arrays on a 2 MiB thread in an isolated process. All six
+baseline/restored cases pass. Body length distinguishes retained/discarded data.
+
+| Carrier/source (crates/omni-providers/src/) | Mutation | Observed outcome |
+|---|---|---|
+| text per-field merge, openai/wire.rs:334 | plain clone | SIGSEGV 11 |
+| reasoning per-field merge, openai/wire.rs:334 | plain clone | SIGSEGV 11 |
+| reasoning array replacement, openai/wire.rs:337 | plain clone | SIGSEGV 11 |
+| input overwrite, openai/wire.rs:394 | plain insert + remove openai/mod.rs:70 scope | stack overflow / SIGABRT 6 |
+| stream overwrite, openai/mod.rs:90 | plain insert + remove mod.rs:70 scope | stack overflow / SIGABRT 6 |
+| client metadata, openai/wire.rs:323–325,402 | same insert/scope mutation | Pass: borrowed value skipped, never builder-owned; request drops iteratively; generated replacement is shallow primitives |
+
+Full initial carrier inventory with source lines is now at the top of
+`conformance/openai-depth.md`. Remaining inventory/work, not safety claims:
+tool schema/strict rewrite and lite prefix (wire.rs:234–253, lite.rs:56–61);
+tool inputs/results/native results (wire.rs:107–115); native fields and foreign
+native (wire.rs:117); cache first-item fallback (wire.rs:175–187); intermediate
+input and return replacement (wire.rs:202,394); response-format schema/text
+(wire.rs:370; shared response_format.rs needs line-level expansion); lite
+message content/annotations (lite.rs:139–154), native function/output fields
+(lite.rs:157–161), reasoning passthrough removal (lite.rs:163–171), unknown
+native item (lite.rs:173), LiteArgs drop (lite.rs:22–29); credential data borrowed
+lookups (identity.rs:30–40, oauth.rs:53–58); generated metadata (oauth.rs:63–75);
+system/provider-tool and media helper inventory still needs expansion.
+
+Logs `/tmp/opencode/b3/s4d-depth-vendor-baseline.log`,
+`s4d-depth-clone-{text_merge,reasoning_merge,scalar}.log`,
+`s4d-depth-insert-noscope-{input_replace,stream_replace,metadata}.log`.
+All scratch mutations restored; no new tripwire entries. After commit gates:
+**52 successful summaries, 231 passes including subprocess repetitions,
+4 ignored, zero failures**; strict all-target clippy, fmt/diff check and three
+source tripwires pass. Logs `s4d-depth-final-{tests,clippy}.log`. Builds use
+incremental=0/dev debug=0/test debug=0. Worktree clean.
+
+C2/C3 status unchanged: OAuth decode matches shared codec semantics; native
+flag comes from client include, not forced upstream include. 289 whole request
+comparisons; literal table **35 ported /86 differential /0 undecided**. X1 two
+ignored comparisons unchanged. Transport still refuses OAuth Zstd marker;
+empty-body frame question unresolved. Startup capture/refresh persistence and
+gateway integration remain deferred. No HTTP or public IR changes.
+
+**Next fresh session: finish D's remaining carriers above**, baseline then
+scratch mutation each, log actual process result, restore; fix any failing
+baseline as a defect. Then compressed request body in HTTP client under rules
+and empty-body question in `conformance/openai-compression.md`. Then gateway
+integration: registration, startup `initialize()`, generated-descriptor catalog,
+persist OAuth result provider data, end-to-end driver, `dispatch_depth` cases,
+benchmark-matrix entry. This checkpoint is not a complete OAuth depth audit.
+
 ## C2/C3 complete — HEAD `31db790c`; D next
 
 **C2 `c0875139`, C3 `31db790c` committed. D not started.** Stopping at a
