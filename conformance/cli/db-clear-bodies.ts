@@ -6,6 +6,7 @@ import { createStore, deriveKey } from "../../packages/store/src/index.ts";
 import { goldenSpawn, verifyGoldenExits } from "./exit-gate.ts";
 import { databaseState } from "./database-state.ts";
 import { fileState } from "./db-file-state.ts";
+import "./db-clear-cells.ts";
 const root = mkdtempSync("/tmp/opencode/e1-e5/db3-clear-");
 const env = {...process.env, OMNI_ENCRYPTION_KEY:"database-golden-secret", NO_COLOR:"1"};
 const store = await createStore({path:join(root,"seed"),encryptionKey:await deriveKey(env.OMNI_ENCRYPTION_KEY)}); store.close();
