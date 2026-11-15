@@ -210,32 +210,30 @@ pub fn history(store: &omni_store::SqliteStore, query: &str, now: f64) -> Result
         let s = &samples[*i];
         let c = &accounts[*c];
         let ratio = nan_max(number(&s[2]) / number(&s[3]), 0.0);
-        let fields = [
-            ("credentialId", json(&c[0])),
-            ("label", json(&c[1])),
-            ("provider", json(&c[2])),
-            ("windowType", json(&s[1])),
-            ("observedAt", json(&s[5])),
-            (
-                "usedRatio",
-                JsValue::Number(if ratio.is_nan() {
-                    ratio
-                } else {
-                    ratio.min(1.0)
-                }),
-            ),
-            ("resetsAt", json(&s[4])),
-            ("windowMs", json(&s[6])),
-        ];
-        out.push_str(
-            &omni_ir::jsjson::stringify(&JsValue::Object(
-                fields
-                    .into_iter()
-                    .map(|(k, v)| (k.encode_utf16().collect(), v))
-                    .collect(),
-            ))
-            .unwrap_or_default(),
+        for (prefix, value) in [
+            ("{\"credentialId\":", &c[0]),
+            (",\"label\":", &c[1]),
+            (",\"provider\":", &c[2]),
+            (",\"windowType\":", &s[1]),
+            (",\"observedAt\":", &s[5]),
+        ] {
+            out.push_str(prefix);
+            write_history_cell(value, &mut out);
+        }
+        out.push_str(",\"usedRatio\":");
+        omni_ir::jsjson::write_number(
+            if ratio.is_nan() {
+                ratio
+            } else {
+                ratio.min(1.0)
+            },
+            &mut out,
         );
+        out.push_str(",\"resetsAt\":");
+        write_history_cell(&s[4], &mut out);
+        out.push_str(",\"windowMs\":");
+        write_history_cell(&s[6], &mut out);
+        out.push('}');
     }
     out.push_str(if truncated {
         "],\"truncated\":true}"
@@ -245,6 +243,17 @@ pub fn history(store: &omni_store::SqliteStore, query: &str, now: f64) -> Result
     Ok(out)
 }
 // Borrow normal TEXT cells; retain the corrupt-cell coercion rules above.
+fn write_history_cell(value: &Value, out: &mut String) {
+    match value {
+        Value::Null => out.push_str("null"),
+        Value::Text(s) => omni_ir::jsjson::write_str(s, out),
+        Value::Integer(_) | Value::Real(_) => omni_ir::jsjson::write_number(number(value), out),
+        Value::Blob(_) => {
+            out.push_str(&omni_ir::jsjson::stringify(&json(value)).unwrap_or_default())
+        }
+    }
+}
+
 fn history_compare_cells(a: &Value, b: &Value) -> std::cmp::Ordering {
     match (a, b) {
         (Value::Text(a), Value::Text(b)) => a.encode_utf16().cmp(b.encode_utf16()),
