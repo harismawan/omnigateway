@@ -9,6 +9,7 @@
 
 pub mod adapter;
 pub mod anthropic;
+pub mod antigravity;
 pub mod codec;
 pub mod custom;
 pub mod http;
