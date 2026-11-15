@@ -4,7 +4,7 @@
  * Success persistence uses the frozen store decrypt path for both databases.
  */
 import { Database } from "bun:sqlite";
-import { copyFileSync, mkdirSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { createHash } from "node:crypto";
@@ -276,7 +276,13 @@ async function run(label: string, binary: string): Promise<Row[]> {
         const start = await row(`${name}/start`, "start", JSON.stringify({ provider, label: name }));
         if (!start.flowId) continue;
         const url = validateStart(start);
+        const logBefore = readFileSync(join(work, `${label}.log`), "utf8").length;
         const r = await request(`/api/connect/${route}`, JSON.stringify({ flowId: start.flowId, code: `code#${url.searchParams.get("state")}` }));
+        if (field === "email") {
+          const logs = readFileSync(join(work, `${label}.log`), "utf8").slice(logBefore);
+          if (/shape-access|shape-refresh|Binding expected/.test(logs)) throw Error("email failure leaked details into log");
+          await Bun.write(join(root, `${provider}-email-${JSON.stringify(shape)}-${route}.log`), logs);
+        }
         const reader = new Database(file, { readonly: true });
         const stored = reader.query("SELECT account_email FROM credentials WHERE label = ?").all(name);
         reader.close();
@@ -439,6 +445,10 @@ try {
   for (const name of names) {
     const a = ts.find(r => r.name === name), b = rust.find(r => r.name === name);
     const ar = a?.response as any, br = b?.response as any;
+    if (name.includes("/reconnect-first/") && name.endsWith("/result")) {
+      if (ar?.status !== 200 || !ar.valid || br?.status !== 200 || !br.valid) { failed++; console.log(`FAILED ${name}`); }
+      continue;
+    }
     if (name.includes("/visibility-lag/") && name.endsWith("/result")) {
       if (ar?.first.status === 200 && ar.valid && br?.valid && br.delay <= 1000) { expectedDivergences++; classes["visibility-lag"]++; continue; }
       failed++; console.log(`FAILED ${name}`); continue;
