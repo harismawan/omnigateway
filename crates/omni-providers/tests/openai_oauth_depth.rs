@@ -10,13 +10,18 @@ use omni_providers::{
 use serde_json::{Value, json};
 
 fn exercise(case: &str) {
-    let raw = if case == "ordinary_input" {
+    let raw = if case == "ignored_provider_tool" {
+        json!({"model":"m","stream":false,"messages":[],"tools":[{"kind":"provider","provider":"openai","type":"future","name":"f","wire":{}}]})
+    } else if case == "ordinary_input" {
         json!({"model":"m","stream":false,"messages":[{"role":"assistant","content":[{"type":"toolUse","id":"call","name":"f","input":null}]}]})
     } else if case.starts_with("ordinary_result") {
         json!({"model":"m","stream":false,"messages":[{"role":"user","content":[{"type":"toolResult","toolUseId":"call","content":"result","native":[{"provider":"anthropic","blockType":"future","data":{}}]}]}]})
     } else if case == "tool_schema" {
         json!({"model":"m","stream":false,"messages":[],"tools":[{"kind":"portable","name":"f","inputSchema":null}]})
-    } else if case.starts_with("native_") || case == "cache_fallback" {
+    } else if case.starts_with("native_")
+        || case == "cache_fallback"
+        || case.starts_with("ignored_")
+    {
         json!({"model":"m","stream":false,"messages":[{"role":"assistant","content":[{"type":"providerNative","provider":"openai","blockType":"reasoning","data":{}}]}]})
     } else {
         json!({"model":"m","stream":false,"messages":[],"vendor":{"openai":{}}})
@@ -26,7 +31,19 @@ fn exercise(case: &str) {
     for _ in 0..39_990 {
         value = Value::Array(vec![value]);
     }
-    if case.starts_with("ordinary_result") {
+    if case == "ignored_provider_tool" {
+        if let ToolDef::Provider(tool) = &mut req.tools.as_mut().expect("tools")[0] {
+            deep::insert(&mut tool.wire, "payload".into(), value);
+        }
+    } else if case == "ignored_foreign" || case == "ignored_system" {
+        if let ContentBlock::ProviderNative(n) = &mut req.messages[0].content[0] {
+            n.provider = "anthropic".into();
+            deep::insert(&mut n.data, "payload".into(), value);
+        }
+        if case == "ignored_system" {
+            req.system = Some(std::mem::take(&mut req.messages[0].content));
+        }
+    } else if case.starts_with("ordinary_result") {
         if let ContentBlock::ToolResult(result) = &mut req.messages[0].content[0] {
             if case == "ordinary_result_native" {
                 deep::insert(
@@ -206,6 +223,9 @@ fn exercise(case: &str) {
             | "format_replace"
             | "format_text_drop"
             | "native_annotations"
+            | "ignored_foreign"
+            | "ignored_system"
+            | "ignored_provider_tool"
     ) {
         assert!(built.request.body.len() < 4000);
     } else {
@@ -245,6 +265,9 @@ fn vendor_carriers_on_small_stack() {
         "native_name",
         "native_call_id",
         "native_output_id",
+        "ignored_foreign",
+        "ignored_system",
+        "ignored_provider_tool",
         "native_reasoning",
         "native_metadata",
         "native_message",

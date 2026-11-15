@@ -1,5 +1,17 @@
 # OpenAI request depth evidence (A1)
 
+## D6 ignored payloads (group 4)
+
+| Carrier | Source | Evidence |
+|---|---|---|
+| Foreign-native data | openai/wire.rs:117 | Remove mod.rs:70 scope → PASS; structurally safe: borrowed identity check, no builder ownership; IR iterative drop |
+| System native data | openai/wire.rs:158; system.rs:14–22 | Remove mod.rs:70 scope → PASS; structurally safe: borrowed discriminant only, no builder ownership; IR iterative drop |
+| Provider-tool wire | openai/wire.rs:234–253 | Remove mod.rs:70 scope → PASS; structurally safe: only portable tools processed; IR iterative drop |
+
+All three unmodified 39,990-level / 2 MiB subprocess cases pass, including
+request destruction; no new defect. Scope mutations restored. Logs:
+`s4e-g4-baseline.log`, `s4e-g4-noscope-{ignored_foreign,ignored_system,ignored_provider_tool}.log`.
+
 ## D3 ordinary tool carriers (s4e)
 
 ### D5 native annotations and aliases (group 3)
@@ -50,12 +62,10 @@ defect found; no protection-removal crash claimed. Mutations restored.
 Logs: `/tmp/opencode/b3/s4e-group1-baseline.log` and
 `s4e-noscope-{ordinary_input,ordinary_result_native,ordinary_result_string,ordinary_result_media}.log`.
 
-Next group is **(4) ignored foreign-native/system/provider-tool payloads**. Remaining:
+Next group is **(5) credential arbitrary data**. Remaining:
 
 | Group/carrier | Source | Status |
 |---|---|---|
-| 4 foreign native | openai/wire.rs:117 | Pending |
-| 4 system/provider tools | openai/wire.rs:158,234–253 | Pending |
 | 5 credential provider data | openai/identity.rs:30–40; openai/oauth.rs:53–58; openai/mod.rs:132–138 | Pending |
 | 6 explicit non-lite schema control | openai/wire.rs:234–253 | Pending |
 | 6 shared helper ownership inventory | response_format.rs, system.rs, tool_result_files.rs (line expansion pending); openai/wire.rs:79–89,135–155,202; openai/lite.rs:22–29,200–206 | Pending |
