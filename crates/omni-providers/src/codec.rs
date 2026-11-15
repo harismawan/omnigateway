@@ -20,7 +20,7 @@ use crate::http::{BodyEncoding, Headers};
 use crate::sse::SseMessage;
 
 /// `AdapterCredentials`: decrypted, from the in-memory snapshot.
-#[derive(PartialEq, Default)]
+#[derive(Default)]
 pub struct Credentials {
     pub access_token: Option<String>,
     pub api_key: Option<String>,

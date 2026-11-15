@@ -16,7 +16,7 @@ fn exercise(case: &str) {
         json!({"model":"m","stream":false,"messages":[{"role":"assistant","content":[{"type":"toolUse","id":"call","name":"f","input":null}]}]})
     } else if case.starts_with("ordinary_result") {
         json!({"model":"m","stream":false,"messages":[{"role":"user","content":[{"type":"toolResult","toolUseId":"call","content":"result","native":[{"provider":"anthropic","blockType":"future","data":{}}]}]}]})
-    } else if case == "tool_schema" {
+    } else if case == "tool_schema" || case == "nonlite_schema" {
         json!({"model":"m","stream":false,"messages":[],"tools":[{"kind":"portable","name":"f","inputSchema":null}]})
     } else if case.starts_with("native_")
         || case == "cache_fallback"
@@ -84,7 +84,7 @@ fn exercise(case: &str) {
             deep::replace(&mut tool.input, value);
         }
         req.conversation_id = Some("depth-conversation".into());
-    } else if case == "tool_schema" {
+    } else if case == "tool_schema" || case == "nonlite_schema" {
         if let ToolDef::Portable(tool) = &mut req.tools.as_mut().expect("tools")[0] {
             deep::replace(&mut tool.input_schema, value);
         }
@@ -205,6 +205,10 @@ fn exercise(case: &str) {
             _ => panic!("unknown carrier"),
         }
     }
+    if case == "nonlite_schema" {
+        credentials.access_token = None;
+        credentials.api_key = Some("key".into());
+    }
     let built = OpenAiCodec
         .build_request(&CodecInput {
             request: &req,
@@ -265,6 +269,7 @@ fn vendor_carriers_on_small_stack() {
         "input_replace",
         "stream_replace",
         "tool_schema",
+        "nonlite_schema",
         "ordinary_input",
         "ordinary_result_native",
         "ordinary_result_string",

@@ -77,12 +77,29 @@ defect found; no protection-removal crash claimed. Mutations restored.
 Logs: `/tmp/opencode/b3/s4e-group1-baseline.log` and
 `s4e-noscope-{ordinary_input,ordinary_result_native,ordinary_result_string,ordinary_result_media}.log`.
 
-Next group is **(6) explicit non-lite schema control and complete helper inventory**. Remaining:
+### D6 explicit non-lite control and helper inventory
 
-| Group/carrier | Source | Status |
-|---|---|---|
-| 6 explicit non-lite schema control | openai/wire.rs:234–253 | Pending |
-| 6 shared helper ownership inventory | response_format.rs, system.rs, tool_result_files.rs (line expansion pending); openai/wire.rs:79–89,135–155,202; openai/lite.rs:22–29,200–206 | Pending |
+`nonlite_schema` selects API-key mode (therefore the non-lite tools insertion
+at wire.rs:253). All 33 cases pass at 39,990 levels / 2 MiB
+(`s5a-depth-baseline.log`). Plain schema clone fails with SIGSEGV
+(`s5a-nonlite-mutation.log`); repaired-vector plain clone likewise fails for
+native_reasoning (`s5a-repaired-mutation.log`). No new product defect found.
+Replacing both LiteArgs iterative drops with ordinary drop passes tool_schema
+and native_reasoning: these drops occur inside the outer codec stack scope,
+so that experiment does not independently prove the iterative release needed.
+Logs: `s5a-args-drop-{tool_schema,native_reasoning}.log`. All restored.
+
+The canonical inventory below includes each ownership stage once; evidence
+tables elsewhere describe mutations of those stages, not additional owners.
+Completeness checked against `grep -nE 'Value|Map|deep::|let (mut )?(raw|read|client_text|text|next|spec|parts|input|repaired|history|out|result)'`
+over response_format.rs, system.rs, tool_result_files.rs, openai/wire.rs and
+openai/lite.rs: **149 output lines**, saved as `s5a-inventory.log`.
+Borrowed references and bounded generated objects are included explicitly.
+
+Credentials: workspace Rust search (`grep -RInE 'Credentials|PartialEq|assert_eq!|==' crates --include='*.rs'`,
+`s5a-comparisons.log`) found no non-test equality/container/bound use of this
+type. Removed recursive PartialEq derive; `cargo check --offline --workspace
+--all-targets` succeeds (`s5a-workspace-check.log`). Clone/drop remain deep.
 
 ## D OAuth/lite ownership inventory (source at 31db790c)
 
@@ -122,16 +139,11 @@ failures: `s4d-native-first-{native_call,native_output}.log`. Mutations:
 `s4d-native-clone-{tool_schema,native_reasoning,native_metadata,native_message,native_call,native_output,native_unknown,cache_fallback}.log`.
 Restored focused depth plus 289 request comparisons: `s4d-native-fixed.log`.
 
-**D remains incomplete.** Remaining: credential-data fields;
-foreign-native/system/provider-tool ignored payloads; shared helper source
-inventory. Do not label step 4 complete yet. Existing
-native-message case uses user role and deep content; it does not demonstrate
-assistant annotation replacement. Tool schema case uses the lite model; explicit
-non-lite control remains to be added.
+Historical D2 omissions were closed by subsequent groups and D6 above.
 
 Paths below are relative to `crates/omni-providers/src/`. This inventory includes
 arbitrary values reachable through provider-native items, not only normal
-message shapes. D is in progress; a listed path is not a depth-safety claim.
+message shapes. Evidence is in the per-group mutation tables.
 
 | Carrier / ownership operation | Source file:line |
 |---|---|
@@ -140,23 +152,29 @@ message shapes. D is in progress; a listed path is not a depth-safety claim.
 | Client metadata ignored, generated replacement | openai/wire.rs:323–325,402 |
 | Vendor input overwritten by assembled lite history | openai/wire.rs:337,394 |
 | Vendor stream overridden; ordered body owned/written/dropped | openai/mod.rs:90–118 |
-| Tool schema clone, OAuth strict:false, lite tools owner | openai/wire.rs:234–253; openai/lite.rs:14,22–29,56–61 |
+| Tool schema map/vector; OAuth strict:false and explicit non-lite insertion | openai/wire.rs:234–253; nonlite_schema and tool_schema plain-clone SIGSEGV |
 | Tool input borrowed → argument string; results string/media; native result ignored | openai/wire.rs:107–115 |
 | Native fields cloned except id; foreign native ignored | openai/wire.rs:117 |
-| Intermediate input/repaired vector; orphan repair | openai/wire.rs:79–89,135–155,202 |
+| Message parts/flush map → input → repaired; orphan repair | openai/wire.rs:77–89,135–155; parts are bounded text/media; native input moves without recursion; answered holds strings only |
+| Repaired input copy into body | openai/wire.rs:202; native_reasoning plain-clone SIGSEGV |
 | Cache fallback first-item copy | openai/wire.rs:175–187 |
-| Response-format schema and text replacement | openai/wire.rs:370; response_format.rs (shared helper) |
+| Response-format borrowed source/spec/schema and traversal vectors | response_format.rs:66–118,135–176; references only, breadth traversal |
+| ResponseFormatRead/ResponseFormat schema owner | response_format.rs:19–30,128–131; deep clone, scoped drop; format_schema scope-removal SIGABRT (prior evidence) |
+| Removed raw format/malformed text; client_text clone; text/copy/removed format | response_format.rs:188–209; scoped recursive drops; format_replace/format_text_drop evidence in earlier groups |
+| Translated next/spec maps and moved schema | response_format.rs:210–237; deep insert/clone, values moved into body; format_schema exercises this stage |
 | Lite message content clone; assistant annotations replaced | openai/lite.rs:139–154 |
 | Lite function call/output fields (native input can carry arbitrary values) | openai/lite.rs:157–161 |
 | Native reasoning clone / old passthrough removal | openai/lite.rs:163–171 |
 | Unknown native item passthrough clone | openai/lite.rs:173 |
-| LiteArgs input/tools iterative drop; returned input clone | openai/lite.rs:22–29,184; openai/wire.rs:394 |
+| LiteArgs input/tools owner | openai/lite.rs:13–14,22–29; ordinary-drop mutations pass within codec scope (structurally protected by scope) |
+| Lite tool prefix, history/out/result owners | openai/lite.rs:56–69,200–206; bounded wrapper moves history, deep Owned release; arbitrary payload copies covered by D2 per-field cases |
+| Returned lite input clone | openai/wire.rs:394; deep clone, vendor input replacement evidence D1 |
 | Credential provider_data borrowed, secrets/account string selection | openai/identity.rs:30–40; openai/oauth.rs:53–58; openai/mod.rs:136 |
 | Generated turn/client metadata | openai/oauth.rs:63–75 (turnId generated string, startedAt number) |
-| System/provider tools ignored arbitrary native payloads | openai/wire.rs:158,234–253 (shared system helper; portable tools only) |
+| System/provider tools ignored arbitrary native payloads | openai/wire.rs:158,234–253; system.rs:9–23 borrows blocks, retains only str references and joined String; ignored_system/provider_tool cases structurally safe |
+| Tool-result file split/parts owner | tool_result_files.rs:93–115,145–169; borrowed FileBlock, String text; generated Value parts contain strings only; ordinary_result_media scope-removal passes |
 
-Response-format helper and shared system/tool-file helper line-level inventory
-still needs expansion in the next D set. Generated metadata/provenance is
+Generated metadata/provenance is
 bounded JSON made from strings/numbers/bools; arbitrary credential fields are
 borrowed and filtered by type, not copied into metadata.
 
@@ -183,8 +201,7 @@ and is structurally safe for the stated reason, not mutation-proven protection.
 Logs: `s4d-depth-vendor-baseline.log`, `s4d-depth-clone-{text_merge,reasoning_merge,scalar}.log`,
 `s4d-depth-insert-noscope-{input_replace,stream_replace,metadata}.log`.
 
-Remaining D: see the current D3 pending table above. D1/D2 evidence below
-is retained as historical evidence, not a second current pending list.
+D1/D2 evidence is retained as historical evidence.
 
 ## Decoder depth (step 3 item 3)
 
