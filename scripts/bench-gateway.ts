@@ -1,5 +1,4 @@
 #!/usr/bin/env bun
-import { setupViaApi as apiSetup, smoke as smokeRequests, recoveryVerdict, sampleRecovery, RECOVERY_LATENESS_MS, type RecoverySample } from "./bench-probe";
 /**
  * Black-box latency, throughput, CPU and memory benchmark for the gateway.
  *
@@ -90,10 +89,31 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { cpus, release, totalmem } from "node:os";
+import { cpus, loadavg, release, totalmem } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import type { Subprocess } from "bun";
+import { processEnvironment } from "./bench-environment";
+import {
+  type MatrixMeta,
+  matches,
+  matrixScenarios,
+  matrixSmoke,
+  allProviders as providers,
+  type Verdict,
+} from "./bench-matrix";
+import { seedOAuth } from "./bench-oauth";
+import { readOhaReport } from "./bench-oha-report";
+import {
+  setupViaApi as apiSetup,
+  RECOVERY_LATENESS_MS,
+  type RecoverySample,
+  recoveryVerdict,
+  sampleRecovery,
+  smoke as smokeRequests,
+} from "./bench-probe";
+import { showPerformance } from "./bench-report";
+import { collectVerifierReport } from "./bench-verifier-report";
 
 const { values: flags } = parseArgs({
   options: {
@@ -108,6 +128,8 @@ const { values: flags } = parseArgs({
     streams: { type: "string", default: "1000" },
     boots: { type: "string", default: "5" },
     only: { type: "string" },
+    matrix: { type: "boolean", default: false },
+    "fresh-process": { type: "boolean", default: false },
     label: { type: "string" },
     cluster: { type: "boolean", default: false },
     replicas: { type: "string", default: "1" },
@@ -139,6 +161,9 @@ const ENCRYPTION_KEY = "bench-only-encryption-key-0123456789";
 const GATEWAY_PORT = 18200;
 const UPSTREAM_PORT = 18100;
 const CLUSTER = flags.cluster === true;
+if (flags.matrix && CLUSTER) throw Error("matrix cluster setup is not implemented");
+if (flags.matrix && !matrixScenarios().some((s) => matches(s.name, flags.only)))
+  throw Error("--only matched no matrix scenarios");
 const REPLICAS = CLUSTER ? Number(flags.replicas) : 1;
 const ADMIN_PASSWORD = "bench-admin-password";
 const PORTS = Array.from({ length: REPLICAS }, (_, i) => GATEWAY_PORT + i);
@@ -490,7 +515,11 @@ async function waitHealthy(timeoutMs: number, base = BASE): Promise<boolean> {
   const deadline = performance.now() + timeoutMs;
   while (performance.now() < deadline) {
     try {
-      const res = await fetch(`${base}/health`, {signal: AbortSignal.timeout(Math.max(1, Math.min(1000, Math.ceil(deadline - performance.now()))))});
+      const res = await fetch(`${base}/health`, {
+        signal: AbortSignal.timeout(
+          Math.max(1, Math.min(1000, Math.ceil(deadline - performance.now()))),
+        ),
+      });
       await res.body?.cancel();
       if (res.ok) return true;
     } catch {
@@ -604,6 +633,7 @@ function agentBody(model: string): string {
 // ---------------------------------------------------------------- scenarios
 
 type Scenario = {
+  smokeBytes?: number;
   name: string;
   what: string;
   path: string;
@@ -631,6 +661,8 @@ type OhaJson = {
 };
 
 type ScenarioResult = {
+  cpuMsPerRequestDrained?: number | null;
+  integrity?: { errors: string[]; verifier: unknown; sizes?: unknown };
   name: string;
   what: string;
   concurrency: number;
@@ -900,7 +932,32 @@ async function oha(
     (scenario.requests === undefined ? flags["request-timeout"] : undefined);
   if (timeout !== undefined) args.push("-t", timeout);
   args.push(`${base}${scenario.path}`);
+  if (flags.matrix) {
+    const file = join(root, `${scenario.name}.oha.db`);
+    rmSync(file, { force: true });
+    args.push("--db-url", file);
+    const reportFile = join(root, `${scenario.name}.oha.json`);
+    rmSync(reportFile, { force: true });
+    args.push("--output", reportFile);
+  }
   const proc = Bun.spawn(args, { stdout: "pipe", stderr: "pipe" });
+  if (flags.matrix) {
+    const report = readOhaReport<OhaJson>(
+      join(root, `${scenario.name}.oha.json`),
+      proc.exited,
+      (r) => {
+        ohaCpuS += procSample(proc.pid)?.cpuS ?? 0;
+        matrixLoadEnd?.(r);
+      },
+    );
+    const [result, err, code] = await Promise.all([
+      report,
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    if (code !== 0) throw Error(`oha failed: ${err}`);
+    return result;
+  }
   const [out, err, code] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
@@ -916,6 +973,7 @@ const ms = (v: number | null | undefined): number => (v == null ? Number.NaN : v
 
 /** CPU seconds every finished `oha` used, for telling the bench's own load from the host's. */
 let ohaCpuS = 0;
+let matrixLoadEnd: ((report: OhaJson) => void) | undefined;
 /** The upstream processes, whose CPU is the bench's own too. */
 const upstreamPids: number[] = [];
 
@@ -1017,6 +1075,36 @@ async function runScenario(
     warmAnswered = answered((await ohaFleet(scenario, key, flags.warmup ?? "3s")).merged);
   await sleep(500);
 
+  const measuredFrom = Date.now();
+  const refreshCount = () => {
+    try {
+      return readFileSync(join(root, "refresh.log"), "utf8").length;
+    } catch {
+      return 0;
+    }
+  };
+  const refreshBefore = flags.matrix ? refreshCount() : 0;
+  let verifier: Subprocess | undefined;
+  if (flags.matrix) {
+    const verifyKey = (await cli(["keys", "create", "--label", `verify-${scenario.name}`])) as {
+      key: string;
+    };
+    const file = join(root, "verify.json");
+    writeFileSync(file, JSON.stringify({ base: BASE, key: verifyKey.key, scenario }));
+    verifier = Bun.spawn(
+      [
+        "taskset",
+        "-c",
+        flags["load-cpus"] ?? "6-7",
+        process.execPath,
+        join(import.meta.dir, "bench-verify-client.ts"),
+        file,
+      ],
+      { stdout: "pipe", stderr: "inherit" },
+    );
+    children.push(verifier);
+  }
+
   const before = fleetSample(pids);
   const backingBefore = backingCpuS();
   const hostBefore = cpuTimes();
@@ -1029,6 +1117,56 @@ async function runScenario(
   let threadsFrom: Map<string, ThreadTime> | null = null;
   let threadsAt = 0;
   const started = performance.now();
+  let boundary:
+    | {
+        at: number;
+        epoch: number;
+        sample: ReturnType<typeof fleetSample>;
+        host: ReturnType<typeof cpuTimes>;
+        own: number;
+        reportedSeconds: number;
+      }
+    | undefined;
+  let drain:
+    | Promise<{ sample: ReturnType<typeof fleetSample>; at: number; complete: boolean }>
+    | undefined;
+  if (flags.matrix)
+    matrixLoadEnd = (r) => {
+      boundary = {
+        at: performance.now(),
+        epoch: Date.now(),
+        sample: fleetSample(pids),
+        host: cpuTimes(),
+        own:
+          ohaCpuS +
+          process.cpuUsage().user / 1e6 +
+          process.cpuUsage().system / 1e6 +
+          upstreamCpuS(),
+        reportedSeconds: r.summary.total,
+      };
+      sampling = false;
+      verifier?.kill("SIGTERM");
+      drain = (async () => {
+        const until = performance.now() + 30000;
+        const db = new Database(env.OMNI_DB_PATH, { readonly: true });
+        try {
+          for (;;) {
+            const row = db
+              .query(
+                "SELECT count(*) n,sum(state='done') done FROM request_logs WHERE at BETWEEN ? AND ? AND api_key_id IN (SELECT id FROM api_keys WHERE label='bench plain')",
+              )
+              .get(measuredFrom, boundary?.epoch ?? Date.now()) as { n: number; done: number };
+            if (row.n === answered(r) && row.done === row.n)
+              return { sample: fleetSample(pids), at: performance.now(), complete: true };
+            if (performance.now() > until)
+              return { sample: fleetSample(pids), at: performance.now(), complete: false };
+            await sleep(10);
+          }
+        } finally {
+          db.close();
+        }
+      })();
+    };
   const sampler = (async () => {
     while (sampling) {
       const s = fleetSample(pids);
@@ -1051,29 +1189,49 @@ async function runScenario(
   })();
 
   const { merged: report, perReplica } = await ohaFleet(scenario, key, flags.duration ?? "20s");
+  const loadProcessReturnedAt = performance.now();
+  matrixLoadEnd = undefined;
+  const measuredTo = boundary?.epoch ?? Date.now();
+  const drained = await drain;
+  let verification: { requests: number; errors: string[]; rate: number } = {
+    requests: 0,
+    errors: [],
+    rate: 4,
+  };
+  if (verifier) {
+    // Normally stopped at the report boundary; fall back only if it was absent.
+    if (!boundary) verifier.kill("SIGTERM");
+    verification = await collectVerifierReport(verifier);
+  }
   const recoveryStart = performance.now();
   sampling = false;
   await sampler;
-  const after = fleetSample(pids);
+  const after = boundary?.sample ?? fleetSample(pids);
   const backingAfter = backingCpuS();
-  const hostAfter = cpuTimes();
+  const hostAfter = boundary?.host ?? cpuTimes();
   const ownAfter =
     ohaCpuS + process.cpuUsage().user / 1e6 + process.cpuUsage().system / 1e6 + upstreamCpuS();
-  const windowS = (performance.now() - started) / 1000;
+  const windowS = ((boundary?.at ?? performance.now()) - started) / 1000;
   const gatewayCpuS = (after?.cpuS ?? 0) - (before?.cpuS ?? 0);
   const foreignCores = Math.max(
     0,
-    busyCores(hostBefore, hostAfter) - (gatewayCpuS + (ownAfter - ownBefore)) / windowS,
+    busyCores(hostBefore, hostAfter) -
+      (gatewayCpuS + ((boundary?.own ?? ownAfter) - ownBefore)) / windowS,
   );
   // Settle before the next scenario, then confirm the process still answers:
   // a scenario that leaves the gateway wedged is a result, not a crash. The
   // settle also lets the writer flush the scenario's last batch (≤ 200 ms).
   let recoverySamples: RecoverySample[] = [];
   if (scenario.clientTimeout !== undefined) {
-    recoverySamples = await sampleRecovery(recoveryStart, () => performance.now(), sleep, () => {
-      const sample = fleetSample(pids);
-      return sample === null ? null : sample.rssKb / 1024;
-    });
+    recoverySamples = await sampleRecovery(
+      recoveryStart,
+      () => performance.now(),
+      sleep,
+      () => {
+        const sample = fleetSample(pids);
+        return sample === null ? null : sample.rssKb / 1024;
+      },
+    );
   } else {
     await sleep(1000);
   }
@@ -1105,8 +1263,75 @@ async function runScenario(
     Object.values(report.errorDistribution).reduce((a, b) => a + b, 0);
   const cpuSeconds = (after?.cpuS ?? 0) - (before?.cpuS ?? 0);
   const lp = report.latencyPercentiles;
+  const integrityErrors: string[] = [];
+  if (flags.matrix && !drained?.complete) integrityErrors.push("common row drain incomplete");
+  if (flags.matrix && refreshCount() !== refreshBefore)
+    integrityErrors.push("OAuth refresh during measurement");
+  if (flags.matrix && (!boundary || Math.abs(windowS - boundary.reportedSeconds) > 0.25))
+    integrityErrors.push("load report boundary differs from oha duration by more than 250ms");
+  let sizeEvidence: unknown;
+  if (flags.matrix) {
+    integrityErrors.push(...verification.errors);
+    if (!verification.requests) integrityErrors.push("no verifier requests");
+    const db = new Database(env.OMNI_DB_PATH, { readonly: true });
+    const chunks = Number(/-c(\d+)$/.exec(JSON.parse(scenario.body).model)?.[1] ?? 1);
+    const rows = db
+      .query(
+        "SELECT status,input_tokens,output_tokens,state FROM request_logs WHERE at BETWEEN ? AND ? AND api_key_id IN (SELECT id FROM api_keys WHERE label='bench plain')",
+      )
+      .all(measuredFrom, measuredTo) as {
+      status: number;
+      input_tokens: number;
+      output_tokens: number;
+      state: string;
+    }[];
+    db.close();
+    if (
+      rows.length !== (report.statusCodeDistribution["200"] ?? 0) ||
+      rows.some(
+        (r) =>
+          r.status !== 200 ||
+          r.state !== "done" ||
+          r.input_tokens !== 64 ||
+          r.output_tokens !== chunks * 2,
+      )
+    )
+      integrityErrors.push("measured log count/status/usage mismatch");
+    const sizes = new Database(join(root, `${scenario.name}.oha.db`), {
+      readonly: true,
+    });
+    const size = sizes
+      .query("SELECT min(len_bytes) lo,max(len_bytes) hi,count(*) n FROM oha")
+      .get() as { lo: number; hi: number; n: number };
+    sizes.close();
+    const expected = scenario.smokeBytes ?? 0;
+    const slack = Math.max(128, Math.ceil(expected * 0.02));
+    sizeEvidence = { ...size, expected, min: expected - slack, max: expected + slack };
+    if (
+      size.n !== (report.statusCodeDistribution["200"] ?? 0) ||
+      size.lo < expected - slack ||
+      size.hi > expected + slack
+    )
+      integrityErrors.push("per-request response size outside smoke band");
+  }
   const fb = report.firstBytePercentiles;
   return {
+    ...(flags.matrix
+      ? {
+          cpuMsPerRequestDrained: requests
+            ? (((drained?.sample?.cpuS ?? 0) - (before?.cpuS ?? 0)) * 1000) / requests
+            : null,
+          loadWindow: {
+            observedSeconds: windowS,
+            reportedSeconds: boundary?.reportedSeconds,
+            reportToExitMs: loadProcessReturnedAt - (boundary?.at ?? loadProcessReturnedAt),
+            drainMs: (drained?.at ?? 0) - (boundary?.at ?? 0),
+          },
+        }
+      : {}),
+    ...(flags.matrix
+      ? { integrity: { errors: integrityErrors, verifier: verification, sizes: sizeEvidence } }
+      : {}),
     name: scenario.name,
     what: scenario.what,
     concurrency: scenario.concurrency,
@@ -1134,7 +1359,10 @@ async function runScenario(
     rssEndMb: (settled?.rssKb ?? 0) / 1024,
     recoverySamples,
     recoveryLatenessToleranceMs: RECOVERY_LATENESS_MS,
-    recoveryVerdict: scenario.clientTimeout === undefined ? null : recoveryVerdict(before === null ? null : before.rssKb / 1024, recoverySamples, crashed),
+    recoveryVerdict:
+      scenario.clientTimeout === undefined
+        ? null
+        : recoveryVerdict(before === null ? null : before.rssKb / 1024, recoverySamples, crashed),
     healthyAfter,
     crashed,
     rows,
@@ -1194,14 +1422,95 @@ const NEVER_DENY = {
  * operator of a cluster has as well.
  */
 async function setupViaApi(): Promise<Record<"plain" | "limited", string>> {
-  return apiSetup(BASE, ADMIN_PASSWORD, {
-    provider: "custom", apiKey: "sk-bench-upstream", label: "bench upstream",
-    endpointId: "bench", endpointLabel: "Bench", origin: `http://127.0.0.1:${UPSTREAM_PORT}`,
-    protocol: "chat_completions",
-  }, Object.fromEntries(Object.entries(BENCH_MODELS).map(([id, upstream]) => [id, benchModel(id, upstream)])), NEVER_DENY);
+  return apiSetup(
+    BASE,
+    ADMIN_PASSWORD,
+    {
+      provider: "custom",
+      apiKey: "sk-bench-upstream",
+      label: "bench upstream",
+      endpointId: "bench",
+      endpointLabel: "Bench",
+      origin: `http://127.0.0.1:${UPSTREAM_PORT}`,
+      protocol: "chat_completions",
+    },
+    Object.fromEntries(
+      Object.entries(BENCH_MODELS).map(([id, upstream]) => [id, benchModel(id, upstream)]),
+    ),
+    NEVER_DENY,
+  );
 }
 
 async function setup(): Promise<Record<"plain" | "limited", string>> {
+  if (flags.matrix) {
+    if (CLUSTER) throw Error("matrix cluster setup is not implemented");
+    for (const provider of providers) {
+      if (!matrixScenarios().some((s) => s.provider === provider.id && matches(s.name, flags.only)))
+        continue;
+      if (provider.provider === "anthropic" && !process.env.OMNI_BENCH_CERT)
+        throw Error("Anthropic matrix requires scripts/bench-matrix.sh");
+      await cli(
+        [
+          "credentials",
+          "add-key",
+          provider.provider,
+          "--label",
+          provider.id,
+          ...(provider.provider === "custom"
+            ? [
+                "--endpoint-id",
+                provider.id,
+                "--endpoint-label",
+                provider.id,
+                "--origin",
+                provider.origin,
+                "--protocol",
+                provider.protocol,
+              ]
+            : []),
+        ],
+        "sk-bench-upstream\n",
+      );
+      if (provider.protocol === "oauth")
+        await seedOAuth(env.OMNI_DB_PATH, ENCRYPTION_KEY, provider.id);
+      const db = new Database(env.OMNI_DB_PATH);
+      const credential = db.query("SELECT id FROM credentials WHERE label=?").get(provider.id) as {
+        id: string;
+      };
+      db.close();
+      for (const chunks of [1, 2000]) {
+        const id = `${provider.id}-c${chunks}`;
+        const model = {
+          id,
+          strategy: "priority",
+          isAlias: false,
+          targets: [
+            {
+              provider: provider.provider,
+              ...(provider.provider === "custom"
+                ? { endpointId: provider.id }
+                : { credentialId: credential.id }),
+              model: `mock-c${chunks}-d0`,
+              tier: 1,
+              weight: 1,
+              costPerMTok: { input: 1, output: 2 },
+              capabilities: { tools: true, images: true, reasoning: true },
+            },
+          ],
+        };
+        const file = join(root, `${id}.model.json`);
+        writeFileSync(file, JSON.stringify(model));
+        await cli(["models", "put", id, "-f", file]);
+      }
+    }
+    const plain = (await cli(["keys", "create", "--label", "bench plain"])) as { key: string };
+    if (process.env.OMNI_BENCH_FAULT === "missing-credential") {
+      const db = new Database(env.OMNI_DB_PATH);
+      db.run("DELETE FROM credentials");
+      db.close();
+    }
+    return { plain: plain.key, limited: plain.key };
+  }
   await cli(
     [
       "credentials",
@@ -1244,6 +1553,43 @@ async function setup(): Promise<Record<"plain" | "limited", string>> {
 }
 
 function startUpstreams(): void {
+  if (flags.matrix) {
+    const upstreams = new Map(
+      providers
+        .filter((p) =>
+          matrixScenarios().some((s) => s.provider === p.id && matches(s.name, flags.only)),
+        )
+        .map((provider) => [provider.origin, provider.script]),
+    );
+    for (const [origin, script] of upstreams) {
+      for (let i = 0; i < 2; i += 1) {
+        const proc = Bun.spawn(
+          [
+            "taskset",
+            "-c",
+            flags["upstream-cpus"] ?? "4-5",
+            process.execPath,
+            join(import.meta.dir, script),
+            "--port",
+            new URL(origin).port || "443",
+            ...(script === "bench-gateway-upstream.ts" ? ["--matrix"] : []),
+            ...(origin.startsWith("https:")
+              ? [
+                  "--cert",
+                  process.env.OMNI_BENCH_CERT ?? "",
+                  "--key",
+                  process.env.OMNI_BENCH_TLS_KEY ?? "",
+                ]
+              : []),
+          ],
+          { stdout: "ignore", stderr: "inherit" },
+        );
+        children.push(proc);
+        upstreamPids.push(proc.pid);
+      }
+    }
+    return;
+  }
   // Two copies on one port: the upstream must never be the ceiling.
   for (let i = 0; i < 2; i += 1) {
     const proc = Bun.spawn(
@@ -1285,6 +1631,48 @@ async function cliTimings(runs: number): Promise<{ p50Ms: number; maxMs: number 
 }
 
 async function main(): Promise<void> {
+  if (flags.matrix) process.env.OMNI_BENCH_REFRESH_LOG = join(root, "refresh.log");
+  if (flags.matrix) {
+    for (const name of ["OMNI_BENCH_CERT", "OMNI_BENCH_TLS_KEY"]) {
+      const value = process.env[name];
+      if (value) {
+        const path = join(root, name);
+        writeFileSync(path, readFileSync(value));
+        (env as Record<string, string | undefined>)[name] = path;
+      }
+    }
+  }
+  const loadBefore = loadavg()[0];
+  let provenance:
+    | {
+        gatewayBinary: string;
+        gatewaySha256: string;
+        harnessCommit: string;
+        loadBefore: number | undefined;
+        loadAfter?: number;
+        environment?: Record<string, string>;
+      }
+    | undefined;
+  if (flags.matrix) {
+    const launcher = GATEWAY_ARGV.some((arg) => arg.endsWith("/run-rust-gateway.sh"));
+    const launcherPath = GATEWAY_ARGV.find((arg) => arg.endsWith("/run-rust-gateway.sh"));
+    const program = launcher
+      ? (process.env.OMNI_RUST_BINARY ??
+        resolve(launcherPath as string, "../../target/release/omnigateway"))
+      : (GATEWAY_ARGV[0] as string);
+    const binary = program.includes("/") ? resolve(root, program) : Bun.which(program);
+    if (!binary) throw Error(`cannot resolve gateway binary: ${program}`);
+    const commit = Bun.spawnSync(["git", "rev-parse", "HEAD"], { cwd: REPO });
+    if (commit.exitCode !== 0) throw Error("cannot identify harness commit");
+    provenance = {
+      gatewayBinary: binary,
+      gatewaySha256: new Bun.CryptoHasher("sha256")
+        .update(await Bun.file(binary).arrayBuffer())
+        .digest("hex"),
+      harnessCommit: commit.stdout.toString().trim(),
+      loadBefore,
+    };
+  }
   mkdirSync(join(root, "no-dashboard"), { recursive: true });
   // `--root` makes the CLI ignore an ambient OMNI_DB_PATH, so the root states
   // its own, which is how a real installation does it.
@@ -1319,17 +1707,93 @@ async function main(): Promise<void> {
   }
   if (keys === null) keys = await setupViaApi();
   const pids = gateways.map((g) => g.pid);
+  if (provenance) provenance.environment = processEnvironment(pids[0] as number);
   await sleep(2000);
   const idle = fleetSample(pids);
-  await smoke(keys.plain);
+  if (!flags.matrix) await smoke(keys.plain);
 
   const only = flags.only?.split(",");
   const results: ScenarioResult[] = [];
-  for (const scenario of scenarios()) {
-    if (only !== undefined && !only.includes(scenario.name)) continue;
+  const matrixResults: (MatrixMeta &
+    Verdict & {
+      name: string;
+      concurrency: number;
+      bodySha256: string;
+      diagnostics?: unknown;
+      metrics: ScenarioResult | null;
+    })[] = [];
+  for (const scenario of flags.matrix ? matrixScenarios() : scenarios()) {
+    if (
+      flags.matrix
+        ? !matches(scenario.name, flags.only)
+        : only !== undefined && !only.includes(scenario.name)
+    )
+      continue;
+    const meta = flags.matrix ? (scenario as Scenario & MatrixMeta) : null;
+    if (meta && flags["fresh-process"]) {
+      await stopGateway(gateways[0] as Subprocess);
+      const replacement = startGateway();
+      gateways[0] = replacement;
+      pids[0] = replacement.pid;
+      if (!(await waitHealthy(30000))) throw Error("fresh gateway did not start");
+      if (
+        provenance &&
+        JSON.stringify(processEnvironment(replacement.pid)) !==
+          JSON.stringify(provenance.environment)
+      )
+        throw Error("effective environment changed after restart");
+    }
+    if (meta) {
+      const verdict = await matrixSmoke(BASE, keys.plain, meta);
+      if (verdict.bytes !== undefined) (scenario as Scenario).smokeBytes = verdict.bytes;
+      if (verdict.classification !== "supported") {
+        matrixResults.push({
+          concurrency: scenario.concurrency,
+          bodySha256: new Bun.CryptoHasher("sha256").update(scenario.body).digest("hex"),
+          name: scenario.name,
+          provider: meta.provider,
+          ingress: meta.ingress,
+          mode: meta.mode,
+          ...verdict,
+          metrics: null,
+        });
+        console.error(`${scenario.name}: ${verdict.classification}: ${verdict.reason}`);
+        continue;
+      }
+    }
     console.error(`running ${scenario.name}…`);
     const result = await runScenario(scenario, pids, keys);
     results.push(result);
+    if (meta) {
+      const failed =
+        shed(result) ||
+        (result.integrity?.errors.length ?? 0) > 0 ||
+        result.requests === 0 ||
+        result.rows === null ||
+        result.crashed > 0 ||
+        !result.healthyAfter ||
+        Object.keys(result.errors).length > 0 ||
+        Object.keys(result.status).some((status) => status !== "200");
+      matrixResults.push({
+        concurrency: scenario.concurrency,
+        bodySha256: new Bun.CryptoHasher("sha256").update(scenario.body).digest("hex"),
+        name: scenario.name,
+        provider: meta.provider,
+        ingress: meta.ingress,
+        mode: meta.mode,
+        classification: failed ? "failed" : "supported",
+        reason: failed ? "load integrity check failed" : "shape and load integrity passed",
+        metrics: failed ? null : result,
+        diagnostics: failed
+          ? {
+              integrity: result.integrity,
+              rows: result.rows,
+              status: result.status,
+              errors: result.errors,
+            }
+          : undefined,
+      });
+    }
     // A crash is a result, recorded above; the next scenario still needs a
     // fleet to measure, so a dead replica is replaced before it starts.
     for (let i = 0; i < gateways.length; i += 1) {
@@ -1340,19 +1804,20 @@ async function main(): Promise<void> {
       gateways[i] = replacement;
       pids[i] = replacement.pid;
     }
-    console.error(
-      `  ${result.rps.toFixed(0)} req/s  p50 ${result.latencyMs.p50.toFixed(2)} ms  ` +
-        `p99 ${result.latencyMs.p99.toFixed(2)} ms  cpu ${result.cpuMsPerRequest.toFixed(3)} ms/req  ` +
-        `rss peak ${result.rssPeakMb.toFixed(0)} MiB  ok ${(result.successRate * 100).toFixed(2)}%` +
-        (result.rows === null
-          ? ""
-          : `  rows ${result.rows.done}/${result.rows.answered} pending ${result.rows.pending}` +
-            `  writer ${writerCell(result.rows.writer)}` +
-            (shed(result) ? "  ROWS DROPPED" : "")) +
-        `  foreign ${result.foreignCores} cores` +
-        (result.threads === null ? "" : `  threads ${JSON.stringify(result.threads)}`) +
-        (result.crashed > 0 ? `  CRASHED ×${result.crashed}` : ""),
-    );
+    if (showPerformance(!!flags.matrix, matrixResults.at(-1)?.classification))
+      console.error(
+        `  ${result.rps.toFixed(0)} req/s  p50 ${result.latencyMs.p50.toFixed(2)} ms  ` +
+          `p99 ${result.latencyMs.p99.toFixed(2)} ms  cpu ${result.cpuMsPerRequest.toFixed(3)} ms/req  ` +
+          `rss peak ${result.rssPeakMb.toFixed(0)} MiB  ok ${(result.successRate * 100).toFixed(2)}%` +
+          (result.rows === null
+            ? ""
+            : `  rows ${result.rows.done}/${result.rows.answered} pending ${result.rows.pending}` +
+              `  writer ${writerCell(result.rows.writer)}` +
+              (shed(result) ? "  ROWS DROPPED" : "")) +
+          `  foreign ${result.foreignCores} cores` +
+          (result.threads === null ? "" : `  threads ${JSON.stringify(result.threads)}`) +
+          (result.crashed > 0 ? `  CRASHED ×${result.crashed}` : ""),
+      );
   }
   const final = fleetSample(pids);
   const shutdownMs = Math.max(...(await Promise.all(gateways.map(stopGateway))));
@@ -1377,6 +1842,7 @@ async function main(): Promise<void> {
   })();
 
   const output = {
+    ...(provenance ? { provenance: { ...provenance, loadAfter: loadavg()[0] } } : {}),
     label: flags.label ?? null,
     when: new Date().toISOString(),
     host: {
@@ -1393,6 +1859,15 @@ async function main(): Promise<void> {
       gatewayCpus: flags["gateway-cpus"],
       upstreamCpus: flags["upstream-cpus"],
       loadCpus: flags["load-cpus"],
+      ...(flags.matrix
+        ? {
+            rate: flags.rate ?? null,
+            freshProcess: flags["fresh-process"],
+            processScope: flags["fresh-process"]
+              ? "fresh gateway per scenario"
+              : "one gateway serves scenarios in order; later RSS includes earlier workload history",
+          }
+        : {}),
       mode: CLUSTER ? "cluster" : "single",
       replicas: REPLICAS,
       cpuSets: CPU_SETS,
@@ -1412,13 +1887,24 @@ async function main(): Promise<void> {
     cliKeysList: cli,
     calibration,
     writerDropped,
-    scenarios: results,
+    scenarios: flags.matrix ? matrixResults : results,
   };
 
   const json = `${JSON.stringify(output, null, 2)}\n`;
   if (flags.out !== undefined) writeFileSync(resolve(REPO, flags.out), json);
   else process.stdout.write(json);
-  console.error(markdown(output));
+  if (flags.matrix) {
+    for (const provider of providers) {
+      console.error(
+        `\n### ${provider.id}\n| scenario | result | req/s | p50 | p99 | CPU ms/req load | CPU ms/req drained | RSS MiB |\n|---|---|---:|---:|---:|---:|---:|---:|`,
+      );
+      for (const r of matrixResults.filter((r) => r.provider === provider.id))
+        console.error(
+          `| ${r.name} | ${r.classification}: ${r.reason} | ${r.metrics?.rps ?? "–"} | ${r.metrics?.latencyMs.p50 ?? "–"} | ${r.metrics?.latencyMs.p99 ?? "–"} | ${r.metrics?.cpuMsPerRequest ?? "–"} | ${r.metrics?.cpuMsPerRequestDrained ?? "–"} | ${r.metrics?.rssPeakMb ?? "–"} |`,
+        );
+    }
+    if (matrixResults.some((r) => r.classification === "failed")) process.exitCode = 1;
+  } else console.error(markdown({ ...output, scenarios: results }));
 }
 
 /**

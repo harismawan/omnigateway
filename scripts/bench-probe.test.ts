@@ -25,7 +25,7 @@ test("authenticated setup propagates cookie through credentials models and keys"
     if (path === "/api/setup") return Response.json({}, { headers: { "set-cookie": "session=ok; HttpOnly" } });
     if (req.headers.get("cookie") !== "session=ok") return new Response("unauthorized", { status: 401 });
     seen.push(path);
-    return Response.json({ key: (await req.json()).label });
+    return Response.json({ key: ((await req.json()) as { label?: string }).label });
   } });
   try {
     expect(await setupViaApi(server.url.toString().replace(/\/$/, ""), "pw", {}, { m: {} }, {})).toEqual({ plain: "bench plain", limited: "bench limited" });

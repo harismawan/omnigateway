@@ -10,7 +10,9 @@
  * per-request value the gateway forwards untouched — no side channel, no
  * gateway-specific hook. `mock-c<chunks>-d<delayMs>` streams `<chunks>` content
  * deltas `<delayMs>` apart, then a usage chunk and `[DONE]`. Every reply is
- * chat-completions SSE, which is all the custom codec ever asks for.
+ * chat-completions SSE by default. `/v1/responses` serves Responses SSE;
+ * both custom codecs always ask upstream for a stream. `--matrix` combines
+ * instant chat frames into one write while preserving the legacy default.
  *
  *   bun scripts/bench-gateway-upstream.ts --port 18100
  *
@@ -18,9 +20,14 @@
  * the upstream from being the bottleneck it is measuring through.
  */
 import { parseArgs } from "node:util";
+import { faultResponse } from "./bench-fault";
 
 const { values } = parseArgs({
-  options: { port: { type: "string" }, host: { type: "string", default: "127.0.0.1" } },
+  options: {
+    port: { type: "string" },
+    host: { type: "string", default: "127.0.0.1" },
+    matrix: { type: "boolean", default: false },
+  },
 });
 const port = Number(values.port);
 if (!Number.isInteger(port) || port < 1 || port > 65_535) {
@@ -72,11 +79,11 @@ function stream(script: Script): ReadableStream<Uint8Array> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   return new ReadableStream<Uint8Array>({
     start(controller) {
-      controller.enqueue(first);
+      if (!values.matrix || script.delayMs !== 0) controller.enqueue(first);
       if (script.delayMs === 0) {
         // Instant replies go out as one write: what is being measured is the
         // gateway's decode/translate loop, not this process's scheduler.
-        const parts: Uint8Array[] = [];
+        const parts: Uint8Array[] = values.matrix ? [first] : [];
         for (let i = 0; i < script.chunks; i += 1) parts.push(delta);
         parts.push(finish, usage, DONE);
         controller.enqueue(Buffer.concat(parts));
@@ -103,6 +110,70 @@ function stream(script: Script): ReadableStream<Uint8Array> {
   });
 }
 
+function responses(script: Script): Uint8Array {
+  const id = "resp_bench";
+  const item = {
+    id: "msg_bench",
+    type: "message",
+    role: "assistant",
+    status: "completed",
+    content: [{ type: "output_text", text: "lorem ipsum ".repeat(script.chunks), annotations: [] }],
+  };
+  const response = {
+    id,
+    object: "response",
+    model: script.model,
+    status: "completed",
+    output: [item],
+    usage: {
+      input_tokens: 64,
+      output_tokens: script.chunks * 2,
+      total_tokens: 64 + script.chunks * 2,
+    },
+  };
+  let sequence = 0;
+  const event = (type: string, rest: object) =>
+    encoder.encode(
+      `event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: sequence++, ...rest })}\n\n`,
+    );
+  const delta = {
+    item_id: item.id,
+    output_index: 0,
+    content_index: 0,
+    delta: "lorem ipsum ",
+  };
+  const { usage: _usage, ...pending } = response;
+  return Buffer.concat([
+    event("response.created", { response: { ...pending, status: "in_progress", output: [] } }),
+    event("response.in_progress", { response: { ...pending, status: "in_progress", output: [] } }),
+    event("response.output_item.added", {
+      output_index: 0,
+      item: { ...item, status: "in_progress", content: [] },
+    }),
+    event("response.content_part.added", {
+      item_id: item.id,
+      output_index: 0,
+      content_index: 0,
+      part: { type: "output_text", text: "", annotations: [] },
+    }),
+    ...Array.from({ length: script.chunks }, () => event("response.output_text.delta", delta)),
+    event("response.output_text.done", {
+      item_id: item.id,
+      output_index: 0,
+      content_index: 0,
+      text: item.content[0]?.text,
+    }),
+    event("response.content_part.done", {
+      item_id: item.id,
+      output_index: 0,
+      content_index: 0,
+      part: item.content[0],
+    }),
+    event("response.output_item.done", { output_index: 0, item }),
+    event("response.completed", { response }),
+  ]);
+}
+
 Bun.serve({
   port,
   hostname: values.host,
@@ -111,7 +182,14 @@ Bun.serve({
   async fetch(request) {
     const path = new URL(request.url).pathname;
     if (path === "/health") return new Response("ok");
-    if (request.method !== "POST" || !path.endsWith("/chat/completions")) {
+    const fault = faultResponse();
+    if (fault) return fault;
+    if (process.env.OMNI_BENCH_FAULT === "500")
+      return Response.json({ error: { message: "injected upstream 500" } }, { status: 500 });
+    if (
+      request.method !== "POST" ||
+      !(path.endsWith("/chat/completions") || path.endsWith("/responses"))
+    ) {
       return new Response("not found", { status: 404 });
     }
     let body: unknown;
@@ -127,7 +205,7 @@ Bun.serve({
         { status: 400 },
       );
     }
-    return new Response(stream(script), {
+    return new Response(path.endsWith("/responses") ? responses(script) : stream(script), {
       headers: { "content-type": "text/event-stream", "cache-control": "no-cache" },
     });
   },
