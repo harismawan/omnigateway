@@ -1,18 +1,18 @@
 # B3 OpenAI / Codex
 
-## Review fixes — uncommitted implementation handoff, HEAD `027150b9`
+## Request-side review fixes — complete for re-review
 
 Finding 2 → `95f775e4`: 18 rows (3 native kinds × 2 shapes × absent/null/wrong-type).
 `s5c-native-red.log`: body 289 function_call/absent differed; green comparison + existing depth each `test result: ok. 1 passed; 0 failed; 0 ignored`.
 Absent omitted; explicit null/object retained with deep clone. Frozen assembler read: codexLite.ts:153–219.
-Index audit (openai/): lite.rs:108,125,150 type predicates; :112 array predicate (absence/null both false); :147 clone now emission guarded at :161; :170–184 get-based copies fixed. wire.rs:137–145 type/string predicates; :394 generated built.input invariant; :26–27 hash bytes, not client maps; test indexes are oracle fixtures. No other client-map copy indexes found.
+Index audit found no other client-map copy indexes: lite.rs uses predicates or guarded emission; wire.rs indexes generated input/hash bytes. Final HEAD `b21aee95`.
 Finding 3 → `027150b9`: six rows U+0085, FEFF, 00A0, 2028, tab, space execute frozen private framingAgrees source through Bun.Transpiler.
 `s5c-trim-red.log`: U+0085 Rust accepted, frozen refused. `s5c-trim-green.log`: `test result: ok. 5 passed; 0 failed; 0 ignored`.
 Only encoded check changed in http/mod.rs; shared omni_ir::js::trim used. Verdict test stops at invalid URL before header encoding.
-Finding 1 → IMPLEMENTED, NOT COMMITTED: gate remains red on reviewer rows 436–437; stopped without weakening expectations or changing omni-ir public types.
+Finding 1 → `b21aee95`: own map + deep-owned prototype, with explicit prototype-aware reads. 108 prototype rows (76 initial + 32 ordering/malformed/client-metadata rows).
 `s5d-red.log`: original comparison failed body 383; API-key twin passed (3 tests). Added 32 ordering/malformed-text/client-metadata rows to prior 76 prototype rows.
-575 rows now execute fully: 573 exact matches; all URL/ordered headers/body/encoding/state comparisons pass. 160 reviewer inputs retained unchanged (previous session excluded one API-key null-numeric row).
-Only differences: rows 436–437 (`null-bound/null`), Rust notes `[]`, frozen `["openai:max-tokens-dropped","openai:temperature-dropped"]`; `s5d-comparison.log`. Canonical Option<f64> collapses null/absence (request.rs:380,382); requires scope decision, not row special-casing.
+573/573 rows pass URL/ordered headers/body/encoding/notes/state: 158 reviewer inputs run of 161 original; three `null-bound/null` inputs excluded for the single ingress-rejected null-numeric boundary. Two OAuth rows remain in corpus, skipped by label; API-key twin was previously omitted.
+Known differences: empty encoded-body refusal remains; null numeric options are out of contract (plugin producers out of scope). Frozen OAuth emits two drop notes, API-key forwards null; Option<f64> collapses absence/null. Ingress schemas openai.ts:118–120, anthropic.ts:268–269, responses.ts:46–47 reject null; assignments :297–299/:682–683/:519–520 require !== undefined. Recorded in conformance/openai-coercion.md; former rows 436–437 document the note-only mismatch.
 40,000-level prototype depth passed; scratch plain `v.clone()` replacing OAuth prototype deep clone crashed child with unix status 139 (`s5d-depth-mutation.log`); restored deep clone, full gate depth passed. Prototype held in deep::Owned inside existing scope.
 
 | Merge site (frozen) | Assignment kind / setter |
@@ -33,14 +33,14 @@ Only differences: rows 436–437 (`null-bound/null`), Rust notes `[]`, frozen `[
 | wire.ts:560–567 reasoning?.effort | openai/wire.rs:401; shared effort for update and metadata |
 | codec.ts:65 service_tier | openai/mod.rs:75; routing-hint header |
 | codec.ts:123 spread/orderFields/JSON.stringify | no; body bytes exclude inherited keys |
-Re-grep confirmed listed reads; no additional escape found. responseFormat.ts actually lives at packages/providers/src/responseFormat.ts. Raw response_format is captured once, not re-read after delete; text IS re-read. Helper response_format.rs:193. Object prototypes supply fields; arrays have none of these named fields; null clears; primitives ignored; own wins. Map insertion order preserves relevant string-entry order; integer entries cannot affect these named reads. JSON nested __proto__ is data, not a chain; serde_json value/de.rs:141 inserts duplicate keys into a map (last value retained).
+Re-grep found no extra read/escape. responseFormat.ts lives at packages/providers/src/. Raw response_format is captured once; text IS re-read after delete. Helper response_format.rs:193. Duplicate JSON keys collapse to last value (serde_json value/de.rs:141). Integer-entry ordering cannot affect these named reads.
 
-Bun spread experiment (`s5d-spread.log`): `text {"text":{"base":true,"__proto__":{"effort":"high"}}} true`; reasoning output identical with outer `reasoning`. Frozen-code comparison nested text/reasoning rows also pass.
-Current uncommitted gates (logs /tmp/opencode/b3/): `s5d-tests.log`: 41 ok summaries, 209 passed, 3 ignored, then `test result: FAILED. 0 passed; 1 failed; 0 ignored` (only notes 436–437). Full gate NOT PASSING; ignores unchanged.
-`s5d-clippy.log`: Finished `dev` profile [unoptimized] target(s) in 1.95s. `s5d-fmt.log`: exit code: 0. `s5d-api.log`: `test result: ok. 3 passed; 0 failed; 0 ignored`.
-`s5d-tripwires.log`: json_writes `test result: ok. 1 passed; 0 failed; 0 ignored`; public_json_boundary `test result: ok. 4 passed; 0 failed; 0 ignored`. Both targets belong to omni-ir.
-git status remains intentionally dirty: 3 source files, 3 prior modified test files, prior untracked corpus. No commits/push/merge; frozen sources untouched. git diff --check passed.
-Next: resolve null-numeric corpus/canonical boundary decision, rerun green gates and commit; decode-side review; then step 5 gateway integration.
+Rule row labels use `{true,false}/` + JSON in category `prototype-pending`, both models: object `{"service_tier":"priority"}` supplies fields; array `[]`/`[{"service_tier":"priority"}]` has no relevant named fields; `null` clears; `"ignored"`/`42`/`true` primitives ignored; `{"__proto__":{"service_tier":"priority"},"service_tier":"default"}` proves own-wins. Order rows have `__proto__` before/after each text/reasoning/service_tier key; exact labels are the ordered bag JSON. Nested `{"text":{"__proto__":{"format":{"type":"json_object"}}}}` and `{"reasoning":{"__proto__":{"effort":"high"}}}` retain own spread data; nested prototype object's __proto__ does not build a chain.
+Bun spread (`s5d-spread.log`): `text {"text":{"base":true,"__proto__":{"effort":"high"}}} true`; reasoning output identical with outer `reasoning`.
+Final-commit gates /tmp/opencode/b3/: `s5e-tests.log`: 53 `test result: ok` summaries, 236 passed, 4 ignored, no FAILED line; comparison `test result: ok. 1 passed; 0 failed; 0 ignored`. Existing ignores unchanged.
+`s5e-clippy.log`: Finished `dev` profile [unoptimized] target(s) in 0.18s; `s5e-fmt.log`: exit code: 0. `s5e-tripwires.log`: json_writes `test result: ok. 1 passed; 0 failed; 0 ignored`; public_json_boundary `test result: ok. 4 passed; 0 failed; 0 ignored`.
+`s5e-status.log`: git status --short empty. No push/merge; frozen sources untouched; precommit full gate also passed.
+Next: re-review of this round together with decode-side review; then step 5 gateway integration.
 
 ## D1 vendor-depth checkpoint — HEAD `8ec4c4a5`
 
