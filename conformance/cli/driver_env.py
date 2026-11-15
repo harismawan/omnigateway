@@ -2,7 +2,9 @@
 import os
 import sys
 
-for name in ("OMNI_DB_PATH", "OMNI_ENCRYPTION_KEY"):
-    if name in os.environ:
+# Same explicit, comma-separated opt-in as driver-env.ts.
+allowed = set(os.environ.get("CLI_CONFORMANCE_ALLOW_OMNI", "").split(","))
+for name in os.environ:
+    if name.startswith("OMNI_") and name not in allowed:
         print(f"CLI conformance refuses inherited {name}; unset it and run bun --no-env-file.", file=sys.stderr)
         sys.exit(2)
