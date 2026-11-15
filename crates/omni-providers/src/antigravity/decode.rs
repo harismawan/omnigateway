@@ -346,6 +346,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn last_permitted_tool_call_can_finish_normally() {
+        let mut decoder = AntigravityDecoder {
+            next_index: u32::MAX,
+            tool_calls: u32::MAX,
+            ..Default::default()
+        };
+        let mut out = VecDeque::new();
+        let msg = SseMessage {
+            event: "message".into(),
+            data: serde_json::json!({"response":{"candidates":[{
+                "content":{"parts":[{"functionCall":{"name":"x","args":{}}}]},
+                "finishReason":"STOP"
+            }]}})
+            .to_string(),
+        };
+        assert_eq!(decoder.message(&msg, &mut out).unwrap(), Flow::Stop);
+        assert_eq!(out.len(), 5); // start, then the complete tool block and end
+        assert!(matches!(&out[1], StreamEvent::BlockStart {
+            index: u32::MAX, block: ContentBlockStart::ToolUse { id, name }
+        } if id == "fc_4294967295" && name == "x"));
+        assert!(matches!(&out[2], StreamEvent::BlockDelta {
+            index: u32::MAX, delta: Delta::ToolJson { partial }
+        } if partial == "{}"));
+        assert!(matches!(&out[3], StreamEvent::BlockEnd { index: u32::MAX }));
+        assert!(matches!(
+            &out[4],
+            StreamEvent::End {
+                stop_reason: StopReason::ToolUse,
+                ..
+            }
+        ));
+        decoder.finish(&mut out);
+        assert_eq!(out.len(), 5);
+    }
+
+    #[test]
     fn counter_exhaustion_is_terminal() {
         // Reachable histories: all tools, alternating text kinds, and mixed blocks.
         for scenario in ["tools", "text", "mixed", "continuing-text"] {
