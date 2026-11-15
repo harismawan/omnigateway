@@ -282,8 +282,9 @@ fn write_snapshot(
     if crate::database_fs::stat(&target).is_some() {
         return Err("CONFLICT: a snapshot for this instant already exists".into());
     }
+    let free = free_bytes(&dir);
     let needed = (crate::database_fs::stat(path).map_or(0, |s| s.len()) as f64 * 1.1).ceil();
-    if free_bytes(&dir).is_some_and(|free| (free as f64) < needed) {
+    if free.is_some_and(|free| (free as f64) < needed) {
         return Err("CONFLICT: not enough free disk space to write a snapshot".into());
     }
     if let Err(error) = conn.execute_batch(&format!(
@@ -411,11 +412,9 @@ pub fn restore_snapshot(
             .to_string()
             .into());
     }
+    let free = files.free_bytes(&dir);
     let needed = (files.stat(live).unwrap_or(0) as f64 * 1.1).ceil();
-    if files
-        .free_bytes(&dir)
-        .is_some_and(|free| (free as f64) < needed)
-    {
+    if free.is_some_and(|free| (free as f64) < needed) {
         return Err("CONFLICT: not enough free disk space to write a snapshot"
             .to_string()
             .into());
@@ -691,8 +690,8 @@ mod restore_sequence_tests {
                 "inspect",
                 "mkdir",
                 "stat undo",
-                "stat live",
                 "free",
+                "stat live",
                 "snapshot",
                 "stat undo",
                 "admin",
@@ -1167,24 +1166,28 @@ mod tests {
         let _serial = TEST_LOCK.lock().unwrap();
         let root = tempfile::tempdir_in("/tmp/opencode/e1-e5").unwrap();
         let path = root.path().join("db");
-        let conn = rusqlite::Connection::open(&path).unwrap();
-        conn.execute_batch("CREATE TABLE sentinel(value); INSERT INTO sentinel VALUES (42)")
+        let store = omni_store::SqliteStore::open(&path, 0).unwrap();
+        store.connection().execute_batch("CREATE TABLE sentinel(value); INSERT INTO sentinel VALUES (42); INSERT INTO settings (key,value) VALUES ('settings','{\"snapshotKeepLatest\":0,\"snapshotMaxAgeDays\":0}')")
             .unwrap();
         let dir = root.path().join("snapshots");
         std::fs::create_dir(&dir).unwrap();
         let old = dir.join("db_2000-01-01T00-00-00-000Z_manual.sqlite");
         std::fs::write(&old, b"retention sentinel").unwrap();
-        let result = with_exclusive("a restore", || {
-            write_snapshot(
-                &conn,
-                &path,
-                &|| 1_700_000_000_000,
-                &|| panic!("forced undo must not read retention settings"),
-                &|_| None,
-                true,
-            )
-        })
+        let candidate = "db_2026-11-01T00-00-00-000Z_manual.sqlite";
+        store
+            .connection()
+            .execute_batch(&format!("VACUUM INTO '{}'", dir.join(candidate).display()))
+            .unwrap();
+        let mut store = SqliteRestoreStore::new(store, path.clone());
+        let restored = restore_snapshot(
+            &mut store,
+            &mut LocalRestoreFiles,
+            &path,
+            candidate,
+            &|| 1_700_000_000_000,
+        )
         .unwrap();
+        let result = &restored["preRestoreSnapshot"];
         assert_eq!(result["reason"], "preRestore");
         assert_eq!(
             result["id"],
