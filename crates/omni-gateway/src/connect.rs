@@ -59,6 +59,7 @@ impl ConnectFlows {
     async fn poll(
         self: &Arc<Self>,
         host: Arc<crate::refresh::Refresher>,
+        holder: Arc<omni_gateway_core::snapshot::SnapshotHolder>,
         id: String,
     ) -> Result<String> {
         let mut rx = {
@@ -75,7 +76,7 @@ impl ConnectFlows {
                 let key = id.clone();
                 tokio::spawn(async move {
                     let mut result = match owner.pending(&key, false).await {
-                        Ok(flow) => complete(host, flow, "").await,
+                        Ok(flow) => complete(host, holder, flow, "").await,
                         Err(e) => Err(e),
                     };
                     // The exchange owns consumption even when every HTTP waiter
@@ -110,7 +111,13 @@ impl ConnectFlows {
         let provider = text(get(&flow, "provider")).ok_or_else(internal)?;
         let pending = pending_value(&flow)?;
         let code = normalize(&provider, &pending, code)?;
-        finish_exchange(app.deps.refresher.clone(), flow, code).await
+        finish_exchange(
+            app.deps.refresher.clone(),
+            app.deps.holder.clone(),
+            flow,
+            code,
+        )
+        .await
     }
     async fn pending(&self, id: &str, take: bool) -> Result<JsValue> {
         let key = format!("oauth:pending:{id}");
@@ -240,6 +247,7 @@ pub async fn serve(
             .connect
             .poll(
                 app.deps.refresher.clone(),
+                app.deps.holder.clone(),
                 text(get(&body, "flowId")).unwrap_or_default(),
             )
             .await
@@ -301,16 +309,18 @@ fn exchange_failure(provider: &str) -> GatewayError {
 }
 async fn finish_exchange(
     host: Arc<crate::refresh::Refresher>,
+    holder: Arc<omni_gateway_core::snapshot::SnapshotHolder>,
     flow: JsValue,
     code: String,
 ) -> Result<String> {
     // Dropping an admin connection must not cancel an already consumed flow.
-    tokio::spawn(async move { complete(host, flow, &code).await })
+    tokio::spawn(async move { complete(host, holder, flow, &code).await })
         .await
         .map_err(|_| internal())?
 }
 async fn complete(
     host: Arc<crate::refresh::Refresher>,
+    holder: Arc<omni_gateway_core::snapshot::SnapshotHolder>,
     flow: JsValue,
     code: &str,
 ) -> Result<String> {
@@ -401,6 +411,13 @@ async fn complete(
         .await
         .map_err(|_| internal())?;
     if reconnect.is_some() {
+        if holder
+            .refresh_credential(host.store.clone(), id.clone())
+            .await
+            .is_err()
+        {
+            tracing::warn!(credentialId = %id, "credential snapshot publication failed; retaining previous snapshot");
+        }
         tracing::info!(provider, credentialId = id, "oauth reconnect completed");
     } else {
         tracing::info!(provider, credentialId = id, "oauth connect completed");
@@ -590,11 +607,15 @@ mod tests {
             .await
             .expect("put");
         let owner = flows.clone();
+        let holder = Arc::new(
+            omni_gateway_core::snapshot::SnapshotHolder::build(&store, key.clone(), 0.0)
+                .expect("snapshot"),
+        );
         let waiter = tokio::spawn(async move {
             if poll {
-                owner.poll(host, "cancelled".into()).await
+                owner.poll(host, holder, "cancelled".into()).await
             } else {
-                finish_exchange(host, flow, "code#s".into()).await
+                finish_exchange(host, holder, flow, "code#s".into()).await
             }
         });
         http.entered.notified().await;
@@ -639,6 +660,14 @@ mod tests {
         .await
         .expect("store");
         let http = Arc::new(Counting(std::sync::atomic::AtomicUsize::new(0)));
+        let holder = Arc::new(
+            omni_gateway_core::snapshot::SnapshotHolder::build(
+                &store,
+                omni_crypto::field::derive_key("test-key"),
+                0.0,
+            )
+            .expect("snapshot"),
+        );
         let host = Arc::new(crate::refresh::Refresher::new(
             Arc::new(store),
             omni_crypto::field::derive_key("test-key"),
@@ -648,8 +677,8 @@ mod tests {
         let flows = Arc::new(ConnectFlows::default());
         flows.coord.kv_set("oauth:pending:test",r#"{"provider":"openai","label":"test","pending":{"verifier":"v","challenge":"c","state":"s","redirectUri":"http://localhost:1455/auth/callback"}}"#,600_000).await.expect("put");
         let (a, b) = tokio::join!(
-            flows.poll(host.clone(), "test".into()),
-            flows.poll(host, "test".into())
+            flows.poll(host.clone(), holder.clone(), "test".into()),
+            flows.poll(host, holder, "test".into())
         );
         assert_eq!(
             a.expect_err("refused").message,
