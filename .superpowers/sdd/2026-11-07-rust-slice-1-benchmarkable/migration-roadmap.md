@@ -19,7 +19,7 @@ Done so far: slice 1 gateway (custom provider, /v1/*, /health, writer, limiter, 
 - [ ] A12 (S) models dry-run (API + CLI)
 - [ ] A13 (M) OTLP export
 - [ ] A14 (S) outbound idle timeout: close a response whose client stops reading (Bun idleTimeout 255 s parity), all response kinds; found in A7 fix round 1
-- [ ] A15 (S) /api/connect/* routes (start, finish, poll) over the B1 provider functions
+- [x] A15 (S) /api/connect/* routes (start, finish, poll) over the B1 provider functions — merged 78e322c2, approved after 5 review rounds (a15-review5.md); connect publishes via full snapshot rebuild before ack (user ruling A); post-merge gates green
 
 ## B. Providers
 - [x] B1 (M) OAuth framework: refresh() with token_version CAS, 60 s sweep, snapshot publication (W→P mutexes) — merged 8f6f84f9, refresh approved after 3 review rounds; /api/connect/* HTTP routes → A15
