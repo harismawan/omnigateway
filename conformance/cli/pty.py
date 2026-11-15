@@ -46,6 +46,20 @@ while True:
         answer_index += 1
         prompt_end = len(out)
     if b"[y/N]" in out and not answered:
+        # Restore conformance: mutate only the fixture named by the caller,
+        # after preview and before accepting the confirmation.
+        mutation = env.get("PTY_RESTORE_MUTATION")
+        if mutation:
+            target = env["PTY_RESTORE_TARGET"]
+            if mutation == "remove":
+                os.unlink(target)
+            elif mutation == "replace":
+                import shutil
+                shutil.copyfile(env["PTY_RESTORE_SOURCE"], target)
+            elif mutation == "readonly":
+                os.chmod(target, 0o555)
+            else:
+                raise ValueError(mutation)
         os.write(master, sys.argv[1].encode() + b"\n")
         answered = True
 os.close(master)
