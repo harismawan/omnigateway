@@ -53,6 +53,7 @@ let tokenStatus = 400;
 let tokenBody = '{"error":"fixture_refusal"}';
 let transport: "normal" | "close" | "partial" = "normal";
 let tokenDelay = 0;
+let inference = false;
 const stub = Bun.listen<{ buffer: Buffer }>({ hostname: "127.0.0.1", port: 443,
   tls: { cert: Bun.file(f.cert!), key: Bun.file(f.key!) },
   socket: {
@@ -65,6 +66,26 @@ const stub = Bun.listen<{ buffer: Buffer }>({ hostname: "127.0.0.1", port: 443,
       const length = Number(headers.find(h => /^content-length:/i.test(h))?.split(":")[1] ?? 0);
       if (s.data.buffer.length < end + 4 + length) return;
       wires.push({ line: line!, headers, body: s.data.buffer.subarray(end + 4, end + 4 + length).toString() });
+      if (inference) {
+        const anthropic = line!.includes("/v1/messages");
+        const body = anthropic ? [
+          { type: "message_start", message: { id: "msg_fixture", type: "message", role: "assistant", model: "claude-sonnet-4-5", content: [], usage: { input_tokens: 1, output_tokens: 0 } } },
+          { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+          { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "fixture answer" } },
+          { type: "content_block_stop", index: 0 },
+          { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 2 } },
+          { type: "message_stop" },
+        ].map(x => `event: ${x.type}\ndata: ${JSON.stringify(x)}\n\n`).join("") : [
+          { type: "response.created", response: { id: "resp_fixture", model: "gpt-5" } },
+          { type: "response.output_item.added", output_index: 0, item: { id: "msg_fixture", type: "message", role: "assistant", content: [] } },
+          { type: "response.content_part.added", output_index: 0, content_index: 0, part: { type: "output_text", text: "" } },
+          { type: "response.output_text.delta", output_index: 0, delta: "fixture answer" },
+          { type: "response.content_part.done", output_index: 0, content_index: 0, part: { type: "output_text", text: "fixture answer" } },
+          { type: "response.completed", response: { id: "resp_fixture", model: "gpt-5", status: "completed", usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 } } },
+        ].map(x => `event: ${x.type}\ndata: ${JSON.stringify(x)}\n\n`).join("");
+        s.end(`HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`);
+        return;
+      }
       if (transport === "close") { s.end(); return; }
       if (transport === "partial") { s.end('HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n{"access_token":'); return; }
       const reply = `HTTP/1.1 ${tokenStatus} Fixture\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(tokenBody)}\r\nConnection: close\r\n\r\n${tokenBody}`;
@@ -317,6 +338,33 @@ async function run(label: string, binary: string): Promise<Row[]> {
       const normalized = responses.map(({ cookie: _, ...r }) => { if (success) r.body.id = "<uuid4>"; return r; }).sort((a,b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
       rows.push({ name, response: { requests: wires.length, responses: normalized, credentials: credentials.length, access: await Promise.all(credentials.map(c => decrypt(fieldKey, c.access_token))) }, wire: [] });
       await row(`${name}/consumed`, "poll", JSON.stringify({ flowId: start.flowId }));
+    }
+    for (const provider of ["anthropic", "openai"]) {
+      tokenStatus = 200;
+      tokenBody = JSON.stringify({ access_token: `${provider}-inference-access`, refresh_token: "inference-refresh", expires_in: 3600 });
+      const start = await row(`${provider}/inference/start`, "start", JSON.stringify({ provider, label: "inference" }));
+      const url = validateStart(start);
+      const connected = await request("/api/connect/finish", JSON.stringify({ flowId: start.flowId, code: `code#${url.searchParams.get("state")}` }));
+      if (connected.status !== 200 || !uuid4.test(connected.body.id)) throw Error("inference connect failed");
+      const begin = Date.now();
+      const model = `inference-${provider}`;
+      const put = await request(`/api/models/${model}`, JSON.stringify({ id: model, strategy: "priority", isAlias: false, targets: [{ provider, model: provider === "openai" ? "gpt-5" : "claude-sonnet-4-5", credentialId: connected.body.id, tier: 1, weight: 1, costPerMTok: { input: 1, output: 2 }, capabilities: { tools: true, images: true, reasoning: true } }] }), cookie, "PUT");
+      if (put.status !== 200) throw Error(`model create: ${JSON.stringify(put)}`);
+      const key = await request("/api/keys", JSON.stringify({ label: model }));
+      if (key.status !== 200 || typeof key.body.key !== "string") throw Error(`key create: ${JSON.stringify(key)}`);
+      inference = true; wires = [];
+      let status = 0, answer: any, delay = 0;
+      do {
+        const r = await fetch("http://127.0.0.1:18515/v1/chat/completions", { method: "POST", headers: { authorization: `Bearer ${key.body.key}`, "content-type": "application/json" }, body: JSON.stringify({ model, messages: [{ role: "user", content: "hello" }], max_tokens: 32, stream: false }) });
+        status = r.status; answer = await r.json(); delay = Date.now() - begin;
+        if (status === 200 || delay >= 5000) break;
+        await Bun.sleep(50);
+      } while (Date.now() - begin < 5000);
+      inference = false;
+      await Bun.write(join(root, `${provider}-routable.json`), JSON.stringify({ delay, status, answer, wires }, null, 2));
+      if (status !== 200) throw Error(`${label}/${provider} not routable within 5s: ${JSON.stringify(answer)}`);
+      if (answer.choices?.[0]?.message?.content !== "fixture answer" || wires.length !== 1 || !wires[0]!.headers.some(h => h.toLowerCase() === `authorization: bearer ${provider}-inference-access`)) throw Error(`${label}/${provider} inference mismatch`);
+      rows.push({ name: `${provider}/inference/result`, response: { status, answer: answer.choices[0].message.content, authorization: `${provider}-inference-access`, requests: wires.length }, wire: [] });
     }
     return rows;
   } finally { proc.kill(); await proc.exited; }
