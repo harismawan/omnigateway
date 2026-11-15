@@ -173,14 +173,14 @@ fn request_cloak_round_trip() {
     assert!(out.iter().any(|e|matches!(e,omni_ir::stream::StreamEvent::BlockStart{block:omni_ir::stream::ContentBlockStart::ToolUse{name,..},..} if name=="original / tool")));
 }
 #[test]
-#[ignore = "X1: lone UTF-16 text surrogate"]
-fn x1_text_retained_red() {
-    compare("X1/text-surrogate");
+#[ignore = "X1: lone UTF-16 units reject the whole frame"]
+fn x1_surrogate_positions_retained_red() {
+    compare("X1/surrogate/");
 }
 #[test]
-#[ignore = "X1: lone UTF-16 tool JSON surrogate"]
-fn x1_args_retained_red() {
-    compare("X1/args-surrogate");
+#[ignore = "X1: even an ignored surrogate rejects the whole frame"]
+fn x1_ignored_field_retained_red() {
+    compare("X1/surrogate/ignored");
 }
 #[test]
 #[ignore = "X1: number beyond double range"]
@@ -254,7 +254,22 @@ fn compare(mode: &str) {
         }
         let actual = serde_json::Value::Array(
             out.iter()
-                .map(|e| serde_json::from_str(&e.to_json()).expect("event"))
+                .map(|e| {
+                    if mode.starts_with("X1/") {
+                        let mut safe = String::new();
+                        for unit in e.to_json().encode_utf16() {
+                            if unit < 128 {
+                                safe.push(char::from(unit as u8));
+                            } else {
+                                use std::fmt::Write;
+                                write!(safe, "\\u{unit:04x}").expect("string write");
+                            }
+                        }
+                        serde_json::Value::String(safe)
+                    } else {
+                        serde_json::from_str(&e.to_json()).expect("event")
+                    }
+                })
                 .collect(),
         );
         if actual != row["events"] || threw == row["thrown"].is_null() {

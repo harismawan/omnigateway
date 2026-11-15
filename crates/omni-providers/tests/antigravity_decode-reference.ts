@@ -59,10 +59,21 @@ if(process.argv.includes('--bounded-depth')) {
  }
 }
 if(process.argv.includes('--x1')){cases.length=0;
- raw('X1/text-surrogate',['data: {"response":{"candidates":[{"content":{"parts":[{"text":"\\ud800"}]},"finishReason":"STOP"}]}}\n\n']);
- raw('X1/args-surrogate',['data: {"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"x","args":"\\ud800"}}]},"finishReason":"STOP"}]}}\n\n']);
- raw('X1/overflow',['data: {"response":{"responseId":1e309,"candidates":[{"finishReason":"STOP"}]}}\n\n']);}
-for(const x of cases){if(process.argv.some(a=>a.startsWith('X1/'))&&!process.argv.includes(x.name))continue;const events:any[]=[];let thrown:any=null;const body=new ReadableStream<Uint8Array>({start(controller){for(const b of x.chunks)controller.enqueue(new Uint8Array(b));controller.close();}});
+ for(const kind of ['surrogate','overflow']) for(const position of ['text','thought','name','id','args','argskey','responseId','modelVersion','message','status','promptTokenCount','candidatesTokenCount','thoughtsTokenCount','cachedContentTokenCount','ignored']) {
+  const value=kind==='surrogate'?'"\\ud800"':'1e309';
+  let json:string;
+  if(position==='text'||position==='thought') json=`{"response":{"candidates":[{"content":{"parts":[{"text":${value}${position==='thought'?',"thought":true':''}}]},"finishReason":"STOP"}]}}`;
+  else if(['name','id','args','argskey'].includes(position)) json=`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"x","${position==='argskey'?'args':position}":${position==='argskey'?'{"\\ud800":0}':value}}}]},"finishReason":"STOP"}]}}`;
+  else if(position==='message'||position==='status') json=`{"error":{"${position}":${value}}}`;
+  else if(position.endsWith('TokenCount')) json=`{"response":{"usageMetadata":{"${position}":${value}},"candidates":[{"finishReason":"STOP"}]}}`;
+  else json=`{"response":{"${position}":${value},"candidates":[{"finishReason":"STOP"}]}}`;
+  raw(`X1/${kind}/${position}`,[`data: ${json}\n\n`]);
+ }
+}
+// JSON text inside a safe envelope preserves lone UTF-16 units without asking
+// serde to parse them. Escape all non-ASCII units for stable byte comparison.
+const safeEvent=(event:any)=>JSON.stringify(event).replace(/[\u0080-\uffff]/g,c=>'\\u'+c.charCodeAt(0).toString(16).padStart(4,'0'));
+for(const x of cases){const filter=process.argv.find(a=>a.startsWith('X1/'));if(filter&&!x.name.startsWith(filter))continue;const events:any[]=[];let thrown:any=null;const body=new ReadableStream<Uint8Array>({start(controller){for(const b of x.chunks)controller.enqueue(new Uint8Array(b));controller.close();}});
  try{for await(const e of decodeAntigravityStream(parseSse(body),{cloak:{fromWire:new Map(x.cloak),toWire:new Map()}}))events.push(e);}catch(e){thrown={name:(e as Error).name,message:(e as Error).message,guard:'antigravity codec decode threw'};}
- rows.push({...x,events,thrown});}
+ rows.push({...x,events:process.argv.includes('--x1')?events.map(safeEvent):events,thrown});}
 console.log(JSON.stringify(rows));

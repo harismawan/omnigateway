@@ -171,10 +171,19 @@ Rust produced the same five-event sequence and identical tool JSON at every
 depth on a 2 MiB thread. Evidence: `/tmp/opencode/b4/turn5/depth.json` and
 `trait.log`. No stack-limit divergence was observed on this runtime.
 
-Retained-red X1 inputs: text `"\\ud800"`; functionCall args `"\\ud800"`;
-responseId numeric literal `1e309`. Separate ignored tests retain each case.
-Non-numeric usage is counted as zero here, so the ordinary corpus covers it
-without the shared nonnumeric-carrier gap.
+Retained-red X1: **the whole frame is rejected at parse time**, including for
+ignored fields. The 30 named reviewer rows cover both lone UTF-16 units and
+`1e309` in text, thinking text, tool name/id, args string/value, responseId,
+modelVersion, error message/status, each of promptTokenCount,
+candidatesTokenCount, thoughtsTokenCount, cachedContentTokenCount, and ignored
+fields, plus args keys. The reviewer's `X1/overflow/argskey` input actually
+contains a surrogate key (not overflow); its name/input are preserved explicitly.
+All yield only retryable UPSTREAM truncation in Rust; frozen continues, counts
+nonfinite usage as zero, and preserves UTF-16 units. An additional dedicated
+ignored-field test repeats that particularly surprising representable-output case.
+Expected events travel as ASCII-safe JSON text strings inside a JSON envelope;
+Rust event JSON is escaped identically, without parsing expected event strings.
+Thus the 31 row executions fail at event comparison, not oracle transport.
 
 The inherent request entry point remains as a trait-forwarding compatibility
 shim: existing `antigravity_depth.rs` calls it without importing ProviderCodec,
