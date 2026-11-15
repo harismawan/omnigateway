@@ -9,3 +9,4 @@ omni-providers/src/http/mod.rs	pub use pool::PoolLimits;
 omni-providers/src/lib.rs	pub use adapter::{AdapterRequest, AdapterResult, EventStream, SendError, send};
 omni-providers/src/lib.rs	pub use codec::Credentials;
 omni-providers/src/openai/oauth.rs	pub use super::oauth_lifecycle::{exchange_request, refresh_request, token_result};
+omni-providers/src/openai/oauth.rs	pub use super::oauth_start::start;
