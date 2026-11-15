@@ -107,6 +107,7 @@ pub fn parse_command(args: &[String], command: &str) -> Result<ParsedCommand, St
             .map_or((&token[2..], None), |(k, v)| (k, Some(v)));
         match name {
             name if matches!(name, "root" | "db")
+                || (command == "db-migrate" && name == "to")
                 || (command.starts_with("setup-") && matches!(name, "dir" | "key"))
                 || (command == "models-put"
                     && matches!(name, "file" | "from-catalog" | "strategy"))

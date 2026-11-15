@@ -16,7 +16,14 @@ Terminal input uses safe rustix termios with automatic restoration. Password cha
 shared Argon2id implementation; existing gateway sessions remain alive until
 restart, matching TS. Multi-question terminal flow uses the authorized divergence
 above. `status` reports supervisor state, credentials and quota in human/JSON
-form. Database commands remain unavailable.
+form. Database backup, restore, stats, snapshots, vacuum and clear-bodies are implemented.
+
+`db migrate` without `--to` captures path existence before the shared store open,
+runs pending migrations, then reads settings. It has no stopped-gateway guard.
+`--to` reproduces prefix validation, running-gateway refusal and confirmation.
+After acceptance it exits 1 with `db migrate --to is not yet available in the Rust CLI`,
+without opening a source or target. Postgres copy, its lifecycle, counts and
+not-carried report remain deferred D4; this boundary is not TS copy parity.
 
 All five plugin commands exit 1 with `plugins are not supported in this release`
 on stderr, also under `--json` (the TS runner has no JSON error envelope).

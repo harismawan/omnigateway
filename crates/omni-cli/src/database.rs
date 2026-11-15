@@ -9,6 +9,40 @@ pub fn run(
         confirm("delete every captured body? there is no snapshot of them")?;
     }
     let ctx = crate::context::resolve(flags)?;
+    if command == "db-migrate" {
+        if let Some(to) = flags.get("to") {
+            if !to.starts_with("postgres") {
+                return Err("--to must be a postgres:// URL".into());
+            }
+            if crate::status::service_status(&ctx, flags)?["running"] == true {
+                return Err("a gateway is running against this installation; run omni stop first, so the copy misses nothing it is writing".into());
+            }
+            if !flags.contains_key("yes") {
+                confirm(&format!(
+                    "copy {} into {}?",
+                    ctx.path.display(),
+                    omni_control::database::migrate_target_label(to)
+                ))?;
+            }
+            // D4: never open either store or connect to the deferred target.
+            return Err("db migrate --to is not yet available in the Rust CLI".into());
+        }
+        let path = ctx.path.clone();
+        let existed = path.exists();
+        let store = ctx.open_migrate()?;
+        store
+            .get_settings()
+            .map_err(crate::context::migrate_error)?;
+        return Ok(if flags.contains_key("json") {
+            omni_ir::jsjson::to_string_pretty(&json!({"path": path, "created": !existed}))
+        } else {
+            format!(
+                "database  {}\nschema    {}",
+                path.display(),
+                if existed { "up to date" } else { "created" }
+            )
+        });
+    }
     if command == "db-restore" {
         let running = crate::status::service_status(&ctx, flags)?;
         if running["running"] == true {

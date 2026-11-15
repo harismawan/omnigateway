@@ -1384,3 +1384,15 @@ pub fn prune(dir: &Path, now: i64, keep_latest: f64, max_age_days: f64) -> Resul
     }
     Ok(())
 }
+/// Frozen CLI copy confirmation URL: URL serialization, password only redacted.
+pub fn migrate_target_label(value: &str) -> String {
+    match url::Url::parse(value) {
+        Ok(mut url) => {
+            if url.password().is_some_and(|p| !p.is_empty()) {
+                let _ = url.set_password(Some("***"));
+            }
+            url.to_string()
+        }
+        Err(_) => value.into(),
+    }
+}
