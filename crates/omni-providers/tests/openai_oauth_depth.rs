@@ -73,6 +73,23 @@ fn exercise(case: &str) {
                     deep::insert(&mut n.data, "role".into(), json!("user"));
                     "content"
                 }
+                "native_name" => {
+                    n.block_type = "function_call".into();
+                    "name"
+                }
+                "native_call_id" => {
+                    n.block_type = "function_call".into();
+                    "call_id"
+                }
+                "native_output_id" => {
+                    n.block_type = "function_call_output".into();
+                    "call_id"
+                }
+                "native_annotations" => {
+                    n.block_type = "message".into();
+                    deep::insert(&mut n.data, "role".into(), json!("assistant"));
+                    "content"
+                }
                 "native_call" => {
                     n.block_type = "function_call".into();
                     "arguments"
@@ -87,7 +104,17 @@ fn exercise(case: &str) {
                 }
                 _ => "payload",
             };
-            deep::insert(&mut n.data, field.into(), value);
+            if case == "native_annotations" {
+                let mut part = json!({"type":"output_text","text":"answer"});
+                deep::insert(
+                    part.as_object_mut().expect("part"),
+                    "annotations".into(),
+                    value,
+                );
+                deep::insert(&mut n.data, field.into(), Value::Array(vec![part]));
+            } else {
+                deep::insert(&mut n.data, field.into(), value);
+            }
         }
         // Only the cache case uses the first-item fallback; other native cases
         // isolate lite handling from that earlier deep copy.
@@ -178,6 +205,7 @@ fn exercise(case: &str) {
             | "ordinary_result_native"
             | "format_replace"
             | "format_text_drop"
+            | "native_annotations"
     ) {
         assert!(built.request.body.len() < 4000);
     } else {
@@ -213,6 +241,10 @@ fn vendor_carriers_on_small_stack() {
         "format_schema",
         "format_replace",
         "format_text_drop",
+        "native_annotations",
+        "native_name",
+        "native_call_id",
+        "native_output_id",
         "native_reasoning",
         "native_metadata",
         "native_message",

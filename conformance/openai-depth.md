@@ -2,6 +2,22 @@
 
 ## D3 ordinary tool carriers (s4e)
 
+### D5 native annotations and aliases (group 3)
+
+| Carrier | Source | Evidence |
+|---|---|---|
+| Assistant annotations | openai/lite.rs:147–151 | content deep clone → plain clone: SIGSEGV 11 |
+| Function name | openai/lite.rs:169 | field deep clone → plain clone: SIGSEGV 11 |
+| Function call_id | openai/lite.rs:169 | field deep clone → plain clone: SIGSEGV 11 |
+| Function output call_id | openai/lite.rs:177 | field deep clone → plain clone: SIGSEGV 11 |
+
+Four unmodified cases pass at 39,990 levels / 2 MiB. Annotations are nested
+inside an assistant output_text part and discarded (small body asserted).
+Mutation proves clone protection, not independently the subsequent replacement.
+All three clone-site mutations applied together; cases isolate each field.
+Restored; no product defect. Logs: `s4e-alias-baseline.log` and
+`s4e-alias-clone-{native_annotations,native_name,native_call_id,native_output_id}.log`.
+
 ### D4 response format (group 2)
 
 | Carrier | Source | Evidence |
@@ -34,12 +50,10 @@ defect found; no protection-removal crash claimed. Mutations restored.
 Logs: `/tmp/opencode/b3/s4e-group1-baseline.log` and
 `s4e-noscope-{ordinary_input,ordinary_result_native,ordinary_result_string,ordinary_result_media}.log`.
 
-Next group is **(3) native assistant annotations/function aliases**. Remaining:
+Next group is **(4) ignored foreign-native/system/provider-tool payloads**. Remaining:
 
 | Group/carrier | Source | Status |
 |---|---|---|
-| 3 assistant annotations | openai/lite.rs:147–154 | Pending |
-| 3 function name/call_id aliases | openai/lite.rs:169,177 | Pending |
 | 4 foreign native | openai/wire.rs:117 | Pending |
 | 4 system/provider tools | openai/wire.rs:158,234–253 | Pending |
 | 5 credential provider data | openai/identity.rs:30–40; openai/oauth.rs:53–58; openai/mod.rs:132–138 | Pending |
@@ -84,10 +98,9 @@ failures: `s4d-native-first-{native_call,native_output}.log`. Mutations:
 `s4d-native-clone-{tool_schema,native_reasoning,native_metadata,native_message,native_call,native_output,native_unknown,cache_fallback}.log`.
 Restored focused depth plus 289 request comparisons: `s4d-native-fixed.log`.
 
-**D remains incomplete.** Remaining: response-format schema/text replacement;
-credential-data fields; foreign-native/system/provider-tool ignored payloads;
-native assistant annotations replacement; native function name/call_id aliases;
-shared helper source inventory. Do not label step 4 complete yet. Existing
+**D remains incomplete.** Remaining: credential-data fields;
+foreign-native/system/provider-tool ignored payloads; shared helper source
+inventory. Do not label step 4 complete yet. Existing
 native-message case uses user role and deep content; it does not demonstrate
 assistant annotation replacement. Tool schema case uses the lite model; explicit
 non-lite control remains to be added.
