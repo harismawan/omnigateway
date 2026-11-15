@@ -143,6 +143,7 @@ async function run(label: string, binary: string): Promise<Row[]> {
         ...(provider === "openai" ? { id_token: idToken } : { account: { email_address: "fixture@example.test" } }) });
       if (reconnect === "missing") tokenBody = JSON.stringify({ access_token: `${provider}-new-access`, expires_in: 3600 });
       const success = await row(`${name}/start`, "start", JSON.stringify({ provider, label: "success label", credentialId: credentialId ? `  ${credentialId}  ` : undefined }));
+      if (!success.flowId) return;
       const successUrl = validateStart(success);
       const before = Date.now();
       const finished = await row(`${name}/finish`, "finish", JSON.stringify({ flowId: success.flowId, code: `fixture-code#${successUrl.searchParams.get("state")}` }));
@@ -290,6 +291,7 @@ async function run(label: string, binary: string): Promise<Row[]> {
       for (const [kind, credentialId] of Object.entries({ other: `${provider === "openai" ? "anthropic" : "openai"}-full`, apiKey: `${provider}-key`, object: {} }))
         await row(`${provider}/reconnect-refusal/${kind}`, "start", JSON.stringify({ provider, credentialId }));
       const start = await row(`${provider}/deleted/start`, "start", JSON.stringify({ provider, credentialId: `${provider}-deleted` }));
+      if (!start.flowId) continue;
       const url = validateStart(start);
       const writer = new Database(file);
       writer.run("DELETE FROM credentials WHERE id = ?", [`${provider}-deleted`]); writer.close();
@@ -300,6 +302,7 @@ async function run(label: string, binary: string): Promise<Row[]> {
       for (const mode of ["close", "partial"] as const) for (const route of ["finish", "poll"]) {
         const name = `${provider}/transport/${mode}/${route}`;
         const start = await row(`${name}/start`, "start", JSON.stringify({ provider }));
+        if (!start.flowId) continue;
         const url = validateStart(start);
         transport = mode;
         await row(name, route, JSON.stringify({ flowId: start.flowId, code: `fixture-code#${url.searchParams.get("state")}` }));
@@ -325,6 +328,7 @@ async function run(label: string, binary: string): Promise<Row[]> {
       tokenStatus = 200;
       tokenBody = JSON.stringify({ access_token: `${provider}-disconnect-access`, refresh_token: "disconnect-refresh", expires_in: 3600 });
       const start = await row(`${name}/start`, "start", JSON.stringify({ provider, label: name }));
+      if (!start.flowId) continue;
       const url = validateStart(start);
       tokenDelay = 500;
       wires = [];
@@ -350,6 +354,7 @@ async function run(label: string, binary: string): Promise<Row[]> {
       tokenStatus = success ? 200 : 400;
       tokenBody = success ? JSON.stringify({ access_token: `${provider}-concurrent-access`, refresh_token: "concurrent-refresh", expires_in: 3600 }) : '{"error":"fixture_refusal"}';
       const start = await row(`${name}/start`, "start", JSON.stringify({ provider, label: name }));
+      if (!start.flowId) continue;
       validateStart(start);
       tokenDelay = 500;
       wires = [];
@@ -378,6 +383,7 @@ async function run(label: string, binary: string): Promise<Row[]> {
       tokenStatus = 200;
       tokenBody = JSON.stringify({ access_token: `${provider}-inference-access-${trial}`, refresh_token: "inference-refresh", expires_in: 3600 });
       const start = await row(`${name}/start`, "start", JSON.stringify({ provider, label: "inference", credentialId: reconnect ? `${provider}-full` : undefined }));
+      if (!start.flowId) continue;
       const url = validateStart(start);
       const connected = await request("/api/connect/finish", JSON.stringify({ flowId: start.flowId, code: `code#${url.searchParams.get("state")}` }));
       if (connected.status !== 200 || (reconnect ? connected.body.id !== `${provider}-full` : !uuid4.test(connected.body.id))) throw Error("inference connect failed");
@@ -429,27 +435,31 @@ try {
   await Bun.write(join(work, "rust.rows.json"), JSON.stringify(rust, null, 2));
   const names = new Set([...ts, ...rust].map(r => r.name));
   let failed = 0, expectedDivergences = 0;
+  const classes = { "visibility-lag": 0, "unported-provider": 0, "provider-list": 0 };
   for (const name of names) {
     const a = ts.find(r => r.name === name), b = rust.find(r => r.name === name);
     const ar = a?.response as any, br = b?.response as any;
     if (name.includes("/visibility-lag/") && name.endsWith("/result")) {
-      if (ar?.first.status === 200 && ar.valid && br?.valid && br.delay <= 1000) { expectedDivergences++; continue; }
+      if (ar?.first.status === 200 && ar.valid && br?.valid && br.delay <= 1000) { expectedDivergences++; classes["visibility-lag"]++; continue; }
       failed++; console.log(`FAILED ${name}`); continue;
     }
     const frozen = "provider must be one of anthropic, openai, kimi, kilo, grok, antigravity, muse, qoder";
-    if (name === "start/provider/grok" || name === "start/provider/muse") {
-      const expected = name === "start/provider/grok" ? "grok oauth start threw" : "muse oauth begin threw";
-      if (ar?.status === 502 && ar.body.error.code === "UPSTREAM" && ar.body.error.message === expected && br?.status === 400 && br.body.error.code === "BAD_REQUEST" && br.body.error.message === "provider must be one of anthropic, openai") { expectedDivergences++; continue; }
+    if (["kimi", "kilo", "grok", "muse"].some(p => name === `start/provider/${p}`)) {
+      const provider = name.split("/").at(-1);
+      const expected = `${provider} oauth ${provider === "grok" ? "start" : "begin"} threw`;
+      if (ar?.status === 502 && ar.body.error.code === "UPSTREAM" && ar.body.error.message === expected && br?.status === 400 && br.body.error.code === "BAD_REQUEST" && br.body.error.message === "provider must be one of anthropic, openai") { expectedDivergences++; classes["unported-provider"]++; continue; }
     }
-    if (["grok", "antigravity", "muse", "qoder"].some(p => name === `start/provider/${p}`)) {
-      if (ar?.status === 200 && typeof ar.body.authorizeUrl === "string" && /^[\w-]{43}$/.test(ar.body.flowId) && br?.status === 400 && br.body.error.code === "BAD_REQUEST" && br.body.error.message === "provider must be one of anthropic, openai") { expectedDivergences++; continue; }
+    if (["antigravity", "qoder"].some(p => name === `start/provider/${p}`)) {
+      if (ar?.status === 200 && ar.body.error === undefined && typeof ar.body.authorizeUrl === "string" && /^[\w-]{43}$/.test(ar.body.flowId) && br?.status === 400 && br.body.error.code === "BAD_REQUEST" && br.body.error.message === "provider must be one of anthropic, openai") { expectedDivergences++; classes["unported-provider"]++; continue; }
     }
-    if (ar?.body?.error?.message === frozen || name === "start/provider/kimi" || name === "start/provider/kilo") {
-      const expected = name === "start/provider/kimi" ? "kimi oauth begin threw" : name === "start/provider/kilo" ? "kilo oauth begin threw" : frozen;
-      if (ar.body.error.message === expected && br?.status === 400 && br.body.error.code === "BAD_REQUEST" && br.body.error.message === "provider must be one of anthropic, openai") { expectedDivergences++; continue; }
+    if (ar?.body?.error?.message === frozen) {
+      if (ar.status === 400 && ar.body.error.code === "BAD_REQUEST" && br?.status === 400 && br.body.error.code === "BAD_REQUEST" && br.body.error.message === "provider must be one of anthropic, openai") { expectedDivergences++; classes["provider-list"]++; continue; }
     }
     if (!isDeepStrictEqual(a,b)) { failed++; console.log(`FAILED ${name}`); }
   }
-  console.log(JSON.stringify({ rows: names.size, failed, expectedDivergences }));
+  for (const [name, count] of Object.entries({ "visibility-lag": 2, "unported-provider": 6, "provider-list": 12 })) {
+    if (classes[name as keyof typeof classes] !== count) { failed++; console.log(`FAILED divergence count ${name}: expected ${count}, got ${classes[name as keyof typeof classes]}`); }
+  }
+  console.log(JSON.stringify({ rows: names.size, failed, expectedDivergences, classes }));
   process.exitCode = failed ? 1 : 0;
 } finally { stub.stop(true); }
