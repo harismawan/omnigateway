@@ -74,10 +74,20 @@ impl ConnectFlows {
                 let owner = self.clone();
                 let key = id.clone();
                 tokio::spawn(async move {
-                    let result = match owner.pending(&key, false).await {
+                    let mut result = match owner.pending(&key, false).await {
                         Ok(flow) => complete(host, flow, "").await,
                         Err(e) => Err(e),
                     };
+                    // The exchange owns consumption even when every HTTP waiter
+                    // has disconnected, or the initial peek failed.
+                    if owner
+                        .coord
+                        .kv_del(&format!("oauth:pending:{key}"))
+                        .await
+                        .is_err()
+                    {
+                        result = Err(internal());
+                    }
                     owner
                         .flights
                         .lock()
@@ -88,19 +98,12 @@ impl ConnectFlows {
                 rx
             }
         };
-        let result = loop {
+        loop {
             if let Some(result) = rx.borrow().clone() {
                 break result;
             }
             rx.changed().await.map_err(|_| internal())?;
-        };
-        // Every waiter consumes on success or failure, as frozen pollOutcome.
-        match self.pending(&id, true).await {
-            Ok(_) => {}
-            Err(e) if e.code == ErrorCode::BadRequest => {}
-            Err(e) => return Err(e),
         }
-        result
     }
     async fn finish(&self, app: &App, id: &str, code: &str) -> Result<String> {
         let flow = self.pending(id, true).await?;
@@ -514,6 +517,13 @@ mod tests {
     }
     #[tokio::test]
     async fn connect_finish_survives_waiter_cancellation() {
+        survives_waiter_cancellation(false).await;
+    }
+    #[tokio::test]
+    async fn connect_poll_survives_waiter_cancellation_and_consumes() {
+        survives_waiter_cancellation(true).await;
+    }
+    async fn survives_waiter_cancellation(poll: bool) {
         struct Delayed {
             entered: tokio::sync::Notify,
             release: tokio::sync::Notify,
@@ -569,7 +579,24 @@ mod tests {
             crate::clock::now_ms,
         ));
         let flow = parse_js(r#"{"provider":"anthropic","label":"survivor","pending":{"verifier":"v","challenge":"c","state":"s","redirectUri":""}}"#).expect("flow");
-        let waiter = tokio::spawn(finish_exchange(host, flow, "code#s".into()));
+        let flows = Arc::new(ConnectFlows::default());
+        flows
+            .coord
+            .kv_set(
+                "oauth:pending:cancelled",
+                &stringify(&flow).expect("json"),
+                600_000,
+            )
+            .await
+            .expect("put");
+        let owner = flows.clone();
+        let waiter = tokio::spawn(async move {
+            if poll {
+                owner.poll(host, "cancelled".into()).await
+            } else {
+                finish_exchange(host, flow, "code#s".into()).await
+            }
+        });
         http.entered.notified().await;
         waiter.abort();
         assert!(waiter.await.expect_err("cancelled").is_cancelled());
@@ -578,6 +605,18 @@ mod tests {
             loop {
                 let rows = store.list_credentials(&key).await.expect("credentials");
                 if let Some(row) = rows.first() {
+                    if poll
+                        && flows
+                            .coord
+                            .kv_get("oauth:pending:cancelled")
+                            .await
+                            .expect("peek")
+                            .is_some()
+                    {
+                        tokio::task::yield_now().await;
+                        continue;
+                    }
+                    assert_eq!(rows.len(), 1);
                     assert_eq!(row.label, "survivor");
                     assert_eq!(row.secrets.access_token.as_deref(), Some("survived"));
                     break;
