@@ -378,6 +378,7 @@ fn history_compare_cells(a: &Value, b: &Value) -> std::cmp::Ordering {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod compact_tests {
     use super::*;
 
@@ -465,7 +466,7 @@ mod compact_tests {
         }
         let result = omni_store::quota::list_compact_quota_samples(&db, 0.0, 2.0, 50001).unwrap();
         assert_eq!(result.cells.len(), cells.len());
-        for (i, pair) in result.series.chunks_exact(2).enumerate() {
+        for (i, pair) in result.series.as_chunks::<2>().0.iter().enumerate() {
             assert_eq!(pair, &[[i, i], [i, i]]);
         }
         // Invalid text byte sequences must remain distinct despite lossy ownership.
