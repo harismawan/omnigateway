@@ -1,42 +1,46 @@
 # B3 OpenAI / Codex
 
-## Item B implemented — HEAD `f35643f0`; empty-body decision pending
+## Review fixes — partial handoff, HEAD `027150b9`
 
-Worktree rust-providers clean; append-only commit, no push/merge.
-First new wire test failed with UnsupportedEncoding(Zstd): `s5b-red.log`.
-Client now sends nonempty zstd bodies, level 3 / one write_all / finish;
-source remains uncompressed; compressed allocation reused for wire bytes.
-Depth: compression consumes already-serialised bytes and holds no JSON value.
-Raw TCP captures compared to frozen nodeHttpClient via Bun reference script:
-source sizes 37, 131091, 3145746, real OAuth codec request (1653 bytes),
-and 2-byte mixed-case/whitespace encoding acceptance probe.
-All header lists/order equal; Content-Length correct; both bodies decompress
-exactly to source; compressed bytes identical in all five probes (`s5b-green.log`).
-Both framing refusals occur before URL parsing/network: supplied content-length;
-missing/wrong/duplicate content-encoding. Rust InvalidEncodedRequest preserves
-frozen text `{provider} codec buildRequest did not return a usable request`;
-frozen type is GatewayError UPSTREAM (adapter); Rust checks in transport.
-Observed empty frozen POST: content-encoding: zstd, Host: fixture,
-Connection: keep-alive, Transfer-Encoding: chunked (no Content-Length).
-After CRLFCRLF, hex `390d0a28b52ffd00580100000d0a300d0a0d0a`:
-9-byte frame `28b52ffd0058010000`, chunk terminator (`s5b-empty.log`).
-Existing explicit chunking needs a new branch for this implicit-empty case;
-per instruction Rust refuses with EmptyEncodedBody. Controller decision pending;
-OAuth emits a nonempty JSON object. Known differences documented in
-conformance/openai-compression.md, Implemented section; byte identity not required.
-Item A depth audit remains committed in d0e142c6 (details in depth doc).
+Finding 2 → `95f775e4`: 18 rows (3 native kinds × 2 shapes × absent/null/wrong-type).
+`s5c-native-red.log`: body 289 function_call/absent differed; green comparison + existing depth each `test result: ok. 1 passed; 0 failed; 0 ignored`.
+Absent omitted; explicit null/object retained with deep clone. Frozen assembler read: codexLite.ts:153–219.
+Index audit (openai/): lite.rs:108,125,150 type predicates; :112 array predicate (absence/null both false); :147 clone now emission guarded at :161; :170–184 get-based copies fixed. wire.rs:137–145 type/string predicates; :394 generated built.input invariant; :26–27 hash bytes, not client maps; test indexes are oracle fixtures. No other client-map copy indexes found.
+Finding 3 → `027150b9`: six rows U+0085, FEFF, 00A0, 2028, tab, space execute frozen private framingAgrees source through Bun.Transpiler.
+`s5c-trim-red.log`: U+0085 Rust accepted, frozen refused. `s5c-trim-green.log`: `test result: ok. 5 passed; 0 failed; 0 ignored`.
+Only encoded check changed in http/mod.rs; shared omni_ir::js::trim used. Verdict test stops at invalid URL before header encoding.
+Finding 1 → NOT IMPLEMENTED / NOT COMMITTED; permitted stopping point. Working tree contains failing rows and corpus.
+Added 76 prototype rows: both modes/models; null/string/number/bool/array/object, inherited tier/reasoning/text/response_format, own wins, nested keys, constructor/prototype.
+160/161 reviewer inputs retained in openai-review-inputs.json (no deduplication); API-key null numeric row excluded: canonical/ingress numbers cannot represent it. Frozen outputs recomputed normally.
+Comparison now 543 rows; `s5c-prototype-red.log`: body 383 API-key __proto__/constructor/numeric-key row fails. Four reviewer OAuth prototype rows included but execution stops earlier.
+40,000-level prototype-object payload test added; no crash observed, fails expected body-length assertion because key still serialized.
 
-Post-last-commit gates, all logs under `/tmp/opencode/b3/`:
-`s5b-tests.log`: 53 `test result: ok` summaries; 235 passed; 4 ignored; no FAILED.
-Final result: `test result: ok. 1 passed; 0 failed; 0 ignored; ... finished in 0.07s`.
-`s5b-clippy.log`: `Finished dev profile [unoptimized] target(s) in 0.18s`.
-`s5b-fmt.log`: `exit code: 0`. Existing ignored tests unchanged.
+| Merge site (frozen) | Assignment kind / setter |
+|---|---|
+| wire.ts:238–249 OAuth vendor | target[name]=value; setter fires |
+| wire.ts:245 text/reasoning per-field | spread creates own nested keys; outer assignment |
+| wire.ts:526 API key | Object.assign; setter fires |
+| responseFormat.ts:342,348,360 | spreads make own fields; body.text assignment |
+| codec.ts:123 serialization | spread then orderFields/JSON.stringify; own only |
+| JSON-parsed vendor/prototype objects | own __proto__ data key; does not itself build prototype chain |
 
-Next: controller decides whether to accept empty-body refusal or extend implicit
-chunking. Then step 5, gateway integration: provider registration, startup
-initialize(), catalog from generated descriptors, persist OAuth result provider
-data with ensure_secrets(prior), end-to-end driver against frozen gateway,
-dispatch_depth cases, and a benchmark-matrix entry.
+| Later merged-object read | Inherited visible / effect |
+|---|---|
+| wire.ts:243 target[name] | yes; selects text/reasoning field merge |
+| responseFormat.ts:312 raw=response_format | yes; translation/drop note; delete removes own only |
+| responseFormat.ts:317,330 text, then format | yes; malformed deletion, format precedence, translation/notes |
+| responseFormat.ts:342 spread clientText | no; copy text own fields only |
+| wire.ts:560–567 reasoning?.effort | yes; effort update + turn metadata; OAuth default reasoning is own |
+| codec.ts:65 service_tier | yes; routing-hint header |
+| codec.ts:123 spread/orderFields/JSON.stringify | no; body bytes exclude inherited keys |
+No later merged-body `in`/hasOwn read found. Codec include lookup is on original request, not merged body. No escaped merged object found beyond these helpers. Tables are source observations; prototype implementation still needed, including array-object/null/primitive handling and deep ownership. Nested JSON __proto__ is data, not an automatically recursive chain.
+
+Post-last-commit gates (logs /tmp/opencode/b3/): `s5c-tests.log` initially failed stale artifact path /tmp/opencode/b3-review/src; cleaned only omni-ir/omni-dialects build artifacts, reran.
+`s5c-tests-rebuilt.log`: 40 ok summaries, 208 passed, 3 ignored before intentional prototype depth failure: `test result: FAILED. 0 passed; 1 failed; 0 ignored`. Full gate NOT PASSING; existing ignores unchanged.
+`s5c-clippy.log`: Finished `dev` profile [unoptimized] target(s) in 2.48s. `s5c-fmt.log`: exit code: 0.
+`s5c-tripwires.log`: json_writes `test result: ok. 1 passed; 0 failed; 0 ignored`; public_json_boundary `test result: ok. 4 passed; 0 failed; 0 ignored`.
+Known differences: finding 1 unresolved; existing empty encoded-body refusal unchanged. No push/merge; frozen sources untouched.
+Next: finish finding 1 and rerun gates; decode-side review; then step 5 gateway integration.
 
 ## D1 vendor-depth checkpoint — HEAD `8ec4c4a5`
 
