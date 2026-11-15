@@ -1,5 +1,5 @@
-//! Pure Google refresh step. Authorization/project bootstrap and usage are deferred.
-use crate::oauth::{AuthRequest, FlowResult, token_error};
+//! Pure Google authorization, project bootstrap and refresh steps; the host owns HTTP.
+use crate::oauth::{AuthRequest, AuthorizeStart, FlowResult, PendingFlow, token_error};
 use omni_ir::{
     error::{ErrorCode, GatewayError},
     jsjson::{JsValue, parse_js},
@@ -26,6 +26,157 @@ fn client_secret() -> String {
         40, 34, 45, 58, 55, 57, 89, 46, 66, 89, 63, 122, 34, 65, 90, 90, 37, 7, 97, 60, 0, 2, 33,
         44, 81, 20, 57, 55, 81, 13, 87, 8, 105, 49, 19,
     ])
+}
+pub fn start(verifier: &str, challenge: &str, state: &str) -> AuthorizeStart {
+    let redirect = "https://antigravity.google/oauth-callback";
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs([
+            ("client_id", client_id().as_str()),
+            ("response_type", "code"),
+            ("redirect_uri", redirect),
+            ("scope", "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/cclog https://www.googleapis.com/auth/experimentsandconfigs"),
+            ("state", state),
+            ("access_type", "offline"),
+            ("prompt", "consent"),
+            ("code_challenge", challenge),
+            ("code_challenge_method", "S256"),
+        ])
+        .finish();
+    AuthorizeStart {
+        authorize_url: format!("https://accounts.google.com/o/oauth2/v2/auth?{query}"),
+        pending: PendingFlow {
+            verifier: verifier.into(),
+            challenge: challenge.into(),
+            state: state.into(),
+            redirect_uri: redirect.into(),
+        },
+    }
+}
+
+pub fn exchange_request(code: &str, pending: &PendingFlow) -> Result<AuthRequest, GatewayError> {
+    let mut parts = code.split('#');
+    let raw = parts.next().unwrap_or("");
+    if parts.next().is_some_and(|s| s != pending.state) {
+        return Err(GatewayError::new(
+            ErrorCode::Auth,
+            "authorization state mismatch",
+        ));
+    }
+    let mut request = refresh_request("");
+    request.body = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs([
+            ("grant_type", "authorization_code"),
+            ("client_id", &client_id()),
+            ("client_secret", &client_secret()),
+            ("code", omni_ir::js::trim(raw)),
+            ("redirect_uri", &pending.redirect_uri),
+            ("code_verifier", &pending.verifier),
+        ])
+        .finish();
+    Ok(request)
+}
+
+/// The host must apply the frozen userinfo step's 15 second timeout.
+pub fn email_request(access: &str) -> AuthRequest {
+    AuthRequest {
+        url: "https://www.googleapis.com/oauth2/v1/userinfo?alt=json".into(),
+        method: "GET".into(),
+        headers: super::profile::headers(vec![
+            ("Authorization".into(), format!("Bearer {access}")),
+            ("Accept".into(), "application/json".into()),
+        ]),
+        body: String::new(),
+    }
+}
+pub fn email_result(status: u16, text: &str) -> Option<JsValue> {
+    if !(200..300).contains(&status) {
+        return None;
+    }
+    let body = parse_js(text).unwrap_or(JsValue::Null);
+    match get(&body, "email") {
+        Some(JsValue::String(email))
+            if !omni_ir::js::trim(&String::from_utf16_lossy(email)).is_empty() =>
+        {
+            Some(JsValue::String(email.clone()))
+        }
+        _ => None,
+    }
+}
+fn project(body: &JsValue) -> String {
+    let value = get(body, "cloudaicompanionProject");
+    let id = match value {
+        Some(JsValue::String(s)) => Some(s),
+        Some(v) => match get(v, "id") {
+            Some(JsValue::String(s)) => Some(s),
+            _ => None,
+        },
+        _ => None,
+    };
+    id.map(|s| omni_ir::js::trim(&String::from_utf16_lossy(s)).to_owned())
+        .unwrap_or_default()
+}
+pub fn project_result(status: u16, text: &str) -> (String, String) {
+    let body = if (200..300).contains(&status) {
+        parse_js(text).unwrap_or(JsValue::Null)
+    } else {
+        JsValue::Null
+    };
+    let mut tier = None;
+    if let Some(JsValue::Array(tiers)) = get(&body, "allowedTiers") {
+        for entry in tiers {
+            if matches!(get(entry, "isDefault"), Some(JsValue::Bool(true)))
+                && let Some(JsValue::String(id)) = get(entry, "id")
+            {
+                tier = Some(String::from_utf16_lossy(id));
+                break;
+            }
+        }
+    }
+    let tier = tier
+        .or_else(
+            || match get(&body, "currentTier").and_then(|v| get(v, "id")) {
+                Some(JsValue::String(id)) => Some(String::from_utf16_lossy(id)),
+                _ => None,
+            },
+        )
+        .unwrap_or_else(|| "legacy-tier".into());
+    (project(&body), tier)
+}
+fn code_assist_request(operation: &str, access: &str, body: String) -> AuthRequest {
+    AuthRequest {
+        url: format!("https://cloudcode-pa.googleapis.com/v1internal:{operation}"),
+        method: "POST".into(),
+        headers: super::profile::headers(vec![
+            ("Content-Type".into(), "application/json".into()),
+            ("Accept".into(), "application/json".into()),
+            ("Authorization".into(), format!("Bearer {access}")),
+        ]),
+        body,
+    }
+}
+pub fn load_request(access: &str) -> AuthRequest {
+    code_assist_request(
+        "loadCodeAssist",
+        access,
+        "{\"metadata\":{\"ideType\":\"ANTIGRAVITY\"}}".into(),
+    )
+}
+pub fn onboard_request(access: &str, tier: &str) -> AuthRequest {
+    code_assist_request(
+        "onboardUser",
+        access,
+        format!(
+            "{{\"tier_id\":{},\"metadata\":{{\"ideType\":\"ANTIGRAVITY\"}}}}",
+            omni_ir::jsjson::to_string(&Value::String(tier.into()))
+        ),
+    )
+}
+pub fn onboard_result(status: u16, text: &str) -> String {
+    if !(200..300).contains(&status) {
+        return String::new();
+    }
+    let body = parse_js(text).unwrap_or(JsValue::Null);
+    get(&body, "response").map(project).unwrap_or_default()
 }
 pub fn refresh_request(token: &str) -> AuthRequest {
     AuthRequest {
