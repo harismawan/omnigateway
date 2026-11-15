@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 pub struct ToolCloak {
     pub to_wire: Vec<(String, String)>,
     pub from_wire: HashMap<String, String>,
+    name_index: HashMap<String, usize>,
 }
 
 fn valid(name: &str) -> bool {
@@ -106,15 +107,15 @@ impl ToolCloak {
                 base
             };
             *cloak.from_wire.entry(alias.clone()).or_default() = name.into();
+            cloak.name_index.insert(name.into(), cloak.to_wire.len());
             cloak.to_wire.push((name.into(), alias));
         }
         cloak
     }
     pub fn name<'a>(&'a self, name: &'a str) -> &'a str {
-        self.to_wire
-            .iter()
-            .find(|(n, _)| n == name)
-            .map_or(name, |(_, alias)| alias)
+        self.name_index
+            .get(name)
+            .map_or(name, |i| self.to_wire[*i].1.as_str())
     }
     pub fn original<'a>(&'a self, name: &'a str) -> &'a str {
         self.from_wire.get(name).map_or(name, String::as_str)
