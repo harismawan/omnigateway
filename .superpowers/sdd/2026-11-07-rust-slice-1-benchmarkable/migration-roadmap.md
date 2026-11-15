@@ -12,7 +12,7 @@ Done so far: slice 1 gateway (custom provider, /v1/*, /health, writer, limiter, 
 - [x] A5 (M) admin keys/models/catalog/settings/password routes — 5da6af7e..9248cd45, reviewed clean (3 fix rounds)
 - [x] A6 (M) credentials routes — d2757acb..9624fa13, approved after 2 fix rounds; routing-path bench vs 66020396: no measurable regression; PG gateway leg + live-PG proof + PG row isolation → D4 + encrypted credential writes + health
 - [x] A7 (M) usage, logs, logs/export, nodes — 6d2a7a8e..d0c11d29, approved after 2 fix rounds (a7-r2-review.md); bounded read-only readers (export pool 4, report lane 4); usage-large peak RSS 58–69 MB vs TS 153–156 MB; documented difference: HEAD export lacks transfer-encoding; requests/:id/body → with A3; agent-setup → after CLI branch merge; PG readers → D4
-- [ ] A8 (S) /api/client/* (7)
+- [x] A8 (S) /api/client/* (7) — functional review closed; speed review approved (a8-speed-review.md), five controller E2E rounds faster at cap; bounded eager-reservation tradeoff recorded.
 - [ ] A9 (L) /api/stream WebSocket + console live view
 - [ ] A10 (M) database routes, quiesce latch, lifecycle restart/shutdown
 - [ ] A11 (S) maintenance loop (pruning, heartbeat)
