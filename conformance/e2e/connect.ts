@@ -44,6 +44,7 @@ let wires: Wire[] = [];
 let tokenStatus = 400;
 let tokenBody = '{"error":"fixture_refusal"}';
 let transport: "normal" | "close" | "partial" = "normal";
+let tokenDelay = 0;
 const stub = Bun.listen<{ buffer: Buffer }>({ hostname: "127.0.0.1", port: 443,
   tls: { cert: Bun.file(f.cert!), key: Bun.file(f.key!) },
   socket: {
@@ -58,7 +59,9 @@ const stub = Bun.listen<{ buffer: Buffer }>({ hostname: "127.0.0.1", port: 443,
       wires.push({ line: line!, headers, body: s.data.buffer.subarray(end + 4, end + 4 + length).toString() });
       if (transport === "close") { s.end(); return; }
       if (transport === "partial") { s.end('HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n{"access_token":'); return; }
-      s.end(`HTTP/1.1 ${tokenStatus} Fixture\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(tokenBody)}\r\nConnection: close\r\n\r\n${tokenBody}`);
+      const reply = `HTTP/1.1 ${tokenStatus} Fixture\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(tokenBody)}\r\nConnection: close\r\n\r\n${tokenBody}`;
+      if (tokenDelay) setTimeout(() => s.end(reply), tokenDelay);
+      else s.end(reply);
     },
   },
 });
@@ -238,6 +241,27 @@ async function run(label: string, binary: string): Promise<Row[]> {
         transport = "normal";
         await row(`${name}/consumed`, route, JSON.stringify({ flowId: start.flowId, code: "code" }));
       }
+    }
+    for (const provider of ["anthropic", "openai"]) {
+      const name = `${provider}/disconnect`;
+      tokenStatus = 200;
+      tokenBody = JSON.stringify({ access_token: `${provider}-disconnect-access`, refresh_token: "disconnect-refresh", expires_in: 3600 });
+      const start = await row(`${name}/start`, "start", JSON.stringify({ provider, label: name }));
+      const url = validateStart(start);
+      tokenDelay = 1000;
+      wires = [];
+      const controller = new AbortController();
+      const response = fetch("http://127.0.0.1:18515/api/connect/finish", { method: "POST", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify({ flowId: start.flowId, code: `fixture-code#${url.searchParams.get("state")}` }), signal: controller.signal }).then(() => "responded", () => "aborted");
+      await Bun.sleep(200);
+      controller.abort();
+      if (await response !== "aborted") throw Error("disconnect request did not abort");
+      await Bun.sleep(2000);
+      tokenDelay = 0;
+      const reader = new Database(file, { readonly: true });
+      const stored = reader.query("SELECT access_token FROM credentials WHERE label = ?").all(name) as any[];
+      reader.close();
+      rows.push({ name, response: { requests: wires.length, credentials: stored.length, access: await Promise.all(stored.map(r => decrypt(fieldKey, r.access_token))) }, wire: [] });
+      await row(`${name}/consumed`, "finish", JSON.stringify({ flowId: start.flowId, code: "code" }));
     }
     return rows;
   } finally { proc.kill(); await proc.exited; }
