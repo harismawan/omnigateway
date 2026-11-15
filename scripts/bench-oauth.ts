@@ -34,6 +34,15 @@ export async function seedOAuth(path: string, secret: string, label: string) {
       "UPDATE credentials SET auth_type='oauth',access_token=?,refresh_token=?,api_key=NULL,expires_at=?,token_version=0 WHERE label=?",
       [await encrypt("bench-access"), await encrypt("bench-refresh"), 4102444800000, label],
     );
+    if (label === "openai-oauth")
+      db.run("UPDATE credentials SET provider_data=? WHERE label=?", [
+        JSON.stringify({
+          accountId: "bench-account",
+          installationId: "11111111-1111-4111-8111-111111111111",
+          idSalt: "ab".repeat(32),
+        }),
+        label,
+      ]);
   } finally {
     db.close();
   }

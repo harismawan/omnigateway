@@ -27,6 +27,59 @@ Bun.serve({
     if (fault) return fault;
     if (process.env.OMNI_BENCH_FAULT === "500")
       return Response.json({ error: { message: "injected upstream 500" } }, { status: 500 });
+    if (path === "/backend-api/wham/usage") return Response.json({});
+    if (["/v1/responses", "/backend-api/codex/responses"].includes(path) && req.method === "POST") {
+      let bytes = new Uint8Array(await req.arrayBuffer());
+      if (req.headers.get("content-encoding") === "zstd") bytes = Bun.zstdDecompressSync(bytes);
+      const body = JSON.parse(new TextDecoder().decode(bytes));
+      const match = /^mock-c(\d+)-d0$/.exec(body.model ?? "");
+      if (
+        !match ||
+        body.stream !== true ||
+        !req.headers.get("authorization") ||
+        (path.includes("codex") && req.headers.get("chatgpt-account-id") !== "bench-account")
+      )
+        return Response.json(
+          { error: { message: "invalid OpenAI fixture request" } },
+          { status: 400 },
+        );
+      const chunks = Number(match[1]);
+      return new Response(
+        Buffer.concat([
+          frame("response.created", { response: { id: "resp_bench", model: body.model } }),
+          frame("response.output_item.added", {
+            output_index: 0,
+            item: { id: "msg_bench", type: "message", role: "assistant", content: [] },
+          }),
+          frame("response.content_part.added", {
+            output_index: 0,
+            content_index: 0,
+            part: { type: "output_text", text: "" },
+          }),
+          ...Array.from({ length: chunks }, () =>
+            frame("response.output_text.delta", {
+              output_index: 0,
+              content_index: 0,
+              delta: "lorem ipsum ",
+            }),
+          ),
+          frame("response.content_part.done", {
+            output_index: 0,
+            content_index: 0,
+            part: { type: "output_text", text: "lorem ipsum ".repeat(chunks) },
+          }),
+          frame("response.completed", {
+            response: {
+              id: "resp_bench",
+              model: body.model,
+              status: "completed",
+              usage: { input_tokens: 64, output_tokens: chunks * 2, total_tokens: 64 + chunks * 2 },
+            },
+          }),
+        ]),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    }
     if (path === "/api/oauth/usage")
       return Response.json({
         five_hour: { utilization: 0, resets_at: null },

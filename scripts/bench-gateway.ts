@@ -129,6 +129,7 @@ const { values: flags } = parseArgs({
     boots: { type: "string", default: "5" },
     only: { type: "string" },
     matrix: { type: "boolean", default: false },
+    "smoke-only": { type: "boolean", default: false },
     "fresh-process": { type: "boolean", default: false },
     label: { type: "string" },
     cluster: { type: "boolean", default: false },
@@ -1447,8 +1448,8 @@ async function setup(): Promise<Record<"plain" | "limited", string>> {
     for (const provider of providers) {
       if (!matrixScenarios().some((s) => s.provider === provider.id && matches(s.name, flags.only)))
         continue;
-      if (provider.provider === "anthropic" && !process.env.OMNI_BENCH_CERT)
-        throw Error("Anthropic matrix requires scripts/bench-matrix.sh");
+      if (provider.provider !== "custom" && !process.env.OMNI_BENCH_CERT)
+        throw Error("Provider matrix requires scripts/bench-matrix.sh");
       await cli(
         [
           "credentials",
@@ -1559,7 +1560,10 @@ function startUpstreams(): void {
         .filter((p) =>
           matrixScenarios().some((s) => s.provider === p.id && matches(s.name, flags.only)),
         )
-        .map((provider) => [provider.origin, provider.script]),
+        .map((provider) => [
+          provider.origin.startsWith("https:") ? "https://127.0.0.1" : provider.origin,
+          provider.script,
+        ]),
     );
     for (const [origin, script] of upstreams) {
       for (let i = 0; i < 2; i += 1) {
@@ -1681,6 +1685,33 @@ async function main(): Promise<void> {
     `OMNI_ENCRYPTION_KEY=${ENCRYPTION_KEY}\nOMNI_DB_PATH=${env.OMNI_DB_PATH}\n`,
   );
   console.error(`bench root ${root}${CLUSTER ? ` · cluster × ${REPLICAS}` : ""}`);
+  if (flags["smoke-only"]) {
+    if (!flags.matrix) throw Error("--smoke-only requires --matrix");
+    const keys = await setup();
+    startUpstreams();
+    await sleep(500);
+    startGateway();
+    if (!(await waitHealthy(30000))) throw Error("smoke gateway did not start");
+    const catalog = await fetch(`${BASE}/v1/models`, {
+      headers: { authorization: `Bearer ${keys.plain}` },
+      signal: AbortSignal.timeout(5000),
+    });
+    const models = await catalog.json();
+    let count = 0;
+    for (const scenario of matrixScenarios().filter((s) => matches(s.name, flags.only))) {
+      if (
+        catalog.status !== 200 ||
+        !models.data.some((m: { id: string }) => m.id === JSON.parse(scenario.body).model)
+      )
+        throw Error("smoke catalog missing model");
+      const verdict = await matrixSmoke(BASE, keys.plain, scenario);
+      console.log(scenario.name, verdict);
+      if (verdict.classification !== "supported") throw Error(`smoke failed: ${scenario.name}`);
+      count++;
+    }
+    console.log({ smokeRows: count, performanceMeasured: false });
+    return;
+  }
   const calibration = await calibrate();
   console.error(
     `calibration (ms, lower is faster) alone ${JSON.stringify(calibration.alone)} ` +
