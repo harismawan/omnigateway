@@ -16,6 +16,7 @@ struct Clock {
     idle: Duration,
     request_changed: tokio::sync::Notify,
     received: AtomicU64,
+    routed: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -30,6 +31,7 @@ impl Activity {
     }
 
     pub(crate) fn request(&self, inference: bool) {
+        self.0.routed.store(true, Relaxed);
         // Frozen proxy.ts explicitly calls server.timeout(request, 0) for
         // these three routes, including their JSON and streaming responses.
         self.0.disabled.store(inference, Relaxed);
@@ -42,7 +44,7 @@ impl Activity {
         if self.0.idle.is_zero() {
             std::future::pending::<()>().await;
         }
-        let mut deadline = self.0.origin + self.0.idle;
+        let mut deadline = self.0.origin + self.0.idle.min(Duration::from_secs(10));
         loop {
             tokio::select! {
                 () = tokio::time::sleep_until(deadline) => {},
@@ -52,8 +54,12 @@ impl Activity {
                 deadline = Instant::now() + self.0.idle;
                 continue;
             }
-            deadline =
-                self.0.origin + Duration::from_nanos(self.0.last.load(Relaxed)) + self.0.idle;
+            let idle = if self.0.routed.load(Relaxed) {
+                self.0.idle
+            } else {
+                self.0.idle.min(Duration::from_secs(10))
+            };
+            deadline = self.0.origin + Duration::from_nanos(self.0.last.load(Relaxed)) + idle;
             if deadline <= Instant::now() {
                 return;
             }
@@ -75,6 +81,7 @@ impl<T> IdleIo<T> {
             idle,
             request_changed: tokio::sync::Notify::new(),
             received: AtomicU64::new(0),
+            routed: AtomicBool::new(false),
         }));
         (
             Self {
@@ -171,6 +178,15 @@ mod tests {
                 "/v1/chat/completions" | "/v1/messages" | "/v1/responses"
             ));
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn initial_headers_have_buns_ten_second_budget() {
+        let (sock, _peer) = tokio::io::duplex(1);
+        let (_, activity) = IdleIo::new(sock, Duration::from_secs(255));
+        let start = Instant::now();
+        activity.expired().await;
+        assert_eq!(start.elapsed(), Duration::from_secs(10));
     }
 
     #[tokio::test(start_paused = true)]
