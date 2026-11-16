@@ -569,13 +569,13 @@ try {
     if (["kimi", "kilo", "grok", "muse"].some(p => name === `start/provider/${p}`)) {
       const provider = name.split("/").at(-1);
       const expected = `${provider} oauth ${provider === "grok" ? "start" : "begin"} threw`;
-      if (ar?.status === 502 && ar.body.error.code === "UPSTREAM" && ar.body.error.message === expected && br?.status === 400 && br.body.error.code === "BAD_REQUEST" && br.body.error.message === "provider must be one of anthropic, openai") { expectedDivergences++; classes["unported-provider"]++; continue; }
+      if (ar?.status === 502 && ar.body.error.code === "UPSTREAM" && ar.body.error.message === expected && br?.status === 400 && br.body.error.code === "BAD_REQUEST" && br.body.error.message === "provider must be one of anthropic, openai, antigravity") { expectedDivergences++; classes["unported-provider"]++; continue; }
     }
     if (["qoder"].some(p => name === `start/provider/${p}`)) {
-      if (ar?.status === 200 && ar.body.error === undefined && typeof ar.body.authorizeUrl === "string" && /^[\w-]{43}$/.test(ar.body.flowId) && br?.status === 400 && br.body.error.code === "BAD_REQUEST" && br.body.error.message === "provider must be one of anthropic, openai") { expectedDivergences++; classes["unported-provider"]++; continue; }
+      if (ar?.status === 200 && ar.body.error === undefined && typeof ar.body.authorizeUrl === "string" && /^[\w-]{43}$/.test(ar.body.flowId) && br?.status === 400 && br.body.error.code === "BAD_REQUEST" && br.body.error.message === "provider must be one of anthropic, openai, antigravity") { expectedDivergences++; classes["unported-provider"]++; continue; }
     }
     if (ar?.body?.error?.message === frozen) {
-      if (ar.status === 400 && ar.body.error.code === "BAD_REQUEST" && br?.status === 400 && br.body.error.code === "BAD_REQUEST" && br.body.error.message === "provider must be one of anthropic, openai") { expectedDivergences++; classes["provider-list"]++; continue; }
+      if (ar.status === 400 && ar.body.error.code === "BAD_REQUEST" && br?.status === 400 && br.body.error.code === "BAD_REQUEST" && br.body.error.message === "provider must be one of anthropic, openai, antigravity") { expectedDivergences++; classes["provider-list"]++; continue; }
     }
     if (!isDeepStrictEqual(a,b)) { failed++; console.log(`FAILED ${name}`); }
   }

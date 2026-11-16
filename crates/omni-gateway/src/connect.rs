@@ -17,6 +17,7 @@ type Result<T> = std::result::Result<T, GatewayError>;
 const PROVIDERS: &[(&str, &str)] = &[
     ("anthropic", ""),
     ("openai", "http://localhost:1455/auth/callback"),
+    ("antigravity", "https://antigravity.google/oauth-callback"),
 ];
 fn bad(s: &str) -> GatewayError {
     GatewayError::new(ErrorCode::BadRequest, s)
@@ -182,6 +183,8 @@ impl ConnectFlows {
             pending,
         } = if *provider == "openai" {
             omni_providers::openai::oauth::start(redirect, &verifier, &challenge, &state)
+        } else if *provider == "antigravity" {
+            omni_providers::antigravity::oauth::start(&verifier, &challenge, &state)
         } else {
             omni_providers::anthropic::oauth::start(&verifier, &challenge, &state)
         };
@@ -277,8 +280,13 @@ fn normalize(provider: &str, pending: &PendingFlow, code: &str) -> Result<String
         return Ok(code.into());
     };
     let expected = url::Url::parse(callback).map_err(|_| internal())?;
+    let label = if provider == "antigravity" {
+        "Antigravity"
+    } else {
+        "OpenAI"
+    };
     if url.origin() != expected.origin() || url.path() != expected.path() {
-        return Err(bad("invalid OpenAI callback URL"));
+        return Err(bad(&format!("invalid {label} callback URL")));
     }
     let field = |name| {
         url.query_pairs()
@@ -289,7 +297,9 @@ fn normalize(provider: &str, pending: &PendingFlow, code: &str) -> Result<String
     let code = field("code");
     let state = field("state");
     if code.is_empty() || state.is_empty() {
-        return Err(bad("OpenAI callback URL must contain code and state"));
+        return Err(bad(&format!(
+            "{label} callback URL must contain code and state"
+        )));
     }
     if state != pending.state {
         return Err(GatewayError::new(
@@ -343,35 +353,50 @@ async fn complete(
         .filter(|c| c.provider == provider)
         .map_or(&serde_json::Value::Null, |c| &c.provider_data);
     let pending = pending_value(&flow)?;
-    let request = if provider == "openai" {
-        omni_providers::openai::oauth::exchange_request(code, &pending)?
+    let result = if provider == "antigravity" {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(150),
+            antigravity_exchange(&host, code, &pending),
+        )
+        .await
+        .map_err(|_| {
+            GatewayError::new(
+                ErrorCode::Upstream,
+                "antigravity oauth exchange did not finish within 150000ms",
+            )
+        })??
     } else {
-        omni_providers::anthropic::oauth::exchange_request(code, &pending)?
-    };
-    let response = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        let response = host
-            .http
-            .send(HttpRequest {
-                provider: provider.clone(),
-                url: request.url,
-                method: request.method,
-                headers: request.headers,
-                body: request.body,
-                body_encoding: None,
-                request_id: None,
-            })
-            .await?;
-        Ok::<_, omni_providers::http::HttpError>((response.status, response.body.text().await?))
-    })
-    .await
-    .map_err(|_| exchange_failure(&provider))?
-    .map_err(|_| exchange_failure(&provider))?;
-    #[allow(clippy::cast_precision_loss)]
-    let now = (host.now)() as f64;
-    let result = if provider == "openai" {
-        omni_providers::openai::oauth::token_result(response.0, &response.1, None, now, data)?
-    } else {
-        omni_providers::anthropic::oauth::token_result(response.0, &response.1, None, now)?
+        let request = if provider == "openai" {
+            omni_providers::openai::oauth::exchange_request(code, &pending)?
+        } else {
+            omni_providers::anthropic::oauth::exchange_request(code, &pending)?
+        };
+        let response = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let response = host
+                .http
+                .send(HttpRequest {
+                    provider: provider.clone(),
+                    url: request.url,
+                    method: request.method,
+                    headers: request.headers,
+                    body: request.body,
+                    body_encoding: None,
+                    request_id: None,
+                })
+                .await?;
+            Ok::<_, omni_providers::http::HttpError>((response.status, response.body.text().await?))
+        })
+        .await
+        .map_err(|_| exchange_failure(&provider))?
+        .map_err(|_| exchange_failure(&provider))?;
+        #[allow(clippy::cast_precision_loss)]
+        let now = (host.now)() as f64;
+        let result = if provider == "openai" {
+            omni_providers::openai::oauth::token_result(response.0, &response.1, None, now, data)?
+        } else {
+            omni_providers::anthropic::oauth::token_result(response.0, &response.1, None, now)?
+        };
+        result
     };
     // The frozen connect host validates flow secrets before persistence.
     if result
@@ -433,6 +458,92 @@ async fn complete(
     Ok(id)
 }
 
+/// Frozen exchange runner limits, applied before transport. The other two providers
+/// retain their existing single-request path, including its byte ordering.
+struct AntigravityExchange<'a> {
+    host: &'a crate::refresh::Refresher,
+    sent: usize,
+}
+impl AntigravityExchange<'_> {
+    async fn send(
+        &mut self,
+        request: omni_providers::oauth::AuthRequest,
+        seconds: u64,
+    ) -> Result<(u16, String)> {
+        self.sent += 1;
+        if self.sent > 4 {
+            return Err(GatewayError::new(
+                ErrorCode::Upstream,
+                "antigravity oauth exchange asked for more than 4 requests",
+            ));
+        }
+        let url = url::Url::parse(&request.url).map_err(|_| exchange_failure("antigravity"))?;
+        if ![
+            "https://oauth2.googleapis.com",
+            "https://www.googleapis.com",
+            "https://cloudcode-pa.googleapis.com",
+            "https://accounts.google.com",
+            "https://daily-cloudcode-pa.googleapis.com",
+        ]
+        .contains(&url.origin().ascii_serialization().as_str())
+        {
+            return Err(GatewayError::new(
+                ErrorCode::Upstream,
+                "antigravity oauth exchange described a request to an origin its manifest does not declare",
+            ));
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(seconds.min(30)), async {
+            let response = self
+                .host
+                .http
+                .send(omni_providers::http::HttpRequest {
+                    provider: "antigravity".into(),
+                    url: request.url,
+                    method: request.method,
+                    headers: request.headers,
+                    body: request.body,
+                    body_encoding: None,
+                    request_id: None,
+                })
+                .await?;
+            Ok::<_, omni_providers::http::HttpError>((response.status, response.body.text().await?))
+        })
+        .await
+        .map_err(|_| exchange_failure("antigravity"))?
+        .map_err(|_| exchange_failure("antigravity"))
+    }
+}
+async fn antigravity_exchange(
+    host: &crate::refresh::Refresher,
+    code: &str,
+    pending: &PendingFlow,
+) -> Result<omni_providers::oauth::FlowResult> {
+    use omni_providers::antigravity::oauth as ag;
+    let mut runner = AntigravityExchange { host, sent: 0 };
+    let token = runner
+        .send(ag::exchange_request(code, pending)?, 30)
+        .await?;
+    // Frozen computes expiry only after all bootstrap calls have completed.
+    let mut result = ag::token_result(token.0, &token.1, None, 0.0, &serde_json::Value::Null)?;
+    let access = String::from_utf16_lossy(&result.access_token);
+    let email = runner.send(ag::email_request(&access), 15).await?;
+    result.account_email = ag::email_result(email.0, &email.1);
+    let loaded = runner.send(ag::load_request(&access), 30).await?;
+    let (mut project, tier) = ag::project_result(loaded.0, &loaded.1);
+    if project.is_empty() {
+        let onboarded = runner.send(ag::onboard_request(&access, &tier), 30).await?;
+        project = ag::onboard_result(onboarded.0, &onboarded.1);
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let now = (host.now)() as f64;
+    result.expires_at = result.expires_at.map(|expiry| expiry + now);
+    result.provider_data = serde_json::json!({"projectId": project, "tier": tier})
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,6 +556,10 @@ mod tests {
             Some(PROVIDERS[1].1)
         );
         assert!(catalog["anthropic"].get("callback").is_none());
+        assert_eq!(
+            catalog["antigravity"]["callback"]["uri"].as_str(),
+            Some(PROVIDERS[2].1)
+        );
     }
     #[test]
     fn connect_callback_parser() {
@@ -481,6 +596,51 @@ mod tests {
             .is_err()
         );
         assert!(normalize("openai", &p, "http://localhost:1455/auth/callback?code=a").is_err());
+    }
+    #[test]
+    fn antigravity_callback_parser() {
+        let p = PendingFlow {
+            verifier: String::new(),
+            challenge: String::new(),
+            state: "s".into(),
+            redirect_uri: PROVIDERS[2].1.into(),
+        };
+        assert_eq!(
+            normalize(
+                "antigravity",
+                &p,
+                "https://antigravity.google/oauth-callback?code=%20x%20&state=s"
+            )
+            .expect("callback"),
+            "x#s"
+        );
+        assert_eq!(normalize("antigravity", &p, "x#s").expect("bare"), "x#s");
+        assert_eq!(
+            normalize("antigravity", &p, "https://wrong.test/")
+                .expect_err("origin")
+                .message,
+            "invalid Antigravity callback URL"
+        );
+        assert_eq!(
+            normalize(
+                "antigravity",
+                &p,
+                "https://antigravity.google/oauth-callback?code=x"
+            )
+            .expect_err("state")
+            .message,
+            "Antigravity callback URL must contain code and state"
+        );
+        assert_eq!(
+            normalize(
+                "antigravity",
+                &p,
+                "https://antigravity.google/oauth-callback?code=x&state=wrong"
+            )
+            .expect_err("state")
+            .message,
+            "authorization state mismatch"
+        );
     }
     #[tokio::test]
     async fn connect_pending_ttl_take_peek_and_lossless_label() {
