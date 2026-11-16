@@ -23,7 +23,8 @@ def probe(label, port, kind):
                    "Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n"
                    f"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nCookie: {cookies[label]}\r\n\r\n").encode()
     elif kind in ("json", "sse"):
-        request = (f"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {key}\r\n"
+        # Keep the normalized-path regression in the regular conformance gate.
+        request = (f"POST /v1/x/../chat/completions HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {key}\r\n"
                    f"Content-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n").encode() + body
     else:
         path = "/health" if kind == "keepalive" else "/large.txt"
