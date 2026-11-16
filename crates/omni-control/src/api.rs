@@ -383,12 +383,9 @@ pub fn client_summary(store: &SqliteStore, id: &str, now: i64, offset: i64) -> R
         id: id.to_owned(),
         label: String::new(),
         prefix: String::new(),
-        allowlist: match row
-            .get::<_, Option<String>>("model_allowlist")
-            .map_err(Failure::internal)?
-        {
-            Some(v) => parse_allowlist(&v, id)?,
-            None => JsValue::Null,
+        allowlist: match row.get_ref("model_allowlist").map_err(Failure::internal)? {
+            rusqlite::types::ValueRef::Null => JsValue::Null,
+            raw => parse_allowlist(&crate::cli_cell::string(raw), id)?,
         },
         limits: {
             // JSON.parse coerces SQLite non-text cells first. Numbers/null

@@ -23,7 +23,8 @@ PASSWORD = 'x3-synthetic-password-2026'
 PORTS = [19500, 19501]
 CHILDREN = []
 RESULTS = []
-TABLES = ['api_keys', 'credentials', 'virtual_models', 'settings', 'request_logs']
+TABLES = ['api_keys', 'credentials', 'virtual_models', 'settings', 'request_logs', 'quota_windows', 'credential_health', 'quota_samples']
+ACCEPTED = json.loads(pathlib.Path(__file__).with_name('x3-accepted.json').read_text())
 ID = dict(integer='1', real='1.5', blob="X'7178'", null='NULL',
           invalidutf="CAST(X'71ff' AS TEXT)", empty="''", numeric="'123'")
 JSON = dict(truncated="'\"canary_x3'", bare="'broken'", empty="''",
@@ -101,7 +102,7 @@ def canonical(r):
     return r['status'], r['content_type'], json.dumps(walk(value), sort_keys=True, ensure_ascii=True, separators=(',', ':'))
 
 
-def state(db):
+def state(db, creation=False):
     d = sqlite3.connect(db)
     out = {}
     for table in TABLES:
@@ -110,6 +111,10 @@ def state(db):
         rows = []
         for row in d.execute('select ' + expressions + ' from ' + table):
             cells = list(zip(row[::2], row[1::2]))
+            if creation and table == 'credentials' and cells[names.index('id')][1] != META['cred_id'].encode().hex().upper():
+                for n in ['id', 'api_key', 'created_at', 'updated_at']:
+                    index = names.index(n)
+                    cells[index] = (cells[index][0], '<generated>')
             # Mutation-generated wall clocks only; storage class still checked.
             for n in ['updated_at', 'revoked_at']:
                 if n in names and cells[names.index(n)][0] != 'null':
@@ -158,7 +163,13 @@ def run_case(case, batch, recreate=True, multi=False):
                                    client.get('cookie') if path.startswith('/api/client/') else login['cookie'],
                                    META['key'] if path == '/v1/models' else None)
                 response.pop('cookie', None)
-                answers.append(dict(response=response, state=state(db) if method != 'GET' else None))
+                if method == 'POST' and path == '/api/credentials':
+                    payload = json.loads(bytes.fromhex(response['body']))
+                    if 'credential' in payload:
+                        for field in ['id', 'createdAt', 'updatedAt']:
+                            payload['credential'][field] = '<generated>'
+                        response['body'] = json.dumps(payload).encode().hex()
+                answers.append(dict(response=response, state=state(db, creation=method == 'POST') if method != 'GET' else None))
             assert p.poll() is None, 'gateway exited'
         finally:
             stop(p)
@@ -168,10 +179,13 @@ def run_case(case, batch, recreate=True, multi=False):
         equal = canonical(a['response']) == canonical(b['response']) and a['state'] == b['state']
         accepted = None
         if not equal:
-            if q[1] == '/v1/models' and a['response']['status'] >= 400 and b['response']['status'] < 400:
-                accepted = 'v1-models-frozen-json'
-            elif q[1] == '/v1/models' or q[1].startswith('/api/client/') and table == 'api_keys':
-                accepted = 'routing-strict'
+            for allowed in ACCEPTED:
+                if (allowed['case'] == list(case) and allowed['request'] == list(q)
+                        and allowed['statuses'] == [a['response']['status'], b['response']['status']]):
+                    accepted = allowed['accepted']
+                    if 'rust_body' in allowed:
+                        assert b['response']['body'] == allowed['rust_body'], 'accepted auth body drift'
+                    break
         RESULTS.append(dict(case=case, request=q, ts=a, rust=b, equal=equal, accepted=accepted))
 
 
@@ -223,6 +237,29 @@ def main():
         run_case(('shipped', t, c, k, ID[k]), [('GET', path, None)], recreate=False)
     for k in ['integer', 'real']:
         run_case(('multirow', 'credentials', 'provider_data', k, ID[k]), [('GET', '/api/client/quota', None)], multi=True)
+    # Nonempty health/quota fixtures; mutate every column over SQLite scalar classes.
+    d = sqlite3.connect(db)
+    d.execute("INSERT INTO quota_windows VALUES(?, 'daily',1700000000000,1,10,1800000000000,1700000000000,86400000)", (cred['id'],))
+    d.execute("INSERT INTO credential_health(credential_id,model,breaker_state,consecutive_failures) VALUES(?,'gpt-4o','closed',0)", (cred['id'],))
+    d.execute("INSERT INTO quota_samples VALUES(?,'daily',1700000000000,1,10,1800000000000,86400000)", (cred['id'],))
+    d.commit()
+    d.close()
+    scalar = dict(ID, blobempty="X''", zero='0', negative='-1', text="'daily'")
+    for table in ['quota_windows', 'credential_health', 'quota_samples']:
+        d = sqlite3.connect(db)
+        cols = [r[1] for r in d.execute('pragma table_info('+table+')')]
+        d.close()
+        for column in cols:
+            for cell, value in scalar.items():
+                run_case(('quota-cells', table, column, cell, value),
+                         [('GET', path, None) for path in ['/api/credentials/health', '/api/client/quota', '/api/client/quota/history?since=0&until=1800000000000']])
+    for field in ['tier', 'weight']:
+        for number in [2, 2.5, 9007199254740992, 1e20]:
+            run_case(('writeback', 'credentials', 'label', 'blob', ID['blob']),
+                     [('PATCH', '/api/credentials/'+cred['id'], {field: number})])
+    # Synthetic create: response metadata must not depend on missing defaults.
+    run_case(('create', 'credentials', 'label', 'integer', '1'),
+             [('POST', '/api/credentials', {'provider': 'openai', 'apiKey': 'sk-synthetic-second', 'label': 'second'})])
     counts = collections.Counter(r['accepted'] for r in RESULTS if r['accepted'])
     failures = [r for r in RESULTS if not r['equal'] and not r['accepted']]
     (ROOT/'results.json').write_text(json.dumps(RESULTS, indent=2))
@@ -230,7 +267,7 @@ def main():
     (ROOT/'summary.json').write_text(json.dumps(summary, indent=2))
     print('evidence', ROOT, flush=True)
     print(json.dumps(summary), flush=True)
-    assert counts == {'routing-strict': 95, 'v1-models-frozen-json': 15}, counts
+    assert counts == {'routing-strict': 94, 'v1-models-frozen-json': 15}, counts
     assert not failures, str(len(failures)) + ' unexpected differences'
 
 

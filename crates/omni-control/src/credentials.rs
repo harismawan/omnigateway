@@ -189,12 +189,7 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
             ));
         }
         let value = obj(fields);
-        let number = |name| match get(&value, name) {
-            Some(JsValue::Number(n)) => *n,
-            Some(JsValue::Null) => 0.0,
-            Some(JsValue::String(u)) => omni_ir::js::string_to_number(&String::from_utf16_lossy(u)),
-            _ => f64::NAN,
-        };
+        let number = |name| crate::cli_cell::scalar_number(get(&value, name).expect("quota field"));
         let optional = |name| {
             if matches!(get(&value, name), Some(JsValue::Null)) {
                 None
@@ -204,11 +199,11 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
         };
         quota.push(omni_store::QuotaWindow {
             text_spent: None,
-            credential_id: row.get("credential_id").map_err(Failure::internal)?,
-            window_type: omni_store::quota::WindowType::parse(
-                &row.get::<_, String>("window_type")
-                    .map_err(Failure::internal)?,
-            ),
+            credential_id: String::new(), // output retains the raw SQLite identity below
+            window_type: omni_store::quota::WindowType::parse(&match get(&value, "windowType") {
+                Some(JsValue::String(units)) => String::from_utf16_lossy(units),
+                _ => String::new(),
+            }),
             starts_at: number("startsAt"),
             used: number("used"),
             limit: optional("limit"),
@@ -291,7 +286,7 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
                 }
             });
             let exhaust_value = match (exhausts, get(raw, "observedAt")) {
-                (Some(_), Some(JsValue::String(units))) => {
+                (Some(_), Some(observed @ (JsValue::String(_) | JsValue::Object(_)))) => {
                     let remaining = q.limit.unwrap_or(f64::NAN) - q.used;
                     let delta = (if remaining.is_nan() {
                         f64::NAN
@@ -310,7 +305,9 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
                         omni_ir::jsjson::write_number(delta, &mut s);
                         s
                     };
-                    let mut value = units.clone();
+                    let mut value: Vec<u16> = crate::cli_cell::scalar_string(observed)
+                        .encode_utf16()
+                        .collect();
                     value.extend(suffix.encode_utf16());
                     JsValue::String(value)
                 }
@@ -329,8 +326,14 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
                 }
             };
             obj(vec![
-                ("credentialId", text(&q.credential_id)),
-                ("windowType", text(q.window_type.as_str())),
+                (
+                    "credentialId",
+                    get(raw, "credentialId").expect("quota field").clone(),
+                ),
+                (
+                    "windowType",
+                    get(raw, "windowType").expect("quota field").clone(),
+                ),
                 (
                     "windowStartsAt",
                     start.map_or(JsValue::Null, JsValue::Number),
@@ -465,7 +468,7 @@ pub fn patch(s: &SqliteStore, id: Option<&str>, body: &JsValue, now: i64) -> Res
             _ => unreachable!(),
         }
     }
-    omni_store::credentials::patch_metadata(s.connection(), id, &mutation, now)?;
+    s.connection().execute("UPDATE credentials SET label=COALESCE(?1,label),enabled=COALESCE(?2,enabled),tier=COALESCE(?3,tier),weight=COALESCE(?4,weight),disabled_reason=CASE WHEN ?2 IS NULL THEN disabled_reason WHEN ?2=1 THEN NULL ELSE 'manual' END,disabled_at=CASE WHEN ?2 IS NULL THEN disabled_at WHEN ?2=1 THEN NULL ELSE ?5 END,updated_at=?5 WHERE id=?6", rusqlite::params![mutation.label, mutation.enabled, mutation.tier.map(crate::cli_cell::bind_number), mutation.weight.map(crate::cli_cell::bind_number), now, id]).map_err(Failure::internal)?;
     if let Some(enabled) = mutation.enabled
         && get(&existing, "enabled") != Some(&JsValue::Bool(enabled))
     {
@@ -612,6 +615,8 @@ pub fn create(
         for (k, v) in fields {
             if k.iter().copied().eq("label".encode_utf16()) {
                 *v = JsValue::String(label.clone());
+            } else if k.iter().copied().eq("tokenVersion".encode_utf16()) {
+                *v = JsValue::Number(0.0);
             }
         }
     }
