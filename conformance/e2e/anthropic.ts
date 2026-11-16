@@ -32,7 +32,7 @@ const env = {
   OMNI_STATIC_DIR: join(work, "absent"),
 };
 async function cli(args: string[], stdin?: string) {
-  const p = Bun.spawn(["bun", "apps/cli/src/index.ts", "--root", seed, "--json", ...args], {
+  const p = Bun.spawn(["bun", "--no-env-file", "apps/cli/src/index.ts", "--root", seed, "--json", ...args], {
     cwd: repo,
     env,
     stdin: stdin ? new TextEncoder().encode(stdin) : "ignore",

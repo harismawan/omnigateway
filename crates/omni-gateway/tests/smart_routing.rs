@@ -61,7 +61,7 @@ async fn stopped_ready_sibling_is_counted_and_cached() {
     let mut ir = serde_json::to_value(chat("gpt-4o", false)).expect("IR");
     let public = "p".repeat(7993);
     ir["messages"][0]["content"][0]["text"] =
-        format!("{}[user]\n{public}", "c".repeat(7993)).into();
+        format!("{public}[user]\n{}", "c".repeat(7993)).into();
     let mut req = Request {
         request: serde_json::from_value(ir).expect("IR"),
         request_id: "ready-parent".into(),

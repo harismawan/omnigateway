@@ -3,6 +3,48 @@ use common::*;
 use omni_gateway::{dispatch::Request, screening::judge};
 
 #[tokio::test]
+async fn pending_failover_is_attributed_sweepable_and_completed_once_on_cancel() {
+    omni_gateway::clock::init_request_ids().expect("RNG");
+    let f = fixture(&["c0", "c1"]);
+    set_setting(&f.path, "guardrailModel", "\"m1\"");
+    let h = harness(&f, vec![status(503, "unavailable"), Reply::Hang]);
+    let req = Request {
+        request: chat("m1", false),
+        request_id: "pending-parent".into(),
+        api_key_id: Some("pending-key".into()),
+        route_started_at: 1000,
+    };
+    let mut call = Box::pin(judge(h.deps.clone(), &req, "pending-failover-policy", None));
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(call.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    h.deps.writer.flush().await.expect("flush");
+    assert_eq!(h.script.calls(), 2);
+    assert_eq!(
+        rows(
+            &f.path,
+            "SELECT requested_model,status,api_key_id,credential_id,state FROM request_logs"
+        ),
+        vec![vec!["m1", "0", "pending-key", "c1", "pending"]]
+    );
+    // The ordinary A11 dead-node sweep must see the classifier pending row.
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    let swept =
+        omni_store::usage::sweep_pending(&conn, "replacement-node", i64::MAX / 2).expect("sweep");
+    assert_eq!(swept.len(), 1);
+    assert_eq!(swept[0].status, 499);
+    assert_eq!(swept[0].api_key_id.as_deref(), Some("pending-key"));
+    drop(call);
+    h.writer.close().await.expect("close");
+    assert_eq!(
+        rows(&f.path, "SELECT status,error_code,state FROM request_logs"),
+        vec![vec!["499", "interrupted", "done"]]
+    );
+}
+
+#[tokio::test]
 async fn capped_surrogate_is_preserved_in_classifier_wire_bytes() {
     omni_gateway::clock::init_request_ids().expect("RNG");
     let f = fixture(&["c0"]);

@@ -557,6 +557,11 @@ async fn classify(
     guardrail: bool,
     stop: Option<tokio::sync::watch::Receiver<bool>>,
 ) -> (String, Option<&'static str>, i64, Option<String>) {
+    // An unpolled worker has not started a transport. Stop must not start it
+    // merely to drain the pool (FuturesUnordered is lazy).
+    if stop.as_ref().is_some_and(|stop| *stop.borrow()) {
+        return (key, None, 0, None);
+    }
     let mut events = Vec::new();
     let run = async {
         while let Some(event) = dispatched.events.next().await {
@@ -576,7 +581,7 @@ async fn classify(
             biased;
             result = timed => result,
             _ = async {
-                if !*stop.borrow() { let _ = stop.changed().await; }
+                if !*stop.borrow() { drop(stop.changed().await); }
             } => return (key, None, 0, None),
         }
     } else {
