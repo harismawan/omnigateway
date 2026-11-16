@@ -36,10 +36,10 @@ Done so far: slice 1 gateway (custom provider, /v1/*, /health, writer, limiter, 
 - [ ] D4 (M) breaker/health shared queue, /health mode, /api/nodes, cluster bench vs targets
 
 ## E. CLI (remaining 49 commands)
-- [~] E1 status, admin set-password, db group (in progress, worktree feat/rust-cli-e1-e5)   - [ ] E2 credentials group + connect
+- [x] E1 status, admin set-password, db group — merged 4b80b738 + stored-cell parity 6d7c8268 (six fix rounds; cli-stored-json-review5.md); five accepted hand-altered-table differences   - [ ] E2 credentials group + connect
 - [ ] E3 logs, logs export, usage, bodies, console, quota group
 - [ ] E4 start/stop/restart/service install/uninstall (Rust binary), doctor
-- [~] E5 setup claude/opencode, plugin * refusals (exit 1), real --help (in progress, worktree feat/rust-cli-e1-e5)
+- [x] E5 setup claude/opencode, plugin * refusals (exit 1), real --help — merged 4b80b738 + 6d7c8268; post-merge matrix 54/54 green
 
 ## F. Packaging and cutover
 - [x] F1 CI cargo + release assets — merged 66020396 (arm64/macOS + publish proven only by CI)   - [x] F2 Dockerfile — merged 66020396; k8s Recreate staged on feat/rust-first-rollout d461aba0 for the promotion PR
