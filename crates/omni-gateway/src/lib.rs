@@ -236,16 +236,17 @@ impl Default for Options {
 }
 
 /// The HTTP/1 server configuration every connection is served with.
-/// `idle` is the header read timeout: armed from the moment hyper waits for a
-/// request head, so it bounds both a slow head and the idle wait between
-/// keep-alive requests.
+/// The transport timer bounds slow heads and keep-alive waits, retaining the
+/// last inference request's exemption until an ordinary request is routed.
 ///
 /// hyper's own `date` header is off: Bun writes one on every response but a
 /// HEAD's, so [`server::handle`] stamps it (see `server::stamp_date`).
-pub fn http1_builder(idle: Duration) -> hyper::server::conn::http1::Builder {
+pub fn http1_builder(_idle: Duration) -> hyper::server::conn::http1::Builder {
     let mut builder = hyper::server::conn::http1::Builder::new();
     builder.timer(hyper_util::rt::TokioTimer::new());
-    builder.header_read_timeout(idle);
+    // The transport timer also covers headers. Hyper's independent header
+    // deadline would close a completed inference connection even while exempt.
+    builder.header_read_timeout(None);
     builder.auto_date_header(false);
     builder
 }
@@ -524,7 +525,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
                     let (sock, activity) = http::IdleIo::new(sock, idle);
                     let requests = activity.clone();
                     let service = hyper::service::service_fn(move |req| {
-                        requests.request(req.method() == hyper::Method::POST && matches!(req.uri().path(),
+                        requests.request(req.method() == hyper::Method::POST && matches!(server::route_path(req.uri().path()).as_ref(),
                             "/v1/messages" | "/v1/responses" | "/v1/chat/completions"));
                         server::handle(app.clone(), req)
                     });

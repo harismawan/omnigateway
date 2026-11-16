@@ -1220,7 +1220,7 @@ async fn read_until_closed(s: &mut TcpStream, limit: Duration) -> Option<String>
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_body_that_stops_arriving_is_cut_after_the_idle_timeout() {
+async fn an_exempt_body_that_stops_arriving_outlives_the_idle_timeout() {
     let g = idle_gw(Duration::from_millis(300)).await;
     let mut s = TcpStream::connect(&g.base).await.expect("connect");
     let req = format!(
@@ -1228,17 +1228,12 @@ async fn a_body_that_stops_arriving_is_cut_after_the_idle_timeout() {
         g.key
     );
     s.write_all(req.as_bytes()).await.expect("write");
-    let started = std::time::Instant::now();
-    let got = read_until_closed(&mut s, Duration::from_secs(3))
-        .await
-        .expect("closed within 3 s");
     assert!(
-        started.elapsed() >= Duration::from_millis(250),
-        "{:?}",
-        started.elapsed()
+        read_until_closed(&mut s, Duration::from_millis(600))
+            .await
+            .is_none()
     );
-    // No answer, never dispatched; the row reads as a hang-up.
-    assert!(!got.contains("HTTP/1.1"), "{got}");
+    drop(s);
     let f = stop(g).await;
     assert_eq!(
         rows(

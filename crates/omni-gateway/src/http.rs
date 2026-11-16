@@ -1,4 +1,5 @@
-//! Connection-level inactivity: only actual socket I/O advances the clock.
+//! Bun's socket budget: writes rearm; inbound traffic must reach 16 KiB/s
+//! worth of bytes per idle window. Inference requests disable the budget.
 use std::io::{self, IoSlice};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -14,6 +15,7 @@ struct Clock {
     disabled: AtomicBool,
     idle: Duration,
     request_changed: tokio::sync::Notify,
+    received: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -31,6 +33,7 @@ impl Activity {
         // Frozen proxy.ts explicitly calls server.timeout(request, 0) for
         // these three routes, including their JSON and streaming responses.
         self.0.disabled.store(inference, Relaxed);
+        self.0.received.store(0, Relaxed);
         self.touch();
         self.0.request_changed.notify_one();
     }
@@ -71,6 +74,7 @@ impl<T> IdleIo<T> {
             disabled: AtomicBool::new(false),
             idle,
             request_changed: tokio::sync::Notify::new(),
+            received: AtomicU64::new(0),
         }));
         (
             Self {
@@ -91,7 +95,19 @@ impl<T: AsyncRead + Unpin> AsyncRead for IdleIo<T> {
         let before = buf.filled().len();
         let result = Pin::new(&mut self.inner).poll_read(cx, buf);
         if matches!(result, Poll::Ready(Ok(()))) && buf.filled().len() > before {
-            self.activity.touch();
+            let n = (buf.filled().len() - before) as u64;
+            let received = self
+                .activity
+                .0
+                .received
+                .fetch_add(n, Relaxed)
+                .saturating_add(n);
+            if u128::from(received)
+                >= self.activity.0.idle.as_nanos().saturating_mul(16_384) / 1_000_000_000
+            {
+                self.activity.0.received.store(0, Relaxed);
+                self.activity.touch();
+            }
         }
         result
     }
@@ -140,6 +156,53 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for IdleIo<T> {
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn normalized_inference_exemptions() {
+        for path in [
+            "/v1/x/../chat/completions",
+            "/v1/x/%2e%2e/messages",
+            "/v1/./responses/",
+            "/v1\\x\\..\\chat/completions",
+        ] {
+            let path = crate::server::route_path(path);
+            assert!(matches!(
+                path.as_ref(),
+                "/v1/chat/completions" | "/v1/messages" | "/v1/responses"
+            ));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn trickling_reads_do_not_rearm_timeout() {
+        let (sock, mut peer) = tokio::io::duplex(10);
+        let (mut io, activity) = IdleIo::new(sock, Duration::from_secs(5));
+        let expiry = tokio::spawn(async move { activity.expired().await });
+        for _ in 0..2 {
+            tokio::time::advance(Duration::from_secs(2)).await;
+            peer.write_all(b"x").await.unwrap();
+            io.read_u8().await.unwrap();
+        }
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(expiry.is_finished());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn inbound_threshold_rearms_window() {
+        let (sock, mut peer) = tokio::io::duplex(16_384);
+        let (mut io, activity) = IdleIo::new(sock, Duration::from_secs(1));
+        let expiry = tokio::spawn(async move { activity.expired().await });
+        tokio::time::advance(Duration::from_millis(800)).await;
+        peer.write_all(&[0; 16_384]).await.unwrap();
+        let mut buf = [0; 16_384];
+        io.read_exact(&mut buf).await.unwrap();
+        tokio::time::advance(Duration::from_millis(800)).await;
+        tokio::task::yield_now().await;
+        assert!(!expiry.is_finished());
+        tokio::time::advance(Duration::from_millis(200)).await;
+        expiry.await.unwrap();
+    }
 
     #[tokio::test(start_paused = true)]
     async fn blocked_writer_expires() {
