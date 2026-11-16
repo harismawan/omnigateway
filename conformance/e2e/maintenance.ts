@@ -16,6 +16,7 @@ for (const [name, binary] of [["ts", values.ts], ["rust", values.rust]]) {
   const path = join(root, "omni.db");
   const seed = openDb(path);
   seed.run("INSERT INTO request_logs(id,at,requested_model,status,duration_ms,state,node_id) VALUES ('dead',1000,'model',0,0,'pending','dead-node')");
+  seed.run(`UPDATE request_logs SET rtk_applied=1,rtk_filter_hits=2,rtk_original_code_units=30,rtk_compressed_code_units=10,rtk_estimated_tokens_saved=5,rtk_filters='["grep"]'`);
   seed.close();
   const env = { PATH: process.env.PATH!, HOME: root, OMNI_ROOT: root,
     OMNI_DB_PATH: path, OMNI_ENCRYPTION_KEY: "maintenance-conformance-0123456789",
