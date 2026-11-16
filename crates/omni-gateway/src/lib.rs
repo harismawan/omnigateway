@@ -14,6 +14,7 @@ pub mod clock;
 pub mod connect;
 pub mod dispatch;
 pub mod finish;
+mod http;
 pub mod jsc_json;
 pub mod load;
 pub mod logging;
@@ -518,13 +519,24 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
                         tracing::debug!("could not set TCP_NODELAY");
                     }
                     let app = app.clone();
+                    let (sock, activity) = http::IdleIo::new(sock, idle);
+                    let requests = activity.clone();
                     let service = hyper::service::service_fn(move |req| {
+                        requests.request(req.method() == hyper::Method::POST && matches!(req.uri().path(),
+                            "/v1/messages" | "/v1/responses" | "/v1/chat/completions"));
                         server::handle(app.clone(), req)
                     });
                     let conn = graceful.watch(builder.serve_connection(TokioIo::new(sock), service));
                     conns.spawn(async move {
-                        if let Err(e) = conn.await {
-                            tracing::debug!(reason = %e, "connection ended with an error");
+                        tokio::select! {
+                            result = conn => if let Err(e) = result {
+                                tracing::debug!(reason = %e, "connection ended with an error");
+                            },
+                            () = activity.expired() => {
+                                // Dropping hyper drops the service/body as on a
+                                // client disconnect: pumps, claims and finishers.
+                                tracing::debug!("connection idle timeout");
+                            }
                         }
                     });
                 }
