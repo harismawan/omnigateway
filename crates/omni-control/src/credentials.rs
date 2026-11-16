@@ -343,6 +343,14 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
 /// Raw quota projection for CLI status, without health/burn/last-used reads.
 /// Like listQuota in frozen TS, unrelated request logs cannot affect this read.
 pub fn status_quota(s: &SqliteStore) -> Result<JsValue> {
+    status_quota_with(s, false)
+}
+/// Operator JSON retains SQLite storage classes, including Uint8Array BLOBs.
+/// Keep the existing human renderer's narrowing separate from this projection.
+pub fn status_quota_json(s: &SqliteStore) -> Result<JsValue> {
+    status_quota_with(s, true)
+}
+fn status_quota_with(s: &SqliteStore, lossless: bool) -> Result<JsValue> {
     let mut statement = s
         .connection()
         .prepare("SELECT * FROM quota_windows")
@@ -361,9 +369,14 @@ pub fn status_quota(s: &SqliteStore) -> Result<JsValue> {
             ("observedAt", "observed_at"),
             ("windowMs", "window_ms"),
         ] {
+            let raw = row.get_ref(column).map_err(Failure::internal)?;
             fields.push((
                 name,
-                sql_value(row.get_ref(column).map_err(Failure::internal)?),
+                if lossless {
+                    crate::cli_cell::Cell::read(raw).json()
+                } else {
+                    sql_value(raw)
+                },
             ));
         }
         quota.push(obj(fields));

@@ -102,8 +102,12 @@ pub fn run(flags: &HashMap<String, String>) -> Result<String, String> {
                 .map_err(|e| e.to_string())?
                 .is_some();
             let accounts = omni_control::credentials::cli_rows(&store)?;
-            let quota_rows =
-                omni_control::credentials::status_quota(&store).map_err(|e| e.message)?;
+            let quota_rows = if flags.contains_key("json") {
+                omni_control::credentials::status_quota_json(&store)
+            } else {
+                omni_control::credentials::status_quota(&store)
+            }
+            .map_err(|e| e.message)?;
             use omni_control::settings_value::get;
             use omni_ir::jsjson::JsValue as J;
             {
