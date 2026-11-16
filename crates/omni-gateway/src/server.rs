@@ -1316,7 +1316,12 @@ async fn models(app: &App, req: &Request<Incoming>) -> Response<Body> {
         Err(e) => {
             tracing::error!(status = e.code.http_status(), code = e.code.as_str(),
                 reason = %e.message, "model listing failed");
-            let e = if e.code.http_status() == 500 {
+            // These two auth diagnostics are produced verbatim by frozen TS.
+            // Other internal errors (notably strict SQLite reader failures)
+            // must not expose Rust table/column/storage-class details.
+            let frozen_diagnostic = e.message.starts_with("JSON Parse error: ")
+                || e.message == "api key configuration is unusable";
+            let e = if e.code.http_status() == 500 && !frozen_diagnostic {
                 GatewayError::new(ErrorCode::Internal, "internal error")
             } else {
                 e
