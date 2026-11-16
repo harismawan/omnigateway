@@ -111,7 +111,12 @@ pub fn human(
         .map(str::to_owned)
         .to_vec(),
     ];
-    for ((k, allowlist), exact) in keys.iter().zip(&listing.allowlists).zip(&listing.limits_js) {
+    for (index, ((k, allowlist), exact)) in keys
+        .iter()
+        .zip(&listing.allowlists)
+        .zip(&listing.limits_js)
+        .enumerate()
+    {
         let models = omni_control::operator_json::models(allowlist)?;
         let limits = if k["limits"].is_null() {
             paint(color, false, "unreadable")
@@ -139,17 +144,21 @@ pub fn human(
                 parts.join(" ")
             }
         };
-        let state = if !k["revokedAt"].is_null() {
+        let state = if !matches!(listing.cell(index, "revokedAt"), jsjson::JsValue::Null) {
             "revoked"
-        } else if k["expiresAt"].as_f64().is_some_and(|e| e <= now as f64) {
+        } else if !matches!(listing.cell(index, "expiresAt"), jsjson::JsValue::Null)
+            && omni_control::cli_cell::scalar_number(listing.cell(index, "expiresAt"))
+                .partial_cmp(&(now as f64))
+                != Some(std::cmp::Ordering::Greater)
+        {
             "expired"
         } else {
             "active"
         };
         rows.push(vec![
-            text(&k["id"]),
-            text(&k["label"]),
-            text(&k["prefix"]),
+            omni_control::cli_cell::table_text(listing.cell(index, "id"))?,
+            omni_control::cli_cell::table_text(listing.cell(index, "label"))?,
+            omni_control::cli_cell::table_text(listing.cell(index, "prefix"))?,
             models,
             limits,
             if k["bodyLoggingOptOut"] == true {
@@ -158,7 +167,10 @@ pub fn human(
                 "—"
             }
             .into(),
-            if k["guardrailPolicy"].is_null() {
+            if matches!(
+                listing.cell(index, "guardrailPolicy"),
+                jsjson::JsValue::Null
+            ) {
                 "no"
             } else {
                 "yes"

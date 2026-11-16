@@ -5,6 +5,7 @@
 //    configuration error. Both CLIs still exit 1 and still compare equal, so
 //    only the gate can notice; the disturbed suite must FAIL.
 
+import "./driver-env.ts";
 import { strict as assert } from "node:assert";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -62,7 +63,7 @@ suite = suite.replace(
   '\n        env: raw === "null" ? {...env,OMNI_CLUSTER_MODE:"true",OMNI_DATABASE_URL:"invalid"} : env,',
 );
 writeFileSync(join(root, "model-puts.ts"), suite);
-const p = Bun.spawn(["bun", join(root, "model-puts.ts")], {
+const p = Bun.spawn(["bun", "--no-env-file", join(root, "model-puts.ts")], {
   env: process.env,
   stdout: "pipe",
   stderr: "pipe",

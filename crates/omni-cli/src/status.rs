@@ -101,20 +101,38 @@ pub fn run(flags: &HashMap<String, String>) -> Result<String, String> {
             configured = omni_control::admin_password::admin_hash(&store)
                 .map_err(|e| e.to_string())?
                 .is_some();
-            let accounts = omni_control::operator_json::parse(
-                &omni_control::credentials::list(&store).map_err(|e| e.message)?,
-            )
-            .map_err(|e| e.to_string())?;
-            let quota_rows =
-                omni_control::credentials::status_quota(&store).map_err(|e| e.message)?;
+            let accounts = omni_control::credentials::cli_rows(&store)?;
+            let quota_rows = if flags.contains_key("json") {
+                omni_control::credentials::status_quota_json(&store)
+            } else {
+                omni_control::credentials::status_quota(&store)
+            }
+            .map_err(|e| e.message)?;
             use omni_control::settings_value::get;
             use omni_ir::jsjson::JsValue as J;
-            if let Some(J::Array(accounts)) = get(&accounts, "credentials") {
-                for c in accounts {
+            {
+                for c in &accounts {
                     let quota = match &quota_rows {
                         J::Array(q) => q
                             .iter()
-                            .filter(|q| get(q, "credentialId") == get(c, "id"))
+                            .filter(|q| {
+                                let quota_id = get(q, "credentialId");
+                                let id = get(c, "id");
+                                if flags.contains_key("json") {
+                                    // Frozen Map keys use SameValueZero. BLOBs from
+                                    // separate SQLite reads are distinct objects.
+                                    match (quota_id, id) {
+                                        (Some(J::Null), Some(J::Null)) => true,
+                                        (Some(J::Number(a)), Some(J::Number(b))) => {
+                                            a == b || (a.is_nan() && b.is_nan())
+                                        }
+                                        (Some(J::String(a)), Some(J::String(b))) => a == b,
+                                        _ => false,
+                                    }
+                                } else {
+                                    quota_id == id
+                                }
+                            })
                             .cloned()
                             .collect(),
                         _ => Vec::new(),
@@ -190,14 +208,14 @@ pub fn run(flags: &HashMap<String, String>) -> Result<String, String> {
             "STATE".into(),
             "QUOTA".into(),
         ]];
-        for c in &credentials {
+        for (c, raw) in credentials.iter().zip(&lossless_credentials) {
+            static UNDEFINED: omni_ir::jsjson::JsValue = omni_ir::jsjson::JsValue::Undefined;
+            let cell = |name| omni_control::settings_value::get(raw, name).unwrap_or(&UNDEFINED);
+            let provider = omni_control::cli_cell::table_text(cell("provider"))?;
             let enabled = c["enabled"] == true;
             rows.push(vec![
-                c["label"].as_str().unwrap_or("").into(),
-                paint(
-                    provider_color(c["provider"].as_str().unwrap_or("")),
-                    c["provider"].as_str().unwrap_or(""),
-                ),
+                omni_control::cli_cell::table_text(cell("label"))?,
+                paint(provider_color(&provider), &provider),
                 paint(
                     if enabled { "32" } else { "31" },
                     if enabled { "enabled" } else { "disabled" },

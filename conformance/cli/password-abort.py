@@ -9,6 +9,7 @@ prompt was reached. Two guards keep a pass from being vacuous:
   was switched off at the hidden-input prompt and back on afterwards.
 """
 import os, termios, subprocess, json, pathlib, tempfile, hashlib, fcntl, struct, select
+import driver_env
 
 binary = pathlib.Path(os.environ['OMNI_CLI_BIN']).resolve()
 root = pathlib.Path(tempfile.mkdtemp(prefix='/tmp/opencode/e1-e5/password-abort-'))

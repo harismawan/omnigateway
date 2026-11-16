@@ -59,6 +59,14 @@ pub(crate) fn validate_client_metadata(s: &SqliteStore) -> Result<()> {
     Ok(())
 }
 fn rows(s: &SqliteStore, id: Option<&str>) -> Result<Vec<JsValue>> {
+    rows_with(s, id, provider_data, false)
+}
+fn rows_with(
+    s: &SqliteStore,
+    id: Option<&str>,
+    parse: fn(ValueRef<'_>, ValueRef<'_>) -> Result<JsValue>,
+    terminal: bool,
+) -> Result<Vec<JsValue>> {
     let mut stmt = s
         .connection()
         .prepare("SELECT * FROM credentials WHERE (?1 IS NULL OR id=?1) ORDER BY tier,label")
@@ -92,7 +100,8 @@ fn rows(s: &SqliteStore, id: Option<&str>) -> Result<Vec<JsValue>> {
                         || matches!(raw,ValueRef::Real(n) if n==1.0),
                 ),
                 "hasRefreshToken" => JsValue::Bool(!matches!(raw, ValueRef::Null)),
-                "providerData" => provider_data(raw, r.get_ref("id").map_err(Failure::internal)?)?,
+                "providerData" => parse(raw, r.get_ref("id").map_err(Failure::internal)?)?,
+                _ if terminal => crate::cli_cell::Cell::read(raw).json(),
                 _ => sql_value(raw),
             };
             fields.push((k, v));
@@ -106,6 +115,23 @@ pub fn list(s: &SqliteStore) -> Result<String> {
         "credentials",
         JsValue::Array(rows(s, None)?),
     )])))
+}
+/// Frozen CLI status propagates JSON.parse diagnostics; HTTP retains its safe failures.
+pub fn cli_list(s: &SqliteStore) -> std::result::Result<String, String> {
+    Ok(stringify(&obj(vec![(
+        "credentials",
+        JsValue::Array(cli_rows(s)?),
+    )])))
+}
+pub fn cli_rows(s: &SqliteStore) -> std::result::Result<Vec<JsValue>, String> {
+    let rows = rows_with(
+        s,
+        None,
+        |raw, _| crate::cli_cell::json(raw).map_err(Failure::internal),
+        true,
+    )
+    .map_err(|e| e.message)?;
+    Ok(rows)
 }
 pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
     let mut statement = s
@@ -317,6 +343,14 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
 /// Raw quota projection for CLI status, without health/burn/last-used reads.
 /// Like listQuota in frozen TS, unrelated request logs cannot affect this read.
 pub fn status_quota(s: &SqliteStore) -> Result<JsValue> {
+    status_quota_with(s, false)
+}
+/// Operator JSON retains SQLite storage classes, including Uint8Array BLOBs.
+/// Keep the existing human renderer's narrowing separate from this projection.
+pub fn status_quota_json(s: &SqliteStore) -> Result<JsValue> {
+    status_quota_with(s, true)
+}
+fn status_quota_with(s: &SqliteStore, lossless: bool) -> Result<JsValue> {
     let mut statement = s
         .connection()
         .prepare("SELECT * FROM quota_windows")
@@ -335,9 +369,14 @@ pub fn status_quota(s: &SqliteStore) -> Result<JsValue> {
             ("observedAt", "observed_at"),
             ("windowMs", "window_ms"),
         ] {
+            let raw = row.get_ref(column).map_err(Failure::internal)?;
             fields.push((
                 name,
-                sql_value(row.get_ref(column).map_err(Failure::internal)?),
+                if lossless {
+                    crate::cli_cell::Cell::read(raw).json()
+                } else {
+                    sql_value(raw)
+                },
             ));
         }
         quota.push(obj(fields));

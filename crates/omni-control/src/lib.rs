@@ -4,6 +4,8 @@ pub mod admin_password;
 pub mod api;
 pub mod body_schema;
 pub mod catalog;
+pub mod cli_cell;
+pub mod cli_error;
 pub mod client_quota;
 pub mod config;
 pub mod credentials;

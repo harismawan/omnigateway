@@ -1,6 +1,7 @@
 // Pin the frozen real CLI's multi-question stdin failure before choosing whether
 // migration should reproduce it or intentionally repair the interactive flow.
 
+import "./driver-env.ts";
 import { Database } from "bun:sqlite";
 import { strict as assert } from "node:assert";
 import { existsSync, mkdtempSync } from "node:fs";

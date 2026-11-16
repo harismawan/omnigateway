@@ -4,6 +4,7 @@
 import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createStore, deriveKey } from "../../packages/store/src/index.ts";
+import "./driver-env.ts";
 import { Database } from "bun:sqlite";
 import { fileState } from "./db-file-state.ts";
 const base=mkdtempSync("/tmp/opencode/e1-e5/db17-kill-root-");

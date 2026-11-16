@@ -10,7 +10,7 @@ use omni_ir::jsjson::JsValue;
 /// what a client sent): such a `models` key is kept as its exact UTF-16
 /// (`LimitConfig::lone_models`), never folded into U+FFFD, so `"\ud800"`,
 /// `"\udc00"` and a literal U+FFFD stay three different overrides.
-pub(crate) fn parse_stored_limits(raw: &str) -> Option<LimitConfig> {
+pub fn parse_stored_limits(raw: &str) -> Option<LimitConfig> {
     // serde refuses every lone surrogate escape, so a text it parses holds
     // none: the common case pays for one parse.
     if let Some(config) = parse_limits(raw) {

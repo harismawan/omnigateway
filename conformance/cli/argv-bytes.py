@@ -1,5 +1,6 @@
 """Unix argv decoding: Bun replaces malformed UTF-8, rather than panicking."""
 import os
+import driver_env
 import pathlib
 import shutil
 import subprocess

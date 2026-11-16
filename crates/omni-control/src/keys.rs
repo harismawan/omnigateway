@@ -1,6 +1,81 @@
 //! Operator key summaries.
+use omni_ir::jsjson::JsValue;
 use omni_store::SqliteStore;
 use serde_json::{Value, json};
+
+struct CliKey {
+    key: omni_store::keys::ApiKey,
+    allowlist_json: Option<String>,
+    fields: JsValue,
+}
+
+/// Terminal projection only: the HTTP reader remains strict.
+fn cli_rows(store: &SqliteStore, id: Option<&str>) -> Result<Vec<CliKey>, String> {
+    let mut stmt = store
+        .connection()
+        .prepare(if id.is_some() {
+            "SELECT * FROM api_keys WHERE id = ?1"
+        } else {
+            "SELECT * FROM api_keys ORDER BY created_at DESC"
+        })
+        .map_err(|e| e.to_string())?;
+    let mut rows = if let Some(id) = id {
+        stmt.query([id])
+    } else {
+        stmt.query([])
+    }
+    .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    while let Some(r) = rows.next().map_err(|e| e.to_string())? {
+        let cell = |name| r.get_ref(name).map_err(|e| e.to_string());
+        let raw = |name| -> Result<JsValue, String> {
+            Ok(crate::cli_cell::Cell::read(cell(name)?).json())
+        };
+        let flag = |name| -> Result<bool, String> {
+            Ok(matches!(
+                cell(name)?,
+                rusqlite::types::ValueRef::Integer(1) | rusqlite::types::ValueRef::Real(1.0)
+            ))
+        };
+        let limits_json = crate::cli_cell::string(cell("limits")?);
+        let key = omni_store::keys::ApiKey {
+            id: crate::cli_cell::string(cell("id")?),
+            label: String::new(),
+            prefix: String::new(),
+            hash: String::new(),
+            model_allowlist: None,
+            lone_allowlist: Vec::new(),
+            limits: omni_store::keys::parse_stored_limits(&limits_json),
+            body_logging_opt_out: flag("body_logging_opt_out")?,
+            smart_routing: flag("smart_routing")?,
+            created_at: 0,
+            revoked_at: None,
+            expires_at: None,
+            guardrail_policy: None,
+        };
+        let mut fields = Vec::new();
+        for (name, column) in [
+            ("id", "id"),
+            ("label", "label"),
+            ("prefix", "prefix"),
+            ("guardrailPolicy", "guardrail_policy"),
+            ("createdAt", "created_at"),
+            ("revokedAt", "revoked_at"),
+            ("expiresAt", "expires_at"),
+        ] {
+            fields.push((name.encode_utf16().collect(), raw(column)?));
+        }
+        out.push(CliKey {
+            key,
+            allowlist_json: match cell("model_allowlist")? {
+                rusqlite::types::ValueRef::Null => None,
+                v => Some(crate::cli_cell::string(v)),
+            },
+            fields: JsValue::Object(fields),
+        });
+    }
+    Ok(out)
+}
 
 pub struct CreateKey {
     pub label: String,
@@ -360,9 +435,9 @@ pub fn set_guardrail(store: &SqliteStore, id: &str, policy: Option<&str>) -> Res
 }
 
 fn require_key(store: &SqliteStore, id: &str) -> Result<(), String> {
-    if omni_store::keys::get_operator(store.connection(), id)
+    if cli_rows(store, Some(id))
         .map_err(|e| e.to_string())?
-        .is_none()
+        .is_empty()
     {
         return Err("BAD_REQUEST: no such api key".into());
     }
@@ -390,6 +465,7 @@ pub fn revoke(store: &SqliteStore, id: &str, now: i64) -> Result<(), String> {
 
 /// Explicit public projection: never serialize the stored hash.
 pub struct KeyListing {
+    pub cells: Vec<JsValue>,
     /// The listing for display and editing: well-formed limits only, and
     /// the complete `limitUsage` with model names as they print (a lone
     /// surrogate as U+FFFD, the bytes stdout carries in both builds).
@@ -402,6 +478,13 @@ pub struct KeyListing {
 }
 
 impl KeyListing {
+    pub fn cell(&self, index: usize, name: &str) -> &JsValue {
+        static UNDEFINED: JsValue = JsValue::Undefined;
+        self.cells
+            .get(index)
+            .and_then(|v| crate::settings_value::get(v, name))
+            .unwrap_or(&UNDEFINED)
+    }
     /// Replace a mutation result with the pre-write target projection. Reading
     /// after UPDATE would leak a concurrent writer's state into this response.
     pub fn capture_mutation<F>(
@@ -419,8 +502,7 @@ impl KeyListing {
         let mut captured = project_keys(
             store,
             now,
-            omni_store::keys::operator_rows(store.connection(), Some(id))
-                .map_err(|e| e.to_string())?,
+            cli_rows(store, Some(id)).map_err(|e| e.to_string())?,
         )?;
         let index = captured.data["keys"]
             .as_array()
@@ -430,6 +512,9 @@ impl KeyListing {
             .ok_or("BAD_REQUEST: no such api key")?;
         let written = write()?;
         captured.data["keys"][index][field] = value.clone();
+        if let Some(cells) = captured.cells.get_mut(index) {
+            crate::settings_value::set(cells, field, JsValue::from(&value));
+        }
         if field == "modelAllowlist" {
             captured.allowlists[index] = omni_ir::jsjson::JsValue::from(&value);
         }
@@ -442,6 +527,7 @@ impl KeyListing {
         let key = &mut captured.data["keys"][index];
         key["limitUsage"] = Value::Array(usage.iter().map(crate::api::lossy).collect());
         self.data["keys"] = Value::Array(vec![key.clone()]);
+        self.cells = captured.cells.get(index).cloned().into_iter().collect();
         self.allowlists = vec![captured.allowlists[index].clone()];
         self.limits_js = vec![captured.limits_js[index].clone()];
         self.usage_js = vec![omni_ir::jsjson::JsValue::Array(usage)];
@@ -459,7 +545,15 @@ impl KeyListing {
                     "modelAllowlist" => *value = self.allowlists[index].clone(),
                     "limits" => *value = self.limits_js[index].clone(),
                     "limitUsage" => *value = self.usage_js[index].clone(),
-                    _ => {}
+                    _ => {
+                        if let Some(raw) = self
+                            .cells
+                            .get(index)
+                            .and_then(|v| crate::settings_value::get(v, &name))
+                        {
+                            *value = raw.clone();
+                        }
+                    }
                 }
             }
         }
@@ -483,37 +577,30 @@ pub fn list_keys(store: &SqliteStore, now: i64) -> Result<KeyListing, String> {
     project_keys(
         store,
         now,
-        omni_store::keys::list_operator(store.connection()).map_err(|e| e.to_string())?,
+        cli_rows(store, None).map_err(|e| e.to_string())?,
     )
 }
-fn project_keys(
-    store: &SqliteStore,
-    now: i64,
-    rows: Vec<omni_store::keys::OperatorKey>,
-) -> Result<KeyListing, String> {
+fn project_keys(store: &SqliteStore, now: i64, rows: Vec<CliKey>) -> Result<KeyListing, String> {
     let mut keys = Vec::new();
     let mut allowlists = Vec::new();
     let mut limits_js = Vec::new();
     let mut usage_js = Vec::new();
-    for omni_store::keys::OperatorKey {
+    let mut cells = Vec::new();
+    for CliKey {
         key,
         allowlist_json: raw,
-        created_at,
-        expires_at,
-        revoked_at,
-        ..
+        fields,
     } in rows
     {
         allowlists.push(match raw {
             None => omni_ir::jsjson::JsValue::Null,
             Some(raw) => crate::operator_json::parse(&raw).map_err(|detail| {
-                omni_store::StoreError::StoredJson {
+                crate::cli_error::store(omni_store::StoreError::StoredJson {
                     table: "api_keys",
                     column: "model_allowlist",
                     row_id: key.id.clone(),
                     detail: detail.into(),
-                }
-                .to_string()
+                })
             })?,
         });
         let allowlist = Value::Null;
@@ -530,9 +617,17 @@ fn project_keys(
         let usage: Vec<Value> = readings.iter().map(crate::api::lossy).collect();
         limits_js.push(exact);
         usage_js.push(omni_ir::jsjson::JsValue::Array(readings));
-        keys.push(json!({"id":key.id,"label":key.label,"prefix":key.prefix,"modelAllowlist":allowlist,"limits":limits,"limitUsage":usage,"bodyLoggingOptOut":key.body_logging_opt_out,"createdAt":created_at,"revokedAt":revoked_at,"expiresAt":expires_at,"guardrailPolicy":key.guardrail_policy,"smartRouting":key.smart_routing}));
+        let mut projected = json!({"id":null,"label":null,"prefix":null,"modelAllowlist":allowlist,"limits":limits,"limitUsage":usage,"bodyLoggingOptOut":key.body_logging_opt_out,"createdAt":null,"revokedAt":null,"expiresAt":null,"guardrailPolicy":null,"smartRouting":key.smart_routing});
+        if let JsValue::Object(fields) = &fields {
+            for (name, value) in fields {
+                projected[String::from_utf16_lossy(name)] = crate::api::lossy(value);
+            }
+        }
+        keys.push(projected);
+        cells.push(fields);
     }
     Ok(KeyListing {
+        cells,
         data: json!({"keys":keys}),
         allowlists,
         limits_js,

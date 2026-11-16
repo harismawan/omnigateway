@@ -78,7 +78,7 @@ pub fn clear_bodies(
 }
 
 // Bun SQLite replaces malformed TEXT bytes, but keeps other cell types distinct.
-fn bun_cell(cell: rusqlite::types::ValueRef<'_>) -> rusqlite::types::Value {
+pub(crate) fn bun_cell(cell: rusqlite::types::ValueRef<'_>) -> rusqlite::types::Value {
     match cell {
         rusqlite::types::ValueRef::Text(bytes) => {
             rusqlite::types::Value::Text(String::from_utf8_lossy(bytes).into_owned())

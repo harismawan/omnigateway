@@ -236,8 +236,8 @@ pub fn run(
         "revoke" => {
             let question = format!(
                 "revoke key \"{}\" ({}…)?",
-                key["label"].as_str().expect("stored label"),
-                key["prefix"].as_str().expect("stored prefix")
+                omni_control::cli_cell::scalar_string(listing.cell(index, "label")),
+                omni_control::cli_cell::scalar_string(listing.cell(index, "prefix"))
             );
             if !has("yes") {
                 if !std::io::stdin().is_terminal() {
@@ -284,9 +284,9 @@ pub fn run(
         "id",
         id,
         "label",
-        key["label"].as_str().expect("stored label"),
+        omni_control::cli_cell::scalar_string(listing.cell(index, "label")),
         "prefix",
-        key["prefix"].as_str().expect("stored prefix")
+        omni_control::cli_cell::scalar_string(listing.cell(index, "prefix"))
     );
     Ok(match command {
         "limits" => {
@@ -304,14 +304,21 @@ pub fn run(
             }
         }
         "expiry" => {
-            if key["expiresAt"].is_null() {
+            if matches!(
+                listing.cell(index, "expiresAt"),
+                omni_ir::jsjson::JsValue::Null
+            ) {
                 format!("{head}\nexpires: never")
             } else {
                 format!(
                     "{head}\nexpires: {}{}",
                     crate::output::time(&key["expiresAt"]),
-                    if key["revokedAt"].is_null()
-                        && key["expiresAt"].as_f64().is_some_and(|v| v <= now as f64)
+                    if matches!(
+                        listing.cell(index, "revokedAt"),
+                        omni_ir::jsjson::JsValue::Null
+                    ) && omni_control::cli_cell::scalar_number(listing.cell(index, "expiresAt"))
+                        .partial_cmp(&(now as f64))
+                        != Some(std::cmp::Ordering::Greater)
                     {
                         format!(" {}", paint(31, "(expired)"))
                     } else {
@@ -328,9 +335,14 @@ pub fn run(
                 "off"
             }
         ),
-        "guardrail" => match key["guardrailPolicy"].as_str() {
-            None => format!("{head}\npolicy: none; requests are not judged"),
-            Some(p) => format!("{head}\npolicy:\n{p}"),
+        "guardrail" => match listing.cell(index, "guardrailPolicy") {
+            omni_ir::jsjson::JsValue::Null => {
+                format!("{head}\npolicy: none; requests are not judged")
+            }
+            p => format!(
+                "{head}\npolicy:\n{}",
+                omni_control::cli_cell::scalar_string(p)
+            ),
         },
         "models" => {
             let models = omni_control::operator_json::models_detail(&listing.allowlists[index])

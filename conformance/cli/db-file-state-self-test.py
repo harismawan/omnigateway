@@ -22,12 +22,14 @@ if "--root" in sys.argv:
         (root / "unexpected-directory").mkdir(exist_ok=True)
     sys.exit(result.returncode)
 
+import driver_env
+
 binary = str(Path(os.environ.get("OMNI_CLI_BIN", "target/debug/omni")).resolve())
 histogram = {}
 for mutation in ("file", "mode", "directory"):
     env = dict(os.environ, OMNI_CLI_BIN=str(Path(__file__).resolve()),
                DB_STATE_REAL_BIN=binary, DB_STATE_MUTATION=mutation)
-    result = subprocess.run(["bun", "conformance/cli/db-restore-swap.ts", "--compare"],
+    result = subprocess.run(["bun", "--no-env-file", "conformance/cli/db-restore-swap.ts", "--compare"],
                             env=env, capture_output=True)
     log = Path(f"/tmp/opencode/e1-e5/db16-mutation-{mutation}.log")
     log.write_bytes(result.stdout + result.stderr)
@@ -45,7 +47,7 @@ with tempfile.TemporaryDirectory(dir="/tmp/opencode/e1-e5", prefix="db18-special
     node = Path(root) / "node"
     os.mkfifo(node)
     def capture():
-        return subprocess.check_output(["bun", "-e", 'import {fileState} from "./conformance/cli/db-file-state.ts"; console.log(JSON.stringify(fileState(process.argv[1])))', root])
+        return subprocess.check_output(["bun", "--no-env-file", "-e", 'import {fileState} from "./conformance/cli/db-file-state.ts"; console.log(JSON.stringify(fileState(process.argv[1])))', root])
     before = capture()
     node.unlink()
     with socket.socket(socket.AF_UNIX) as sock:

@@ -1,5 +1,6 @@
 """Independent review probe.py/quota.py malformed-row cases."""
 import os, pathlib, subprocess, sqlite3, json, shutil, tempfile, hashlib
+import driver_env
 root=pathlib.Path(tempfile.mkdtemp(prefix='/tmp/opencode/e1-e5/status-rows-'))
 binary=pathlib.Path(os.environ['OMNI_CLI_BIN']).resolve()
 commands=[[shutil.which('bun'),'--no-env-file',str(pathlib.Path.cwd()/'apps/cli/src/index.ts')],[str(binary)]]

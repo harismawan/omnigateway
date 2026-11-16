@@ -1,5 +1,6 @@
 // Frozen control oracle: deterministic rival commit after set, before summary.
 
+import "./driver-env.ts";
 import { Database } from "bun:sqlite";
 import { strict as assert } from "node:assert";
 import { mkdtempSync, rmSync } from "node:fs";

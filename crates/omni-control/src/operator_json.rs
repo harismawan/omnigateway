@@ -207,6 +207,7 @@ mod tests {
             let earlier = parse(&format!("{}0{}", "[".repeat(512), "]".repeat(512))).expect("deep array");
             let later = parse("[{\"toString\":null}]").expect("error array");
             let listing = crate::keys::KeyListing {
+                cells: vec![JsValue::Object(vec![]), JsValue::Object(vec![])],
                 data: serde_json::json!({"keys":[{"modelAllowlist":null},{"modelAllowlist":null}]}),
                 allowlists: vec![earlier, later],
                 limits_js: vec![JsValue::Null, JsValue::Null],

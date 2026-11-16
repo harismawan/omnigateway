@@ -7,6 +7,7 @@
 // The last block is the review's own repro: keys created over `/api` by the
 // Rust gateway (`OMNI_GATEWAY_BIN`, default `target/debug/omnigateway`), then
 // listed by both CLIs from copies of that one database.
+import "./driver-env.ts";
 import { Database } from "bun:sqlite";
 import { strict as assert } from "node:assert";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";

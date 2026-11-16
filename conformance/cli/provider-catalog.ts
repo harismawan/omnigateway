@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import "./driver-env.ts";
 /**
  * Generates the Rust CLI's built-in provider descriptors from the frozen TS
  * registry, never from a hand-copied table.

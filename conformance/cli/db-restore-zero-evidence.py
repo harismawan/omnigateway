@@ -6,6 +6,7 @@ and db19-sqlite (reviewer's driver linked to bundled SQLite).
 Recreate with r5 columns.py ONLY=valid-log; never normalize arbitrary DB bytes.
 """
 import json
+import driver_env
 import re
 import sqlite3
 import subprocess
@@ -54,7 +55,7 @@ with tempfile.TemporaryDirectory(prefix="db20-zero-", dir="/tmp/opencode") as tm
         assert not r.stderr
         assert r.stdout.splitlines() == ['version=3.54.1', 'integrity_check=ok ', 'value=["key",0,1,0,0,0,0,0.0,"real"] ']
         js = 'import{Database}from"bun:sqlite";let d=new Database(process.argv[1]);console.log(JSON.stringify([d.query("select sqlite_version() as v").get().v,d.query("pragma integrity_check").get().integrity_check,d.query(process.argv[2]).get().value]));d.close()'
-        r = subprocess.run(["bun", "-e", js, str(p), sql], capture_output=True, text=True, check=True)
+        r = subprocess.run(["bun", "--no-env-file", "-e", js, str(p), sql], capture_output=True, text=True, check=True)
         assert not r.stderr
         assert json.loads(r.stdout) == ['3.53.4', 'ok', '["key",0,1,0,0,0,0,0.0,"real"]']
         assert p.read_bytes() == raw

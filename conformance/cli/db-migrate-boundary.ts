@@ -1,4 +1,5 @@
 // Deliberately Rust-only: the accepted D4 path must not contact a server.
+import "./driver-env.ts";
 import { strict as assert } from "node:assert";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";

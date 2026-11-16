@@ -107,17 +107,21 @@ pub fn run(command: &str, flags: &HashMap<String, String>) -> Result<String, Str
     let ctx = crate::context::resolve(flags)?;
     let base = ctx.base_url()?;
     let store = ctx.open()?;
-    let models = omni_control::models::list(&store)?;
+    let models = omni_control::models::cli_list(&store)?;
+    let credentials = omni_control::credentials::cli_rows(&store)?;
     let descriptions = models
         .iter()
-        .map(|m| describe(m, &store))
+        .map(|m| describe(m, &credentials))
         .collect::<Result<Vec<_>, _>>()?;
     if models.is_empty() {
         return Err("no virtual models configured; add one with `omni models put`".into());
     }
     let ids = models
         .iter()
-        .map(|m| string(get(m, "id").expect("model id")))
+        .map(|m| match get(m, "id").expect("model id") {
+            V::Null => String::new(),
+            id => omni_control::cli_cell::scalar_string(id),
+        })
         .collect::<Vec<_>>();
     let mut mapping = Vec::new();
     for (i, (label, _, _)) in SLOTS.iter().enumerate() {
@@ -265,15 +269,27 @@ pub fn run(command: &str, flags: &HashMap<String, String>) -> Result<String, Str
     })
 }
 
-fn describe(model: &V, store: &omni_store::SqliteStore) -> Result<V, String> {
+fn describe(model: &V, credentials: &[V]) -> Result<V, String> {
     let mut result = object();
     let mut label = get(model, "id").expect("id").clone();
     let mut context: Option<f64> = None;
     let mut output: Option<f64> = None;
-    let V::Array(targets) = get(model, "targets").ok_or("missing targets")? else {
-        return Err("model.targets is not iterable".into());
+    // JSON strings are iterable. Their character targets have no model fields,
+    // so neither limits nor a catalog label is selected by the frozen consumer.
+    let targets = match get(model, "targets").ok_or("missing targets")? {
+        V::Array(targets) => targets.as_slice(),
+        V::String(_) => &[],
+        V::Null => {
+            return Err("null is not an object (evaluating 'target of model.targets')".into());
+        }
+        V::Number(_) => return Err("number is not iterable".into()),
+        V::Bool(_) => return Err("boolean is not iterable".into()),
+        _ => return Err("{} is not iterable".into()),
     };
     for t in targets {
+        if matches!(t, V::Null) {
+            return Err("null is not an object (evaluating 'target.provider')".into());
+        }
         let provider = get(t, "provider").map(string).unwrap_or_default();
         let choice = omni_control::catalog::rows(Some(&provider))
             .into_iter()
@@ -284,28 +300,22 @@ fn describe(model: &V, store: &omni_store::SqliteStore) -> Result<V, String> {
         {
             label = v.clone();
         }
-        let mut stmt = store
-            .connection()
-            .prepare(
-                "SELECT id,auth_type,provider_data FROM credentials WHERE provider=? AND enabled=1",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([&provider], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                ))
+        let rows = credentials
+            .iter()
+            .filter(|c| {
+                get(c, "provider") == Some(&text(&provider))
+                    && get(c, "enabled") == Some(&V::Bool(true))
             })
-            .map_err(|e| e.to_string())?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
+            .map(|c| {
+                (
+                    string(get(c, "id").expect("credential id")),
+                    string(get(c, "authType").expect("auth type")),
+                    get(c, "providerData").expect("provider data"),
+                )
+            })
+            .collect::<Vec<_>>();
         let pin = rows.iter().find(|(id, _, data)| {
-            get(t, "credentialId") == Some(&text(id))
-                && operator_json::parse(data)
-                    .ok()
-                    .is_some_and(|d| serves_pin(t, id, &provider, &d))
+            get(t, "credentialId") == Some(&text(id)) && serves_pin(t, id, &provider, data)
         });
         let auths = if let Some((_, a, _)) = pin {
             vec![a.as_str()]
