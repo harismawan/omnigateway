@@ -40,6 +40,67 @@ fn unavailable() -> SmartDecision {
     })
 }
 
+/// Lazy like frozen `screenFirst`: constructing this outcome does not screen.
+/// The SSE head can therefore be sent while classification is still pending.
+pub fn screen_first(
+    deps: Arc<Deps>,
+    mut req: Request,
+    policy: Option<String>,
+    surface: &'static str,
+) -> dispatch::Dispatched {
+    let own = Arc::new(Mutex::new(RequestLog::new(
+        req.request_id.clone(),
+        req.route_started_at,
+        0,
+    )));
+    locked(&own).requested_model = req.request.model.clone();
+    let log = own.clone();
+    let events = Box::pin(async_stream::stream! {
+        let decision = check_confidentiality(deps.clone(), &req).await;
+        let (local_model, notes) = match decision {
+            SmartDecision::Refused(refusal) => {
+                let mut refused = dispatch::refused(&deps, &req, &refusal, surface);
+                *locked(&log) = locked(&refused.log).clone();
+                while let Some(event) = refused.events.next().await { yield event; }
+                return;
+            }
+            SmartDecision::Proceed { local_model, notes } => (local_model, notes),
+        };
+        // Guardrail remains fail closed until its separate implementation.
+        if let Some(refusal) = dispatch::screen(policy.as_deref(), false, &deps.holder.load().routing.settings) {
+            let mut refused = dispatch::refused(&deps, &req, &refusal, surface);
+            *locked(&log) = locked(&refused.log).clone();
+            locked(&log).degradations.extend(notes);
+            while let Some(event) = refused.events.next().await { yield event; }
+            return;
+        }
+        let client_model = req.request.model.clone();
+        if let Some(model) = &local_model { req.request.model.clone_from(model); }
+        let mut inner = dispatch::dispatch_with_options(deps, req, DispatchOptions { local_only: local_model.is_some(), ..DispatchOptions::default() });
+        while let Some(mut event) = inner.events.next().await {
+            if let (Some(model), Ok(StreamEvent::Start { model: start_model, .. })) = (&local_model, &mut event) {
+                start_model.clone_from(model);
+            }
+            {
+                let mut current = locked(&log);
+                *current = locked(&inner.log).clone();
+                current.requested_model.clone_from(&client_model);
+                for note in &notes { if !current.degradations.contains(note) { current.degradations.push(note.clone()); } }
+            }
+            yield event;
+        }
+        let mut current = locked(&log);
+        *current = locked(&inner.log).clone();
+        current.requested_model = client_model;
+        for note in notes { if !current.degradations.contains(&note) { current.degradations.push(note); } }
+    });
+    dispatch::Dispatched {
+        deadline: None,
+        events,
+        log: own,
+    }
+}
+
 /// Owns all started calls, including calls interrupted by a sibling or disconnect.
 struct CheckRow {
     deps: Arc<Deps>,
@@ -234,7 +295,9 @@ async fn classify(
             .any(|e| matches!(e, StreamEvent::Error { .. }))
     {
         omni_ir::stream::try_collect(events).ok().and_then(|r| {
-            parse_confidentiality(&json!({"content": r.content, "stopReason": r.stop_reason.as_str()}))
+            parse_confidentiality(
+                &json!({"content": r.content, "stopReason": r.stop_reason.as_str()}),
+            )
         })
     } else {
         None
