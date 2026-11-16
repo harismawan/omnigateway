@@ -59,7 +59,19 @@ pub(crate) fn validate_client_metadata(s: &SqliteStore) -> Result<()> {
     Ok(())
 }
 fn rows(s: &SqliteStore, id: Option<&str>) -> Result<Vec<JsValue>> {
-    rows_with(s, id, provider_data, false)
+    rows_with(
+        s,
+        id,
+        |raw, id| {
+            crate::cli_cell::json(raw).map_err(|_| {
+                Failure::internal(format!(
+                    "invalid credential provider_data: id={}",
+                    stringify(&crate::cli_cell::Cell::read(id).json())
+                ))
+            })
+        },
+        true,
+    )
 }
 fn rows_with(
     s: &SqliteStore,
@@ -152,7 +164,7 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
         ] {
             fields.push((
                 name,
-                sql_value(row.get_ref(column).map_err(Failure::internal)?),
+                crate::cli_cell::Cell::read(row.get_ref(column).map_err(Failure::internal)?).json(),
             ));
         }
         health.push(obj(fields));
@@ -178,7 +190,7 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
         ] {
             fields.push((
                 name,
-                sql_value(row.get_ref(column).map_err(Failure::internal)?),
+                crate::cli_cell::Cell::read(row.get_ref(column).map_err(Failure::internal)?).json(),
             ));
         }
         let value = obj(fields);
@@ -212,21 +224,30 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
         quota_json.push(value);
     }
     let settings = s.get_settings()?;
-    let credentials = rows(s, None)?;
+    // list() parses every credential's metadata before the per-id seeks.
+    rows(s, None)?;
+    let mut ids = s
+        .connection()
+        .prepare("SELECT id FROM credentials ORDER BY tier,label")
+        .map_err(Failure::internal)?;
+    let mut credentials = ids.query([]).map_err(Failure::internal)?;
     let mut last_used = Vec::new();
-    for c in credentials {
-        if let Some(JsValue::String(id)) = get(&c, "id") {
-            let at: Option<f64> = s
-                .connection()
-                .query_row(
-                    "SELECT MAX(at) FROM request_logs WHERE credential_id=?",
-                    [String::from_utf16_lossy(id)],
-                    |r| r.get(0),
-                )
-                .map_err(Failure::internal)?;
-            if let Some(at) = at {
-                last_used.push((id.clone(), JsValue::Number(at)));
-            }
+    while let Some(c) = credentials.next().map_err(Failure::internal)? {
+        let raw = c.get_ref(0).map_err(Failure::internal)?;
+        let id = crate::cli_cell::Cell::read(raw).json();
+        let at = s
+            .connection()
+            .query_row(
+                "SELECT MAX(at) FROM request_logs WHERE credential_id=?",
+                [crate::database::bun_cell(raw)],
+                |r| Ok(crate::cli_cell::Cell::read(r.get_ref(0)?).json()),
+            )
+            .map_err(Failure::internal)?;
+        if !matches!(at, JsValue::Null) {
+            last_used.push((
+                crate::cli_cell::scalar_string(&id).encode_utf16().collect(),
+                at,
+            ));
         }
     }
     let burn = quota
