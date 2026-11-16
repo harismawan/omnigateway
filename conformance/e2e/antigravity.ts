@@ -66,7 +66,7 @@ for (const code of [400, 401, 403, 404, 429, 500, 503]) {
 }
 for (const kind of ["bare", "missing-project", "refresh", "invalid-grant"]) cases.push({ name: kind, path: "/v1/chat/completions", kind });
 for (const profile of ["version", "all"]) cases.push({ name: `profile-${profile}`, path: "/v1/chat/completions", profile });
-// Exactly one pending listing row, owned by branch fix/rust-models-listing.
+// Listing row: plain equality since the catalog-aware /v1/models listing merged (b5597230).
 cases.push({ name: "listing-alias", path: "/v1/models", kind: "listing" });
 
 type Wire = { url: string; method: string; headers: string[]; body: string };
@@ -229,13 +229,10 @@ try {
   await Bun.write(join(work, "ts.rows.json"), JSON.stringify(ts, null, 2));
   await Bun.write(join(work, "rust.rows.json"), JSON.stringify(rust, null, 2));
   let failed = 0, equal = 0;
-  const classes = { "listing-pending": 0 };
+  const classes = {};
   console.log("| row | client | upstream | stored | scenario |\n|---|---|---|---|---|");
   for (const [i, c] of cases.entries()) {
     const a = ts[i]!, b = rust[i]!;
-    if (c.kind === "listing") {
-      if (valid(a,c) && valid(b,c) && !normalizedEqual(norm(a.clients[0]),norm(b.clients[0]))) { classes["listing-pending"]++; console.log(`| ${c.name} | listing-pending | equal | equal | expected |`); continue; }
-    }
     const client = a.clients.length === b.clients.length && a.clients.every((x: any, j: number) => normalizedEqual(norm(x),norm(b.clients[j])));
     const upstream = isDeepStrictEqual(a.upstream.map(wireMask),b.upstream.map(wireMask));
     const stored = isDeepStrictEqual(a.credentials,b.credentials) && isDeepStrictEqual(a.logs,b.logs);
@@ -244,7 +241,6 @@ try {
     if (pass) equal++; else failed++;
     console.log(`| ${c.name} | ${client} | ${upstream} | ${stored} | ${scenario ? "PASS" : "FAIL"} |`);
   }
-  if (classes["listing-pending"] !== 1) { failed++; console.error("FAILED exact listing-pending count",classes); }
   console.log(JSON.stringify({ rows: cases.length, equal, failed, classes, work }));
   process.exitCode = failed ? 1 : 0;
 } finally { stub.stop(true); }
