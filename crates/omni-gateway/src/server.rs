@@ -953,6 +953,17 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
         let smart =
             key.smart_routing && app.deps.holder.load().routing.settings.smart_router_enabled;
         let dispatched = if smart {
+            if let Some(classifier) = &app
+                .deps
+                .holder
+                .load()
+                .routing
+                .settings
+                .smart_router_classifier_model
+            {
+                app.limiter
+                    .record_override(&key.id, &key.limits, classifier);
+            }
             crate::screening::screen_first(
                 app.deps.clone(),
                 dreq,

@@ -1040,7 +1040,7 @@ async fn a_smart_routing_key_with_no_models_is_refused_as_unconfigured() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_smart_routing_key_with_models_set_is_refused_as_unavailable() {
+async fn a_smart_routing_key_already_local_bypasses_classification() {
     let g = screened(&[
         ("smartRouterEnabled", "true"),
         ("smartRouterClassifierModel", "\"m1\""),
@@ -1055,22 +1055,18 @@ async fn a_smart_routing_key_with_models_set_is_refused_as_unavailable() {
         r#"{"model":"m1","input":"hi"}"#,
     )
     .await;
-    assert_eq!(s, 502);
-    assert!(
-        b.contains("\"message\":\"confidentiality check unavailable\""),
-        "{b}"
-    );
+    assert_eq!(s, 200, "{b}");
     let f = stop(g).await;
     assert_eq!(
         screen_rows(&f),
         [[
             "ksr",
             "m1",
-            "502",
-            "UPSTREAM",
-            "0",
-            r#"["smart-router:unavailable"]"#,
-            "null"
+            "200",
+            "null",
+            "1",
+            r#"["smart-router:already-local"]"#,
+            "c0"
         ]]
     );
 }

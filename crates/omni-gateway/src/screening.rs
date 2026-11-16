@@ -277,10 +277,10 @@ async fn classify(
         while let Some(event) = dispatched.events.next().await {
             match event {
                 Ok(event) => events.push(event),
-                Err(_) => return false,
+                Err(error) => return Err(error.code),
             }
         }
-        true
+        Ok(())
     };
     let result = tokio::time::timeout(
         std::time::Duration::from_secs_f64(timeout_ms.max(0.0) / 1000.0),
@@ -289,7 +289,7 @@ async fn classify(
     .await;
     let log = locked(&dispatched.log);
     let timeout = result.is_err();
-    let verdict = if matches!(result, Ok(true))
+    let verdict = if matches!(result, Ok(Ok(())))
         && !events
             .iter()
             .any(|e| matches!(e, StreamEvent::Error { .. }))
@@ -307,11 +307,23 @@ async fn classify(
     (
         key,
         verdict,
-        if own_timeout { 504 } else { log.status },
+        if own_timeout {
+            504
+        } else if log.status == 0 {
+            match &result {
+                Ok(Err(code)) => i64::from(code.http_status()),
+                _ => 0,
+            }
+        } else {
+            log.status
+        },
         if own_timeout {
             Some("TIMEOUT".into())
         } else {
-            log.error_code.clone()
+            log.error_code.clone().or_else(|| match result {
+                Ok(Err(code)) => Some(code.as_str().into()),
+                _ => None,
+            })
         },
     )
 }
