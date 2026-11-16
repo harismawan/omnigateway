@@ -1,6 +1,6 @@
 # X3 independent review
 
-Verdict: **REQUEST CHANGES**. Five Important findings below; no Critical finding established. Final CLI verification still running.
+Verdict: **REQUEST CHANGES**. Five Important findings below; no Critical finding established. All requested runnable gates and six CLI corpora now finished.
 
 ## Findings first
 ### Important: health quota identifiers still pass through strict typed reads
@@ -70,7 +70,7 @@ The returned `Result` can fail only during authentication (body generation is in
 
 Own separate `cargo build --offline -p omni-cli`: exit 0, copied `omni-8d0c9c13`, SHA256 `c34130f80f10589670c389c45f4b6a657e7fb427e0ec9b5ba6eab1f8d7e2d1a4`. Own gateway SHA256 `e6c93b893e00ed1dc6ae35e61a6aa74004e6a62c00d2dde5ce7bb8918b9ec531`. Frozen binary SHA256 `f9cc6678a7d2bc2300a71b3aae98caff1aaedbcb2d811baee3dffd4325009d63`. Source builds are at requested HEAD; hash is not the implementer's copied binary (different build feature/artifact context).
 
-## Gates (completed so far)
+## Gates
 
 Quoted command/exit lines from files:
 
@@ -84,7 +84,7 @@ Quoted command/exit lines from files:
 
 No admin-routes invocation (reserved for controller).
 
-## Own probes (completed so far)
+## Own probes
 
 Health-extra: **182 pairs / 160 equal / 22 differences**, detailed above, every column in seeded credential_health and quota_windows across 13 classes, raw bodies identical in all 160 equal cases. Quick minimal repro adds **2 pairs / 2 differences** (duplicates of health-extra finding).
 
@@ -94,15 +94,22 @@ Extended: `operator-_feqp0x3`, **1,543 pairs / 1,361 equal / 182 different**, al
 
 Full counts by cell class for **every suite**: `probe-counts.md` (machine-readable `probe-summary.json`). Own probes **2,409 pairs / 2,166 equal / 243 different**, including minimal duplicate repros. All 243 differences map to four own-probe findings: 20 strict quota identifier/type reads + 2 BLOB arithmetic + 182 weight write-back + 32 POST tokenVersion + 7 duplicate minimal/shipped-schema/tier repros. The fifth finding comes from auditing the committed corpus's accepted rows. No accepted routing-strict/frozen-JSON rows are used to excuse own probe failures. Extra settings/key suite **35/35 equal** includes 7 successful key limits writes; incomplete settings bodies correctly produce matching 400s. Separate **full valid settings** supplement (`operator-jj4a_ufw`) **35/35 equal**, 14 successful settings PUTs + corresponding GETs over all JSON classes and nonfinite/negative-zero cells, plus 7 successful key limits writes. Mixed provider_data rows **42/42 equal** (`operator-7cbi5jk0`): healthy + malformed metadata credentials, **both with actual quota windows and samples**, all 14 JSON classes, quota/history/credential-health routes. Thus quota metadata success is not just an empty-window artifact.
 
-## CLI completed so far
+## CLI corpora — all six complete
 
-First sequential batch hit the harness's explicit **1200-second timeout** during wide, after first three suites passed; no final wide result produced. `cli-batch-timeout.exit` records the notified **143 (SIGTERM)**. No CLI corpus failure was asserted from that interruption. Restarted wide, extra, quota-json sequentially with a **3600-second** tool allowance, fresh fixtures, same independently built copied CLI. Original interrupted log retained; rerun logs use `-rerun.log`. This is a harness timeout, not a workspace test flake.
+First sequential batch hit the harness's explicit **1200-second timeout** during wide, after first three suites passed; no final wide result produced. `cli-batch-timeout.exit` records the notified **143 (SIGTERM)**. No CLI corpus failure was asserted from that interruption. Restarted wide, extra, quota-json sequentially with a **3600-second** tool allowance, fresh fixtures, same independently built copied CLI: all three finished successfully. Original interrupted log retained; rerun logs use `-rerun.log`. This is a harness timeout, not a workspace test flake.
 
 * stored-cells: **1,045 pairs, 0 failing**.
 * neighbors: **3,806 pairs, 0 failing**, explicit existing exclusions `random-create:2`, `unimplemented-credentials:4` retained.
 * neighbors-targeted: **8 pairs, 0 failing**.
+* wide: **4,236 pairs, 0 failing**, evidence `/tmp/opencode/cli-fix5/wide-pm8dvnoy`.
+* extra: **180 pairs, 0 failing**, evidence `/tmp/opencode/cli-fix5/extra-djh4kpr9`.
+* quota-json: **196 pairs, 0 failing**, classes `equal:151`, accepted `human-quota:45`; evidence `/tmp/opencode/cli-fix6/r6-quota-hvlw0sye`.
+* Total six CLI corpora: **9,471 pairs, 0 failing** (existing documented exclusions/classes retained).
 * `cli-neighbors.exit`: `env -i PATH=... HOME=/tmp/opencode/x3-review/cli-home PYTHONDONTWRITEBYTECODE=1 CLI_CONFORMANCE_ALLOW_OMNI=OMNI_CLI_BIN OMNI_CLI_BIN=/tmp/opencode/x3-review/omni-8d0c9c13 python3 conformance/cli/neighbors.py ; exit=0`.
 * `cli-neighbors-targeted.exit`: `env -i PATH=... HOME=/tmp/opencode/x3-review/cli-home PYTHONDONTWRITEBYTECODE=1 CLI_CONFORMANCE_ALLOW_OMNI=OMNI_CLI_BIN OMNI_CLI_BIN=/tmp/opencode/x3-review/omni-8d0c9c13 python3 conformance/cli/neighbors-targeted.py ; exit=0`.
+* `cli-wide.exit`: `env -i PATH=... HOME=/tmp/opencode/x3-review/cli-home PYTHONDONTWRITEBYTECODE=1 CLI_CONFORMANCE_ALLOW_OMNI=OMNI_CLI_BIN OMNI_CLI_BIN=/tmp/opencode/x3-review/omni-8d0c9c13 python3 conformance/cli/wide.py ; exit=0`.
+* `cli-extra.exit`: `env -i PATH=... HOME=/tmp/opencode/x3-review/cli-home PYTHONDONTWRITEBYTECODE=1 CLI_CONFORMANCE_ALLOW_OMNI=OMNI_CLI_BIN OMNI_CLI_BIN=/tmp/opencode/x3-review/omni-8d0c9c13 python3 conformance/cli/extra.py ; exit=0`.
+* `cli-quota-json.exit`: `env -i PATH=... HOME=/tmp/opencode/x3-review/cli-home PYTHONDONTWRITEBYTECODE=1 CLI_CONFORMANCE_ALLOW_OMNI=OMNI_CLI_BIN OMNI_CLI_BIN=/tmp/opencode/x3-review/omni-8d0c9c13 python3 conformance/cli/quota-json.py ; exit=0`.
 
 ## Verification limits / documented differences
 
