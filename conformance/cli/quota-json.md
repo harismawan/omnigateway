@@ -27,3 +27,7 @@ all frozen exit0. The seven human rows must match; no new accepted identities.
 Red against eabedf83: 148 equal, 45 human-quota, 3 JSON identity failures.
 The separate SQLite BLOB reads are distinct Uint8Array Map keys, not structural
 indexed-object keys. Scalar Map keys retain SameValueZero semantics.
+
+Green after 4c670bbe: 151 equal, 45 accepted human-quota, zero failures;
+all seven JSON identity fixtures and seven human identity fixtures match frozen.
+Only the JSON join changes; human matching and shared typed readers stay intact.
