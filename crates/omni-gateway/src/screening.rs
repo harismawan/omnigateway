@@ -233,14 +233,8 @@ async fn judge_with_model(
             api_key_id: req.api_key_id.clone(),
             result: None,
         };
-        let (_, verdict, status, error) = classify(
-            dispatched,
-            key.clone(),
-            settings.guardrail_timeout_ms,
-            true,
-            None,
-        )
-        .await;
+        let (_, verdict, status, error) =
+            classify(dispatched, key.clone(), settings.guardrail_timeout_ms, true).await;
         row.result = Some((status, error));
         if let Some(verdict) = verdict {
             locked(judge_cache()).set(key, verdict.into(), (deps.now)());
@@ -464,9 +458,7 @@ pub async fn check_confidentiality(deps: Arc<Deps>, req: &Request) -> SmartDecis
         completed: false,
     };
     let mut pending = FuturesUnordered::new();
-    let (stop, stopped) = tokio::sync::watch::channel(false);
     let mut confidential = false;
-    let mut failure = None;
     loop {
         while pending.len() < 4 {
             let Some((key, text)) = uncached.pop_front() else {
@@ -498,7 +490,6 @@ pub async fn check_confidentiality(deps: Arc<Deps>, req: &Request) -> SmartDecis
                 key,
                 settings.smart_router_timeout_ms,
                 false,
-                Some(stopped.clone()),
             ));
         }
         let Some((key, result, status, error)) = pending.next().await else {
@@ -515,23 +506,13 @@ pub async fn check_confidentiality(deps: Arc<Deps>, req: &Request) -> SmartDecis
             None => {
                 aggregate.row.status = status;
                 aggregate.row.error_code = error;
-                failure = Some(());
-                break;
+                aggregate.completed = true;
+                return unavailable();
             }
         }
     }
-    // Stop in-flight transports, but first let siblings with a whole reply
-    // already ready finish. Their usage and cache entries belong to this check.
-    stop.send_replace(true);
-    while let Some((key, result, _, _)) = pending.next().await {
-        if let Some(verdict) = result {
-            locked(smart_cache()).set(key, verdict.to_owned(), (deps.now)());
-        }
-    }
     aggregate.completed = true;
-    if failure.is_some() {
-        unavailable()
-    } else if confidential {
+    if confidential {
         local_decision(false)
     } else {
         SmartDecision::Proceed {
@@ -555,13 +536,7 @@ async fn classify(
     key: String,
     timeout_ms: f64,
     guardrail: bool,
-    stop: Option<tokio::sync::watch::Receiver<bool>>,
 ) -> (String, Option<&'static str>, i64, Option<String>) {
-    // An unpolled worker has not started a transport. Stop must not start it
-    // merely to drain the pool (FuturesUnordered is lazy).
-    if stop.as_ref().is_some_and(|stop| *stop.borrow()) {
-        return (key, None, 0, None);
-    }
     let mut events = Vec::new();
     let run = async {
         while let Some(event) = dispatched.events.next().await {
@@ -572,21 +547,11 @@ async fn classify(
         }
         Ok(())
     };
-    let timed = tokio::time::timeout(
+    let result = tokio::time::timeout(
         std::time::Duration::from_secs_f64(timeout_ms.max(0.0) / 1000.0),
         run,
-    );
-    let result = if let Some(mut stop) = stop {
-        tokio::select! {
-            biased;
-            result = timed => result,
-            _ = async {
-                if !*stop.borrow() { drop(stop.changed().await); }
-            } => return (key, None, 0, None),
-        }
-    } else {
-        timed.await
-    };
+    )
+    .await;
     let log = locked(&dispatched.log);
     let timeout = result.is_err();
     let verdict = if matches!(result, Ok(Ok(())))

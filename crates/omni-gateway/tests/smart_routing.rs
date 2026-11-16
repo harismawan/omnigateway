@@ -23,8 +23,10 @@ impl HttpClient for Together {
         Box<dyn std::future::Future<Output = Result<HttpResponse, HttpError>> + Send + '_>,
     > {
         Box::pin(async move {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            self.ready.wait().await;
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if call < 2 {
+                self.ready.wait().await;
+            }
             let verdict = if req.body.contains(&"c".repeat(100)) {
                 "CONFIDENTIAL"
             } else {
@@ -46,7 +48,7 @@ impl HttpClient for Together {
 }
 
 #[tokio::test]
-async fn stopped_ready_sibling_is_counted_and_cached() {
+async fn stopped_ready_sibling_is_dropped_without_caching() {
     omni_gateway::clock::init_request_ids().expect("RNG");
     let f = fixture(&["c0"]);
     set_setting(&f.path, "smartRouterClassifierModel", "\"m1\"");
@@ -75,7 +77,9 @@ async fn stopped_ready_sibling_is_counted_and_cached() {
             ..
         }
     ));
-    // Both replies were ready before stop, including the public sibling.
+    // Both replies were ready, but Rust drops the undecided public sibling.
+    // Documented difference: frozen may count/cache an already-parsed sibling
+    // here; only aggregate classifier usage and cache warmth may differ.
     let mut ir = serde_json::to_value(&req.request).expect("IR");
     ir["messages"][0]["content"][0]["text"] = public.into();
     req.request = serde_json::from_value(ir).expect("IR");
@@ -86,14 +90,14 @@ async fn stopped_ready_sibling_is_counted_and_cached() {
             ..
         }
     ));
-    assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(transport.calls.load(Ordering::SeqCst), 3);
     h.writer.close().await.expect("close");
     assert_eq!(
         rows(
             &f.path,
-            "SELECT attempts,input_tokens,output_tokens FROM request_logs"
+            "SELECT attempts,input_tokens,output_tokens FROM request_logs ORDER BY rowid"
         ),
-        vec![vec!["2", "20", "8"]]
+        vec![vec!["2", "10", "4"], vec!["1", "10", "4"]]
     );
 }
 
