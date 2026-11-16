@@ -28,7 +28,7 @@ Done so far: slice 1 gateway (custom provider, /v1/*, /health, writer, limiter, 
 - [ ] B10 (M) quota poller + oauthUsage + quota routes + resets/redeem
 
 ## C. Request-path features
-- [ ] C1 (M) smart router + guardrail (replace screen() stub)
+- [x] C1 (M) smart router + guardrail (replace screen() stub) — merged 69117cde, approved after 2 review rounds + user ruling on the classifier scheduling difference (c1-rereview.md, docs/smart-router-compatibility.md); post-merge gates green
 - [x] C2 (M) RTK with its tests — merged c7fdf1f3 (reviewed)  (C3 ponytail: DROPPED, operator plans to remove the feature)
 
 ## D. Cluster
