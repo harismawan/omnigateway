@@ -512,8 +512,8 @@ async function run(label: string, binary: string): Promise<Row[]> {
       }
       if (done.id) {
         const stored = await storedRow(done.id);
-        const projectId = ["empty-onboard", "onboard-failure", "load-failure"].includes(scenario) ? "" : scenario === "onboard" ? "onboard-project" : "fixture-project";
-        const tier = ["onboard", "empty-onboard", "onboard-failure"].includes(scenario) ? "chosen-tier" : scenario === "load-failure" ? undefined : "fixture-tier";
+        const projectId = ["empty-onboard", "onboard-failure"].includes(scenario) ? "" : ["onboard", "load-failure"].includes(scenario) ? "onboard-project" : "fixture-project";
+        const tier = ["onboard", "empty-onboard", "onboard-failure"].includes(scenario) ? "chosen-tier" : scenario === "load-failure" ? "legacy-tier" : "fixture-tier";
         const data = JSON.parse(stored.provider_data);
         if (stored.provider !== "antigravity" || stored.auth_type !== "oauth" || stored.enabled !== 1 || stored.access_token !== "google-new-access" || stored.refresh_token !== "google-new-refresh" || stored.account_email !== (scenario === "email-failure" ? null : "google@example.test") || data.projectId !== projectId || data.tier !== tier || stored.token_version !== (scenario === "reconnect" ? 8 : 0) || stored.disabled_at !== null || stored.disabled_reason !== null) throw Error(`Google ${scenario} invalid persistence`);
         await Bun.write(join(root, `google-${scenario}.raw.json`), JSON.stringify(stored, null, 2));
