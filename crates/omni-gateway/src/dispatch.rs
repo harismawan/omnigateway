@@ -182,6 +182,29 @@ pub struct Request {
     pub route_started_at: i64,
 }
 
+/// Per-call choices, independent of the installation's dispatch dependencies.
+#[derive(Debug, Clone, Copy)]
+pub struct DispatchOptions {
+    /// Whether operator transforms may run. Both are currently unported;
+    /// screening callers explicitly opt out rather than relying on defaults.
+    pub request_transforms: bool,
+    /// Revalidate the model against dispatch's own snapshot before routing.
+    pub local_only: bool,
+    /// Whether attempt selection writes pending/route rows. Classifier calls
+    /// have their own completed row, never the parent's `onRoute` callback.
+    pub on_route: bool,
+}
+
+impl Default for DispatchOptions {
+    fn default() -> Self {
+        Self {
+            request_transforms: true,
+            local_only: false,
+            on_route: true,
+        }
+    }
+}
+
 /// `DispatchOutcome`: the events and the log they fill in.
 pub struct Dispatched {
     pub deadline: Option<tokio::time::Instant>,
@@ -395,55 +418,6 @@ pub struct Refusal {
     pub notes: &'static [&'static str],
 }
 
-/// Pre-dispatch screening, failing closed (`screenFirst` in
-/// `guardrail/judge.ts`, with `checkConfidentiality` and `judge`).
-///
-/// Neither the smart-router classifier nor the guardrail is ported, so a key
-/// that needs screening is always refused. Where TS refuses for missing
-/// configuration the refusal is TS's own; where TS would call a classifier,
-/// the refusal is the one TS gives when that call fails, without the call.
-/// `None` is the unscreened path: neither flag, or smart routing while
-/// `smartRouterEnabled` is off.
-pub fn screen(
-    guardrail_policy: Option<&str>,
-    smart_routing: bool,
-    settings: &omni_store::settings::Settings,
-) -> Option<Refusal> {
-    // `key.smartRouting ? settings : null` then `smartRouterEnabled === true`.
-    if smart_routing && settings.smart_router_enabled {
-        // `checkConfidentiality` step 1. Ported only as far as "both set":
-        // the local-only check needs the classifier this slice lacks, and
-        // either answer refuses.
-        if settings.smart_router_classifier_model.is_none()
-            || settings.smart_router_local_model.is_none()
-        {
-            return Some(Refusal {
-                code: ErrorCode::Internal,
-                message: LOCAL_ONLY_MESSAGE,
-                notes: &["smart-router:unconfigured"],
-            });
-        }
-        return Some(Refusal {
-            code: ErrorCode::Upstream,
-            message: "confidentiality check unavailable",
-            notes: &["smart-router:unavailable"],
-        });
-    }
-    guardrail_policy?;
-    if settings.guardrail_model.is_none() {
-        return Some(Refusal {
-            code: ErrorCode::Internal,
-            message: "usage policy check is not configured",
-            notes: &["guardrail:unconfigured"],
-        });
-    }
-    Some(Refusal {
-        code: ErrorCode::Upstream,
-        message: "usage policy check unavailable",
-        notes: &["guardrail:unavailable"],
-    })
-}
-
 /// `LOCAL_ONLY_MESSAGE`.
 pub const LOCAL_ONLY_MESSAGE: &str = "confidential routing is not configured";
 
@@ -475,8 +449,17 @@ pub fn refused(deps: &Deps, req: &Request, refusal: &Refusal, surface: &str) -> 
 
 /// `dispatch`. Returns once routing has been decided; the attempts run as
 /// the returned stream is pulled.
-#[allow(clippy::too_many_lines)]
 pub fn dispatch(deps: Arc<Deps>, req: Request) -> Dispatched {
+    dispatch_with_options(deps, req, DispatchOptions::default())
+}
+
+/// `dispatch` with the explicit screening-call choices used by classifiers.
+#[allow(clippy::too_many_lines)]
+pub fn dispatch_with_options(
+    deps: Arc<Deps>,
+    req: Request,
+    options: DispatchOptions,
+) -> Dispatched {
     let started_at = (deps.now)();
     deps.health.reconcile(&deps.holder);
     let snapshot = deps.holder.load();
@@ -508,7 +491,13 @@ pub fn dispatch(deps: Arc<Deps>, req: Request) -> Dispatched {
 
     // RTK and ponytail run here in TS; both default off and neither is
     // ported, so the request goes as sent (see the report).
-    let model = match resolve_model(&req.request.model, &snapshot.routing, &deps.providers) {
+    let resolved = if options.local_only {
+        omni_router::local_only_model(&req.request.model, &snapshot.routing, &deps.providers)
+            .ok_or_else(|| GatewayError::new(ErrorCode::Internal, LOCAL_ONLY_MESSAGE))
+    } else {
+        resolve_model(&req.request.model, &snapshot.routing, &deps.providers)
+    };
+    let model = match resolved {
         Ok(m) => m.into_owned(),
         Err(e) => {
             let events = fail(&log, e.code, e.message);
@@ -600,6 +589,7 @@ pub fn dispatch(deps: Arc<Deps>, req: Request) -> Dispatched {
         log: log.clone(),
         started_at,
         deadline,
+        on_route: options.on_route,
     });
     Dispatched {
         events,
@@ -619,6 +609,7 @@ struct RunState {
     log: Arc<Mutex<RequestLog>>,
     started_at: i64,
     deadline: Option<tokio::time::Instant>,
+    on_route: bool,
 }
 
 /// Awaits `f` unless the deadline passes first.
@@ -701,7 +692,7 @@ fn run(mut s: RunState) -> EventsStream {
             // `onRoute`: the pending row on the first attempt, a route update on each failover.
             // A refusal is counted in the writer's `dropped` and warned about
             // by the writer task, rate-limited; never a line per request.
-            if began {
+            if s.on_route && began {
                 deps.writer.send(LogEvent::Route {
                     id: rid.clone(),
                     target: RouteTarget {
@@ -710,7 +701,7 @@ fn run(mut s: RunState) -> EventsStream {
                         credential_id: c.credential.id.clone(),
                     },
                 });
-            } else {
+            } else if s.on_route {
                 began = true;
                 deps.writer.send(LogEvent::Begin(PendingLog {
                     id: rid.clone(),

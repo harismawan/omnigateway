@@ -945,14 +945,33 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
             route_started_at: started_at,
         };
         // After admission: a refused screen still counts as one request.
-        let refusal = dispatch::screen(
-            key.guardrail_policy.as_deref(),
-            key.smart_routing,
-            &app.deps.holder.load().routing.settings,
-        );
-        let dispatched = match &refusal {
-            Some(r) => dispatch::refused(&app.deps, &dreq, r, sname),
-            None => dispatch::dispatch(app.deps.clone(), dreq),
+        let smart =
+            key.smart_routing && app.deps.holder.load().routing.settings.smart_router_enabled;
+        let dispatched = if smart || key.guardrail_policy.is_some() {
+            if let Some(classifier) = &app.deps.holder.load().routing.settings.guardrail_model {
+                app.limiter
+                    .record_override(&key.id, &key.limits, classifier);
+            }
+            if let Some(classifier) = &app
+                .deps
+                .holder
+                .load()
+                .routing
+                .settings
+                .smart_router_classifier_model
+            {
+                app.limiter
+                    .record_override(&key.id, &key.limits, classifier);
+            }
+            crate::screening::screen_first(
+                app.deps.clone(),
+                dreq,
+                key.guardrail_policy.clone(),
+                smart,
+                sname,
+            )
+        } else {
+            dispatch::dispatch(app.deps.clone(), dreq)
         };
         let response_deadline = dispatched.deadline;
         fin.outcome = Some(dispatched.log.clone());
@@ -1065,12 +1084,27 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
                 (200, omni_ir::jsjson::to_string(&rendered))
             }
         };
+        let mut response_headers = limit_headers(&headroom, admitted);
+        if smart && status == 200 {
+            let log = fin
+                .outcome
+                .as_ref()
+                .expect("dispatch log")
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let route = if log.degradations.iter().any(|n| n == "smart-router:public") {
+                "external"
+            } else {
+                "local"
+            };
+            response_headers.push(("x-omni-route".into(), route.into()));
+        }
         fin.complete(false, None);
         Ok(json_response(
             status,
             APPLICATION_JSON,
             body,
-            &limit_headers(&headroom, admitted),
+            &response_headers,
         ))
     }
     .await;

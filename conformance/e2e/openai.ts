@@ -26,7 +26,7 @@ const env = {
   OMNI_STATIC_DIR: join(work, "absent"),
 };
 async function cli(args: string[], input?: string) {
-  const p = Bun.spawn(["bun", "apps/cli/src/index.ts", "--root", seed, "--json", ...args], {
+  const p = Bun.spawn(["bun", "--no-env-file", "apps/cli/src/index.ts", "--root", seed, "--json", ...args], {
     cwd: resolve(import.meta.dir, "../.."),
     env,
     stdin: input ? new TextEncoder().encode(input) : "ignore",
