@@ -25,6 +25,7 @@
 
 pub mod bodies;
 pub mod health;
+mod maintenance;
 pub mod migrate;
 mod rows;
 pub mod usage;

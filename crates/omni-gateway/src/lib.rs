@@ -17,6 +17,7 @@ pub mod finish;
 pub mod jsc_json;
 pub mod load;
 pub mod logging;
+pub mod maintenance;
 pub mod models;
 mod output_budget;
 pub mod overlay;
@@ -38,63 +39,8 @@ use tokio::net::TcpListener;
 
 /// `STOP_DEADLINE_MS`.
 pub const STOP_DEADLINE: Duration = Duration::from_secs(5);
-/// `NODE_GRACE_MS`.
-const NODE_GRACE_MS: i64 = 60_000;
 /// `KEEPALIVE_MS`.
 pub const KEEPALIVE: Duration = Duration::from_secs(10);
-
-/// `heartbeat` then `sweepPending` (`store.maintenance.heartbeat`,
-/// `store.usage.sweepPending`): own pending rows, and pending rows of nodes
-/// with no live heartbeat, are completed as 499 `interrupted` with zero
-/// duration, through the writer like any other completion.
-fn sweep_pending(
-    store: &SqliteStore,
-    node_id: &str,
-    now: i64,
-) -> Result<Vec<omni_store::writer::RequestLog>, omni_store::StoreError> {
-    let c = store.connection();
-    c.execute(
-        "INSERT OR REPLACE INTO nodes (id, seen_at) VALUES (?, ?)",
-        rusqlite::params![node_id, now],
-    )?;
-    c.execute(
-        "DELETE FROM nodes WHERE seen_at < ?",
-        rusqlite::params![now - 86_400_000],
-    )?;
-    let mut stmt = c.prepare(
-        "SELECT id, at, api_key_id, requested_model, resolved_provider, resolved_model,
-                credential_id, attempts, input_tokens, output_tokens, cache_read_tokens,
-                cache_write_tokens, ttft_ms, cost_usd, degradations
-           FROM request_logs
-          WHERE state = 'pending'
-            AND (node_id = ? OR node_id NOT IN (SELECT id FROM nodes WHERE seen_at > ?))",
-    )?;
-    let rows = stmt.query_map(rusqlite::params![node_id, now - NODE_GRACE_MS], |r| {
-        let mut log = omni_store::writer::RequestLog::new(r.get::<_, String>(0)?, r.get(1)?, 499);
-        log.api_key_id = r.get(2)?;
-        log.requested_model = r.get(3)?;
-        log.resolved_provider = r.get(4)?;
-        log.resolved_model = r.get(5)?;
-        log.credential_id = r.get(6)?;
-        log.attempts = r.get(7)?;
-        log.input_tokens = r.get(8)?;
-        log.output_tokens = r.get(9)?;
-        log.cache_read_tokens = r.get(10)?;
-        log.cache_write_tokens = r.get(11)?;
-        log.ttft_ms = r.get(12)?;
-        log.cost_usd = r.get(13)?;
-        let degradations: String = r.get(14)?;
-        log.degradations = serde_json::from_str(&degradations).unwrap_or_default();
-        log.error_code = Some("interrupted".into());
-        log.duration_ms = 0;
-        Ok(log)
-    })?;
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row?);
-    }
-    Ok(out)
-}
 
 /// Pre-seeds every limited key in the snapshot: at once (the boot
 /// snapshot, and anything a refresh swapped in before this task started),
@@ -324,7 +270,11 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         let node_id = node_id.clone();
         tokio::task::spawn_blocking(move || {
             let store = SqliteStore::open(&path, offset).map_err(|e| e.to_string())?;
-            let swept = sweep_pending(&store, &node_id, now).map_err(|e| e.to_string())?;
+            omni_store::maintenance::heartbeat(store.connection(), &node_id, now)
+                .map_err(|e| e.to_string())?;
+            let mut recovery = omni_store::open_connection(&path).map_err(|e| e.to_string())?;
+            let swept = omni_store::writer::recover_pending(&mut recovery, &node_id, now, offset)
+                .map_err(|e| e.to_string())?;
             Ok::<_, String>((store, swept))
         })
         .await
@@ -362,14 +312,8 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
     )
     .map_err(|e| e.to_string())?;
     let handle = writer.handle();
-    if !swept.is_empty() {
-        let count = swept.len();
-        for log in swept {
-            if !handle.send(omni_store::writer::LogEvent::Finish(log)) {
-                tracing::warn!("request log writer full during the boot sweep");
-            }
-        }
-        tracing::info!(count = count, "retired interrupted requests");
+    if swept > 0 {
+        tracing::info!(count = swept, "retired interrupted requests");
     }
 
     let limiter = RateLimiter::new();
@@ -509,6 +453,13 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         clock::now_ms,
     ));
     let oauth_scheduler = oauth_refresher.start_scheduler(holder.clone());
+    let mut maintenance = maintenance::start(
+        path.clone(),
+        offset,
+        node_id.clone(),
+        handle.clone(),
+        Arc::new(omni_coord::MemoryCoord::new(omni_coord::system_clock())),
+    );
     let deps = Arc::new(dispatch::Deps {
         refresher: oauth_refresher,
         http,
@@ -581,10 +532,11 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         }
         drop(listener);
         let shutdown_until = tokio::time::Instant::now() + deadline;
+        drop(tokio::time::timeout_at(shutdown_until, maintenance.stop()).await);
         oauth_scheduler.abort();
         drop(oauth_scheduler.await);
         tracing::info!(reason = "signal", "shutdown requested");
-        if tokio::time::timeout(deadline, graceful.shutdown())
+        if tokio::time::timeout_at(shutdown_until, graceful.shutdown())
             .await
             .is_err()
         {

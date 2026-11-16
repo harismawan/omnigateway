@@ -44,6 +44,23 @@ mod pg_batch;
 mod sql;
 mod task;
 
+/// Persist recovery work directly, never through the request-path lossy queue.
+/// Each claim and its rollups commit atomically; already-completed rows count zero.
+pub fn recover_pending(
+    conn: &mut rusqlite::Connection,
+    node: &str,
+    now: i64,
+    offset: i64,
+) -> Result<usize, crate::StoreError> {
+    let rows = crate::usage::pending_interruptions(conn, node, now)?;
+    let mut count = 0;
+    for row in rows {
+        let outcome = batch::write(conn, &[events::LogEvent::Finish(row).into()], node, offset)?;
+        count += outcome.completions.len();
+    }
+    Ok(count)
+}
+
 pub use events::{
     BreakerTransition, Committed, Completion, HealthMeasurement, LogEvent, PendingLog, RequestLog,
     RouteTarget, SeedQuery, SeedRows, WriteEvent,

@@ -4,10 +4,53 @@ pub fn clear_bodies(
     dir: &std::path::Path,
     now: i64,
 ) -> Result<serde_json::Value, String> {
+    let removed = prune_bodies(conn, dir, now as f64)?;
+    let orphans = sweep_body_orphans(conn, dir)?;
+    Ok(serde_json::json!({"removed":removed,"orphans":orphans}))
+}
+
+pub fn prune_bodies(
+    conn: &rusqlite::Connection,
+    dir: &std::path::Path,
+    horizon: f64,
+) -> Result<usize, String> {
+    remove_body_rows(
+        conn,
+        dir,
+        "SELECT request_id, rel_path FROM request_bodies WHERE at < ?",
+        horizon,
+    )
+}
+
+pub fn prune_bodies_to_cap(
+    conn: &rusqlite::Connection,
+    dir: &std::path::Path,
+    cap: i64,
+) -> Result<usize, String> {
+    let total: i64 = conn
+        .query_row("SELECT COUNT(*) FROM request_bodies", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    if total <= cap {
+        return Ok(0);
+    }
+    remove_body_rows(
+        conn,
+        dir,
+        "SELECT request_id, rel_path FROM request_bodies ORDER BY at ASC, request_id ASC LIMIT ?",
+        (total - cap) as f64,
+    )
+}
+
+fn remove_body_rows(
+    conn: &rusqlite::Connection,
+    dir: &std::path::Path,
+    sql: &str,
+    parameter: f64,
+) -> Result<usize, String> {
     let rows = conn
-        .prepare("SELECT request_id, rel_path FROM request_bodies WHERE at < ?")
+        .prepare(sql)
         .map_err(|e| e.to_string())?
-        .query_map([now], |r| {
+        .query_map([parameter], |r| {
             Ok((bun_cell(r.get_ref(0)?), bun_cell(r.get_ref(1)?)))
         })
         .map_err(|e| e.to_string())?
@@ -36,6 +79,13 @@ pub fn clear_bodies(
             .map_err(|e| e.to_string())?;
     }
     tx.commit().map_err(|e| e.to_string())?;
+    Ok(rows.len())
+}
+
+pub fn sweep_body_orphans(
+    conn: &rusqlite::Connection,
+    dir: &std::path::Path,
+) -> Result<usize, String> {
     // Frozen sweep takes this snapshot before walking, then rechecks only misses.
     // Non-TEXT cells cannot strictly equal a JavaScript path string.
     let known = conn
@@ -74,7 +124,7 @@ pub fn clear_bodies(
             orphans += 1;
         }
     }
-    Ok(serde_json::json!({"removed":rows.len(),"orphans":orphans}))
+    Ok(orphans)
 }
 
 // Bun SQLite replaces malformed TEXT bytes, but keeps other cell types distinct.
@@ -1332,6 +1382,63 @@ mod tests {
 }
 
 pub fn prune(dir: &Path, now: i64, keep_latest: f64, max_age_days: f64) -> Result<(), String> {
+    prune_snapshots_in(dir, now, keep_latest, max_age_days).map(|_| ())
+}
+
+pub fn prune_snapshots(
+    live: &Path,
+    now: i64,
+    keep_latest: f64,
+    max_age_days: f64,
+) -> Result<usize, String> {
+    Ok(with_exclusive_or_skip("a snapshot sweep", || {
+        prune_snapshots_in(
+            &live
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("snapshots"),
+            now,
+            keep_latest,
+            max_age_days,
+        )
+    })?
+    .unwrap_or(0))
+}
+
+pub fn sweep_staging(live: &Path, now: i64) -> Result<usize, String> {
+    let dir = live.parent().unwrap_or_else(|| Path::new("."));
+    let incoming = format!(
+        "{}.incoming",
+        live.file_name().unwrap_or_default().to_string_lossy()
+    );
+    let mut removed = 0;
+    for entry in crate::database_fs::readdir(dir) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name != incoming && !(name.starts_with("omni-import-") && name.ends_with(".sqlite.part"))
+        {
+            continue;
+        }
+        let Some(mtime) = crate::database_fs::stat(&entry.path())
+            .and_then(|s| s.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        else {
+            continue;
+        };
+        if mtime.as_millis() >= u128::try_from(now - 3_600_000).unwrap_or(0) {
+            continue;
+        }
+        unlink(&entry.path())?;
+        removed += 1;
+    }
+    Ok(removed)
+}
+
+fn prune_snapshots_in(
+    dir: &Path,
+    now: i64,
+    keep_latest: f64,
+    max_age_days: f64,
+) -> Result<usize, String> {
     let mut snapshots = Vec::new();
     let entries = crate::database_fs::readdir(dir);
     for entry in entries {
@@ -1372,6 +1479,7 @@ pub fn prune(dir: &Path, now: i64, keep_latest: f64, max_age_days: f64) -> Resul
     // Stable sort: frozen TS retains directory enumeration order on ties.
     snapshots.sort_by_key(|s| std::cmp::Reverse(s.0));
     let undo = snapshots.iter().position(|s| s.1 == "preRestore");
+    let mut removed = 0;
     for (i, (at, _, path)) in snapshots.iter().enumerate() {
         if i == 0
             || Some(i) == undo
@@ -1381,8 +1489,9 @@ pub fn prune(dir: &Path, now: i64, keep_latest: f64, max_age_days: f64) -> Resul
             continue;
         }
         unlink(path)?;
+        removed += 1;
     }
-    Ok(())
+    Ok(removed)
 }
 /// Frozen CLI copy confirmation URL: URL serialization, password only redacted.
 pub fn migrate_target_label(value: &str) -> String {

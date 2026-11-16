@@ -251,11 +251,21 @@ pub(crate) async fn sweep_pending(
         &[&(now - 86_400_000)],
     )
     .await?;
+    pending_interruptions(c, node_id, now).await
+}
+
+pub(crate) async fn pending_interruptions(
+    c: &impl GenericClient,
+    node_id: &str,
+    now: i64,
+) -> Result<Vec<RequestLog>, StoreError> {
     let rows = query_rows(
         c,
         "SELECT id, at, api_key_id, requested_model, resolved_provider, resolved_model,
                 credential_id, attempts, input_tokens, output_tokens, cache_read_tokens,
-                cache_write_tokens, ttft_ms, cost_usd, degradations
+                cache_write_tokens, ttft_ms, cost_usd, degradations,
+                rtk_applied, rtk_filter_hits, rtk_original_code_units,
+                rtk_compressed_code_units, rtk_estimated_tokens_saved, rtk_filters
            FROM request_logs
           WHERE state = 'pending'
             AND (node_id = $1 OR node_id NOT IN (SELECT id FROM nodes WHERE seen_at > $2))",
@@ -279,6 +289,12 @@ pub(crate) async fn sweep_pending(
             log.cost_usd = r.try_get(13)?;
             let degradations: String = r.try_get(14)?;
             log.degradations = serde_json::from_str(&degradations).unwrap_or_default();
+            log.rtk_applied = r.try_get(15)?;
+            log.rtk_filter_hits = r.try_get(16)?;
+            log.rtk_original_code_units = r.try_get(17)?;
+            log.rtk_compressed_code_units = r.try_get(18)?;
+            log.rtk_estimated_tokens_saved = r.try_get(19)?;
+            log.rtk_filters = crate::maintenance::rtk_filters(&r.try_get::<_, String>(20)?);
             log.error_code = Some("interrupted".into());
             log.duration_ms = 0;
             Ok(log)
