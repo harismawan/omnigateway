@@ -303,7 +303,7 @@ async fn one_unreadable_key_row_does_not_stop_boot() {
         (s, b.as_str()),
         (
             500,
-            r#"{"type":"error","error":{"type":"api_error","message":"JSON Parse error: Expected '}'"}}"#
+            r#"{"type":"error","error":{"type":"api_error","message":"internal error"}}"#
         )
     );
     stop(g).await;
