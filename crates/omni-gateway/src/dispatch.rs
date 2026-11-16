@@ -182,6 +182,29 @@ pub struct Request {
     pub route_started_at: i64,
 }
 
+/// Per-call choices, independent of the installation's dispatch dependencies.
+#[derive(Debug, Clone, Copy)]
+pub struct DispatchOptions {
+    /// Whether operator transforms may run. Both are currently unported;
+    /// screening callers explicitly opt out rather than relying on defaults.
+    pub request_transforms: bool,
+    /// Revalidate the model against dispatch's own snapshot before routing.
+    pub local_only: bool,
+    /// Whether attempt selection writes pending/route rows. Classifier calls
+    /// have their own completed row, never the parent's `onRoute` callback.
+    pub on_route: bool,
+}
+
+impl Default for DispatchOptions {
+    fn default() -> Self {
+        Self {
+            request_transforms: true,
+            local_only: false,
+            on_route: true,
+        }
+    }
+}
+
 /// `DispatchOutcome`: the events and the log they fill in.
 pub struct Dispatched {
     pub deadline: Option<tokio::time::Instant>,
@@ -475,8 +498,17 @@ pub fn refused(deps: &Deps, req: &Request, refusal: &Refusal, surface: &str) -> 
 
 /// `dispatch`. Returns once routing has been decided; the attempts run as
 /// the returned stream is pulled.
-#[allow(clippy::too_many_lines)]
 pub fn dispatch(deps: Arc<Deps>, req: Request) -> Dispatched {
+    dispatch_with_options(deps, req, DispatchOptions::default())
+}
+
+/// `dispatch` with the explicit screening-call choices used by classifiers.
+#[allow(clippy::too_many_lines)]
+pub fn dispatch_with_options(
+    deps: Arc<Deps>,
+    req: Request,
+    options: DispatchOptions,
+) -> Dispatched {
     let started_at = (deps.now)();
     deps.health.reconcile(&deps.holder);
     let snapshot = deps.holder.load();
@@ -508,7 +540,13 @@ pub fn dispatch(deps: Arc<Deps>, req: Request) -> Dispatched {
 
     // RTK and ponytail run here in TS; both default off and neither is
     // ported, so the request goes as sent (see the report).
-    let model = match resolve_model(&req.request.model, &snapshot.routing, &deps.providers) {
+    let resolved = if options.local_only {
+        omni_router::local_only_model(&req.request.model, &snapshot.routing, &deps.providers)
+            .ok_or_else(|| GatewayError::new(ErrorCode::Internal, LOCAL_ONLY_MESSAGE))
+    } else {
+        resolve_model(&req.request.model, &snapshot.routing, &deps.providers)
+    };
+    let model = match resolved {
         Ok(m) => m.into_owned(),
         Err(e) => {
             let events = fail(&log, e.code, e.message);
@@ -600,6 +638,7 @@ pub fn dispatch(deps: Arc<Deps>, req: Request) -> Dispatched {
         log: log.clone(),
         started_at,
         deadline,
+        on_route: options.on_route,
     });
     Dispatched {
         events,
@@ -619,6 +658,7 @@ struct RunState {
     log: Arc<Mutex<RequestLog>>,
     started_at: i64,
     deadline: Option<tokio::time::Instant>,
+    on_route: bool,
 }
 
 /// Awaits `f` unless the deadline passes first.
@@ -701,7 +741,7 @@ fn run(mut s: RunState) -> EventsStream {
             // `onRoute`: the pending row on the first attempt, a route update on each failover.
             // A refusal is counted in the writer's `dropped` and warned about
             // by the writer task, rate-limited; never a line per request.
-            if began {
+            if s.on_route && began {
                 deps.writer.send(LogEvent::Route {
                     id: rid.clone(),
                     target: RouteTarget {
@@ -710,7 +750,7 @@ fn run(mut s: RunState) -> EventsStream {
                         credential_id: c.credential.id.clone(),
                     },
                 });
-            } else {
+            } else if s.on_route {
                 began = true;
                 deps.writer.send(LogEvent::Begin(PendingLog {
                     id: rid.clone(),
