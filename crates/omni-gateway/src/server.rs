@@ -1306,7 +1306,12 @@ async fn models(app: &App, req: &Request<Incoming>) -> Response<Body> {
                 .filter(|id| allowed.as_ref().is_none_or(|a| a.contains(id.as_str())))
                 .filter_map(|id| snapshot.routing.models.get(id))
                 .collect();
-            json_response(200, JSON_UTF8, crate::models::list_body(&visible), &[])
+            json_response(
+                200,
+                JSON_UTF8,
+                crate::models::list_body(&visible, &snapshot.routing.credentials),
+                &[],
+            )
         }
         Err(e) => {
             tracing::error!(status = e.code.http_status(), code = e.code.as_str(),

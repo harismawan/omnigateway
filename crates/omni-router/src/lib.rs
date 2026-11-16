@@ -10,6 +10,7 @@
 
 mod breaker;
 mod filters;
+mod model_limits;
 mod providers;
 mod quota;
 mod rank;
@@ -24,6 +25,7 @@ pub use filters::{
     Eligible, Excluded, ExcludedKind, Pair, Required, eligible, required_capabilities,
     required_providers, serves_target,
 };
+pub use model_limits::{ServingCredentials, model_display_name, resolve_model_limits};
 pub use providers::{CatalogModel, Descriptor, Providers};
 pub use quota::{QUOTA_FLOOR, UNKNOWN_QUOTA, quota_headroom, quota_stale_after_ms};
 pub use rank::{Candidate, RankInput, RankResult, Reasons, RecentUse, rank};

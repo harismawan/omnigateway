@@ -1,28 +1,16 @@
 //! `GET /v1/models` (`routes/models.ts`, `resolveModelLimits` and
 //! `modelDisplayName` from `@omni/control/modelLimits.ts`).
 //!
-//! Slice 1 has no provider catalogs (ruling 15), so a target's limits are the
-//! figures the operator saved on it and the display name is the model's id.
-//! With catalogs empty the credential-dependent narrowing has nothing to
-//! narrow, so the listing does not read credentials.
+//! Catalog labels and limits use the same held snapshot as routing.
 
 use omni_ir::jsjson::{write_number, write_str};
-use omni_store::VirtualModel;
-
-/// The narrowest defined figure across the model's targets.
-fn narrowest(
-    model: &VirtualModel,
-    pick: impl Fn(&omni_store::Target) -> Option<f64>,
-) -> Option<f64> {
-    model
-        .targets
-        .iter()
-        .filter_map(pick)
-        .reduce(omni_ir::js::math_min)
-}
+use omni_store::{Credential, VirtualModel};
 
 /// `modelListBody(models, credentials)`, as `JSON.stringify` writes it.
-pub fn list_body(models: &[&VirtualModel]) -> String {
+pub fn list_body(models: &[&VirtualModel], credentials: &[Credential]) -> String {
+    static PROVIDERS: std::sync::OnceLock<omni_router::Providers> = std::sync::OnceLock::new();
+    let providers = PROVIDERS.get_or_init(omni_router::Providers::builtin);
+    let credentials = omni_router::ServingCredentials::new(credentials);
     let mut out = String::from("{\"object\":\"list\",\"data\":[");
     for (i, m) in models.iter().enumerate() {
         if i > 0 {
@@ -31,15 +19,16 @@ pub fn list_body(models: &[&VirtualModel]) -> String {
         out.push_str("{\"id\":");
         write_str(&m.id, &mut out);
         out.push_str(",\"object\":\"model\",\"type\":\"model\",\"display_name\":");
-        write_str(&m.id, &mut out);
+        write_str(omni_router::model_display_name(m, providers), &mut out);
         out.push_str(
             ",\"created\":0,\"created_at\":\"1970-01-01T00:00:00.000Z\",\"owned_by\":\"omnigateway\"",
         );
-        if let Some(n) = narrowest(m, |t| t.context_window) {
+        let (context, output) = omni_router::resolve_model_limits(m, &credentials, providers);
+        if let Some(n) = context {
             out.push_str(",\"max_input_tokens\":");
             write_number(n, &mut out);
         }
-        if let Some(n) = narrowest(m, |t| t.max_output_tokens) {
+        if let Some(n) = output {
             out.push_str(",\"max_tokens\":");
             write_number(n, &mut out);
         }
@@ -64,8 +53,81 @@ mod tests {
     #[test]
     fn an_empty_listing_has_null_cursors() {
         assert_eq!(
-            list_body(&[]),
+            list_body(&[], &[]),
             "{\"object\":\"list\",\"data\":[],\"has_more\":false,\"first_id\":null,\"last_id\":null}"
         );
+    }
+
+    #[test]
+    fn frozen_listing_corpus() {
+        let output = std::process::Command::new("bun")
+            .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+            .args(["--no-env-file", "conformance/models-listing.ts"])
+            .output()
+            .expect("Bun oracle");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let rows: serde_json::Value = serde_json::from_slice(&output.stdout).expect("oracle JSON");
+        let mut failures = 0;
+        for row in rows.as_array().expect("corpus rows") {
+            let models: Vec<VirtualModel> = row["models"]
+                .as_array()
+                .expect("models")
+                .iter()
+                .map(|m| VirtualModel {
+                    id: m["id"].as_str().expect("model id").into(),
+                    targets: serde_json::from_value(m["targets"].clone()).expect("targets"),
+                    strategy: omni_store::Strategy::Priority,
+                    is_alias: false,
+                })
+                .collect();
+            let refs: Vec<_> = models.iter().collect();
+            let credentials: Vec<_> = row["credentials"]
+                .as_array()
+                .expect("credentials")
+                .iter()
+                .map(|c| {
+                    use omni_store::credentials::{CredentialSecrets, Secret};
+                    Credential {
+                        lone_endpoint: None,
+                        id: c["id"].as_str().expect("credential id").into(),
+                        provider: c["provider"].as_str().expect("provider").into(),
+                        label: String::new(),
+                        auth_type: omni_store::AuthType::parse(
+                            c["authType"].as_str().expect("auth"),
+                        ),
+                        enabled: c["enabled"].as_bool().expect("enabled"),
+                        tier: 1.0,
+                        weight: 1.0,
+                        expires_at: None,
+                        account_email: None,
+                        provider_data: c["providerData"].clone(),
+                        disabled_reason: None,
+                        disabled_at: None,
+                        has_refresh_token: false,
+                        token_version: 0,
+                        created_at: 0,
+                        updated_at: 0,
+                        secrets: CredentialSecrets {
+                            access_token: Secret::Absent,
+                            refresh_token: Secret::Absent,
+                            api_key: Secret::Absent,
+                            id_token: Secret::Absent,
+                        },
+                    }
+                })
+                .collect();
+            if list_body(&refs, &credentials) != row["expected"].as_str().expect("expected bytes") {
+                failures += 1;
+            }
+        }
+        eprintln!(
+            "listing corpus: {} rows, {failures} failing",
+            rows.as_array().expect("rows").len()
+        );
+        assert_eq!(failures, 0);
     }
 }
