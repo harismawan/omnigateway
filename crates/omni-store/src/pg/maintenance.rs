@@ -2,6 +2,13 @@
 use crate::StoreError;
 
 impl super::PgStore {
+    pub async fn pending_interruptions(
+        &self,
+        node: &str,
+        now: i64,
+    ) -> Result<Vec<crate::writer::RequestLog>, StoreError> {
+        super::usage::pending_interruptions(&self.client().await?, node, now).await
+    }
     pub async fn heartbeat(&self, node: &str, now: i64) -> Result<(), StoreError> {
         let c = self.client().await?;
         c.execute("INSERT INTO nodes (id, seen_at) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET seen_at = EXCLUDED.seen_at", &[&node, &now]).await?;

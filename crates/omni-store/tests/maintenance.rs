@@ -129,3 +129,92 @@ db.close();
         }
     }
 }
+
+#[tokio::test]
+async fn frozen_pending_sweep_matches_live_dead_own_and_exact_grace_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let a = dir.path().join("rust.db");
+    let b = dir.path().join("ts.db");
+    let store = SqliteStore::open(&a, 0).unwrap();
+    let c = store.connection();
+    let now = 1_794_000_000_000_i64;
+    for (node, seen) in [
+        ("live", now - 59_999),
+        ("boundary", now - 60_000),
+        ("old", now - 60_001),
+        ("mine", now),
+    ] {
+        c.execute(
+            "INSERT INTO nodes(id,seen_at) VALUES (?,?)",
+            rusqlite::params![node, seen],
+        )
+        .unwrap();
+    }
+    for node in ["live", "boundary", "old", "mine", "absent"] {
+        c.execute("INSERT INTO request_logs(id,at,requested_model,status,duration_ms,state,node_id) VALUES (?,?,'model',0,1,'pending',?)",rusqlite::params![node,now - 1000,node]).unwrap();
+    }
+    c.execute_batch(&format!("VACUUM INTO '{}'", b.display()))
+        .unwrap();
+    for db in [c, &rusqlite::Connection::open(&b).unwrap()] {
+        db.execute("UPDATE request_logs SET rtk_applied=1,rtk_filter_hits=2,rtk_original_code_units=30,rtk_compressed_code_units=10,rtk_estimated_tokens_saved=5,rtk_filters='[\"test\"]' WHERE id='old'", []).unwrap();
+    }
+    let rows = omni_store::usage::pending_interruptions(c, "mine", now).unwrap();
+    let count = rows.len();
+    let writer = omni_store::writer::Writer::spawn(
+        &a,
+        omni_store::writer::WriterConfig {
+            day_offset_minutes: 0,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for row in rows {
+        assert!(
+            writer
+                .handle()
+                .send(omni_store::writer::LogEvent::Finish(row))
+        );
+    }
+    writer.close().await.unwrap();
+    let script = dir.path().join("pending.ts");
+    std::fs::write(
+        &script,
+        format!(
+            r#"
+import {{ Database }} from 'bun:sqlite';
+import {{ createUsageRepo }} from '{}/packages/store/src/sqlite/usage.ts';
+const db = new Database(process.argv[2]);
+console.log(await createUsageRepo(db,'mine',0).sweepPending({now}));
+db.close();
+"#,
+            root.display()
+        ),
+    )
+    .unwrap();
+    let output = std::process::Command::new("bun")
+        .arg("--no-env-file")
+        .arg(&script)
+        .arg(&b)
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap())
+        .env("HOME", dir.path())
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(count, 4);
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        count.to_string()
+    );
+    let ts = rusqlite::Connection::open(&b).unwrap();
+    assert_eq!(dump(c), dump(&ts));
+}

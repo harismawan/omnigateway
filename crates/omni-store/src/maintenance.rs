@@ -2,6 +2,37 @@
 use crate::StoreError;
 use rusqlite::{Connection, params};
 
+pub(crate) fn rtk_filters(raw: &str) -> Vec<String> {
+    let values: Vec<serde_json::Value> = serde_json::from_str(raw).unwrap_or_default();
+    values
+        .into_iter()
+        .filter_map(|v| {
+            v.as_str()
+                .filter(|s| {
+                    matches!(
+                        *s,
+                        "git-diff"
+                            | "git-status"
+                            | "git-log"
+                            | "grep"
+                            | "path-list"
+                            | "numbered-read"
+                            | "build-output"
+                            | "test-output"
+                            | "deduplicate-log"
+                            | "smart-truncate"
+                            | "lint-output"
+                            | "package-output"
+                            | "tree-output"
+                            | "git-operation"
+                            | "docker-build"
+                    )
+                })
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
 pub fn heartbeat(c: &Connection, node: &str, now: i64) -> Result<(), StoreError> {
     c.execute(
         "INSERT OR REPLACE INTO nodes (id, seen_at) VALUES (?, ?)",

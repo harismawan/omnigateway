@@ -191,7 +191,9 @@ pub fn pending_interruptions(
     let mut stmt = conn.prepare(
         "SELECT id, at, api_key_id, requested_model, resolved_provider, resolved_model,
                 credential_id, attempts, input_tokens, output_tokens, cache_read_tokens,
-                cache_write_tokens, ttft_ms, cost_usd, degradations
+                cache_write_tokens, ttft_ms, cost_usd, degradations,
+                rtk_applied, rtk_filter_hits, rtk_original_code_units,
+                rtk_compressed_code_units, rtk_estimated_tokens_saved, rtk_filters
            FROM request_logs
           WHERE state = 'pending'
             AND (node_id = ? OR node_id NOT IN (SELECT id FROM nodes WHERE seen_at > ?))",
@@ -212,6 +214,12 @@ pub fn pending_interruptions(
         log.cost_usd = r.get(13)?;
         let degradations: String = r.get(14)?;
         log.degradations = serde_json::from_str(&degradations).unwrap_or_default();
+        log.rtk_applied = r.get::<_, i64>(15)? == 1;
+        log.rtk_filter_hits = r.get(16)?;
+        log.rtk_original_code_units = r.get(17)?;
+        log.rtk_compressed_code_units = r.get(18)?;
+        log.rtk_estimated_tokens_saved = r.get(19)?;
+        log.rtk_filters = crate::maintenance::rtk_filters(&r.get::<_, String>(20)?);
         log.error_code = Some("interrupted".into());
         log.duration_ms = 0;
         Ok(log)
