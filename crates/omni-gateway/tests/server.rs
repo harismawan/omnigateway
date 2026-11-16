@@ -1233,7 +1233,7 @@ async fn an_exempt_body_that_stops_arriving_outlives_the_idle_timeout() {
             .await
             .is_none()
     );
-    drop(s);
+    // Shutdown cancels the pending exempt upload through its finisher.
     let f = stop(g).await;
     assert_eq!(
         rows(
