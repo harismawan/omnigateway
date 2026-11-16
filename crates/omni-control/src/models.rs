@@ -43,36 +43,10 @@ pub fn cli_list(store: &SqliteStore) -> Result<Vec<JsValue>, String> {
 
 fn list_with(
     store: &SqliteStore,
-    render: fn(omni_store::StoreError) -> String,
+    _render: fn(omni_store::StoreError) -> String,
 ) -> Result<Vec<JsValue>, String> {
-    omni_store::models::operator_rows(store.connection())
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .map(|(id, targets, strategy, alias)| {
-            Ok(JsValue::Object(vec![
-                (
-                    "id".encode_utf16().collect(),
-                    JsValue::from(&serde_json::json!(id)),
-                ),
-                (
-                    "targets".encode_utf16().collect(),
-                    crate::operator_json::parse(&targets).map_err(|detail| {
-                        render(omni_store::StoreError::StoredJson {
-                            table: "virtual_models",
-                            column: "targets",
-                            row_id: id.clone().unwrap_or_else(|| "null".into()),
-                            detail: detail.into(),
-                        })
-                    })?,
-                ),
-                (
-                    "strategy".encode_utf16().collect(),
-                    JsValue::from(&serde_json::json!(strategy)),
-                ),
-                ("isAlias".encode_utf16().collect(), JsValue::Bool(alias)),
-            ]))
-        })
-        .collect()
+    // Same raw-cell projection as the terminal, but never log parser input.
+    cli_list(store).map_err(|_| "invalid virtual_models operator row".into())
 }
 pub fn get(store: &SqliteStore, id: &str) -> Result<JsValue, String> {
     list(store)?
