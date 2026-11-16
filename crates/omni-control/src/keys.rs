@@ -3,14 +3,18 @@ use omni_ir::jsjson::JsValue;
 use omni_store::SqliteStore;
 use serde_json::{Value, json};
 
-struct CliKey {
-    key: omni_store::keys::ApiKey,
-    allowlist_json: Option<String>,
-    fields: JsValue,
+pub(crate) struct OperatorKey {
+    pub(crate) key: omni_store::keys::ApiKey,
+    pub(crate) allowlist_json: Option<String>,
+    pub(crate) limits_json: String,
+    pub(crate) fields: JsValue,
 }
 
-/// Terminal projection only: the HTTP reader remains strict.
-fn cli_rows(store: &SqliteStore, id: Option<&str>) -> Result<Vec<CliKey>, String> {
+/// Operator projection shared by HTTP and CLI; never used for auth or routing.
+pub(crate) fn operator_rows(
+    store: &SqliteStore,
+    id: Option<&str>,
+) -> Result<Vec<OperatorKey>, String> {
     let mut stmt = store
         .connection()
         .prepare(if id.is_some() {
@@ -65,8 +69,9 @@ fn cli_rows(store: &SqliteStore, id: Option<&str>) -> Result<Vec<CliKey>, String
         ] {
             fields.push((name.encode_utf16().collect(), raw(column)?));
         }
-        out.push(CliKey {
+        out.push(OperatorKey {
             key,
+            limits_json,
             allowlist_json: match cell("model_allowlist")? {
                 rusqlite::types::ValueRef::Null => None,
                 v => Some(crate::cli_cell::string(v)),
@@ -435,7 +440,7 @@ pub fn set_guardrail(store: &SqliteStore, id: &str, policy: Option<&str>) -> Res
 }
 
 fn require_key(store: &SqliteStore, id: &str) -> Result<(), String> {
-    if cli_rows(store, Some(id))
+    if operator_rows(store, Some(id))
         .map_err(|e| e.to_string())?
         .is_empty()
     {
@@ -502,7 +507,7 @@ impl KeyListing {
         let mut captured = project_keys(
             store,
             now,
-            cli_rows(store, Some(id)).map_err(|e| e.to_string())?,
+            operator_rows(store, Some(id)).map_err(|e| e.to_string())?,
         )?;
         let index = captured.data["keys"]
             .as_array()
@@ -577,19 +582,24 @@ pub fn list_keys(store: &SqliteStore, now: i64) -> Result<KeyListing, String> {
     project_keys(
         store,
         now,
-        cli_rows(store, None).map_err(|e| e.to_string())?,
+        operator_rows(store, None).map_err(|e| e.to_string())?,
     )
 }
-fn project_keys(store: &SqliteStore, now: i64, rows: Vec<CliKey>) -> Result<KeyListing, String> {
+fn project_keys(
+    store: &SqliteStore,
+    now: i64,
+    rows: Vec<OperatorKey>,
+) -> Result<KeyListing, String> {
     let mut keys = Vec::new();
     let mut allowlists = Vec::new();
     let mut limits_js = Vec::new();
     let mut usage_js = Vec::new();
     let mut cells = Vec::new();
-    for CliKey {
+    for OperatorKey {
         key,
         allowlist_json: raw,
         fields,
+        ..
     } in rows
     {
         allowlists.push(match raw {

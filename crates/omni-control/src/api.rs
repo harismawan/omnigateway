@@ -92,6 +92,7 @@ fn string_of(v: &JsValue) -> Option<&[u16]> {
 /// `toSummary(store, key, now)` for one stored row, with the fields an edit
 /// replaced (`{ ...key, field: value }`) already applied to `row`.
 struct KeyRow {
+    cells: JsValue,
     id: String,
     label: String,
     prefix: String,
@@ -156,10 +157,12 @@ fn names_proto(v: &JsValue) -> bool {
 }
 
 fn key_rows(store: &SqliteStore, id: Option<&str>) -> Result<Vec<KeyRow>> {
-    omni_store::keys::operator_rows(store.connection(), id)?
+    crate::keys::operator_rows(store, id)
+        .map_err(Failure::internal)?
         .into_iter()
         .map(|row| {
             Ok(KeyRow {
+                cells: row.fields,
                 allowlist: match &row.allowlist_json {
                     None => JsValue::Null,
                     Some(raw) => parse_allowlist(raw, &row.key.id)?,
@@ -175,9 +178,9 @@ fn key_rows(store: &SqliteStore, id: Option<&str>) -> Result<Vec<KeyRow>> {
                 label: row.key.label,
                 prefix: row.key.prefix,
                 body_logging_opt_out: row.key.body_logging_opt_out,
-                created_at: row.created_at,
-                revoked_at: row.revoked_at,
-                expires_at: row.expires_at,
+                created_at: serde_json::Value::Null,
+                revoked_at: serde_json::Value::Null,
+                expires_at: serde_json::Value::Null,
                 guardrail_policy: row.key.guardrail_policy,
                 smart_routing: row.key.smart_routing,
             })
@@ -299,7 +302,7 @@ pub fn lossy(v: &JsValue) -> serde_json::Value {
 fn summary(store: &SqliteStore, k: KeyRow, now: i64) -> Result<JsValue> {
     let usage = limit_usage(store, &k.id, &k.limits, now)?;
     let opt_text = |v: Option<String>| v.map_or(JsValue::Null, |s| text(&s));
-    Ok(object(vec![
+    let mut out = object(vec![
         ("id", text(&k.id)),
         ("label", text(&k.label)),
         ("prefix", text(&k.prefix)),
@@ -312,7 +315,13 @@ fn summary(store: &SqliteStore, k: KeyRow, now: i64) -> Result<JsValue> {
         ("expiresAt", JsValue::from(&k.expires_at)),
         ("guardrailPolicy", opt_text(k.guardrail_policy)),
         ("smartRouting", JsValue::Bool(k.smart_routing)),
-    ]))
+    ]);
+    if let JsValue::Object(fields) = &k.cells {
+        for (name, value) in fields {
+            crate::settings_value::set(&mut out, &String::from_utf16_lossy(name), value.clone());
+        }
+    }
+    Ok(out)
 }
 
 /// JS own-key order: canonical array indices ascending, then insertion.
@@ -370,6 +379,7 @@ pub fn client_summary(store: &SqliteStore, id: &str, now: i64, offset: i64) -> R
         })
     };
     let key = KeyRow {
+        cells: JsValue::Null,
         id: id.to_owned(),
         label: String::new(),
         prefix: String::new(),
@@ -555,6 +565,7 @@ pub fn edit_key(
             };
             write(conn, id, E::Expiry(at))?;
             row.expires_at = at.map_or(serde_json::Value::Null, serde_json::Value::from);
+            crate::settings_value::set(&mut row.cells, "expiresAt", value);
         }
         KeyEdit::Guardrail => {
             let policy = string_of(&value).map(utf8);
