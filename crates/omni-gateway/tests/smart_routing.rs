@@ -40,7 +40,7 @@ async fn unconfigured_is_checked_before_already_local() {
 async fn already_local_bypasses_classifier() {
     let (decision, calls) = check("m1", true).await;
     assert!(
-        matches!(decision, SmartDecision::Proceed { local_model: Some(m), notes } if m == "m1" && notes == ["smart-router:already-local"])
+        matches!(decision, SmartDecision::Proceed { local_model: Some(m), notes, .. } if m == "m1" && notes == ["smart-router:already-local"])
     );
     assert_eq!(calls, 0);
 }

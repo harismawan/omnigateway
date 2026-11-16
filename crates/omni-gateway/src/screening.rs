@@ -23,10 +23,134 @@ fn smart_cache() -> &'static Mutex<VerdictCache> {
     CACHE.get_or_init(|| Mutex::new(VerdictCache::default()))
 }
 
+fn judge_cache() -> &'static Mutex<VerdictCache> {
+    static CACHE: OnceLock<Mutex<VerdictCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(VerdictCache::default()))
+}
+
+struct JudgeRow {
+    deps: Arc<Deps>,
+    log: Arc<Mutex<RequestLog>>,
+    api_key_id: Option<String>,
+    result: Option<(i64, Option<String>)>,
+}
+
+impl Drop for JudgeRow {
+    fn drop(&mut self) {
+        let mut row = locked(&self.log).clone();
+        row.api_key_id.clone_from(&self.api_key_id);
+        row.degradations.push("guardrail:classifier".into());
+        if let Some((status, error)) = &self.result {
+            row.status = *status;
+            row.error_code.clone_from(error);
+        } else if row.status == 0 {
+            row.status = 499;
+            row.error_code = Some("interrupted".into());
+        }
+        row.duration_ms = (self.deps.now)() - row.at;
+        self.deps.telemetry.record(&row);
+        self.deps.writer.send(LogEvent::Finish(row));
+    }
+}
+
+/// Independently logged policy classifier; cache hits never dispatch or log.
+pub async fn judge(
+    deps: Arc<Deps>,
+    req: &Request,
+    policy: &str,
+    local_classifier: Option<String>,
+) -> (Option<Refusal>, Vec<String>) {
+    let snapshot = deps.holder.load();
+    let settings = &snapshot.routing.settings;
+    let local_only = local_classifier.is_some();
+    let Some(model) = local_classifier
+        .as_ref()
+        .or(settings.guardrail_model.as_ref())
+    else {
+        return (
+            Some(Refusal {
+                code: ErrorCode::Internal,
+                message: "usage policy check is not configured",
+                notes: &[],
+            }),
+            vec!["guardrail:unconfigured".into()],
+        );
+    };
+    let judged: Value = serde_json::from_str(&judged_text_json(
+        &serde_json::to_value(&req.request).expect("IR serializes"),
+        settings.guardrail_history_turns,
+    ))
+    .expect("judged text JSON");
+    let key = verdict_key(
+        req.api_key_id.as_deref().unwrap_or(""),
+        policy,
+        model,
+        &judged,
+    );
+    let cached = locked(judge_cache()).get(&key, (deps.now)());
+    let verdict = if let Some(cached) = cached {
+        Some(cached)
+    } else {
+        let dispatched = dispatch::dispatch_with_options(
+            deps.clone(),
+            Request {
+                request: serde_json::from_value(classifier_request(model, policy, &judged))
+                    .expect("classifier IR"),
+                request_id: crate::clock::request_id(),
+                api_key_id: None,
+                route_started_at: (deps.now)(),
+            },
+            DispatchOptions {
+                request_transforms: false,
+                local_only,
+                on_route: false,
+            },
+        );
+        let mut row = JudgeRow {
+            deps: deps.clone(),
+            log: dispatched.log.clone(),
+            api_key_id: req.api_key_id.clone(),
+            result: None,
+        };
+        let (_, verdict, status, error) =
+            classify(dispatched, key.clone(), settings.guardrail_timeout_ms, true).await;
+        row.result = Some((status, error));
+        if let Some(verdict) = verdict {
+            locked(judge_cache()).set(key, verdict.into(), (deps.now)());
+        }
+        verdict.map(str::to_owned)
+    };
+    let (what, refusal) = match verdict.as_deref() {
+        Some("allow") => ("allowed", None),
+        Some("deny") => (
+            "denied",
+            Some(Refusal {
+                code: ErrorCode::ContentFilter,
+                message: "request refused by this API key's usage policy",
+                notes: &[],
+            }),
+        ),
+        _ => (
+            "unavailable",
+            Some(Refusal {
+                code: ErrorCode::Upstream,
+                message: "usage policy check unavailable",
+                notes: &[],
+            }),
+        ),
+    };
+    let mut notes = vec![format!("guardrail:{what}")];
+    if judged["truncated"] == true {
+        notes.push("guardrail:truncated".into());
+    }
+    (refusal, notes)
+}
+
 #[derive(Debug)]
 pub enum SmartDecision {
     Proceed {
         local_model: Option<String>,
+        classifier: Option<String>,
         notes: Vec<String>,
     },
     Refused(Refusal),
@@ -46,6 +170,7 @@ pub fn screen_first(
     deps: Arc<Deps>,
     mut req: Request,
     policy: Option<String>,
+    smart: bool,
     surface: &'static str,
 ) -> dispatch::Dispatched {
     let own = Arc::new(Mutex::new(RequestLog::new(
@@ -56,23 +181,28 @@ pub fn screen_first(
     locked(&own).requested_model = req.request.model.clone();
     let log = own.clone();
     let events = Box::pin(async_stream::stream! {
-        let decision = check_confidentiality(deps.clone(), &req).await;
-        let (local_model, notes) = match decision {
+        let decision = if smart { check_confidentiality(deps.clone(), &req).await } else {
+            SmartDecision::Proceed { local_model: None, classifier: None, notes: Vec::new() }
+        };
+        let (local_model, classifier, mut notes) = match decision {
             SmartDecision::Refused(refusal) => {
                 let mut refused = dispatch::refused(&deps, &req, &refusal, surface);
                 *locked(&log) = locked(&refused.log).clone();
                 while let Some(event) = refused.events.next().await { yield event; }
                 return;
             }
-            SmartDecision::Proceed { local_model, notes } => (local_model, notes),
+            SmartDecision::Proceed { local_model, classifier, notes } => (local_model, classifier, notes),
         };
-        // Guardrail remains fail closed until its separate implementation.
-        if let Some(refusal) = dispatch::screen(policy.as_deref(), false, &deps.holder.load().routing.settings) {
+        if let Some(policy) = policy {
+            let (refusal, judge_notes) = judge(deps.clone(), &req, &policy, classifier).await;
+            notes.extend(judge_notes);
+            if let Some(refusal) = refusal {
             let mut refused = dispatch::refused(&deps, &req, &refusal, surface);
             *locked(&log) = locked(&refused.log).clone();
             locked(&log).degradations.extend(notes);
             while let Some(event) = refused.events.next().await { yield event; }
             return;
+            }
         }
         let client_model = req.request.model.clone();
         if let Some(model) = &local_model { req.request.model.clone_from(model); }
@@ -157,11 +287,13 @@ pub async fn check_confidentiality(deps: Arc<Deps>, req: &Request) -> SmartDecis
     if is_local(&req.request.model) {
         return SmartDecision::Proceed {
             local_model: Some(req.request.model.clone()),
+            classifier: Some(classifier.to_owned()),
             notes: vec!["smart-router:already-local".into()],
         };
     }
     let local_decision = |oversize: bool| SmartDecision::Proceed {
         local_model: Some(local.to_owned()),
+        classifier: Some(classifier.to_owned()),
         notes: if oversize {
             vec!["smart-router:local".into(), "smart-router:oversize".into()]
         } else {
@@ -186,6 +318,7 @@ pub async fn check_confidentiality(deps: Arc<Deps>, req: &Request) -> SmartDecis
     if uncached.is_empty() {
         return SmartDecision::Proceed {
             local_model: None,
+            classifier: None,
             notes: vec!["smart-router:public".into()],
         };
     }
@@ -227,7 +360,12 @@ pub async fn check_confidentiality(deps: Arc<Deps>, req: &Request) -> SmartDecis
                 },
             );
             aggregate.calls.push(dispatched.log.clone());
-            pending.push(classify(dispatched, key, settings.smart_router_timeout_ms));
+            pending.push(classify(
+                dispatched,
+                key,
+                settings.smart_router_timeout_ms,
+                false,
+            ));
         }
         let Some((key, result, status, error)) = pending.next().await else {
             break;
@@ -254,6 +392,7 @@ pub async fn check_confidentiality(deps: Arc<Deps>, req: &Request) -> SmartDecis
     } else {
         SmartDecision::Proceed {
             local_model: None,
+            classifier: None,
             notes: vec!["smart-router:public".into()],
         }
     }
@@ -271,6 +410,7 @@ async fn classify(
     mut dispatched: dispatch::Dispatched,
     key: String,
     timeout_ms: f64,
+    guardrail: bool,
 ) -> (String, Option<&'static str>, i64, Option<String>) {
     let mut events = Vec::new();
     let run = async {
@@ -295,9 +435,12 @@ async fn classify(
             .any(|e| matches!(e, StreamEvent::Error { .. }))
     {
         omni_ir::stream::try_collect(events).ok().and_then(|r| {
-            parse_confidentiality(
-                &json!({"content": r.content, "stopReason": r.stop_reason.as_str()}),
-            )
+            let response = json!({"content": r.content, "stopReason": r.stop_reason.as_str()});
+            if guardrail {
+                parse_verdict(&response)
+            } else {
+                parse_confidentiality(&response)
+            }
         })
     } else {
         None

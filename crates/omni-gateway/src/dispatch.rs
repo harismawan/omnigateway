@@ -418,55 +418,6 @@ pub struct Refusal {
     pub notes: &'static [&'static str],
 }
 
-/// Pre-dispatch screening, failing closed (`screenFirst` in
-/// `guardrail/judge.ts`, with `checkConfidentiality` and `judge`).
-///
-/// Neither the smart-router classifier nor the guardrail is ported, so a key
-/// that needs screening is always refused. Where TS refuses for missing
-/// configuration the refusal is TS's own; where TS would call a classifier,
-/// the refusal is the one TS gives when that call fails, without the call.
-/// `None` is the unscreened path: neither flag, or smart routing while
-/// `smartRouterEnabled` is off.
-pub fn screen(
-    guardrail_policy: Option<&str>,
-    smart_routing: bool,
-    settings: &omni_store::settings::Settings,
-) -> Option<Refusal> {
-    // `key.smartRouting ? settings : null` then `smartRouterEnabled === true`.
-    if smart_routing && settings.smart_router_enabled {
-        // `checkConfidentiality` step 1. Ported only as far as "both set":
-        // the local-only check needs the classifier this slice lacks, and
-        // either answer refuses.
-        if settings.smart_router_classifier_model.is_none()
-            || settings.smart_router_local_model.is_none()
-        {
-            return Some(Refusal {
-                code: ErrorCode::Internal,
-                message: LOCAL_ONLY_MESSAGE,
-                notes: &["smart-router:unconfigured"],
-            });
-        }
-        return Some(Refusal {
-            code: ErrorCode::Upstream,
-            message: "confidentiality check unavailable",
-            notes: &["smart-router:unavailable"],
-        });
-    }
-    guardrail_policy?;
-    if settings.guardrail_model.is_none() {
-        return Some(Refusal {
-            code: ErrorCode::Internal,
-            message: "usage policy check is not configured",
-            notes: &["guardrail:unconfigured"],
-        });
-    }
-    Some(Refusal {
-        code: ErrorCode::Upstream,
-        message: "usage policy check unavailable",
-        notes: &["guardrail:unavailable"],
-    })
-}
-
 /// `LOCAL_ONLY_MESSAGE`.
 pub const LOCAL_ONLY_MESSAGE: &str = "confidential routing is not configured";
 
