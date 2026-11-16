@@ -15,7 +15,7 @@ const { values: f } = parseArgs({ options: Object.fromEntries(
 ) });
 for (const k of ["ts", "rust", "work", "cert", "key"]) if (!f[k]) throw Error(`--${k} required`);
 const work = resolve(f.work!);
-if (!work.startsWith("/tmp/opencode/b4/e2e/")) throw Error("private evidence directory required");
+if (!["/tmp/opencode/b4/e2e/", "/tmp/opencode/b4/connect2/"].some(p => work.startsWith(p))) throw Error("private evidence directory required");
 const seed = join(work, "seed");
 mkdirSync(seed, { recursive: true });
 const env = {

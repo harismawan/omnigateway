@@ -391,12 +391,11 @@ async fn complete(
         .map_err(|_| exchange_failure(&provider))?;
         #[allow(clippy::cast_precision_loss)]
         let now = (host.now)() as f64;
-        let result = if provider == "openai" {
+        if provider == "openai" {
             omni_providers::openai::oauth::token_result(response.0, &response.1, None, now, data)?
         } else {
             omni_providers::anthropic::oauth::token_result(response.0, &response.1, None, now)?
-        };
-        result
+        }
     };
     // The frozen connect host validates flow secrets before persistence.
     if result
