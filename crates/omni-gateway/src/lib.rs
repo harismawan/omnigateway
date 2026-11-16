@@ -17,6 +17,7 @@ pub mod finish;
 pub mod jsc_json;
 pub mod load;
 pub mod logging;
+pub mod maintenance;
 pub mod models;
 mod output_budget;
 pub mod overlay;
@@ -509,6 +510,13 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         clock::now_ms,
     ));
     let oauth_scheduler = oauth_refresher.start_scheduler(holder.clone());
+    let mut maintenance = maintenance::start(
+        path.clone(),
+        offset,
+        node_id.clone(),
+        handle.clone(),
+        Arc::new(omni_coord::MemoryCoord::new(omni_coord::system_clock())),
+    );
     let deps = Arc::new(dispatch::Deps {
         refresher: oauth_refresher,
         http,
@@ -581,6 +589,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         }
         drop(listener);
         let shutdown_until = tokio::time::Instant::now() + deadline;
+        drop(tokio::time::timeout_at(shutdown_until, maintenance.stop()).await);
         oauth_scheduler.abort();
         drop(oauth_scheduler.await);
         tracing::info!(reason = "signal", "shutdown requested");

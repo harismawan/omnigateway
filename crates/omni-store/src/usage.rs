@@ -179,6 +179,15 @@ pub fn sweep_pending(
         "DELETE FROM nodes WHERE seen_at < ?",
         params![now - 86_400_000],
     )?;
+    pending_interruptions(conn, node_id, now)
+}
+
+/// The hourly sweep does not write a heartbeat: liveness has its own timer.
+pub fn pending_interruptions(
+    conn: &Connection,
+    node_id: &str,
+    now: i64,
+) -> Result<Vec<crate::writer::RequestLog>, StoreError> {
     let mut stmt = conn.prepare(
         "SELECT id, at, api_key_id, requested_model, resolved_provider, resolved_model,
                 credential_id, attempts, input_tokens, output_tokens, cache_read_tokens,
