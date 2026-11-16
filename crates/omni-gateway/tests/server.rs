@@ -744,6 +744,68 @@ async fn health_models_count_tokens_and_the_404s() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn pathname_catch_all_preserves_the_normalized_trailing_slash() {
+    let g = boot().await;
+    for (target, path) in [
+        ("/missing/", "/missing/"),
+        ("/missing", "/missing"),
+        ("/x/%2e%2e/missing/", "/missing/"),
+    ] {
+        let (status, _, body) = call(&g.base, "GET", target, &[], "").await;
+        assert_eq!(status, 404);
+        assert_eq!(
+            body,
+            format!(r#"{{"error":{{"code":"NOT_FOUND","message":"no route for {path}"}}}}"#)
+        );
+    }
+    stop(g).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pathname_static_file_with_a_trailing_slash_still_serves() {
+    let f = fixture(&[]);
+    let assets = tempfile::tempdir().expect("assets");
+    std::fs::write(assets.path().join("large.txt"), "static contents").expect("asset");
+    let env = [
+        ("OMNI_ENCRYPTION_KEY".to_owned(), ENC.to_owned()),
+        (
+            "OMNI_DB_PATH".to_owned(),
+            f.path.to_str().unwrap().to_owned(),
+        ),
+        (
+            "OMNI_STATIC_DIR".to_owned(),
+            assets.path().to_str().unwrap().to_owned(),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    let mut config = load_config(&env, || 0).expect("config");
+    config.port = 0;
+    let running = start(config, Options::default()).await.expect("start");
+    let base = format!("127.0.0.1:{}", running.addr.port());
+    for path in ["/large.txt/", "/x/../large.txt/"] {
+        let (status, _, body) = call(&base, "GET", path, &[], "").await;
+        assert_eq!((status, body.as_str()), (200, "static contents"));
+    }
+    running.shutdown();
+    running.wait().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pathname_normalized_inference_routes_keep_their_dispatch_key() {
+    let g = boot().await;
+    for path in [
+        "/v1/x/%2e%2e/messages/",
+        "/v1/./responses/",
+        "/v1\\x\\..\\chat/completions",
+    ] {
+        let (status, _, _) = call(&g.base, "POST", path, &[], "{}").await;
+        assert_eq!(status, 401, "{path}");
+    }
+    stop(g).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_client_that_hangs_up_mid_stream_files_one_499_row() {
     let g = boot().await;
     let auth = bearer(&g);

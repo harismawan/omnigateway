@@ -499,8 +499,8 @@ pub(crate) fn route_path(raw: &str) -> std::borrow::Cow<'_, str> {
 }
 
 pub async fn handle(app: Arc<App>, req: Request<Incoming>) -> Result<Response<Body>, Infallible> {
-    let path = route_path(req.uri().path()).into_owned();
-    let route = path.as_str();
+    let path = crate::static_files::pathname(req.uri().path()).into_owned();
+    let route = route_path(req.uri().path());
     let method = req.method().clone();
     // Bun refuses a declared body over `maxRequestBodySize` before routing,
     // on every route but `/v1/*` (whose own limit is stricter).
@@ -508,7 +508,7 @@ pub async fn handle(app: Arc<App>, req: Request<Incoming>) -> Result<Response<Bo
         return Ok(crate::api::payload_too_large());
     }
     let get = matches!(method, Method::GET | Method::HEAD);
-    let res = match (method.clone(), route) {
+    let res = match (method.clone(), route.as_ref()) {
         (Method::GET | Method::HEAD, "/health") => health(&app),
         (Method::POST, "/__omni/bench/flush") if app.bench_endpoints => bench_flush(&app).await,
         (Method::POST, "/v1/messages") => proxy(app, Surface::Anthropic, req).await,
