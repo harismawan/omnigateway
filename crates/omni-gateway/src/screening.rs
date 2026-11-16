@@ -1,10 +1,257 @@
-//! Pure classifier contracts from the frozen TS gateway. Screening orchestration lives elsewhere.
+//! Frozen classifier contracts and smart-routing orchestration.
 
 use serde_json::{Value, json};
 use std::collections::VecDeque;
 
 pub const VERDICT_TTL_MS: i64 = 3_600_000;
 pub const VERDICT_CACHE_MAX: usize = 10_000;
+
+use crate::dispatch::{self, Deps, DispatchOptions, Refusal, Request};
+use futures_util::{StreamExt, stream::FuturesUnordered};
+use omni_ir::{error::ErrorCode, stream::StreamEvent};
+use omni_store::writer::{LogEvent, RequestLog};
+use std::sync::{Arc, Mutex, OnceLock};
+
+fn locked<T>(value: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    value
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn smart_cache() -> &'static Mutex<VerdictCache> {
+    static CACHE: OnceLock<Mutex<VerdictCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(VerdictCache::default()))
+}
+
+#[derive(Debug)]
+pub enum SmartDecision {
+    Proceed {
+        local_model: Option<String>,
+        notes: Vec<String>,
+    },
+    Refused(Refusal),
+}
+
+fn unavailable() -> SmartDecision {
+    SmartDecision::Refused(Refusal {
+        code: ErrorCode::Upstream,
+        message: "confidentiality check unavailable",
+        notes: &["smart-router:unavailable"],
+    })
+}
+
+/// Owns all started calls, including calls interrupted by a sibling or disconnect.
+struct CheckRow {
+    deps: Arc<Deps>,
+    row: RequestLog,
+    calls: Vec<Arc<Mutex<RequestLog>>>,
+    completed: bool,
+}
+
+impl Drop for CheckRow {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.row.status = 499;
+            self.row.error_code = Some("interrupted".into());
+        }
+        for call in &self.calls {
+            let log = locked(call);
+            if self.row.resolved_provider.is_none() && log.resolved_provider.is_some() {
+                self.row
+                    .resolved_provider
+                    .clone_from(&log.resolved_provider);
+                self.row.resolved_model.clone_from(&log.resolved_model);
+                self.row.credential_id.clone_from(&log.credential_id);
+            }
+            self.row.input_tokens += log.input_tokens;
+            self.row.output_tokens += log.output_tokens;
+            self.row.cache_read_tokens += log.cache_read_tokens;
+            self.row.cache_write_tokens += log.cache_write_tokens;
+            self.row.cost_usd += log.cost_usd;
+        }
+        self.row.attempts = i64::try_from(self.calls.len()).unwrap_or(i64::MAX);
+        self.row.duration_ms = (self.deps.now)() - self.row.at;
+        self.deps.telemetry.record(&self.row);
+        self.deps.writer.send(LogEvent::Finish(self.row.clone()));
+    }
+}
+
+/// Validate both configured models before the already-local bypass. No provider
+/// call, pending row, or cache entry exists until these checks have succeeded.
+pub async fn check_confidentiality(deps: Arc<Deps>, req: &Request) -> SmartDecision {
+    let snapshot = deps.holder.load();
+    let settings = &snapshot.routing.settings;
+    let (Some(classifier), Some(local)) = (
+        settings.smart_router_classifier_model.as_deref(),
+        settings.smart_router_local_model.as_deref(),
+    ) else {
+        return unconfigured();
+    };
+    let is_local = |model: &str| {
+        omni_router::local_only_model(model, &snapshot.routing, &deps.providers).is_some()
+    };
+    if !is_local(classifier) || !is_local(local) {
+        return unconfigured();
+    }
+    if is_local(&req.request.model) {
+        return SmartDecision::Proceed {
+            local_model: Some(req.request.model.clone()),
+            notes: vec!["smart-router:already-local".into()],
+        };
+    }
+    let local_decision = |oversize: bool| SmartDecision::Proceed {
+        local_model: Some(local.to_owned()),
+        notes: if oversize {
+            vec!["smart-router:local".into(), "smart-router:oversize".into()]
+        } else {
+            vec!["smart-router:local".into()]
+        },
+    };
+    let value = serde_json::to_value(&req.request).expect("IR serializes");
+    let mut uncached = VecDeque::new();
+    for text in segments(&value) {
+        let key = segment_key(classifier, &settings.smart_router_policy, &text);
+        let cached = locked(smart_cache()).get(&key, (deps.now)());
+        if cached.as_deref() == Some("confidential") {
+            return local_decision(false);
+        }
+        if cached.is_none() {
+            uncached.push_back((key, text));
+        }
+    }
+    if uncached.len() > 64 {
+        return local_decision(true);
+    }
+    if uncached.is_empty() {
+        return SmartDecision::Proceed {
+            local_model: None,
+            notes: vec!["smart-router:public".into()],
+        };
+    }
+    let mut row = RequestLog::new(crate::clock::request_id(), (deps.now)(), 200);
+    row.api_key_id.clone_from(&req.api_key_id);
+    row.requested_model = classifier.to_owned();
+    row.degradations = vec!["smart-router:classifier".into()];
+    let mut aggregate = CheckRow {
+        deps: deps.clone(),
+        row,
+        calls: Vec::new(),
+        completed: false,
+    };
+    let mut pending = FuturesUnordered::new();
+    let mut confidential = false;
+    loop {
+        while pending.len() < 4 {
+            let Some((key, text)) = uncached.pop_front() else {
+                break;
+            };
+            let request = serde_json::from_value(confidentiality_request(
+                classifier,
+                &settings.smart_router_policy,
+                &text,
+            ))
+            .expect("classifier IR");
+            let dispatched = dispatch::dispatch_with_options(
+                deps.clone(),
+                Request {
+                    request,
+                    request_id: crate::clock::request_id(),
+                    api_key_id: None,
+                    route_started_at: (deps.now)(),
+                },
+                DispatchOptions {
+                    request_transforms: false,
+                    local_only: true,
+                    on_route: false,
+                },
+            );
+            aggregate.calls.push(dispatched.log.clone());
+            pending.push(classify(dispatched, key, settings.smart_router_timeout_ms));
+        }
+        let Some((key, result, status, error)) = pending.next().await else {
+            break;
+        };
+        match result {
+            Some(verdict) => {
+                locked(smart_cache()).set(key, verdict.to_owned(), (deps.now)());
+                if verdict == "confidential" {
+                    confidential = true;
+                    break;
+                }
+            }
+            None => {
+                aggregate.row.status = status;
+                aggregate.row.error_code = error;
+                aggregate.completed = true;
+                return unavailable();
+            }
+        }
+    }
+    aggregate.completed = true;
+    if confidential {
+        local_decision(false)
+    } else {
+        SmartDecision::Proceed {
+            local_model: None,
+            notes: vec!["smart-router:public".into()],
+        }
+    }
+}
+
+fn unconfigured() -> SmartDecision {
+    SmartDecision::Refused(Refusal {
+        code: ErrorCode::Internal,
+        message: dispatch::LOCAL_ONLY_MESSAGE,
+        notes: &["smart-router:unconfigured"],
+    })
+}
+
+async fn classify(
+    mut dispatched: dispatch::Dispatched,
+    key: String,
+    timeout_ms: f64,
+) -> (String, Option<&'static str>, i64, Option<String>) {
+    let mut events = Vec::new();
+    let run = async {
+        while let Some(event) = dispatched.events.next().await {
+            match event {
+                Ok(event) => events.push(event),
+                Err(_) => return false,
+            }
+        }
+        true
+    };
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs_f64(timeout_ms.max(0.0) / 1000.0),
+        run,
+    )
+    .await;
+    let log = locked(&dispatched.log);
+    let timeout = result.is_err();
+    let verdict = if matches!(result, Ok(true))
+        && !events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::Error { .. }))
+    {
+        omni_ir::stream::try_collect(events).ok().and_then(|r| {
+            parse_confidentiality(&json!({"content": r.content, "stopReason": r.stop_reason.as_str()}))
+        })
+    } else {
+        None
+    };
+    let own_timeout =
+        timeout && (log.status == 0 || log.error_code.as_deref() == Some("interrupted"));
+    (
+        key,
+        verdict,
+        if own_timeout { 504 } else { log.status },
+        if own_timeout {
+            Some("TIMEOUT".into())
+        } else {
+            log.error_code.clone()
+        },
+    )
+}
 
 /// Bounded LRU. Hits update recency, not expiration; failures are never inserted.
 pub struct VerdictCache {
