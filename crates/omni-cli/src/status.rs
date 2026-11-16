@@ -115,7 +115,24 @@ pub fn run(flags: &HashMap<String, String>) -> Result<String, String> {
                     let quota = match &quota_rows {
                         J::Array(q) => q
                             .iter()
-                            .filter(|q| get(q, "credentialId") == get(c, "id"))
+                            .filter(|q| {
+                                let quota_id = get(q, "credentialId");
+                                let id = get(c, "id");
+                                if flags.contains_key("json") {
+                                    // Frozen Map keys use SameValueZero. BLOBs from
+                                    // separate SQLite reads are distinct objects.
+                                    match (quota_id, id) {
+                                        (Some(J::Null), Some(J::Null)) => true,
+                                        (Some(J::Number(a)), Some(J::Number(b))) => {
+                                            a == b || (a.is_nan() && b.is_nan())
+                                        }
+                                        (Some(J::String(a)), Some(J::String(b))) => a == b,
+                                        _ => false,
+                                    }
+                                } else {
+                                    quota_id == id
+                                }
+                            })
                             .cloned()
                             .collect(),
                         _ => Vec::new(),
