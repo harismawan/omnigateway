@@ -220,6 +220,7 @@ impl Refresher {
         let request = match c.provider.as_str() {
             "anthropic" => omni_providers::anthropic::oauth::refresh_request(token),
             "openai" => omni_providers::openai::oauth::refresh_request(token),
+            "antigravity" => omni_providers::antigravity::oauth::refresh_request(token),
             _ => {
                 return Err(GatewayError::new(
                     ErrorCode::BadRequest,
@@ -243,11 +244,21 @@ impl Refresher {
             Ok::<_, omni_providers::http::HttpError>((response.status, response.body.text().await?))
         })
         .await
-        .map_err(|_| GatewayError::new(ErrorCode::Timeout, "token request timed out"))?
-        .map_err(|_| GatewayError::new(ErrorCode::Network, "token request failed"))?;
+        // All built-in flows run through frozen pluginFlow: send, body and
+        // per-step deadline exceptions are raised into refresh, then relabelled.
+        .map_err(|_| refresh_threw(&c.provider))?
+        .map_err(|_| refresh_threw(&c.provider))?;
         #[allow(clippy::cast_precision_loss)]
         let result = if c.provider == "openai" {
             omni_providers::openai::oauth::token_result(
+                response.0,
+                &response.1,
+                Some(token),
+                (self.now)() as f64,
+                &c.provider_data,
+            )
+        } else if c.provider == "antigravity" {
+            omni_providers::antigravity::oauth::token_result(
                 response.0,
                 &response.1,
                 Some(token),
@@ -328,6 +339,12 @@ impl Refresher {
                 GatewayError::new(ErrorCode::Auth, format!("credential {} is gone", c.id))
             })
     }
+}
+fn refresh_threw(provider: &str) -> GatewayError {
+    GatewayError::new(
+        ErrorCode::Upstream,
+        format!("{provider} oauth refresh threw"),
+    )
 }
 // X2: the shared integer carrier truncates fractions and saturates infinities.
 // TS setInterval keeps its phase; callbacks while `running` simply return.
@@ -446,4 +463,103 @@ mod persistence_tests {
         );
         assert_eq!(js_text(&parse_js("{}").expect("json")), "[object Object]");
     }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod transport_tests {
+    use super::*;
+    use omni_providers::http::{Client, HttpError, HttpResponse};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    struct Transport(Option<String>);
+    impl HttpClient for Transport {
+        fn send(
+            &self,
+            mut request: HttpRequest,
+        ) -> FutureResult<'_, std::result::Result<HttpResponse, HttpError>> {
+            Box::pin(async move {
+                let Some(url) = &self.0 else {
+                    return std::future::pending().await;
+                };
+                request.url.clone_from(url);
+                Client::new().send(request).await
+            })
+        }
+    }
+
+    async fn check(provider: &str, kind: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("refresh.db");
+        let db = omni_store::SqliteStore::open(&path, 0).unwrap();
+        let key = omni_crypto::field::derive_key("refresh-transport");
+        db.connection().execute("INSERT INTO credentials (id,provider,label,auth_type,access_token,refresh_token,expires_at,created_at,updated_at) VALUES ('c',?,'fixture','oauth',?,?,1,1000,1000)", rusqlite::params![provider, omni_crypto::field::encrypt(&key,"old-access"), omni_crypto::field::encrypt(&key,"old-refresh")]).unwrap();
+        drop(db);
+        let store = Arc::new(
+            Backend::open(omni_store::StoreConfig::Sqlite { path }, 0)
+                .await
+                .unwrap(),
+        );
+        let before = store.credential(&key, "c").await.unwrap().unwrap();
+        let (url, server) = if kind == "timeout" {
+            (None, None)
+        } else {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/token", listener.local_addr().unwrap());
+            let truncated = kind == "truncated";
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = [0; 4096];
+                assert!(socket.read(&mut bytes).await.unwrap() > 0);
+                if truncated {
+                    socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{",
+                        )
+                        .await
+                        .unwrap();
+                }
+            });
+            (Some(url), Some(server))
+        };
+        let service = Refresher::new(store, key, Arc::new(Transport(url)), || 2000);
+        // Only the pending fake is time-advanced; socket/body cases use real I/O.
+        if kind == "timeout" {
+            tokio::time::pause();
+        }
+        let error = service.run(&before).await.unwrap_err();
+        if kind == "timeout" {
+            tokio::time::resume();
+        }
+        if let Some(server) = server {
+            server.await.unwrap();
+        }
+        assert_eq!(error.code, ErrorCode::Upstream);
+        assert_eq!(error.message, format!("{provider} oauth refresh threw"));
+        let after = service
+            .store
+            .credential(&service.key, "c")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(before, after);
+        assert!(after.enabled);
+    }
+    macro_rules! case {
+        ($name:ident, $provider:literal, $kind:literal) => {
+            #[tokio::test]
+            async fn $name() {
+                check($provider, $kind).await;
+            }
+        };
+    }
+    case!(antigravity_close, "antigravity", "close");
+    case!(antigravity_truncated, "antigravity", "truncated");
+    case!(antigravity_timeout, "antigravity", "timeout");
+    case!(anthropic_close, "anthropic", "close");
+    case!(anthropic_truncated, "anthropic", "truncated");
+    case!(anthropic_timeout, "anthropic", "timeout");
+    case!(openai_close, "openai", "close");
+    case!(openai_truncated, "openai", "truncated");
+    case!(openai_timeout, "openai", "timeout");
 }

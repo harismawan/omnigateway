@@ -32,6 +32,38 @@ async fn flush(h: Harness) {
 }
 
 #[tokio::test]
+async fn antigravity_registered_codec_dispatches_cloud_code() {
+    let f = fixture(&["c0"]);
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute(
+        "UPDATE credentials SET provider='antigravity',auth_type='oauth',access_token=api_key,provider_data='{\"projectId\":\"project-test\"}'",
+        [],
+    )
+    .expect("provider");
+    let body = "data: {\"response\":{\"responseId\":\"r1\",\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hello\"}]},\"finishReason\":\"STOP\"}]}}\n\n";
+    let h = harness(&f, vec![Reply::Http(200, vec![], vec![body.into()])]);
+    let mut d = dispatch(h.deps.clone(), req("gemini-2.5-flash"));
+    let events = drain(&mut d).await;
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    {
+        let calls = h.script.seen.lock().expect("seen");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].provider, "antigravity");
+        assert_eq!(
+            calls[0].url,
+            "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse"
+        );
+        let sent: serde_json::Value = serde_json::from_str(&calls[0].body).expect("body");
+        assert_eq!(sent["project"], "project-test");
+        assert_eq!(sent["model"], "gemini-2.5-flash");
+    }
+    flush(h).await;
+}
+
+#[tokio::test]
 async fn openai_registered_codec_dispatches_responses() {
     let f = fixture(&["c0"]);
     let conn = rusqlite::Connection::open(&f.path).expect("db");
