@@ -5,23 +5,40 @@ use rusqlite::{Connection, params};
 /// Frozen config preserves raw log retention, but validates body retention.
 /// Array/object ToPrimitive is deliberately outside this scalar compatibility surface.
 pub fn horizons(raw: Option<&str>, now: i64) -> Result<(f64, f64), StoreError> {
-    let parsed = raw.and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
-    let map = parsed.as_ref().and_then(serde_json::Value::as_object);
-    let log = map.and_then(|m| m.get("logRetentionDays"));
-    if matches!(
-        log,
-        Some(serde_json::Value::Array(_) | serde_json::Value::Object(_))
-    ) {
-        return Err(StoreError::Refused(
-            "maintenance object/array retention requires ToPrimitive; stopped".into(),
-        ));
-    }
-    let days = log.map_or(30.0, |v| omni_ir::js::to_number(Some(v)));
-    let body = map
-        .and_then(|m| m.get("bodyRetentionDays"))
-        .and_then(serde_json::Value::as_f64)
-        .filter(|v| v.fract() == 0.0 && (1.0..=3650.0).contains(v))
-        .unwrap_or(1.0);
+    use omni_ir::jsjson::{JsValue, parse_js};
+    let parsed = raw.and_then(|s| parse_js(s).ok());
+    let property = |name: &str| {
+        if let Some(JsValue::Object(entries)) = &parsed {
+            entries
+                .iter()
+                .rev()
+                .find(|(key, _)| key.iter().copied().eq(name.encode_utf16()))
+                .map(|(_, value)| value)
+        } else {
+            None
+        }
+    };
+    let days = match property("logRetentionDays") {
+        None => 30.0,
+        Some(JsValue::Null) => 0.0,
+        Some(JsValue::Bool(b)) => f64::from(u8::from(*b)),
+        Some(JsValue::Number(n)) => *n,
+        // A lone surrogate cannot occur in a numeric string. Reject it as NaN
+        // without replacement/roundtripping through serde_json.
+        Some(JsValue::String(units)) => {
+            String::from_utf16(units).map_or(f64::NAN, |s| omni_ir::js::string_to_number(&s))
+        }
+        Some(JsValue::Array(_) | JsValue::Object(_)) => {
+            return Err(StoreError::Refused(
+                "maintenance object/array retention requires ToPrimitive; stopped".into(),
+            ));
+        }
+        Some(JsValue::Undefined | JsValue::Function) => f64::NAN,
+    };
+    let body = match property("bodyRetentionDays") {
+        Some(JsValue::Number(n)) if n.fract() == 0.0 && (1.0..=3650.0).contains(n) => *n,
+        _ => 1.0,
+    };
     // f64::min ignores NaN; JS Math.min propagates it.
     let minimum = if days.is_nan() {
         f64::NAN
