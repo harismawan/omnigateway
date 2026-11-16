@@ -30,17 +30,12 @@ fn sql_value(v: ValueRef<'_>) -> JsValue {
     }
 }
 fn provider_data(raw: ValueRef<'_>, id: ValueRef<'_>) -> Result<JsValue> {
-    if matches!(raw, ValueRef::Null) {
-        return Ok(JsValue::Null);
-    }
-    let invalid = || {
+    crate::cli_cell::json(raw).map_err(|_| {
         Failure::internal(format!(
             "invalid credential provider_data: id={}",
-            stringify(&sql_value(id))
+            stringify(&crate::cli_cell::Cell::read(id).json())
         ))
-    };
-    let bytes = raw.as_bytes().map_err(|_| invalid())?;
-    crate::operator_json::parse(&String::from_utf8_lossy(bytes)).map_err(|_| invalid())
+    })
 }
 
 /// Match credentials.list's whole-list JSON failure without opening secret columns.

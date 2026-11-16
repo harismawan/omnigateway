@@ -2810,8 +2810,8 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
         const reopened = await exchange({method:"POST",target:"/api/client/login",headers:[J],body:JSON.stringify({key:identities[0]!.key})});
         identities[0]!.cookie=cookieOf(reopened)!;
         callers.find(([who])=>who==="client-A")![1]=identities[0]!.cookie;
-        // Inference auth intentionally retains the frozen parser diagnostic on
-        // both the wire and in rejection logs; separate keys pin each sink.
+        // Proxy/count retain the parser diagnostic; models logs the detail but
+        // returns the generic internal error at its HTTP boundary.
         for (const [name,target,method] of [["Proxy","/v1/chat/completions","POST"],["Count","/v1/messages/count_tokens","POST"],["Models","/v1/models","GET"]] as const) {
           const id = `inference-parser-${name}`;
           const raw = `sk-fixture-${id}`;
@@ -2820,7 +2820,9 @@ async function runOne(label: "ts" | "rust", binary: string, cfg: Config) {
           fixture.run("INSERT INTO api_keys(id,label,prefix,hash,limits,created_at,model_allowlist) VALUES(?,?,?,?,?,?,?)",[id,id,id,hash,"{}",1,canary]);
           const answer = await exchange({method,target,headers:[["authorization",`Bearer ${raw}`],J],...(method === "POST" ? {body:JSON.stringify({model:"probe",messages:[{role:"user",content:"probe"}]})} : {})});
           check(`inherited stored parser ${name}`,answer,500);
-          if (!answer.body.includes(canary)) secretProblems.push(`${name}: inherited parser diagnostic missing from response`);
+          if (name === "Models" && label === "rust") {
+            if (answer.body.includes(canary) || !answer.body.includes("internal error")) secretProblems.push(`${name}: expected generic internal response`);
+          } else if (!answer.body.includes(canary)) secretProblems.push(`${name}: inherited parser diagnostic missing from response`);
           fixture.run("DELETE FROM api_keys WHERE id=?",[id]);
         }
         fixture.run("UPDATE api_keys SET model_allowlist='storedAllowlistSecretCanary' WHERE id='client-A'");

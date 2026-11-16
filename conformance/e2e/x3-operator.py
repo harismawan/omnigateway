@@ -166,6 +166,19 @@ def run_case(case, batch, recreate=True, multi=False):
         sides.append(answers)
     for q, a, b in zip(batch, *sides):
         equal = canonical(a['response']) == canonical(b['response']) and a['state'] == b['state']
+        # The operator-boundary ruling intentionally redacts only /v1/models
+        # internal errors. Keep raw evidence, but compare the redacted response
+        # against its exact generic contract, not as another routing exception.
+        if q[1] == '/v1/models' and a['response']['status'] == b['response']['status'] == 500:
+            generic = dict(a['response'])
+            generic['body'] = b['response']['body']
+            body = bytes.fromhex(b['response']['body']).decode()
+            equal = (json.loads(body) == {'type': 'error', 'error': {'type': 'api_error', 'message': 'internal error'}}
+                     and canonical(generic) == canonical(b['response']) and a['state'] == b['state'])
+            # These four remain strict-reader differences, even though their
+            # wire details now share the generic boundary response.
+            if table == 'api_keys' and column == 'model_allowlist' and cell in ('integer', 'real', 'blob', 'blobnum'):
+                equal = False
         accepted = None
         if not equal:
             if q[1] == '/v1/models' and a['response']['status'] >= 400 and b['response']['status'] < 400:

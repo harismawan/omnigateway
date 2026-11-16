@@ -1316,6 +1316,11 @@ async fn models(app: &App, req: &Request<Incoming>) -> Response<Body> {
         Err(e) => {
             tracing::error!(status = e.code.http_status(), code = e.code.as_str(),
                 reason = %e.message, "model listing failed");
+            let e = if e.code.http_status() == 500 {
+                GatewayError::new(ErrorCode::Internal, "internal error")
+            } else {
+                e
+            };
             error_response(Dialect::Anthropic, &e, &[])
         }
     }
