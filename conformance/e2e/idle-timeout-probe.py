@@ -37,6 +37,7 @@ def probe(label, port, kind):
             raise RuntimeError(f"{label}/{kind}: EOF before headers")
         head += byte
     count = 0
+    sample = b""
     eof = False
     if kind in ("keepalive", "active"):
         while time.monotonic() - started < HOLD:
@@ -46,6 +47,7 @@ def probe(label, port, kind):
             except socket.timeout:
                 break
             count += len(chunk)
+            sample = (sample + chunk)[:64]
             if not chunk:
                 eof = True
                 break
@@ -62,11 +64,12 @@ def probe(label, port, kind):
             except socket.timeout:
                 break
             count += len(chunk)
+            sample = (sample + chunk)[:64]
             if not chunk:
                 eof = True
                 break
     result = dict(kind=kind, seconds=round(time.monotonic() - started, 2),
-                  eof=eof, bytes=count, head=head.decode("latin1"))
+                  eof=eof, bytes=count, head=head.decode("latin1"), sampleHex=sample.hex())
     s.close()
     print(label, json.dumps(result), flush=True)
     return label, result

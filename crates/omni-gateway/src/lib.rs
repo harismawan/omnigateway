@@ -192,6 +192,8 @@ pub struct Options {
     /// Bun's `idleTimeout` (255 s, its maximum, which TS sets): how long a
     /// request's headers may take, how long a keep-alive connection may sit
     /// between requests, and how long the request body may go without a byte.
+    /// Also bounds socket inactivity during responses, except the three
+    /// inference POST routes (frozen TS's `server.timeout(request, 0)`).
     /// There is no total body deadline, as in TS.
     pub idle_timeout: Duration,
     /// `OMNI_BENCH=1`: serve `POST /__omni/bench/flush`, the bench harness's

@@ -13,6 +13,7 @@ struct Clock {
     last: AtomicU64,
     disabled: AtomicBool,
     idle: Duration,
+    request_changed: tokio::sync::Notify,
 }
 
 #[derive(Clone)]
@@ -31,6 +32,7 @@ impl Activity {
         // these three routes, including their JSON and streaming responses.
         self.0.disabled.store(inference, Relaxed);
         self.touch();
+        self.0.request_changed.notify_one();
     }
 
     pub(crate) async fn expired(&self) {
@@ -39,7 +41,10 @@ impl Activity {
         }
         let mut deadline = self.0.origin + self.0.idle;
         loop {
-            tokio::time::sleep_until(deadline).await;
+            tokio::select! {
+                () = tokio::time::sleep_until(deadline) => {},
+                () = self.0.request_changed.notified() => {},
+            }
             if self.0.disabled.load(Relaxed) {
                 deadline = Instant::now() + self.0.idle;
                 continue;
@@ -65,6 +70,7 @@ impl<T> IdleIo<T> {
             last: AtomicU64::new(0),
             disabled: AtomicBool::new(false),
             idle,
+            request_changed: tokio::sync::Notify::new(),
         }));
         (
             Self {
@@ -146,6 +152,80 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn idle_reader_expires_and_zero_timeout_is_disabled() {
+        let (sock, _peer) = tokio::io::duplex(1);
+        let (mut io, activity) = IdleIo::new(sock, Duration::from_secs(5));
+        let reader = tokio::spawn(async move { io.read_u8().await });
+        activity.expired().await;
+        assert!(!reader.is_finished());
+        reader.abort();
+        let (sock, _peer) = tokio::io::duplex(1);
+        let (_, activity) = IdleIo::new(sock, Duration::ZERO);
+        let expiry = tokio::spawn(async move { activity.expired().await });
+        tokio::time::advance(Duration::from_secs(1000)).await;
+        tokio::task::yield_now().await;
+        assert!(!expiry.is_finished());
+        expiry.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn vectored_partial_write_advances_clock() {
+        let (sock, mut peer) = tokio::io::duplex(1);
+        let (mut io, activity) = IdleIo::new(sock, Duration::from_secs(5));
+        let expiry = tokio::spawn(async move { activity.expired().await });
+        tokio::time::advance(Duration::from_secs(4)).await;
+        assert_eq!(io.write_vectored(&[IoSlice::new(b"xx")]).await.unwrap(), 1);
+        assert_eq!(peer.read_u8().await.unwrap(), b'x');
+        tokio::time::advance(Duration::from_secs(4)).await;
+        tokio::task::yield_now().await;
+        assert!(!expiry.is_finished());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        expiry.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connection_timeout_drops_pending_service_work() {
+        use std::convert::Infallible;
+        use std::sync::atomic::AtomicUsize;
+
+        struct Claim(Arc<AtomicUsize>);
+        impl Drop for Claim {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Relaxed);
+            }
+        }
+
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let (sock, mut peer) = tokio::io::duplex(1024);
+        let (io, activity) = IdleIo::new(sock, Duration::from_secs(5));
+        let claims = dropped.clone();
+        let service = hyper::service::service_fn(move |_| {
+            let claim = Claim(claims.clone());
+            async move {
+                let _claim = claim;
+                std::future::pending::<Result<hyper::Response<crate::server::Body>, Infallible>>()
+                    .await
+            }
+        });
+        let task = tokio::spawn(async move {
+            let builder = crate::http1_builder(Duration::from_secs(5));
+            let conn = builder.serve_connection(hyper_util::rt::TokioIo::new(io), service);
+            tokio::select! {
+                _ = conn => panic!("connection completed before timeout"),
+                () = activity.expired() => {},
+            }
+        });
+        peer.write_all(b"GET /pending HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(5)).await;
+        task.await.unwrap();
+        assert_eq!(dropped.load(Relaxed), 1);
+        assert!(peer.read_u8().await.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn partial_writes_and_reads_extend_idle() {
         let (sock, mut peer) = tokio::io::duplex(1);
         let (mut io, activity) = IdleIo::new(sock, Duration::from_secs(5));
@@ -171,11 +251,14 @@ mod tests {
         activity.request(true);
         let waiter = activity.clone();
         let expiry = tokio::spawn(async move { waiter.expired().await });
-        tokio::time::advance(Duration::from_secs(20)).await;
+        tokio::time::advance(Duration::from_secs(22)).await;
         tokio::task::yield_now().await;
         assert!(!expiry.is_finished());
         activity.request(false);
+        tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_secs(5)).await;
+        tokio::task::yield_now().await;
+        assert!(expiry.is_finished());
         expiry.await.unwrap();
     }
 }

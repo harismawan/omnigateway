@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-/** Real-duration socket probe: ~285 seconds. Run only inside a loopback netns.
+/** Real-duration socket probe: ~305 seconds. Run only inside a loopback netns.
  * No shortened production timeout. Ports 18670..18672 are private to this driver.
  * Evidence is retained in --work; --rust can be the baseline or final binary.
  */
@@ -98,7 +98,12 @@ try {
   for (const label of ["ts", "rust"]) {
     const path = join(work, label, "omni.db");
     const db = new Database(path, { readonly: true });
-    writeFileSync(join(work, label, "request-logs.json"), JSON.stringify(db.query("SELECT status,error_code FROM request_logs ORDER BY at").all(), null, 2));
+    const rows = db.query("SELECT status,error_code FROM request_logs ORDER BY at").all() as { status: number; error_code: string | null }[];
+    writeFileSync(join(work, label, "request-logs.json"), JSON.stringify(rows, null, 2));
     db.close();
+    if (rows.length !== 2 || !rows.some(r => r.status === 200 && r.error_code === null) ||
+        !rows.some(r => r.status === 499 && r.error_code === "interrupted")) {
+      throw Error(`${label}: expected JSON success and interrupted SSE log`);
+    }
   }
 }
