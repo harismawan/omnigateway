@@ -15,7 +15,7 @@ Done so far: slice 1 gateway (custom provider, /v1/*, /health, writer, limiter, 
 - [x] A8 (S) /api/client/* (7) — functional review closed; speed review approved (a8-speed-review.md), five controller E2E rounds faster at cap; bounded eager-reservation tradeoff recorded.
 - [ ] A9 (L) /api/stream WebSocket + console live view
 - [ ] A10 (M) database routes, quiesce latch, lifecycle restart/shutdown
-- [ ] A11 (S) maintenance loop (pruning, heartbeat)
+- [x] A11 (S) maintenance loop (pruning, heartbeat) — merged 669984ca, approved after 3 review rounds (a11-review3.md); post-merge gates green
 - [ ] A12 (S) models dry-run (API + CLI)
 - [ ] A13 (M) OTLP export
 - [ ] A14 (S) outbound idle timeout: close a response whose client stops reading (Bun idleTimeout 255 s parity), all response kinds; found in A7 fix round 1
