@@ -58,7 +58,7 @@ pub(crate) fn validate_client_metadata(s: &SqliteStore) -> Result<()> {
     }
     Ok(())
 }
-fn rows(s: &SqliteStore, id: Option<&str>) -> Result<Vec<JsValue>> {
+pub(crate) fn rows(s: &SqliteStore, id: Option<&str>) -> Result<Vec<JsValue>> {
     rows_with(
         s,
         id,

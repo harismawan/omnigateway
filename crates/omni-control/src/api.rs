@@ -802,18 +802,20 @@ pub type Account = (String, JsValue);
 /// provider and parsed `provider_data`, every row (a row that does not
 /// parse fails the route, as `JSON.parse` throws in TS).
 pub fn accounts(store: &SqliteStore) -> Result<Vec<Account>> {
-    omni_store::models::operator_credentials(store.connection())?
+    crate::credentials::rows(store, None)?
         .into_iter()
-        .map(|(id, provider, _, _, data)| {
-            let parsed = crate::operator_json::parse(&data).map_err(|detail| {
-                omni_store::StoreError::StoredJson {
-                    table: "credentials",
-                    column: "provider_data",
-                    row_id: id,
-                    detail: detail.into(),
-                }
-            })?;
-            Ok((provider, parsed))
+        .filter_map(|credential| {
+            // Catalog membership uses strict equality against string provider ids.
+            // Other SQLite classes cannot contribute models to any provider.
+            let JsValue::String(provider) = get(&credential, "provider")? else {
+                return None;
+            };
+            Some(Ok((
+                utf8(provider),
+                get(&credential, "providerData")
+                    .expect("credential projection")
+                    .clone(),
+            )))
         })
         .collect()
 }

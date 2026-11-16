@@ -117,46 +117,30 @@ fn put_with(
     if get(&model, "id") != Some(&text(id)) {
         return Err("BAD_REQUEST: model id in the path and body must match".into());
     }
-    let credentials = if terminal {
+    let credential_rows = if terminal {
         crate::credentials::cli_rows(store)?
-            .into_iter()
-            .map(|c| {
-                let field = |k| match get(&c, k) {
-                    Some(JsValue::String(s)) => String::from_utf16_lossy(s),
-                    _ => String::new(),
-                };
-                (
-                    field("id"),
-                    field("provider"),
-                    field("label"),
-                    field("authType"),
-                    get(&c, "providerData").cloned().unwrap_or(JsValue::Null),
-                )
-            })
-            .collect()
     } else {
-        omni_store::models::operator_credentials(store.connection())
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .map(|(id, p, l, a, d)| {
-                let parsed = crate::operator_json::parse(&d).map_err(|detail| {
-                    render(omni_store::StoreError::StoredJson {
-                        table: "credentials",
-                        column: "provider_data",
-                        row_id: id.clone(),
-                        detail: detail.into(),
-                    })
-                })?;
-                Ok((id, p, l, a, parsed))
-            })
-            .collect::<Result<Vec<_>, String>>()?
+        crate::credentials::rows(store, None).map_err(|e| e.message)?
     };
+    let credentials = credential_rows
+        .into_iter()
+        .map(|c| {
+            let field = |k| get(&c, k).cloned().unwrap_or(JsValue::Null);
+            (
+                field("id"),
+                field("provider"),
+                field("label"),
+                field("authType"),
+                get(&c, "providerData").cloned().unwrap_or(JsValue::Null),
+            )
+        })
+        .collect::<Vec<_>>();
     let Some(JsValue::Array(targets)) = get(&model, "targets") else {
         unreachable!()
     };
     if credentials
         .iter()
-        .any(|(_, p, _, _, d)| p == "custom" && matches!(d, JsValue::Null))
+        .any(|(_, p, _, _, d)| p == &text("custom") && matches!(d, JsValue::Null))
     {
         return Err(
             "null is not an object (evaluating 'credential.providerData.endpointId')".into(),
@@ -165,7 +149,7 @@ fn put_with(
     for t in targets {
         if get(t, "provider") == Some(&text("custom"))
             && !credentials.iter().any(|(_, p, _, _, d)| {
-                p == "custom" && get(d, "endpointId") == get(t, "endpointId")
+                p == &text("custom") && get(d, "endpointId") == get(t, "endpointId")
             })
         {
             return Err(format!(
@@ -209,7 +193,7 @@ fn put_with(
         if get(t, "credentialId").is_some() {
             for account in &credentials {
                 let (id, p, _, _, d) = account;
-                if p != &provider {
+                if p != &text(&provider) {
                     continue;
                 }
                 if matches!(d, JsValue::Null) {
@@ -219,7 +203,7 @@ fn put_with(
                     );
                 }
                 if get(t, "endpointId") == get(d, "endpointId")
-                    && get(t, "credentialId") == Some(&text(id))
+                    && get(t, "credentialId") == Some(id)
                 {
                     pin = Some(account);
                     break;
@@ -234,26 +218,30 @@ fn put_with(
             if let Some(pin) = pin {
                 std::ptr::eq(*c, pin)
             } else {
-                c.1 == provider
+                c.1 == text(&provider)
             }
         }) {
-            if !have.contains(&c.3.as_str()) {
-                have.push(c.3.as_str());
+            if !have.contains(&&c.3) {
+                have.push(&c.3);
             }
         }
         if have.is_empty() {
             continue;
         }
         let reach = crate::catalog::model_auths(&provider, &model_id);
-        if reach.iter().any(|a| have.contains(a)) {
+        if reach.iter().any(|a| have.contains(&&text(a))) {
             continue;
         }
-        let phrase = |a: &[&str]| {
+        let phrase = |a: &[&JsValue]| {
             a.iter()
-                .map(|a| match *a {
-                    "oauth" => "OAuth",
-                    "apiKey" => "API key",
-                    _ => "",
+                .map(|a| {
+                    if **a == text("oauth") {
+                        "OAuth"
+                    } else if **a == text("apiKey") {
+                        "API key"
+                    } else {
+                        ""
+                    }
                 })
                 .collect::<Vec<_>>()
                 .join(" or ")
@@ -262,7 +250,7 @@ fn put_with(
             (
                 format!(
                     "this target is pinned to \"{}\", which is {}",
-                    c.2,
+                    crate::cli_cell::scalar_string(&c.2),
                     phrase(&have)
                 ),
                 "pin it to the other kind, or pick a model this account can reach",
@@ -275,7 +263,14 @@ fn put_with(
         };
         return Err(format!(
             "BAD_REQUEST: {provider} serves \"{model_id}\" to {} credentials only, and {holds} — {fix}",
-            phrase(&reach)
+            phrase(
+                &reach
+                    .iter()
+                    .map(|a| text(a))
+                    .collect::<Vec<_>>()
+                    .iter()
+                    .collect::<Vec<_>>()
+            )
         ));
     }
     let strategy = crate::operator_json::string(get(&model, "strategy").expect("schema"))?;
