@@ -213,3 +213,75 @@ python3 review/identity-parity.py exit=1 (3 observed new parity failures)
 At final check HEAD had advanced externally to **f1704d6608bbf52695115926a90eaf1f8dd2c045**, via `28567236` new identity corpus, `4c670bbe` Map-key fix, `f1704d66` green record. **I did not make these edits and have not reviewed those commits here.** This review's verdict is expressly for requested **eabedf83**, not the newer HEAD. Copied binary remains SHA256 **4d0fa59e3012269d1bfb887a6169b5346692538621120caae2826f93fe9e4375**; all probes use that copy. Corpus drivers were copied at eabedf83 before advancement; they retain original 182 quota pairs, not successor's expanded corpus. Earlier boundary/frozen checks and sql_value/function extraction were made during this review. Cargo gates ran in the shared worktree and all exited0, but exact timing of external source advancement relative to compilation is not independently established: **do not use those Cargo results as stronger immutable-commit provenance than the copied CLI binary**. No claim that new HEAD passes/fails this review, and no automatic approval of the follow-up repair. Final disk 17 GiB, above cutoff. No evidence deleted, product edits, commits, or subagents by reviewer; only preexisting tracked dirty report remains.
 
 The five documented differences, inherited behaviors and unverified items above are the complete scope basis, not a blanket malformed-cell waiver. R6 is outside every exception and therefore blocks approval of eabedf83 across all rounds despite six green original corpora.
+
+
+# R6-only follow-up — f1704d66 (final)
+
+**Verdict: REQUEST CHANGES pending disposition of the human identity mismatch below. R6's JSON regression is CLOSED.** No inference that the five user-accepted differences have expanded. This section supersedes the eabedf83 R6 finding for the JSON path, not the earlier historical evidence. No product edits/commits/subagents.
+
+## Reviewer build and results
+
+Touched all crates/**/*.rs, own rust-cli target, `cargo build --offline -p omni-cli` alone, CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0. Copied reviewer binary SHA256 **f3d6d14981e94bfe93af09aee03585eb6dc941e8dee3e9fadf3cba30fe4671fa**; build exit0, HEAD f1704d66. Disk initially 17 GiB (>5 GiB cutoff). All CLI children isolated HOME/root, Bun --no-env-file, evidence `/tmp/opencode/cli-fix6-review/r6/`; original implementer evidence read-only.
+
+| Own verification | Count/result |
+|---|---|
+| Original seven identity cases, JSON + human | **14/14 equal** |
+| Additional 12 edge identities, JSON + human | **23/24 equal**, one human mismatch below |
+| All identity JSON rows | **19/19 equal** |
+| Previous I3 BLOB projections | **21/21 equal** |
+| quota-json corpus | **196: 151 equal / 45 accepted human / 0 unexpected** |
+| extra corpus | **180/180 equal**, typed DB state equal |
+| Old 54d73636 vs new human, original 91 fixtures | **91/91 identical bytes/exit/typed DB state** |
+| Panic scan | **1,056 decoded child records, 0 markers/101/134/−6** |
+
+Counts are separate sets, not deduplicated. Panic record count = 392 quota + 360 extra + 76 identities + 42 I3 + 182 human stability + 4 direct human-mismatch reproduction children. The identity assertion exits1 intentionally because its one human mismatch is NOT masked. Corpus scratch copies only redirect evidence roots. Implementer six-corpus/gate `.exit` files independently read: 23 exit0, one intended red exit1; test log sums **1,265 passed / 0 failed / 19 ignored**. I did not rerun full workspace/clippy/fmt in this R6-only follow-up; previous round's own gates and these implementer files are distinguished from my fresh build/two corpora. Own typed boundary diff exit0. No new HTTP/typed-reader code in this range.
+
+## Exact Map semantics
+
+Frozen `packages/control/src/credentials.ts:282–296` uses the **same Map for both human and JSON status**, not a human-only structural comparison. `status.rs` now implements reachable SameValueZero correctly for JSON: Null/Null; numeric `==` (therefore +0/−0 and INTEGER1/REAL1 equal); both NaN; UTF16 string equality; other kinds never match. Only SQLite classes reach this path, so Bool/Undefined handling is irrelevant. Distinct BLOB reads are distinct JS objects even if their bytes agree and must never join, including empty BLOBs.
+
+Fresh end-to-end cases: ±0 in both directions equal; INTEGER1/REAL1 in both directions equal; TEXT'1'/Number1 in both directions unequal (quota empty); NULL/NULL matches and attaches quota; ±Infinity same-sign match; BLOB/BLOB never matches in JSON; mixed BLOB/TEXT and BLOB/NULL never match in JSON. NaN cannot persist as SQLite REAL here: both Python binding and direct **Bun SQLite** binding verified typeof=NULL. Bun Map probe (`map.ts`, map.exit0) separately confirms ±0, NaN, Number1, TEXT/Number inequality, BLOB identity inequality, NULL match. Rust f64 == agrees for signed zero; explicit NaN branch is defensive and correct but unreachable from normal SQLite stored cells. This closes original R6 without broadening typed readers.
+
+## Important H1 — human mixed TEXT/BLOB quota identity divergence (inherited; ruling needed)
+
+The human branch retains structural comparison **after** `sql_value` converts quota BLOB to UTF8 TEXT. Thus BLOB/BLOB identities do not match on that path (credential id remains an indexed object, quota id becomes string); the seven new corpus identities all pass human comparison. This does **not** make the general human join Map-equivalent.
+
+Minimal fixture: ordinary credential id TEXT 'q', provider openai, label quota, auth oauth; affinity-free quota table row ('q','fiveHour',0,1,10,NULL,0,NULL). Exact SQL:
+
+```sql
+UPDATE quota_windows SET credential_id=X'71';
+```
+
+Command both sides `--root <scratch>/root status` (no JSON). Both exit0, stderr empty, typed DB unchanged. Frozen quota cell **unknown**; Rust **5h 10% (20773d ago)**. `status --json` for this mixed identity agrees (quota empty), confirming JSON R6 is fixed. Full original identity streams in `quota-6i_8w5f2/identity.json`. Independent direct reproduction `quota-dlxkbt1b/human-mixed.json` runs frozen, reviewer f1704d66, reviewer 54d73636 and reviewer eabedf83: **all three Rust binaries print the same incorrect attached-quota human cell**, so this is inherited, not a new f1704d66 regression.
+
+Frozen Map does not associate a TEXT credential id with an independently read Uint8Array key. Rust human projection turns X'71' into "q", and `crates/omni-cli/src/status.rs:132–133` (else structural-equality branch) then associates it. Source consumer is frozen credentials.ts:282–296, upstream status.ts:80; shared `sql_value` credentials.rs:24–30 intentionally remains unchanged. No typed/health loosening proposed.
+
+**Class audit:** the 45 pinned accepted human identities are seven-column fixture mutations (window_type/starts_at/used and selected limit_value values). They contain **no credential_id case**. The seven added identity cases are explicitly `human_difference=False`. This mixed TEXT/BLOB case is not among those seven, not in the pinned accepted set, and would fail its current equality requirement if added without a new classification. It may be considered within the user's broader human quota waiver, but **I do not rule on that or expand the waiver**. Report H1 for explicit disposition; do not silently mask it or describe all human Map behavior as verified. REQUEST CHANGES here means unresolved scope/known mismatch, not an instruction to repair an already accepted behavior against the user's wishes.
+
+## Final five documented differences (unchanged; no sixth inferred)
+
+1. Human status quota/burn over malformed quota_windows cells: accepted coercion/percentage/age/window-label/burn arithmetic, **not JSON** or normal quota/credential table behavior. H1's association/identity mismatch is newly reported for classification, not automatically included.
+2. models put pinned/custom credential resolution for non-string stored id/provider/label/authType: not provider_data parse, string-field ordinary behavior, setup, other model commands, or gateway typed readers.
+3. I1 setup malformed stored target JSON objects: provider/limit object conversion/ToString errors and Number-only narrowing; not ordinary validated setup/config inputs or all setup errors. These malformed payloads can exist in stock TEXT columns, despite the hand-altered-data scope wording.
+4. I2 human models show object-valued target model/credentialId error precedence: not JSON, other model commands, or normal show errors.
+5. M1 inherited long-radix ToNumber rounding on malformed stored scalar inputs: large-radix arithmetic precision only; no demonstrated current-epoch expiry mismatch, no general numeric-coercion waiver or shared gateway change.
+
+Inherited frozen behaviors remain: exact stream/exit contract outside exceptions, direct table non-strings throw, flags ===1, guardrail only Null means absent, finite-number-only date rendering versus expiry ToNumber, Uint8Array byte-string/indexed JSON, nonfinite JSON null only at serialization, invalid limits fail closed. Prior R1–R5 and I3 closures stand. Six preexisting neighbors exclusions (two random creates/four unsupported credential mutations) remain disclosures, not fresh parity passes.
+
+Unverified in this narrow follow-up: arbitrary/all SQLite and nested JSON domains, exhaustive interactive generated limits, full malformed pinned/custom combinations, controller matrix, independent full five-old-corpus/workspace/clippy/fmt rerun at f1704d66. Implementer gates read, not passed off as mine. No claim of immutable domain-wide equivalence or permission to change the five accepted differences.
+
+## Exit evidence (verbatim)
+
+```text
+cargo build --offline -p omni-cli exit=0
+env -i [isolated] python3 review/r6/identity.py exit=1
+env -i [isolated] python3 review/r6/i3-21.py exit=0
+env -i [isolated] python3 review/r6/quota-json.py exit=0
+env -i [isolated] python3 review/r6/extra.py exit=0
+env -i [isolated] python3 review/r6/human91.py exit=0
+env -i [isolated] python3 review/r6/human-mixed.py exit=0 (assert inherited difference exists)
+env -i [isolated] bun --no-env-file review/r6/map.ts exit=0
+git diff --exit-code [typed boundary] 21348e06..HEAD exit=0
+```
+
+Note human-mixed.exit0 means it asserted the known inherited mismatch exists; identity.exit1 is the unmasked parity failure. The corpus gates are genuinely green; no inference that they contain the mixed-type case.
