@@ -148,12 +148,23 @@ pub async fn judge(
     policy: &str,
     local_classifier: Option<String>,
 ) -> (Option<Refusal>, Vec<String>) {
+    judge_with_model(deps, req, policy, local_classifier, None).await
+}
+
+async fn judge_with_model(
+    deps: Arc<Deps>,
+    req: &Request,
+    policy: &str,
+    local_classifier: Option<String>,
+    model_override: Option<Option<String>>,
+) -> (Option<Refusal>, Vec<String>) {
     let snapshot = deps.holder.load();
     let settings = &snapshot.routing.settings;
     let local_only = local_classifier.is_some();
-    let Some(model) = local_classifier
+    let Some(model) = local_classifier.as_ref().or(model_override
         .as_ref()
-        .or(settings.guardrail_model.as_ref())
+        .unwrap_or(&settings.guardrail_model)
+        .as_ref())
     else {
         return (
             Some(Refusal {
@@ -289,6 +300,7 @@ pub fn screen_first(
     smart: bool,
     surface: &'static str,
 ) -> dispatch::Dispatched {
+    let guardrail_model = deps.holder.load().routing.settings.guardrail_model.clone();
     let own = Arc::new(Mutex::new(RequestLog::new(
         req.request_id.clone(),
         req.route_started_at,
@@ -310,7 +322,7 @@ pub fn screen_first(
             SmartDecision::Proceed { local_model, classifier, notes } => (local_model, classifier, notes),
         };
         if let Some(policy) = policy {
-            let (refusal, judge_notes) = judge(deps.clone(), &req, &policy, classifier).await;
+            let (refusal, judge_notes) = judge_with_model(deps.clone(), &req, &policy, classifier, smart.then_some(guardrail_model)).await;
             notes.extend(judge_notes);
             if let Some(refusal) = refusal {
             let mut refused = dispatch::refused(&deps, &req, &refusal, surface);
