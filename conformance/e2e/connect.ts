@@ -16,7 +16,7 @@ const { values: f } = parseArgs({ options: Object.fromEntries(
 ) });
 for (const k of ["ts", "rust", "work", "cert", "key"]) if (!f[k]) throw Error(`--${k} required`);
 const work = resolve(f.work!);
-if (!work.startsWith("/tmp/opencode/a15/")) throw Error("work must be under /tmp/opencode/a15/");
+if (!["/tmp/opencode/a15/", "/tmp/opencode/b4/connect2/"].some(p => work.startsWith(p))) throw Error("invalid private work directory");
 const seed = join(work, "seed");
 mkdirSync(seed, { recursive: true });
 const baseEnv = {
@@ -38,7 +38,7 @@ const password = "a15-admin-password";
 const db = new Database(seedDb);
 db.run("INSERT OR REPLACE INTO settings (key,value) VALUES ('adminPasswordHash',?)", [await Bun.password.hash(password, { algorithm: "argon2id", memoryCost: 19456, timeCost: 2 })]);
 // Identical SQL on the stopped seed DB; both gateways receive the same copy.
-for (const provider of ["anthropic", "openai"]) for (const kind of ["full", "missing", "deleted", "key"]) {
+for (const provider of ["anthropic", "openai", "antigravity"]) for (const kind of ["full", "missing", "deleted", "key"]) {
   db.run(`INSERT INTO credentials (id,provider,label,auth_type,enabled,tier,weight,expires_at,account_email,provider_data,access_token,refresh_token,id_token,created_at,updated_at,disabled_reason,disabled_at,token_version)
     VALUES (?,?,?,?,0,3,2.5,4102444800000,'old@example.test',?,?,?,?,1000,2000,'fixture disabled',1500,7)`,
     [`${provider}-${kind}`, provider, "old label", kind === "key" ? "apiKey" : "oauth",
@@ -54,6 +54,7 @@ let tokenBody = '{"error":"fixture_refusal"}';
 let transport: "normal" | "close" | "partial" = "normal";
 let tokenDelay = 0;
 let inference = false;
+let google = { emailStatus: 200, loadStatus: 200, onboardStatus: 200, load: { cloudaicompanionProject: "fixture-project", currentTier: { id: "fixture-tier" } } as any, onboard: { response: { cloudaicompanionProject: "onboard-project" } } as any };
 const stub = Bun.listen<{ buffer: Buffer }>({ hostname: "127.0.0.1", port: 443,
   tls: { cert: Bun.file(f.cert!), key: Bun.file(f.key!) },
   socket: {
@@ -66,7 +67,17 @@ const stub = Bun.listen<{ buffer: Buffer }>({ hostname: "127.0.0.1", port: 443,
       const length = Number(headers.find(h => /^content-length:/i.test(h))?.split(":")[1] ?? 0);
       if (s.data.buffer.length < end + 4 + length) return;
       wires.push({ line: line!, headers, body: s.data.buffer.subarray(end + 4, end + 4 + length).toString() });
+      if (/oauth2\/v1\/userinfo|:loadCodeAssist|:onboardUser|:retrieveUserQuotaSummary|:fetchAvailableModels/.test(line!)) {
+        const email = line!.includes("userinfo"), load = line!.includes(":loadCodeAssist"), onboard = line!.includes(":onboardUser");
+        const status = email ? google.emailStatus : load ? google.loadStatus : onboard ? google.onboardStatus : 200;
+        const body = JSON.stringify(email ? { email: "google@example.test" } : load ? google.load : onboard ? google.onboard : {});
+        s.end(`HTTP/1.1 ${status} Fixture\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`); return;
+      }
       if (inference) {
+        if (line!.includes("streamGenerateContent")) {
+          const body = `data: ${JSON.stringify({ response: { candidates: [{ content: { role: "model", parts: [{ text: "fixture answer" }] }, finishReason: "STOP" }], usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 2 } } })}\n\n`;
+          s.end(`HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`); return;
+        }
         const anthropic = line!.includes("/v1/messages");
         const body = anthropic ? [
           { type: "message_start", message: { id: "msg_fixture", type: "message", role: "assistant", model: "claude-sonnet-4-5", content: [], usage: { input_tokens: 1, output_tokens: 0 } } },
@@ -461,6 +472,57 @@ async function run(label: string, binary: string): Promise<Row[]> {
       cleanup.run("UPDATE credentials SET label='a' WHERE id=?", [`${provider}-full`]);
       cleanup.close();
     }
+    for (const scenario of ["url", "bare", "mismatch", "invalid-url", "missing-state", "poll", "reconnect", "object-project", "onboard", "empty-onboard", "onboard-failure", "load-failure", "email-failure", "token-400", "token-401", "token-500", "immediate"]) {
+      const name = `antigravity/connect/${scenario}`;
+      google = { emailStatus: scenario === "email-failure" ? 500 : 200, loadStatus: scenario === "load-failure" ? 500 : 200, onboardStatus: scenario === "onboard-failure" ? 500 : 200,
+        load: ["onboard", "empty-onboard", "onboard-failure", "load-failure"].includes(scenario) ? { allowedTiers: [{ id: "chosen-tier", isDefault: true }] } : { cloudaicompanionProject: scenario === "object-project" ? { id: " fixture-project " } : "fixture-project", currentTier: { id: "fixture-tier" } },
+        onboard: scenario === "empty-onboard" ? { done: false } : { response: { cloudaicompanionProject: { id: "onboard-project" } } } };
+      tokenStatus = scenario.startsWith("token-") ? Number(scenario.slice(6)) : 200;
+      tokenBody = tokenStatus === 200 ? JSON.stringify({ access_token: "google-new-access", refresh_token: "google-new-refresh", expires_in: 3600 }) : '{"error":"fixture_refusal"}';
+      let inferenceKey = "";
+      if (scenario === "immediate") {
+        const key = await request("/api/keys", JSON.stringify({ label: name })); inferenceKey = key.body.key;
+        await request("/api/models/google-immediate", JSON.stringify({ id: "google-immediate", strategy: "priority", isAlias: false, targets: [{ provider: "antigravity", model: "gemini-2.5-pro", tier: 1, weight: 1, costPerMTok: { input: 1, output: 2 }, capabilities: { tools: true, images: true, reasoning: true } }] }), cookie, "PUT");
+        const writer = new Database(file); writer.run("UPDATE credentials SET enabled=0 WHERE provider='antigravity'"); writer.close();
+        await Bun.sleep(650);
+      }
+      const start = await row(`${name}/start`, "start", JSON.stringify({ provider: "antigravity", label: " google label ", ...(scenario === "reconnect" ? { credentialId: "antigravity-full" } : {}) }));
+      if (!start.flowId) {
+        for (const suffix of ["exchange", "persistence", ...(scenario === "immediate" ? ["inference"] : [])]) rows.push({ name: `${name}/${suffix}`, response: { missing: true }, wire: [] });
+        continue;
+      }
+      const url = validateStart(start), state = url.searchParams.get("state")!;
+      const code = scenario === "url" ? `https://antigravity.google/oauth-callback?code=%20fixture-code%20&state=${state}` : scenario === "invalid-url" ? "https://wrong.test/callback?code=x&state=x" : scenario === "missing-state" ? "https://antigravity.google/oauth-callback?code=x" : `fixture-code#${scenario === "mismatch" ? "wrong" : state}`;
+      const before = Date.now();
+      const done = await row(`${name}/exchange`, scenario === "poll" ? "poll" : "finish", JSON.stringify({ flowId: start.flowId, code }));
+      const after = Date.now();
+      // Only the token request carries random verifier bytes. Retain all other wire bytes.
+      for (const wire of rows.at(-1)!.wire) if (wire.line.includes("/token ")) {
+        const fields = new URLSearchParams(wire.body), verifier = fields.get("code_verifier")!;
+        if (createHash("sha256").update(verifier).digest("base64url") !== url.searchParams.get("code_challenge")) throw Error("Google PKCE invalid");
+        if (Number(wire.headers.find(h => /^content-length:/i.test(h))?.split(":")[1]) !== Buffer.byteLength(wire.body)) throw Error("Google length invalid");
+        fields.set("code_verifier", "<verifier>"); wire.body = fields.toString();
+        wire.headers = wire.headers.map(h => /^content-length:/i.test(h) ? "content-length: <validated>" : h);
+      }
+      if (done.id) {
+        const stored = await storedRow(done.id);
+        await Bun.write(join(root, `google-${scenario}.raw.json`), JSON.stringify(stored, null, 2));
+        for (const [field, delta] of [["expires_at", 3600000], ["created_at", 0], ["updated_at", 0]] as const) {
+          if (scenario === "reconnect" && field === "created_at") continue;
+          if (stored[field] < before + delta - 2000 || stored[field] > after + delta + 2000) throw Error(`Google invalid ${field}`);
+          stored[field] = `<request-time+${delta}>`;
+        }
+        if (scenario !== "reconnect") { stored.id = "<uuid4>"; done.id = "<uuid4>"; }
+        rows.push({ name: `${name}/persistence`, response: stored, wire: [] });
+      } else rows.push({ name: `${name}/persistence`, response: null, wire: [] });
+      if (scenario === "immediate") {
+        inference = true; wires = [];
+        const r = await fetch("http://127.0.0.1:18515/v1/chat/completions", { method: "POST", headers: { authorization: `Bearer ${inferenceKey}`, "content-type": "application/json" }, body: JSON.stringify({ model: "google-immediate", messages: [{ role: "user", content: "hello" }], max_tokens: 32 }) });
+        const answer: any = await r.json(); inference = false;
+        const valid = r.status === 200 && answer.choices?.[0]?.message?.content === "fixture answer" && wires.length === 1 && wires[0]!.headers.some(h => h.toLowerCase() === "authorization: bearer google-new-access");
+        rows.push({ name: `${name}/inference`, response: { status: r.status, valid }, wire: [] });
+      }
+    }
     return rows;
   } finally { proc.kill(); await proc.exited; }
 }
@@ -473,8 +535,8 @@ function validateStart(start: any): URL {
 function masked(rows: Row[]): Row[] {
   return rows.map(row => {
     const r = structuredClone(row);
-    const body = (r.response as any).body;
-    if (["grok", "antigravity", "muse", "qoder"].some(p => r.name === `start/provider/${p}`)) return r;
+    const body = (r.response as any)?.body;
+    if (["grok", "muse", "qoder"].some(p => r.name === `start/provider/${p}`)) return r;
     if (body?.flowId) {
       const url = validateStart(body);
       body.flowId = "<flow>";
@@ -495,6 +557,7 @@ try {
   for (const name of names) {
     const a = ts.find(r => r.name === name), b = rust.find(r => r.name === name);
     const ar = a?.response as any, br = b?.response as any;
+    if (name === "antigravity/connect/immediate/inference" && (!ar?.valid || !br?.valid)) { failed++; console.log(`FAILED ${name}`); continue; }
     if (["changed-label", "equal-priority", "equal-roundRobin", "invalid-utf8"].some(kind => name.includes(`/${kind}/`)) && (!ar?.valid || !br?.valid)) {
       failed++; console.log(`FAILED ${name} expected bearer`); continue;
     }
@@ -508,7 +571,7 @@ try {
       const expected = `${provider} oauth ${provider === "grok" ? "start" : "begin"} threw`;
       if (ar?.status === 502 && ar.body.error.code === "UPSTREAM" && ar.body.error.message === expected && br?.status === 400 && br.body.error.code === "BAD_REQUEST" && br.body.error.message === "provider must be one of anthropic, openai") { expectedDivergences++; classes["unported-provider"]++; continue; }
     }
-    if (["antigravity", "qoder"].some(p => name === `start/provider/${p}`)) {
+    if (["qoder"].some(p => name === `start/provider/${p}`)) {
       if (ar?.status === 200 && ar.body.error === undefined && typeof ar.body.authorizeUrl === "string" && /^[\w-]{43}$/.test(ar.body.flowId) && br?.status === 400 && br.body.error.code === "BAD_REQUEST" && br.body.error.message === "provider must be one of anthropic, openai") { expectedDivergences++; classes["unported-provider"]++; continue; }
     }
     if (ar?.body?.error?.message === frozen) {
@@ -516,7 +579,7 @@ try {
     }
     if (!isDeepStrictEqual(a,b)) { failed++; console.log(`FAILED ${name}`); }
   }
-  for (const [name, count] of Object.entries({ "unported-provider": 6, "provider-list": 12 })) {
+  for (const [name, count] of Object.entries({ "unported-provider": 5, "provider-list": 12 })) {
     if (classes[name as keyof typeof classes] !== count) { failed++; console.log(`FAILED divergence count ${name}: expected ${count}, got ${classes[name as keyof typeof classes]}`); }
   }
   console.log(JSON.stringify({ rows: names.size, failed, expectedDivergences, classes }));
