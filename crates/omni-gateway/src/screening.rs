@@ -207,13 +207,13 @@ pub async fn judge(
                 request: serde_json::from_value(classifier_request(model, policy, &judged))
                     .expect("classifier IR"),
                 request_id: crate::clock::request_id(),
-                api_key_id: None,
+                api_key_id: req.api_key_id.clone(),
                 route_started_at: (deps.now)(),
             },
             DispatchOptions {
                 request_transforms: false,
                 local_only,
-                on_route: false,
+                on_route: true,
             },
         );
         let mut row = JudgeRow {

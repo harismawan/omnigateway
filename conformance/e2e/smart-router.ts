@@ -102,8 +102,12 @@ function listener(port: number, tls?: { cert: ReturnType<typeof Bun.file>; key: 
       ].map(x => `event: ${x.type}\ndata: ${JSON.stringify(x)}\n\n`).join("");
       const reply = status !== 200 ? '{"error":{"message":"fixture failure","type":"server_error"}}' : tls ? responses : request.stream ?
         `data: ${JSON.stringify({ ...payload, object: "chat.completion.chunk", choices: [{ index: 0, delta: { role: "assistant", content: text }, finish_reason: null }] })}\n\ndata: ${JSON.stringify({ ...payload, object: "chat.completion.chunk", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n` : JSON.stringify(payload);
-      s.write(`HTTP/1.1 ${status} Fixture\r\nContent-Type: ${request.stream && status === 200 ? "text/event-stream" : "application/json"}\r\nContent-Length: ${Buffer.byteLength(reply)}\r\nConnection: close\r\n\r\n${reply}`);
-      s.end();
+      const respond = () => {
+        s.write(`HTTP/1.1 ${status} Fixture\r\nContent-Type: ${request.stream && status === 200 ? "text/event-stream" : "application/json"}\r\nContent-Length: ${Buffer.byteLength(reply)}\r\nConnection: close\r\n\r\n${reply}`);
+        s.end();
+      };
+      if (classifier && pendingCase(current)) setTimeout(respond, 2000);
+      else respond();
     },
   } });
 }
@@ -115,6 +119,7 @@ function request(c: Case) {
   return { model, stream: c.stream, max_tokens: 128, messages: [{ role: "user", content: text }] };
 }
 const logMask = (row: any) => Object.fromEntries(Object.entries(row).filter(([k]) => !["id", "at", "duration_ms", "ttft_ms", "updated_at", "node_id"].includes(k)));
+const pendingCase = (c: Case) => c.kind === "guard-allow" && c.path === "/v1/chat/completions" && !c.stream;
 async function run(binary: string, label: string) {
   const rows: any[] = [];
   for (const [i, c] of cases.entries()) {
@@ -128,7 +133,7 @@ async function run(binary: string, label: string) {
     const settings = { ...(old ? JSON.parse(old.value) : {}), smartRouterEnabled: c.kind !== "off",
       smartRouterClassifierModel: c.kind === "unconfigured" ? null : "classifier", smartRouterLocalModel: "local-model",
       smartRouterPolicy: "Private account data is confidential.", smartRouterTimeoutMs: 100,
-      guardrailModel: c.kind === "guard-unconfigured" ? null : "judge", guardrailTimeoutMs: 100, guardrailHistoryTurns: 3 };
+      guardrailModel: c.kind === "guard-unconfigured" ? null : "judge", guardrailTimeoutMs: pendingCase(c) ? 5000 : 100, guardrailHistoryTurns: 3 };
     d.run("INSERT INTO settings(key,value) VALUES('settings',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [JSON.stringify(settings)]);
     d.close();
     const child = Bun.spawn([resolve(binary)], { cwd: root, env: { ...env, HOME: root, OMNI_ROOT: root, OMNI_DB_PATH: file }, stdout: Bun.file(join(root, "stdout")), stderr: Bun.file(join(root, "stderr")) });
@@ -139,14 +144,20 @@ async function run(binary: string, label: string) {
         await Bun.sleep(25);
       }
       if (!ready) throw Error(`boot failed: ${root}`);
-      const clients = [], rounds: Wire[][] = [];
+      const clients = [], rounds: Wire[][] = [], pending: any[] = [];
       for (let round = 0; round < 2; round++) {
         wires = [];
+        const snapshot = pendingCase(c) && round === 0 ? setTimeout(() => {
+          const reader = new Database(file);
+          pending.push(reader.query("SELECT requested_model,status,api_key_id FROM request_logs ORDER BY rowid").all());
+          reader.close();
+        }, 700) : undefined;
         try {
           const response = await fetch("http://127.0.0.1:18540" + c.path, { method: "POST", keepalive: false,
             headers: { authorization: `Bearer ${key}`, "content-type": "application/json" }, body: JSON.stringify(request(c)), signal: AbortSignal.timeout(20000) });
           clients.push({ status: response.status, headers: [...response.headers.entries()], body: await response.text(), route: c.path });
         } catch (error) { clients.push({ status: 0, headers: [], body: `TRANSPORT:${(error as any).code ?? String(error)}`, route: c.path }); }
+        clearTimeout(snapshot);
         // Apply time-sensitive masks at receipt, not minutes later after both tables.
         const client = clients.at(-1)! as any;
         const normalized = norm(client);
@@ -156,7 +167,7 @@ async function run(binary: string, label: string) {
       child.kill("SIGTERM"); await child.exited;
       const reader = new Database(file);
       const logs = reader.query("SELECT * FROM request_logs ORDER BY rowid").all().map(logMask); reader.close();
-      rows.push({ name: c.name, clients, upstream: rounds, logs });
+      rows.push({ name: c.name, clients, upstream: rounds, logs, pending });
     } finally { if (child.exitCode === null) { child.kill("SIGTERM"); await child.exited; } }
   }
   return rows;
@@ -168,6 +179,9 @@ function valid(row: any, c: Case) {
   const failure = ["garbage", "timeout", "5xx", "unconfigured", "guard-deny", "guard-garbage", "guard-timeout", "guard-5xx", "guard-unconfigured"].includes(c.kind);
   const status = c.stream ? 200 : c.kind.includes("unconfigured") ? 500 : c.kind === "guard-deny" ? 400 : failure ? 502 : 200;
   if (row.clients.length !== 2 || row.clients.some((r: any) => r.status !== status)) return false;
+  if (pendingCase(c) && (row.pending.length !== 1 || row.pending[0].length !== 1 ||
+    row.pending[0][0].requested_model !== "judge" || row.pending[0][0].status !== 0 ||
+    !row.pending[0][0].api_key_id)) return false;
   const calls = (r: Wire[]) => r.filter(w => ["classifier", "judge"].includes(JSON.parse(w.body).model));
   const cached = ["public", "confidential", "guard-allow", "guard-deny", "both-public", "both-local"].includes(c.kind);
   if (cached && (calls(row.upstream[0]).length === 0 || calls(row.upstream[1]).length !== 0)) return false;
@@ -197,7 +211,7 @@ try {
   for (const [i, c] of cases.entries()) {
     const a = ts[i]!, b = rust[i]!;
     const client = a.clients.every((x: any, j: number) => x.normalized !== null && isDeepStrictEqual(x.normalized, b.clients[j].normalized));
-    const upstream = isDeepStrictEqual(a.upstream, b.upstream), stored = isDeepStrictEqual(a.logs, b.logs);
+    const upstream = isDeepStrictEqual(a.upstream, b.upstream), stored = isDeepStrictEqual(a.logs, b.logs) && isDeepStrictEqual(a.pending, b.pending);
     const oracle = valid(a, c), scenario = valid(b, c);
     if (!oracle) oracleInvalid++;
     if (client && upstream && stored && oracle && scenario) equal++; else failed++;
