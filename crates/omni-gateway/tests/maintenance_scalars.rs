@@ -213,3 +213,105 @@ console.log(JSON.stringify({{counts,tables}}));db.close();
     .unwrap();
     println!("{}", json!(report));
 }
+
+#[test]
+fn raw_json_text_retention_matches_frozen() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let evidence = std::path::Path::new("/tmp/opencode/a11/r2-harness");
+    std::fs::create_dir_all(evidence).unwrap();
+    let script = evidence.join("raw-oracle.ts");
+    std::fs::write(&script, format!(r#"
+import {{Database}} from 'bun:sqlite';
+import {{createUsageRepo}} from '{r}/packages/store/src/sqlite/usage.ts';
+import {{createCredentialRepo}} from '{r}/packages/store/src/sqlite/credentials.ts';
+import {{createConfigRepo}} from '{r}/packages/store/src/sqlite/config.ts';
+import {{createBodyRepo}} from '{r}/packages/store/src/sqlite/bodies.ts';
+import {{pruneLogs}} from '{r}/apps/gateway/src/maintenance.ts';
+const db=new Database(process.argv[2]);
+const x=await pruneLogs({{config:createConfigRepo(db),usage:createUsageRepo(db,'mine',0),credentials:createCredentialRepo(db,null as any),bodies:createBodyRepo(db,null as any,process.argv[3])}} as any,1794000000000);
+const tables={{}};for(const t of ['request_logs','usage_rollup','usage_daily','quota_samples','request_bodies','nodes'])tables[t]=db.query(`SELECT * FROM ${{t}} ORDER BY 1,2`).values().map(row=>row.map(v=>v===null?['null']:[typeof v,v]));
+console.log(JSON.stringify({{counts:[x.raw,x.daily,x.quotaSamples,x.bodies+x.bodiesOverCap+x.bodyOrphans],tables}}));db.close();
+"#,r=root.display())).unwrap();
+    let deep = format!(
+        "{{\"logRetentionDays\":0,\"unrelated\":{}0{}}}",
+        "[".repeat(2000),
+        "]".repeat(2000)
+    );
+    let cases = [
+        r#"{"logRetentionDays":1e309}"#,
+        r#"{"logRetentionDays":-1e309}"#,
+        r#"{"logRetentionDays":"\ud800"}"#,
+        r#"{"logRetentionDays":0,"unrelated":"\ud800"}"#,
+        r#"{"logRetentionDays":0,"unrelated":1e309}"#,
+        r#"{"logRetentionDays":0,"unrelated":-1e309}"#,
+        r#"{"logRetentionDays":1e-400}"#,
+        r#"{"logRetentionDays":-0}"#,
+        r#"{"logRetentionDays":1,"bodyRetentionDays":1e309}"#,
+        r#"{"logRetentionDays":1,"bodyRetentionDays":"\ud800"}"#,
+        r#"{"logRetentionDays":0,}"#,
+        &deep,
+    ];
+    let mut mismatches = Vec::new();
+    for (case, raw) in cases.iter().enumerate() {
+        let d = tempfile::tempdir_in(evidence).unwrap();
+        let a = d.path().join("a.db");
+        let b = d.path().join("b.db");
+        let s = SqliteStore::open(&a, 0).unwrap();
+        let c = s.connection();
+        c.execute(
+            "INSERT INTO settings(key,value) VALUES('settings',?)",
+            [raw],
+        )
+        .unwrap();
+        let now = 1_794_000_000_000_i64;
+        for (i, at) in [
+            1,
+            now - 31 * 86_400_000,
+            now - 2 * 86_400_000,
+            now - 86_400_000,
+            now - 1,
+            now,
+            now + 1,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            c.execute("INSERT INTO request_logs(id,at,api_key_id,requested_model,status,duration_ms,state) VALUES (?,?,'k','m',200,1,'done')",params![format!("r{i}"),at]).unwrap();
+            c.execute(
+                "INSERT INTO request_bodies(request_id,at) VALUES (?,?)",
+                params![format!("r{i}"), at],
+            )
+            .unwrap();
+        }
+        omni_store::rollup::rebuild_rollup(c).unwrap();
+        c.execute_batch(&format!("VACUUM INTO '{}'", b.display()))
+            .unwrap();
+        let counts = omni_gateway::maintenance::prune_logs(&a, 0, now).unwrap();
+        let o = std::process::Command::new("bun")
+            .arg("--no-env-file")
+            .arg(&script)
+            .arg(&b)
+            .arg(d.path().join("artifacts"))
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap())
+            .env("HOME", d.path())
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let ts: Value = serde_json::from_slice(&o.stdout).unwrap();
+        let rust = json!({"counts":counts,"tables":dump(c)});
+        if rust != ts {
+            mismatches.push(case);
+            std::fs::write(
+                evidence.join(format!("mismatch-{case}.json")),
+                serde_json::to_vec_pretty(&json!({"rust":rust,"ts":ts})).unwrap(),
+            )
+            .unwrap();
+        }
+    }
+    assert!(mismatches.is_empty(), "raw text mismatches: {mismatches:?}");
+}
