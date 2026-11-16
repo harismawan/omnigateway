@@ -770,11 +770,11 @@ async fn pathname_static_file_with_a_trailing_slash_still_serves() {
         ("OMNI_ENCRYPTION_KEY".to_owned(), ENC.to_owned()),
         (
             "OMNI_DB_PATH".to_owned(),
-            f.path.to_str().unwrap().to_owned(),
+            f.path.to_str().expect("database path").to_owned(),
         ),
         (
             "OMNI_STATIC_DIR".to_owned(),
-            assets.path().to_str().unwrap().to_owned(),
+            assets.path().to_str().expect("assets path").to_owned(),
         ),
     ]
     .into_iter()
