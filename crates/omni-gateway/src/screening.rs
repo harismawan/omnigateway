@@ -28,6 +28,94 @@ fn judge_cache() -> &'static Mutex<VerdictCache> {
     CACHE.get_or_init(|| Mutex::new(VerdictCache::default()))
 }
 
+/// IR strings are UTF-8, but a frozen head/tail cap can bisect a pair. Carry
+/// those units through prompt construction as collision-free markers, then
+/// restore their JSON escapes at the bare transport seam (before encoding).
+struct JudgeTransport {
+    inner: Arc<dyn omni_providers::http::HttpClient>,
+    escapes: Vec<(String, String)>,
+}
+
+impl omni_providers::http::HttpClient for JudgeTransport {
+    fn send(
+        &self,
+        mut req: omni_providers::http::HttpRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        omni_providers::http::HttpResponse,
+                        omni_providers::http::HttpError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        for (marker, escape) in &self.escapes {
+            req.body = req.body.replace(marker, escape);
+        }
+        self.inner.send(req)
+    }
+}
+
+fn judge_value(
+    value: &omni_ir::jsjson::JsValue,
+    prefix: &str,
+    escapes: &mut Vec<(String, String)>,
+) -> Value {
+    use omni_ir::jsjson::JsValue;
+    match value {
+        JsValue::String(units) => {
+            let mut text = String::new();
+            for c in char::decode_utf16(units.iter().copied()) {
+                match c {
+                    Ok(c) => text.push(c),
+                    Err(e) => {
+                        let marker = format!("{prefix}{}__", escapes.len());
+                        text.push_str(&marker);
+                        escapes.push((marker, format!("\\u{:04x}", e.unpaired_surrogate())));
+                    }
+                }
+            }
+            text.into()
+        }
+        JsValue::Array(items) => items
+            .iter()
+            .map(|v| judge_value(v, prefix, escapes))
+            .collect(),
+        JsValue::Object(items) => Value::Object(
+            items
+                .iter()
+                .map(|(k, v)| (String::from_utf16_lossy(k), judge_value(v, prefix, escapes)))
+                .collect(),
+        ),
+        _ => serde_json::from_str(&omni_ir::jsjson::stringify(value).expect("judged scalar"))
+            .expect("scalar"),
+    }
+}
+
+fn judge_deps(deps: &Arc<Deps>, escapes: Vec<(String, String)>) -> Arc<Deps> {
+    if escapes.is_empty() {
+        return deps.clone();
+    }
+    Arc::new(Deps {
+        http: Arc::new(JudgeTransport {
+            inner: deps.http.clone(),
+            escapes,
+        }),
+        refresher: deps.refresher.clone(),
+        writer: deps.writer.clone(),
+        holder: deps.holder.clone(),
+        load: deps.load.clone(),
+        probes: deps.probes.clone(),
+        providers: deps.providers.clone(),
+        health: deps.health.clone(),
+        telemetry: deps.telemetry.clone(),
+        now: deps.now,
+        rand: deps.rand,
+    })
+}
+
 struct JudgeRow {
     deps: Arc<Deps>,
     log: Arc<Mutex<RequestLog>>,
@@ -76,23 +164,45 @@ pub async fn judge(
             vec!["guardrail:unconfigured".into()],
         );
     };
-    let judged: Value = serde_json::from_str(&judged_text_json(
+    let judged_json = judged_text_json(
         &serde_json::to_value(&req.request).expect("IR serializes"),
         settings.guardrail_history_turns,
-    ))
-    .expect("judged text JSON");
-    let key = verdict_key(
-        req.api_key_id.as_deref().unwrap_or(""),
-        policy,
-        model,
-        &judged,
     );
+    let original = omni_ir::jsjson::parse_js(&judged_json).expect("judged text JSON");
+    let omni_ir::jsjson::JsValue::Object(fields) = &original else {
+        unreachable!()
+    };
+    let mut key_fields = vec![
+        omni_ir::jsjson::JsValue::from(&json!(req.api_key_id.as_deref().unwrap_or(""))),
+        omni_ir::jsjson::JsValue::from(&json!(policy)),
+        omni_ir::jsjson::JsValue::from(&json!(model)),
+    ];
+    for name in ["system", "human", "toolResults"] {
+        key_fields.push(
+            fields
+                .iter()
+                .find(|(k, _)| k.iter().copied().eq(name.encode_utf16()))
+                .expect("judged field")
+                .1
+                .clone(),
+        );
+    }
+    let key = omni_crypto::apikey::hash(
+        &omni_ir::jsjson::stringify(&omni_ir::jsjson::JsValue::Array(key_fields))
+            .expect("cache key"),
+    );
+    let mut prefix = "__omni_judge_utf16_".to_owned();
+    while judged_json.contains(&prefix) || policy.contains(&prefix) || model.contains(&prefix) {
+        prefix.push('_');
+    }
+    let mut escapes = Vec::new();
+    let judged = judge_value(&original, &prefix, &mut escapes);
     let cached = locked(judge_cache()).get(&key, (deps.now)());
     let verdict = if let Some(cached) = cached {
         Some(cached)
     } else {
         let dispatched = dispatch::dispatch_with_options(
-            deps.clone(),
+            judge_deps(&deps, escapes),
             Request {
                 request: serde_json::from_value(classifier_request(model, policy, &judged))
                     .expect("classifier IR"),

@@ -957,7 +957,7 @@ async fn a_policy_key_with_no_guardrail_model_is_refused_as_unconfigured() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_policy_key_with_a_guardrail_model_is_refused_as_unavailable_without_a_classifier_call() {
+async fn an_unreadable_guardrail_reply_is_refused_with_a_classifier_row() {
     let g = screened(&[("guardrailModel", "\"m1\"")]).await;
     let (s, _, b) = call(
         &g.base,
@@ -973,18 +973,29 @@ async fn a_policy_key_with_a_guardrail_model_is_refused_as_unavailable_without_a
         r#"{"error":{"message":"usage policy check unavailable","type":"server_error","code":"server_error"}}"#
     );
     let f = stop(g).await;
-    // One row: no classifier row, nothing dispatched.
+    // The unreadable reply is successful dispatch but fails closed in the judge.
     assert_eq!(
         screen_rows(&f),
-        [[
-            "kpol",
-            "m1",
-            "502",
-            "UPSTREAM",
-            "0",
-            r#"["guardrail:unavailable"]"#,
-            "null"
-        ]]
+        vec![
+            vec![
+                "kpol",
+                "m1",
+                "502",
+                "UPSTREAM",
+                "0",
+                r#"["guardrail:unavailable"]"#,
+                "null"
+            ],
+            vec![
+                "kpol",
+                "m1",
+                "200",
+                "null",
+                "1",
+                r#"["guardrail:classifier"]"#,
+                "c0"
+            ]
+        ]
     );
 }
 

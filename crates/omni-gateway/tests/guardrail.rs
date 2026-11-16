@@ -3,6 +3,31 @@ use common::*;
 use omni_gateway::{dispatch::Request, screening::judge};
 
 #[tokio::test]
+async fn capped_surrogate_is_preserved_in_classifier_wire_bytes() {
+    omni_gateway::clock::init_request_ids().expect("RNG");
+    let f = fixture(&["c0"]);
+    set_setting(&f.path, "guardrailModel", "\"m1\"");
+    let h = harness(&f, vec![sse_ok(1)]);
+    let text = format!("{}😀{}", "a".repeat(3991), "z".repeat(9000));
+    let mut chat = chat("m1", false);
+    chat.system = Some(
+        serde_json::from_value(serde_json::json!([{"type":"text","text":text}])).expect("system"),
+    );
+    let req = Request {
+        request: chat,
+        request_id: "parent".into(),
+        api_key_id: Some("surrogate-key".into()),
+        route_started_at: 1000,
+    };
+    let (_, notes) = judge(h.deps.clone(), &req, "policy", None).await;
+    assert!(notes.contains(&"guardrail:truncated".into()));
+    let wire = h.script.seen.lock().expect("seen")[0].body.clone();
+    assert!(wire.contains("\\ud83d"));
+    assert!(!wire.contains("__omni_judge_utf16_"));
+    h.writer.close().await.expect("close");
+}
+
+#[tokio::test]
 async fn unconfigured_never_dispatches() {
     let f = fixture(&["c0"]);
     let h = harness(&f, vec![]);
