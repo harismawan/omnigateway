@@ -136,6 +136,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for IdleIo<T> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
