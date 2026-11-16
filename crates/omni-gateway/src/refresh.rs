@@ -244,8 +244,10 @@ impl Refresher {
             Ok::<_, omni_providers::http::HttpError>((response.status, response.body.text().await?))
         })
         .await
-        .map_err(|_| GatewayError::new(ErrorCode::Timeout, "token request timed out"))?
-        .map_err(|_| GatewayError::new(ErrorCode::Network, "token request failed"))?;
+        // All built-in flows run through frozen pluginFlow: send, body and
+        // per-step deadline exceptions are raised into refresh, then relabelled.
+        .map_err(|_| refresh_threw(&c.provider))?
+        .map_err(|_| refresh_threw(&c.provider))?;
         #[allow(clippy::cast_precision_loss)]
         let result = if c.provider == "openai" {
             omni_providers::openai::oauth::token_result(
@@ -337,6 +339,12 @@ impl Refresher {
                 GatewayError::new(ErrorCode::Auth, format!("credential {} is gone", c.id))
             })
     }
+}
+fn refresh_threw(provider: &str) -> GatewayError {
+    GatewayError::new(
+        ErrorCode::Upstream,
+        format!("{provider} oauth refresh threw"),
+    )
 }
 // X2: the shared integer carrier truncates fractions and saturates infinities.
 // TS setInterval keeps its phase; callbacks while `running` simply return.

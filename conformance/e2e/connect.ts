@@ -487,6 +487,8 @@ async function run(label: string, binary: string): Promise<Row[]> {
         await Bun.sleep(650);
       }
       const start = await row(`${name}/start`, "start", JSON.stringify({ provider: "antigravity", label: " google label ", ...(scenario === "reconnect" ? { credentialId: "antigravity-full" } : {}) }));
+      if ((rows.at(-1)!.response as any).status !== 200) throw Error(`Google ${scenario} start status`);
+      validateStart(start);
       if (!start.flowId) {
         for (const suffix of ["exchange", "persistence", ...(scenario === "immediate" ? ["inference"] : [])]) rows.push({ name: `${name}/${suffix}`, response: { missing: true }, wire: [] });
         continue;
@@ -496,6 +498,10 @@ async function run(label: string, binary: string): Promise<Row[]> {
       const before = Date.now();
       const done = await row(`${name}/exchange`, scenario === "poll" ? "poll" : "finish", JSON.stringify({ flowId: start.flowId, code }));
       const after = Date.now();
+      const expectedStatus = ["mismatch"].includes(scenario) ? 401 : ["invalid-url", "missing-state"].includes(scenario) ? 400 : scenario === "token-400" || scenario === "token-401" ? 401 : scenario === "token-500" ? 502 : 200;
+      if ((rows.at(-1)!.response as any).status !== expectedStatus) throw Error(`Google ${scenario} expected ${expectedStatus}`);
+      if (expectedStatus === 200 && (scenario === "reconnect" ? done.id !== "antigravity-full" : !uuid4.test(done.id))) throw Error(`Google ${scenario} invalid id`);
+      if (expectedStatus !== 200 && (!done.error || typeof done.error.message !== "string" || done.id !== undefined)) throw Error(`Google ${scenario} invalid error`);
       // Only the token request carries random verifier bytes. Retain all other wire bytes.
       for (const wire of rows.at(-1)!.wire) if (wire.line.includes("/token ")) {
         const fields = new URLSearchParams(wire.body), verifier = fields.get("code_verifier")!;
@@ -506,10 +512,15 @@ async function run(label: string, binary: string): Promise<Row[]> {
       }
       if (done.id) {
         const stored = await storedRow(done.id);
+        const projectId = ["empty-onboard", "onboard-failure", "load-failure"].includes(scenario) ? "" : scenario === "onboard" ? "onboard-project" : "fixture-project";
+        const tier = ["onboard", "empty-onboard", "onboard-failure"].includes(scenario) ? "chosen-tier" : scenario === "load-failure" ? undefined : "fixture-tier";
+        const data = JSON.parse(stored.provider_data);
+        if (stored.provider !== "antigravity" || stored.auth_type !== "oauth" || stored.enabled !== 1 || stored.access_token !== "google-new-access" || stored.refresh_token !== "google-new-refresh" || stored.account_email !== (scenario === "email-failure" ? null : "google@example.test") || data.projectId !== projectId || data.tier !== tier || stored.token_version !== (scenario === "reconnect" ? 8 : 0) || stored.disabled_at !== null || stored.disabled_reason !== null) throw Error(`Google ${scenario} invalid persistence`);
         await Bun.write(join(root, `google-${scenario}.raw.json`), JSON.stringify(stored, null, 2));
         for (const [field, delta] of [["expires_at", 3600000], ["created_at", 0], ["updated_at", 0]] as const) {
-          if (scenario === "reconnect" && field === "created_at") continue;
-          if (stored[field] < before + delta - 2000 || stored[field] > after + delta + 2000) throw Error(`Google invalid ${field}`);
+          if (!Number.isSafeInteger(stored[field])) throw Error(`Google invalid ${field} type`);
+          if (scenario === "reconnect" && field === "created_at") { if (stored[field] !== 1000) throw Error("Google reconnect creation changed"); continue; }
+          if (stored[field] < before + delta || stored[field] > after + delta) throw Error(`Google invalid ${field}`);
           stored[field] = `<request-time+${delta}>`;
         }
         if (scenario !== "reconnect") { stored.id = "<uuid4>"; done.id = "<uuid4>"; }
