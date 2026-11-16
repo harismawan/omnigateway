@@ -20,7 +20,8 @@ impl super::PgStore {
         Ok(())
     }
 
-    pub async fn prune_logs(&self, horizon: i64) -> Result<u64, StoreError> {
+    pub async fn prune_logs(&self, horizon: f64) -> Result<u64, StoreError> {
+        let horizon = crate::maintenance::pg_horizon(horizon)?;
         let mut c = self.client().await?;
         let tx = c.transaction().await?;
         let removed = tx
@@ -34,7 +35,8 @@ impl super::PgStore {
         Ok(removed)
     }
 
-    pub async fn prune_daily(&self, horizon: i64) -> Result<u64, StoreError> {
+    pub async fn prune_daily(&self, horizon: f64) -> Result<u64, StoreError> {
+        let horizon = crate::maintenance::pg_horizon(horizon)?;
         Ok(self
             .client()
             .await?
@@ -42,7 +44,8 @@ impl super::PgStore {
             .await?)
     }
 
-    pub async fn prune_quota_samples(&self, horizon: i64) -> Result<u64, StoreError> {
+    pub async fn prune_quota_samples(&self, horizon: f64) -> Result<u64, StoreError> {
+        let horizon = crate::maintenance::pg_horizon(horizon)?;
         Ok(self
             .client()
             .await?
@@ -53,7 +56,8 @@ impl super::PgStore {
             .await?)
     }
 
-    pub async fn prune_bodies(&self, horizon: i64) -> Result<usize, StoreError> {
+    pub async fn prune_bodies(&self, horizon: f64) -> Result<usize, StoreError> {
+        let horizon = crate::maintenance::pg_horizon(horizon)?;
         let c = self.client().await?;
         let rows = c
             .query(

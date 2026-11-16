@@ -1,7 +1,7 @@
 //! The frozen maintenance timers: no immediate tick, per-node heartbeat,
 //! leased hourly sweep. Blocking work is owned and drained on shutdown.
 use omni_coord::Coord;
-use omni_store::writer::{LogEvent, WriterHandle};
+use omni_store::writer::WriterHandle;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 pub const HEARTBEAT: Duration = Duration::from_secs(10);
@@ -75,26 +75,18 @@ pub fn start(
 }
 
 async fn run_sweep(path: PathBuf, offset: i64, node: String, writer: WriterHandle) {
+    let _ = writer; // Recovery must not use the lossy request-path queue.
     let pending = tokio::task::spawn_blocking({
         let path = path.clone();
         move || {
-            let c = omni_store::open_connection(&path)?;
-            omni_store::usage::pending_interruptions(&c, &node, crate::clock::now_ms())
+            let mut c = omni_store::open_connection(&path)?;
+            omni_store::writer::recover_pending(&mut c, &node, crate::clock::now_ms(), offset)
         }
     })
     .await;
     match pending {
-        Ok(Ok(rows)) => {
-            let count = rows.len();
-            for row in rows {
-                writer.send(LogEvent::Finish(row));
-            }
-            if let Err(e) = writer.flush().await {
-                tracing::error!(reason = ?e, "pending sweep failed");
-            } else if count > 0 {
-                tracing::info!(count, "retired interrupted requests");
-            }
-        }
+        Ok(Ok(count)) if count > 0 => tracing::info!(count, "retired interrupted requests"),
+        Ok(Ok(_)) => {}
         Ok(Err(e)) => tracing::error!(reason = %e, "pending sweep failed"),
         Err(e) => tracing::error!(reason = %e, "pending sweep failed"),
     }
@@ -138,9 +130,12 @@ async fn run_sweep(path: PathBuf, offset: i64, node: String, writer: WriterHandl
 
 pub fn prune_logs(path: &std::path::Path, offset: i64, now: i64) -> Result<[usize; 4], String> {
     let store = omni_store::SqliteStore::open(path, offset).map_err(|e| e.to_string())?;
-    let settings = store.get_settings().map_err(|e| e.to_string())?;
+    let raw_settings =
+        omni_store::settings::operator_raw(store.connection()).map_err(|e| e.to_string())?;
+    let (horizon, body_horizon) = omni_store::maintenance::horizons(raw_settings.as_deref(), now)
+        .map_err(|e| e.to_string())?;
     let c = store.connection();
-    let horizon = now as f64 - settings.log_retention_days * 86_400_000.0;
+
     let raw = omni_store::maintenance::prune(c, horizon).map_err(|e| e.to_string())?;
     let daily = omni_store::maintenance::prune_daily(c, now as f64 - 400.0 * 86_400_000.0)
         .map_err(|e| e.to_string())?;
@@ -150,11 +145,6 @@ pub fn prune_logs(path: &std::path::Path, offset: i64, now: i64) -> Result<[usiz
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .join("request_bodies");
-    let body_horizon = now as f64
-        - settings
-            .body_retention_days
-            .min(settings.log_retention_days)
-            * 86_400_000.0;
     let bodies = omni_control::database::prune_bodies(c, &dir, body_horizon)?;
     let cap = omni_control::database::prune_bodies_to_cap(c, &dir, 100_000)?;
     let orphans = omni_control::database::sweep_body_orphans(c, &dir)?;
