@@ -132,3 +132,175 @@ Supplemental diagnostic terminated intentionally (quoted from `.exit`):
 ```text
 unshare -Urn python3 /tmp/opencode/a14/fin-timing.py: 143
 ```
+
+## r1 — review corrections
+
+
+Commit `264a5de3`: 4 files +108/-27. Shared `server::route_path` supplies normalized routing and timeout exemption; includes Elysia trailing-slash handling. Hyper header timer disabled in favor of the transport budget, so completed exempt sockets retain exemption. Non-exempt inbound transport and body waits rearm only after 16,384 × idle seconds bytes; inference read_body has no idle deadline. Request changes clear the inbound counter and set/rearm mode. No dependencies; no TS product changes.
+
+Red unit: missing shared function compile error, then normalized test green and trickle test red (7 pass/1 fail); final 9 paused/normal tests pass. Review probes copied (never modified originals) to `r1-probes`, CLI cwd corrected to rust-postgres. Red/green probes run in separate loopback namespaces with real 255s duration. Supplemental slow-header probe trickles an unfinished header at 100/200s.
+
+Residual: raw transport counts header/framing bytes toward threshold; body-specific timer counts decoded body bytes. Thus exotic chunked framing near the threshold may cut earlier via decoded-body timer; no claim of exact Bun internal framing parity. Failed-write/drain corner cases from original report remain unisolated. Production threshold is exactly 4,177,920 bytes for 255s; subsecond test durations use proportional bytes rather than rounded-to-zero seconds.
+
+Historical checkpoint: full gates and isolated burst were pending; final evidence follows below.
+
+Commits at this checkpoint: `264a5de3` (4 files +108/-27), `b03c126f` (1 file +2/-1, ordinary driver now sends normalized inference paths), `b0936e67` (1 file +1/-1, upload test holds socket until shutdown). First full workspace attempt failed only changed test request-log assertion: explicitly dropping an unfinished request body follows existing 500/INTERNAL read-error path, not shutdown 499. Test corrected to assert shutdown cancellation; focused rerun passed. No product error classification was changed beyond scope. First clippy/fmt/size all exit 0. Second full gates completed below.
+
+Both r1 builds produce identical production binary SHA256 `ad7e51bdef724223ca3d3247c08c0a5c646392ecf9615e5ceeab1910c911afc9`; final build after commit `b0936e67`, binary `/tmp/opencode/a14/r1-rust2`. Prior gates/probes using `r1-rust` execute byte-identical production code.
+
+Reviewer evidence remains untouched. Red normalized probe fails JSON/SSE; red completed-exempt stays open frozen vs EOF Rust255s; red inbound count_tokens EOF frozen vs pending Rust at280s. Initial supplemental headers probe failed with BrokenPipe when sending after frozen had already closed, retained; revised select-based probe records closure time without writing after EOF.
+
+### r1 real-duration green results
+
+Normalized JSON/SSE paired probe passes: JSON full 6,291,770 bytes and no EOF; SSE stays open. Completed inference idle stays open at280.10s both. Following ordinary GET closes frozen257.61s vs Rust257.01s from initial POST; pipelined POST+GET closes253.61 vs255.00s (Bun timer granularity). Non-exempt count_tokens trickle now EOF both at278s inspection, no response bytes.
+Exact `.exit` lines and classifications will follow. Original reviewer scripts only return measurement completion for inbound/transition; classification above comes from their JSON rows, not process exit alone.
+
+### r1 initial-header discovery
+
+Measured frozen **initial incomplete headers use Bun's 10s default**, before a routed request receives configured255s: standalone frozen EOF12.00s; paired select-based frozen EOF9.52s vs intermediate Rust255.00s. Saved Bun HttpResponseData default idleTimeout=10 agrees. `cfe1c561` adds initial `min(configured idle,10s)` until first routed request; later completed inference stays exempt. Initial header red test is black-box; added paused-time ten-second unit alongside9 existing tests. Final unit10/10 passed. Final commit source tree clean.
+`cfe1c561` (1 file +19/-3). Final binary `/tmp/opencode/a14/r1-final`, SHA256 `ef377cb74c908fc7a2e56f5c577e94a56dcf4b9fbb62b050125f5ec36ffd68d9`, built after `cfe1c561`. Earlier r1-rust/rust2 gates are superseded where initial-header behavior matters; final full gates rerunning.
+The optional first headers probe failed while writing at100/200s after frozen already closed; no parity claim from its process status. Select-based probe fixes that harness bug. One-byte/200s probe remains equal-truncation expectation, not active-reader expectation.
+
+Final initial-header paired probe: frozen8.397s vs Rust10.002s EOF, empty response, equal class with Bun4s granularity. One-byte/200s intermediate paired probe: both EOF1,796,241 raw remaining bytes, confirming reviewer's minor correction. Final repeats pending.
+
+R1 scope deliberately changes server.rs shared route path and inbound reader, as explicitly required by review rulings. No admin routes modified. `http1_builder` retains its public duration parameter for callers but delegates all budgets to IdleIo at the production listener; standalone test listeners without IdleIo do not acquire idle enforcement. Initial header default uses10s, subsequent ordinary requests255s, completed inference timeout disabled. No new environment knobs.
+
+### r1 retained attempt commands
+
+```text
+cargo test --offline -p omni-gateway --lib http::tests: 101
+cargo test --offline -p omni-gateway --lib http::tests: 101
+cargo test --offline -p omni-gateway --lib http::tests: 0
+cargo test --offline -p omni-gateway --lib http::tests: 0
+cargo test --offline -p omni-gateway --lib http::tests: 0
+cargo build --offline -p omni-gateway: 0
+cargo build --offline -p omni-gateway: 0
+cargo build --offline -p omni-gateway: 0
+cargo test --offline --workspace: 101
+cargo clippy --offline --workspace --all-targets -- -D warnings: 0
+cargo fmt --all -- --check: 0
+cargo test --offline -p omni-gateway --test dispatch_size -- --nocapture: 0
+cargo test --offline -p omni-gateway --test server an_exempt_body_that_stops_arriving: 0
+normalized probe frozen vs da4b7a99: 1
+transition probe frozen vs da4b7a99: 0
+inbound probe frozen vs da4b7a99: 0
+headers probe frozen vs da4b7a99: 1
+normalized probe frozen vs r1-rust: 0
+transition probe frozen vs r1-rust: 0
+inbound probe frozen vs r1-rust: 0
+headers probe frozen vs r1-rust: 1
+headers-timed probe: 0
+one-byte probe: 0
+frozen initial partial headers probe: 0
+```
+
+R1 commits since reviewed HEAD:4 commits,5 files, +129/-31 total (including e2e/test updates). Disk checks immediately before builds ranged5.8→5.3GiB; later5.1GiB. Stop threshold remains5GiB; no files/caches deleted. Initial first-round low-throughput wording above is superseded by r1's measured threshold policy. Initial-body logs500 after peer closing is pre-existing and retained; shutdown test499 is a different cancellation path, not evidence they are identical.
+
+Residual initial header implementation:10-second precise Tokio timer matches measured8–12s Bun class, not coarse4-second tick alignment. Incoming initial headers near4.18MiB threshold are not separately probed. Ordinary response/socket writes still rearm on successful nonempty socket I/O, including partial vectored writes. New per-read counter uses a relaxed atomic add; no allocation or syscall; final isolated burst appears below.
+
+### r1 disk boundary
+
+Filesystem transiently fell below5GiB during the second workspace run (5,241,503,744 bytes observed). Attempted TERM to owned cargo-test PID3537881; process had already exited, so no signal delivered. The queued loop completed test/clippy/fmt/size with exit0 before inspection; no further Cargo work started. Available bytes oscillate around5GiB due concurrent environment growth. No deletion/cleanup attempted. Workspace unit binary was built before the last source commit; final focused unit tests and clippy checked the last source. A fresh complete workspace on final initial-header change remains unverified because workspace started before that edit and no rebuild will start below cutoff.
+
+### r1 isolated throughput
+
+After Cargo completed: four alternating base/final bursts,2,000 authenticated JSON requests at concurrency20 and one8,603,191-byte SSE per pass.
+base: 7057.80 aggregate req/s, mean SSE 102.69ms.
+final: 7044.48 aggregate req/s, mean SSE 101.35ms.
+Final/base delta -0.19%; no material regression shown by this short local burst.
+```text
+unshare -Urn bun --no-env-file /tmp/opencode/a14/r1-burst.ts: 0
+```
+
+### r1 Cargo verification evidence
+
+```text
+cargo test --offline --workspace: 0
+cargo clippy --offline --workspace --all-targets -- -D warnings: 0
+cargo fmt --all -- --check: 0
+cargo test --offline -p omni-gateway --test dispatch_size -- --nocapture: 0
+cargo test --offline -p omni-gateway --lib http::tests: 0
+cargo build --offline -p omni-gateway: 0
+```
+
+Second workspace passed, all three named historical flakes passed; no flaky rerun needed. That workspace loaded9-test HTTP unit binary before final initial-header change; final focused10-test suite passed separately. Final clippy/fmt/dispatch-size commands executed after final commit; dispatch size3,400 bytes. Fresh final full-workspace run is unverified under5GiB build cutoff; evidence is intentionally not presented as one final all-workspace run.
+
+### r1 final paired probe classifications
+
+All final probes complete with process exit0; rows checked independently for parity. Normalized JSON full6,291,770 bytes, noEOF both; SSE noEOF both. Completed exempt idle remains open280.02/280.01s; next ordinary frozen256.34 vs Rust257.01s; pipeline252.34 vs255.00s. Count_tokens trickle EOF both after278s hold. Initial slow header EOF8.397 vs10.002s. One-byte/200s EOF both1,796,241 remaining raw bytes. Differences in timeout seconds are within Bun4s tick granularity.
+
+```text
+normalized probe frozen vs r1-final: 0
+transition probe frozen vs r1-final: 0
+inbound probe frozen vs r1-final: 0
+headers-timed probe frozen vs r1-final: 0
+one-byte probe frozen vs r1-final: 0
+```
+
+Final JSON behavior assertions independently passed (normalized2 + transition3 + inbound1 + initial headers1 + one-byte1 =8 paired classes; measured rows retained in r1-final-classifications.json). Process exit0 is not used as substitute for row equality.
+
+### r1 final provider gates (completed subset)
+
+```text
+bash /tmp/opencode/a14/anthropic-ns.sh /tmp/opencode/a8/ts /tmp/opencode/a14/r1-final /tmp/opencode/b4/e2e/a14/r1-final-anthropic: 0
+bash /tmp/opencode/a14/openai-ns.sh /tmp/opencode/a8/ts /tmp/opencode/a14/r1-final /tmp/opencode/b4/e2e/a14/r1-final-openai: 0
+bash conformance/e2e/antigravity-ns.sh /tmp/opencode/a8/ts /tmp/opencode/a14/r1-final /tmp/opencode/b4/e2e/a14/r1-final-antigravity: 0
+bash conformance/e2e/smart-router-ns.sh /tmp/opencode/a8/ts /tmp/opencode/a14/r1-final /tmp/opencode/c1/w-a14-r1-final: 0
+```
+
+Historical checkpoint: final run.ts + ordinary normalized idle driver and supplemental silent inference upload were running. They subsequently passed; fresh post-recovery Cargo results and final status follow below.
+
+### r1 controller-provided disk recovery
+
+Controller reported reclaiming its unused main-target build cache (not evidence); independently confirmed14GiB free. No implementer deletion performed. Fresh complete workspace test and clippy at unchanged `cfe1c561` ran after the already-running idle/silent-upload probes finished. Earlier disk-blocked statements above are historical and superseded by the final results below.
+
+### r1 final outcome — verification complete
+
+All requested review corrections implemented in four append-only commits after reviewed HEAD `da4b7a99`:
+
+| Commit | Subject | Files / lines |
+|---|---|---|
+| `264a5de3` | fix(http): align normalized idle budget transitions | 4, +108/-27 |
+| `b03c126f` | test(http): gate normalized inference paths | 1, +2/-1 |
+| `b0936e67` | test(http): cancel exempt upload during shutdown | 1, +1/-1 |
+| `cfe1c561` | fix(http): match initial Bun header budget | 1, +19/-3 |
+
+Net r1 diff: **5 files, +129/-31**. Worktree clean; no push/merge. Reviewer-owned evidence remains unchanged.
+
+After the running probes completed, a **fresh full workspace test at final `cfe1c561` passed**, including all10 HTTP unit tests (initial-header regression included),1,347 `test ... ok` lines, and all three named historical flakes. No flaky rerun required. Fresh final clippy, fmt and dispatch-size checks passed; concrete dispatch future **3,400 bytes <=5,500**. All Cargo commands used the worktree-local `./target`, offline mode and mandated build settings, one at a time, private HOME and scrubbed PATH. Disk remained14GiB free throughout these final gates.
+
+Final ordinary idle driver passes at the final binary: both static responses truncate after **1,796,096 bytes**, active slow readers stay open, normalized inference JSON completes **6,291,770 bytes**, and SSE stays open. Both stored outcomes are JSON200/null and SSE499/interrupted. WebSocket404/101 remains the previously documented out-of-scope route gap.
+
+Supplemental **silent inference upload** (no body progress for278s) remains pending/open at280s in both frozen and final Rust, with no response bytes: confirms the exemption also removes the former inference-body idle ceiling. Final normalized, transition, inbound, initial-header and one-byte probe behavior classes match frozen as documented above; only coarse Bun timer granularity differs.
+
+Isolated final/base throughput remains **7,044.48 vs7,057.80 req/s (-0.19%)**, mean8.6MiB SSE **101.35 vs102.69ms**. No material regression demonstrated by the short burst.
+
+**Final binary:** `/tmp/opencode/a14/r1-final`  
+**Built-after commit:** `cfe1c5618f925d95883fa397f0fcba7c021a11d0`  
+**SHA256:** `ef377cb74c908fc7a2e56f5c577e94a56dcf4b9fbb62b050125f5ec36ffd68d9`
+
+Remaining unverified: exact Bun failed-write/drain corner cases; near-threshold chunked/header framing accounting (raw transport bytes vs decoded body bytes); coarse tick alignment; individual upstream/limiter resource counters beyond existing disconnect/destructor coverage. Fresh final full-workspace verification is **no longer blocked or unverified**.
+
+### r1 final command/exit evidence
+
+Quoted verbatim from corresponding `r1-*.exit` files; failed/superseded attempts retained above.
+
+```text
+cargo test --offline --workspace: 0
+cargo clippy --offline --workspace --all-targets -- -D warnings: 0
+cargo fmt --all -- --check: 0
+cargo test --offline -p omni-gateway --test dispatch_size -- --nocapture: 0
+bash /tmp/opencode/a14/anthropic-ns.sh /tmp/opencode/a8/ts /tmp/opencode/a14/r1-final /tmp/opencode/b4/e2e/a14/r1-final-anthropic: 0
+bash /tmp/opencode/a14/openai-ns.sh /tmp/opencode/a8/ts /tmp/opencode/a14/r1-final /tmp/opencode/b4/e2e/a14/r1-final-openai: 0
+bash conformance/e2e/antigravity-ns.sh /tmp/opencode/a8/ts /tmp/opencode/a14/r1-final /tmp/opencode/b4/e2e/a14/r1-final-antigravity: 0
+bash conformance/e2e/smart-router-ns.sh /tmp/opencode/a8/ts /tmp/opencode/a14/r1-final /tmp/opencode/c1/w-a14-r1-final: 0
+unshare -Urn bash -c run.ts: 0
+bash conformance/e2e/idle-timeout-ns.sh /tmp/opencode/a8/ts /tmp/opencode/a14/r1-final /tmp/opencode/a14/r1-final-idle: 0
+normalized probe frozen vs r1-final: 0
+transition probe frozen vs r1-final: 0
+inbound probe frozen vs r1-final: 0
+headers-timed probe frozen vs r1-final: 0
+one-byte probe frozen vs r1-final: 0
+silent inference body probe: 0
+unshare -Urn bun --no-env-file /tmp/opencode/a14/r1-burst.ts: 0
+```
