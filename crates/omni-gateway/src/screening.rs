@@ -315,10 +315,13 @@ pub fn screen_first(
             }
         }
         let client_model = req.request.model.clone();
+        // Already-local aliases retain the provider's response model. Only a
+        // genuine reroute relabels, while both paths enforce local dispatch.
+        let reroute = local_model.as_ref().filter(|model| **model != client_model);
         if let Some(model) = &local_model { req.request.model.clone_from(model); }
         let mut inner = dispatch::dispatch_with_options(deps, req, DispatchOptions { local_only: local_model.is_some(), ..DispatchOptions::default() });
         while let Some(mut event) = inner.events.next().await {
-            if let (Some(model), Ok(StreamEvent::Start { model: start_model, .. })) = (&local_model, &mut event) {
+            if let (Some(model), Ok(StreamEvent::Start { model: start_model, .. })) = (&reroute, &mut event) {
                 start_model.clone_from(model);
             }
             {
