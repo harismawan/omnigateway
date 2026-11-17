@@ -685,7 +685,9 @@ mod tests {
             (Method::PUT, "/api/settings", "res:settings"),
         ] {
             assert_eq!(
-                route(&method, path).unwrap().resource_topic(),
+                route(&method, path)
+                    .expect("publisher route")
+                    .resource_topic(),
                 Some(topic),
                 "{method} {path}"
             );
@@ -698,7 +700,9 @@ mod tests {
             (Method::POST, "/api/connect/poll"),
         ] {
             assert_eq!(
-                route(&method, path).unwrap().resource_topic(),
+                route(&method, path)
+                    .expect("non-publisher route")
+                    .resource_topic(),
                 None,
                 "{method} {path}"
             );
