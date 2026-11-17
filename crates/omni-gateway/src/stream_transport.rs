@@ -205,8 +205,26 @@ pub async fn route(app: Arc<App>, mut req: Request<Incoming>) -> Response<Body> 
         .get("sec-websocket-key")
         .and_then(|v| v.to_str().ok())
     else {
-        return crate::api::json(400, "Expected a websocket connection".into(), None);
+        return Response::builder()
+            .status(400)
+            .header("content-type", "text/plain;charset=utf-8")
+            .body(crate::server::full("Expected a websocket connection"))
+            .expect("bad upgrade");
     };
+    if req
+        .headers()
+        .get("sec-websocket-version")
+        .is_none_or(|v| v != "13")
+    {
+        let mut response = Response::builder()
+            .status(426)
+            .header("sec-websocket-version", "13")
+            .header("connection", "close")
+            .body(crate::server::full(""))
+            .expect("bad version");
+        response.extensions_mut().insert(crate::api::NoDate);
+        return response;
+    }
     let accept = stream_codec::accept(key);
     let upgrade = hyper::upgrade::on(&mut req);
     tokio::spawn(async move {
