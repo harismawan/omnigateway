@@ -168,21 +168,22 @@ fn mutate(
                 && let Some(endpoint) = flags.get("endpoint-id")
             {
                 let rows = omni_control::credentials::cli_rows(&store).map_err(|e| (1, e))?;
-                if rows.iter().any(|c| {
-                    prop(c, "provider") == &string("custom")
-                        && matches!(prop(c, "providerData"), J::Null)
-                }) {
-                    return Err((
-                        1,
-                        "null is not an object (evaluating 'credential.providerData.endpointId')"
-                            .into(),
-                    ));
+                let mut existing = None;
+                for c in &rows {
+                    if prop(c, "provider") != &string("custom") {
+                        continue;
+                    }
+                    if matches!(prop(c, "providerData"), J::Null) {
+                        return Err((1,"null is not an object (evaluating 'credential.providerData.endpointId')".into()));
+                    }
+                    if prop(prop(c, "providerData"), "endpointId")
+                        == &string(endpoint.trim_matches(omni_ir::js::is_js_whitespace))
+                    {
+                        existing = Some(c);
+                        break;
+                    }
                 }
-                if let Some(old) = rows.iter().find(|c| {
-                    prop(c, "provider") == &string("custom")
-                        && prop(prop(c, "providerData"), "endpointId")
-                            == &string(endpoint.trim_matches(omni_ir::js::is_js_whitespace))
-                }) {
+                if let Some(old) = existing {
                     let data = prop(old, "providerData");
                     for name in ["endpointLabel", "origin", "protocol"] {
                         if !input.iter().any(|(k, _)| *k == name) {
