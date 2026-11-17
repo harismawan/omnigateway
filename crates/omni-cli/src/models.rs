@@ -119,6 +119,10 @@ fn table(headers: &[&str], right: &[usize], rows: Vec<Vec<String>>) -> String {
 
 /// Number.toFixed(2): round the exact binary significand, ties away from zero.
 fn fixed(n: f64) -> String {
+    fixed_digits(n, 2)
+}
+
+fn fixed_digits(n: f64, digits: u32) -> String {
     if !n.is_finite() || n.abs() >= 1e21 {
         return text(&JsValue::Number(n)).expect("number");
     }
@@ -126,7 +130,8 @@ fn fixed(n: f64) -> String {
     let exp = ((bits >> 52) & 2047) as i32;
     let mantissa = (bits & ((1_u64 << 52) - 1)) | if exp == 0 { 0 } else { 1_u64 << 52 };
     let shift = if exp == 0 { -1074 } else { exp - 1023 - 52 };
-    let scaled = u128::from(mantissa) * 100;
+    let scale = 10_u128.pow(digits);
+    let scaled = u128::from(mantissa) * scale;
     let rounded = if shift >= 0 {
         scaled << shift
     } else if -shift >= 128 {
@@ -137,10 +142,11 @@ fn fixed(n: f64) -> String {
             + u128::from((scaled & ((1_u128 << shift) - 1)) >= (1_u128 << (shift - 1)))
     };
     format!(
-        "{}{}.{:02}",
+        "{}{}.{:0width$}",
         if n < 0.0 { "-" } else { "" },
-        rounded / 100,
-        rounded % 100
+        rounded / scale,
+        rounded % scale,
+        width = digits as usize
     )
 }
 fn price(v: &JsValue) -> Result<String, String> {
@@ -577,6 +583,7 @@ pub fn run(
         if flags.contains_key("json") {
             return Ok(jsjson::stringify_pretty(&result).expect("result"));
         }
+        omni_control::dry_run::cli_table_cells(&store, &result).map_err(|e| (1, e))?;
         return dry_run_human(&result, color).map_err(|e| (1, e));
     }
     if command == "models-catalog" {
@@ -783,7 +790,7 @@ fn dry_run_human(result: &JsValue, color: bool) -> Result<String, String> {
                     text(prop(c, "model"))?,
                     text(prop(c, "tier"))?,
                     match prop(c, "score") {
-                        JsValue::Number(n) => format!("{n:.3}"),
+                        JsValue::Number(n) => fixed_digits(*n, 3),
                         _ => "NaN".into(),
                     },
                 ])
