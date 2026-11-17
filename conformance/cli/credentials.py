@@ -76,6 +76,11 @@ for value in ['0','1',"'1'","'0'",'1.5']:
 for provider in ['anthropic','openai','kimi','kilo','grok','antigravity','muse','qoder','custom','unknown']:
     cases.append(('add',seed,'',['credentials','add-key',provider]))
     cases.append(('add label',seed,'',['credentials','add-key',provider,'--label','  chosen  ']))
+for col in columns + ['api_key','access_token','id_token']:
+    for value in values:
+        for provider in ['openai','custom']:
+            cases.append((f'add neighbor:{col}={value}',seed,f'UPDATE credentials SET "{col}"={value}',
+                          ['credentials','add-key',provider]))
 custom = ['credentials','add-key','custom','--endpoint-id','ep','--endpoint-label','Endpoint','--origin','https://example.test/v1/','--protocol','chat-completions']
 cases.append(('custom',seed,'',custom))
 for data in ['{}','null','[]','1','"x"','invalid', '{"endpointId":"ep","endpointLabel":"Endpoint","origin":"https://example.test","basePath":"/v1","protocol":"chat_completions"}', '{"endpointId":"ep","endpointLabel":"Endpoint","origin":"https://example.test","protocol":"responses"}']:
@@ -102,10 +107,7 @@ def normalize(result, args, started, ended, expected_key):
     if result['code'] != 0 or args[:1] != ['credentials']: return
     op = args[1]
     if op not in ['enable','disable','set','add-key']: return
-    with sqlite3.connect(db) as conn:
-        ids = [r[0] for r in conn.execute('SELECT id FROM credentials')]
-    conn.close()
-    new_id = next((i for i in ids if i not in ['c','old']),None) if op == 'add-key' else None
+    new_id = re.search(rb'[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}', bytes.fromhex(result['out'])).group().decode() if op == 'add-key' else None
     for row in result['types']['credentials']:
         target = row['id'] == ('text',(new_id if op == 'add-key' else args[2]).encode().hex().upper())
         if not target: continue
