@@ -188,6 +188,17 @@ struct Logs {
 }
 
 impl Logs {
+    fn apply_notified(&mut self, event: &LogEvent, node_id: &str, outcome: &mut Outcome) -> bool {
+        let publishes = !matches!(event, LogEvent::Begin(p) if self.rows.get(&p.id).is_some_and(Option::is_some));
+        if !self.apply_logged(event, node_id) {
+            return false;
+        }
+        if publishes {
+            outcome.log_notifications += 1;
+            outcome.finish_notifications += usize::from(matches!(event, LogEvent::Finish(_)));
+        }
+        true
+    }
     async fn load(c: &impl GenericClient, events: &[WriteEvent]) -> Result<Self, StoreError> {
         let mut ids: IndexMap<&str, ()> = IndexMap::new();
         for e in events {
@@ -1018,16 +1029,11 @@ pub(crate) async fn write(
     let tx = client.transaction().await?;
     let mut logs = Logs::load(&tx, events).await?;
     let mut refused = Vec::new();
-    let mut log_notifications = 0;
-    let mut finish_notifications = 0;
+    let mut notifications = Outcome::default();
     for (i, e) in events.iter().enumerate() {
         if let WriteEvent::Log(l) = e {
-            let publishes = !matches!(l, LogEvent::Begin(p) if logs.rows.get(&p.id).is_some_and(Option::is_some));
-            if !logs.apply_logged(l, node_id) {
+            if !logs.apply_notified(l, node_id, &mut notifications) {
                 refused.push(i);
-            } else if publishes {
-                log_notifications += 1;
-                finish_notifications += usize::from(matches!(l, LogEvent::Finish(_)));
             }
         }
     }
@@ -1084,10 +1090,62 @@ pub(crate) async fn write(
     let health_refused = write_health(&tx, events).await?;
     tx.commit().await?;
     Ok(Outcome {
-        log_notifications,
-        finish_notifications,
+        log_notifications: notifications.log_notifications,
+        finish_notifications: notifications.finish_notifications,
         health_refused,
         completions,
         refused,
     })
+}
+
+#[cfg(test)]
+mod notification_tests {
+    use super::*;
+
+    #[test]
+    fn postgres_notification_counts_exclude_refused_values_not_duplicate_finishes() {
+        let mut logs = Logs {
+            rows: HashMap::new(),
+            existed: HashSet::new(),
+            dirty: IndexMap::new(),
+            completed: Vec::new(),
+            model_unencodable: HashSet::new(),
+        };
+        let mut outcome = Outcome::default();
+        let pending = LogEvent::Begin(PendingLog {
+            id: "p".into(),
+            at: 1000,
+            api_key_id: None,
+            requested_model: "m".into(),
+            resolved_provider: None,
+            resolved_model: None,
+            credential_id: None,
+        });
+        assert!(logs.apply_notified(&pending, "n", &mut outcome));
+        assert!(logs.apply_notified(&pending, "n", &mut outcome));
+        assert_eq!(outcome.log_notifications, 1);
+        let route = LogEvent::Route {
+            id: "p".into(),
+            target: super::super::events::RouteTarget {
+                provider: "custom".into(),
+                model: "m".into(),
+                credential_id: "c".into(),
+            },
+        };
+        assert!(logs.apply_notified(&route, "n", &mut outcome));
+        let finish = LogEvent::Finish(RequestLog::new("p", 1000, 200));
+        assert!(logs.apply_notified(&finish, "n", &mut outcome));
+        assert!(logs.apply_notified(&finish, "n", &mut outcome));
+        assert_eq!(
+            (outcome.log_notifications, outcome.finish_notifications),
+            (4, 2)
+        );
+        let mut invalid = RequestLog::new("refused", 1000, 200);
+        invalid.status = i64::MAX;
+        assert!(!logs.apply_notified(&LogEvent::Finish(invalid), "n", &mut outcome));
+        assert_eq!(
+            (outcome.log_notifications, outcome.finish_notifications),
+            (4, 2)
+        );
+    }
 }
