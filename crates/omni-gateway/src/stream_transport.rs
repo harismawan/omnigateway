@@ -175,12 +175,11 @@ impl Hub {
         } else if frame["type"] == "send" {
             Some("topic is read-only")
         } else if frame["type"] == "unsubscribe" {
-            if let Some(e) = state.sockets.get_mut(&id) {
-                if e.topics.remove(topic)
-                    && let Some(index) = resource_index(topic)
-                {
-                    self.subscribers[index].fetch_sub(1, Relaxed);
-                }
+            if let Some(e) = state.sockets.get_mut(&id)
+                && e.topics.remove(topic)
+                && let Some(index) = resource_index(topic)
+            {
+                self.subscribers[index].fetch_sub(1, Relaxed);
             }
             None
         } else if topic.starts_with("stream:") && !state.declared.contains(topic) {
@@ -520,10 +519,13 @@ mod tests {
     fn empty_resource_publish_never_locks_even_with_other_subscribers() {
         let hub = hub();
         hub.message(1, "admin", json!({"type":"subscribe","topic":"res:logs"}));
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = hub.state.lock().expect("stream state");
-            panic!("poison state to detect any empty-path locking");
-        }));
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _guard = hub.state.lock().expect("stream state");
+                panic!("poison state to detect any empty-path locking");
+            }))
+            .is_err()
+        );
         hub.invalidate("res:usage", None);
         hub.publish("res:usage", Value::Null, None);
     }
