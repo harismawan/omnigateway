@@ -168,7 +168,7 @@ async function run(binary: string, label: string, c: Cell, port: number) {
         // Pin capture to independently received bytes, not just gateway-vs-gateway.
         const captured = read.artifact.client.response;
         if (c.stream) {
-          const wireFrames = client.split("\n\n").filter(Boolean).map(x => x.replaceAll(secret, "sk-[redacted]"));
+          const wireFrames = boundValue(maskSecrets(client.split("\n\n").filter(Boolean))).value;
           if (!isDeepStrictEqual(captured, wireFrames)) throw Error("captured client frames differ from wire");
         } else {
           const wire = boundValue(maskSecrets(JSON.parse(client))).value;
