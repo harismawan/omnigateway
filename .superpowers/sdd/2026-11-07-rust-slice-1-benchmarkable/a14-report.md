@@ -304,3 +304,48 @@ one-byte probe frozen vs r1-final: 0
 silent inference body probe: 0
 unshare -Urn bun --no-env-file /tmp/opencode/a14/r1-burst.ts: 0
 ```
+
+
+## r2 — pathname preservation
+
+- Commit: `b988f53529129b09b3482b645d7a3279e3be159c` (`fix(server): keep pathname in catch-all bodies (3 tests)`).
+- Append-only test-lint follow-up / final HEAD: `84c476846e9c43e9bd3e162683b55618157f19ff` (`test(server): explain fixture path expectations`). The first clippy gate rejected two new test-only `unwrap()` calls; changed them to descriptive `expect()` calls. No production-code changes in this follow-up. The requested single-commit shape could not be preserved without rewriting the already-created fix commit, which was prohibited.
+- Restored WHATWG-normalized `path`, including its trailing slash, independently of `route_path`'s dispatch key. Audited every original `handle` pathname use: plugin asset classification and static serving (including catch-all errors) now receive the preserved pathname again. There were no pathname-bearing log statements in the changed region; static handling and its error/log implementation are unchanged.
+- Exemption implementation, its `route_path` helper, and all timeout transitions are unchanged. The separate 255-second normalized-path exemption probes were not rerun. The requested full idle-timeout suite was run separately.
+- Three new integration tests: catch-all path preservation (plain and encoded-dot-normalized), static trailing-slash paths, normalized inference dispatch (encoded dots, trailing slash, backslashes). Red: 2 passed / 1 failed with the exact `/missing/` regression. Green: 3 passed / 0 failed. Evidence: `r2-red.log`, `r2-green.log`.
+- Paired raw-socket probe: 6 cases passed against frozen TS and the committed Rust binary. `/missing/` preserves the 65-byte JSON and `/missing` the 64-byte JSON; `/large.txt/` serves the static file; three normalized inference paths still dispatch to authentication (401). Exact responses: `/tmp/opencode/a14/r2-quick/quick.json`.
+- Additional paired raw-socket audit: 6 more cases agree (encoded-dot catch-all normalization, doubled trailing slash, plugin asset with/without trailing slash, normalized static path, doubled-slash static path). Exact responses: `/tmp/opencode/a14/r2-extra/quick.json`.
+- All 12 pairs match status, body, and case-insensitively compared end-to-end headers excluding Date. Raw hop-by-hop difference retained in evidence: Rust explicitly sends `Connection: close`; TS closes without that header (also present in reviewer's pre-r1 `base-quick/quick.json`). No claim of byte-identical whole responses. See `r2-raw-header-audit.log`.
+- Built **after** the commit, using this worktree's own `target`, offline with two build jobs and debug/incremental disabled. Binary: `/tmp/opencode/a14/r2-final`; SHA-256 `b6472a30956a2a4acbe3121f461d46a2844ba4e6d4466ecf6d6dfdfa2db79ce3`; commit recorded in `r2-final.commit`.
+- Rebuilt after the append-only follow-up, retained separately as `/tmp/opencode/a14/r2-final-postlint` (`r2-final2.commit`, `r2-final2.sha256`); `cmp` confirms it is byte-identical to `/tmp/opencode/a14/r2-final`. Thus paired/idle/conformance probes exercise the exact final binary bytes; no repeat of those probes is needed for the test-only lint correction. Final workspace/fmt/dispatch-size gates were rerun.
+- Commands ran with a scrubbed explicit environment/private HOME; provider-capable tests and gateway probes ran in loopback-only user/network namespaces. No TS product edits, dependency changes, admin-routes suite, push, or merge.
+- Requested idle suite: 12 socket checks (six per runtime), PASS; normal `run.ts`: 49 passing table rows, `all rows equal`. Exemption audit retained in `r2-exemption-audit.log`.
+
+Gate results follow (exit values quoted from the corresponding `.exit` files).
+
+
+```text
+cargo test --offline -p omni-gateway --test server pathname_ -- --test-threads=1 (red): 101 (r2-red.exit)
+cargo test --offline -p omni-gateway --test server pathname_ -- --test-threads=1 (green): 0 (r2-green.exit)
+cargo fmt --all -- --check (before commit): 0 (r2-precommit-fmt.exit)
+cargo build --offline -p omni-gateway --bin omnigateway (after commit): 0 (r2-build.exit)
+cargo fmt --all -- --check (before append-only lint commit): 0 (r2-precommit2-fmt.exit)
+cargo test --offline -p omni-gateway --test server pathname_ -- --test-threads=1 (lint correction): 0 (r2-green2.exit)
+cargo clippy --offline --workspace --all-targets -- -D warnings (lint correction): 0 (r2-clippy2.exit)
+cargo build --offline -p omni-gateway --bin omnigateway (after append-only lint commit): 0 (r2-build2.exit)
+cargo test --offline --workspace: 0 (r2-workspace.exit)
+cargo test --offline --workspace (final HEAD): 0 (r2-workspace2.exit)
+cargo clippy --offline --workspace --all-targets -- -D warnings: 101 (r2-clippy.exit)
+cargo fmt --all -- --check: 0 (r2-fmt.exit)
+cargo fmt --all -- --check (final HEAD): 0 (r2-fmt2.exit)
+cargo test --offline -p omni-gateway --test dispatch_size -- --nocapture: 0 (r2-dispatch_size.exit)
+cargo test --offline -p omni-gateway --test dispatch_size -- --nocapture (final HEAD): 0 (r2-dispatch_size2.exit)
+unshare -Urn bash -c 'ip link set lo up; python3 /tmp/opencode/a14/r2-quick.py': 0 (r2-quick.exit)
+unshare -Urn bash -c 'ip link set lo up; python3 /tmp/opencode/a14/r2-extra.py': 0 (r2-extra.exit)
+bash conformance/e2e/idle-timeout-ns.sh /tmp/opencode/a8/ts /tmp/opencode/a14/r2-final /tmp/opencode/a14/r2-idle: 0 (r2-idle.exit)
+unshare -Urn bash -c 'ip link set lo up; bun --no-env-file conformance/e2e/run.ts --ts /tmp/opencode/a8/ts --rust /tmp/opencode/a14/r2-final': 0 (r2-run.exit)
+```
+
+- `workspace`: 1350 passed, 0 failed, 37 ignored across 205 test result groups.
+- `workspace2`: 1350 passed, 0 failed, 37 ignored across 205 test result groups.
+- No flaky-test retry was needed; final HEAD workspace rerun was for the test-only lint correction.
