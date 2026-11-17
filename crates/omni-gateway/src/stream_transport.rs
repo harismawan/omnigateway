@@ -300,7 +300,7 @@ async fn run(
         Instant::now() + Duration::from_secs(20),
         Duration::from_secs(20),
     );
-    let mut last_pong = Instant::now();
+    let last_pong = Instant::now();
     let mut stop = hub.shutdown.subscribe();
     let mut validation: Option<tokio::task::JoinHandle<bool>> = None;
     let mut validation_started = Instant::now();
@@ -329,7 +329,10 @@ async fn run(
                     let event=match codec.next_event(){Ok(Some(e))=>e,Ok(None)=>break,Err(code)=>{close=Some((code,if code==1009 {"Received too big message"} else {""}));break 'connection;}};
                     let wire=match event {
                         Event::Ping(p)=>Some(stream_codec::encode(10,&p)),
-                        Event::Pong(_)=>{last_pong=Instant::now();None},
+                        // Frozen Elysia passes a raw socket to pong(), whereas
+                        // routes/stream.ts looks up ws.raw. Thus no registry
+                        // pong is recorded, even for a compliant client.
+                        Event::Pong(_)=>None,
                         Event::Close(p)=>{drop(tx.send((stream_codec::encode(8,&p),0)).await);break 'connection;},
                         Event::Text(text)=>{for wire in hub.message(id,kind,parse_text(&text)){if tx.send((stream_codec::encode(1,wire.as_bytes()),0)).await.is_err(){break 'connection;}} None},
                         Event::Binary(_)=>Some(stream_codec::encode(1,b"{\"type\":\"error\",\"message\":\"malformed frame\"}")),

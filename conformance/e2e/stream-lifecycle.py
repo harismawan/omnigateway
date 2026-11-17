@@ -15,7 +15,8 @@ import subprocess
 import sys
 import time
 
-binary, root, output = sys.argv[1:]
+binary, root, output = sys.argv[1:4]
+idle = len(sys.argv) > 4 and sys.argv[4] == "idle"
 env = dict(os.environ, OMNI_ROOT=root, OMNI_DB_PATH=root + "/omni.db",
            OMNI_ENCRYPTION_KEY="stream-test-encryption-key-0123456789",
            OMNI_HOST="127.0.0.1", OMNI_PORT="18772", OMNI_LOG_LEVEL="warn")
@@ -79,16 +80,18 @@ try:
     ping_at = time.monotonic()-start
     assert 15 <= ping_at <= 25, ping_at
     s.sendall(bytes([0x8a, 0x80 | len(data)]) + b"\0\0\0\0" + data)
-    api("/api/logout", {}, cookie)
+    if not idle:
+        api("/api/logout", {}, cookie)
     while True:
         op, data = frame(s)
         if op == 8:
             break
         assert op == 9
         s.sendall(bytes([0x8a, 0x80 | len(data)]) + b"\0\0\0\0" + data)
-    assert data == struct.pack(">H", 4401) + b"session expired", data
+    expected = struct.pack(">H", 1001) + b"pong deadline" if idle else struct.pack(">H", 4401) + b"session expired"
+    assert data == expected, data
     revoked_at = time.monotonic()-start
-    assert 30 <= revoked_at <= 45, revoked_at
+    assert (55 <= revoked_at <= 85 if idle else 30 <= revoked_at <= 45), revoked_at
     s.close()
     cookie = api("/api/login", {"password": "stream-test-password"})
     s = opened(cookie)
@@ -97,7 +100,7 @@ try:
     assert op == 8 and data == struct.pack(">H", 1001) + b"restart", (op, data)
     s.close()
     Path(output).write_text(json.dumps({"pingSeconds": ping_at, "revokedSeconds": revoked_at,
-                                       "revoked": "4401 session expired", "shutdown": "1001 restart"}))
+                                       "close": "1001 pong deadline (despite pongs)" if idle else "4401 session expired", "shutdown": "1001 restart"}))
     print("PASS heartbeat / pong / revoke / shutdown", output)
 finally:
     if p.poll() is None:
