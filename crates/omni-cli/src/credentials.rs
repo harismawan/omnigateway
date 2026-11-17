@@ -8,7 +8,17 @@ fn prop<'a>(v: &'a J, k: &str) -> &'a J {
     get(v, k).unwrap_or(&UNDEFINED)
 }
 fn text(v: &J) -> String {
-    omni_control::operator_json::string(v).unwrap_or_default()
+    match v {
+        J::Object(_) | J::Null | J::Number(_) | J::String(_) => cli_cell::scalar_string(v),
+        _ => omni_control::operator_json::string(v).unwrap_or_default(),
+    }
+}
+fn provider(v: &J, color: bool) -> Result<String, String> {
+    if matches!(v, J::String(_)) {
+        crate::models::provider(v, color)
+    } else {
+        Ok(text(v))
+    }
 }
 fn time(v: &J) -> String {
     match v {
@@ -87,7 +97,10 @@ pub fn run(
                     let (ok, status) = condition(c, now as f64);
                     Ok(vec![
                         cli_cell::table_text(prop(c, "id"))?,
-                        crate::models::provider(prop(c, "provider"), color)?,
+                        {
+                            cli_cell::table_text(prop(c, "provider"))?;
+                            provider(prop(c, "provider"), color)?
+                        },
                         cli_cell::table_text(prop(c, "label"))?,
                         cli_cell::table_text(prop(c, "authType"))?,
                         text(prop(c, "tier")),
@@ -111,14 +124,14 @@ pub fn run(
             let c = rows
                 .iter()
                 .find(|c| prop(c, "id") == &J::String(id.encode_utf16().collect()))
-                .ok_or((1, "no such credential".into()))?;
+                .ok_or((1, "BAD_REQUEST: no such credential".into()))?;
             if !json {
                 let (ok, status) = condition(c, now as f64);
                 let entries = vec![
                     ("id", text(prop(c, "id"))),
                     (
                         "provider",
-                        crate::models::provider(prop(c, "provider"), color).map_err(|e| (1, e))?,
+                        provider(prop(c, "provider"), color).map_err(|e| (1, e))?,
                     ),
                     ("label", text(prop(c, "label"))),
                     ("auth", text(prop(c, "authType"))),
@@ -195,6 +208,11 @@ pub fn run(
                         .iter()
                         .find(|c| prop(c, "id") == prop(h, "credentialId"))
                         .map_or(prop(h, "credentialId"), |c| prop(c, "label"));
+                    let label = if matches!(label, J::Null | J::Undefined) {
+                        prop(h, "credentialId")
+                    } else {
+                        label
+                    };
                     let last = prop(prop(&data, "lastUsed"), &text(prop(h, "credentialId")));
                     let last = time(last);
                     rendered.push(vec![
