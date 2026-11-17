@@ -262,7 +262,10 @@ async fn surfaces_gates_oversize_and_persistence_isolation() {
 #[tokio::test]
 async fn abandoned_adapter_branch_is_drained_before_settle() {
     let collector = Collector::new(true);
-    let http = collector.wrap(Arc::new(Script));
+    let http = collector.wrap_for(Arc::new(Script), "parent".into());
+    // A screened request's classifier finishes first but must not abort the
+    // parent transport, just as its calls are excluded from the artifact.
+    drop(http.dispatch_scope("classifier"));
     let mut response = http
         .send(HttpRequest {
             provider: "custom".into(),
@@ -271,7 +274,7 @@ async fn abandoned_adapter_branch_is_drained_before_settle() {
             headers: vec![],
             body: "{}".into(),
             body_encoding: None,
-            request_id: None,
+            request_id: Some("parent".into()),
         })
         .await
         .unwrap();

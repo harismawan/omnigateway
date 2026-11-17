@@ -455,7 +455,10 @@ impl omni_providers::http::BodyObserver for Observer {
 }
 
 impl omni_providers::http::HttpClient for CaptureHttp {
-    fn dispatch_scope(&self) -> Option<Box<dyn Send>> {
+    fn dispatch_scope(&self, request_id: &str) -> Option<Box<dyn Send>> {
+        if self.request_id.as_ref().is_some_and(|id| id != request_id) {
+            return None;
+        }
         Some(Box::new(DispatchScope(self.collector.clone())))
     }
     fn send(

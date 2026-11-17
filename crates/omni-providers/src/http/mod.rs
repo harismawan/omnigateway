@@ -162,7 +162,7 @@ impl HttpError {
 /// The transport seam Task 5's dispatch calls; tests substitute their own.
 pub trait HttpClient: Send + Sync {
     /// Opt-in request-local transport lifetime, including detached capture reads.
-    fn dispatch_scope(&self) -> Option<Box<dyn Send>> {
+    fn dispatch_scope(&self, _request_id: &str) -> Option<Box<dyn Send>> {
         None
     }
 
