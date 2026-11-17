@@ -78,11 +78,17 @@ for provider in ['anthropic','openai','kimi','kilo','grok','antigravity','muse',
     cases.append(('add label',seed,'',['credentials','add-key',provider,'--label','  chosen  ']))
 custom = ['credentials','add-key','custom','--endpoint-id','ep','--endpoint-label','Endpoint','--origin','https://example.test/v1/','--protocol','chat-completions']
 cases.append(('custom',seed,'',custom))
+for data in ['{}','null','[]','1','"x"','invalid', '{"endpointId":"ep","endpointLabel":"Endpoint","origin":"https://example.test","basePath":"/v1","protocol":"chat_completions"}', '{"endpointId":"ep","endpointLabel":"Endpoint","origin":"https://example.test","protocol":"responses"}']:
+    sql = "INSERT INTO credentials(id,provider,label,auth_type,provider_data,created_at,updated_at) VALUES('old','custom','old','apiKey'," + "'"+data+"',1,2)"
+    for args in [custom, ['credentials','add-key','custom','--endpoint-id',' ep ']]:
+        cases.append(('custom reuse',seed,sql,args))
+for tail in [[],['openai','--key','secret'],['openai','--origin'],['openai','--protocol=-bad']]:
+    cases.append(('add malformed',seed,'',['credentials','add-key']+tail))
 for flag in ['endpoint-id','endpoint-label','origin','protocol']:
     for value in ['', ' ', 'bad', 'https://u:p@example.test', 'https://example.test?q=1','responses']:
         args = custom.copy(); args[args.index('--'+flag)+1] = value
         cases.append(('custom validation',seed,'',args))
-for sql in ["", "INSERT INTO models(id,targets,strategy,is_alias) VALUES('pin','[{\"provider\":\"openai\",\"model\":\"m\",\"credentialId\":\"c\"}]','score',0)"]:
+for sql in ["", "INSERT INTO virtual_models(id,targets,strategy,is_alias) VALUES('pin','[{\"provider\":\"openai\",\"model\":\"m\",\"credentialId\":\"c\"}]','score',0)"]:
     for yes in [[],['--yes']]: cases.append(('pinned',seed,sql,['credentials','rm','c']+yes))
 
 def normalize(result, args, started, ended):
@@ -93,7 +99,7 @@ def normalize(result, args, started, ended):
     if op not in ['enable','disable','set','add-key']: return
     with sqlite3.connect(db) as conn:
         ids = [r[0] for r in conn.execute('SELECT id FROM credentials')]
-    new_id = next((i for i in ids if i != 'c'),None) if op == 'add-key' else None
+    new_id = next((i for i in ids if i not in ['c','old']),None) if op == 'add-key' else None
     for row in result['types']['credentials']:
         target = row['id'] == ('text',(new_id if op == 'add-key' else args[2]).encode().hex().upper())
         if not target: continue

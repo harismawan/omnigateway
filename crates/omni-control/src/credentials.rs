@@ -434,6 +434,19 @@ pub fn remove(s: &SqliteStore, id: Option<&str>) -> Result<()> {
     Ok(())
 }
 pub fn patch(s: &SqliteStore, id: Option<&str>, body: &JsValue, now: i64) -> Result<()> {
+    patch_with(s, id, body, now, false)
+}
+/// CLI store errors retain JSON.parse's exception rather than HTTP's safe wrapper.
+pub fn cli_patch(s: &SqliteStore, id: &str, body: &JsValue, now: i64) -> Result<()> {
+    patch_with(s, Some(id), body, now, true)
+}
+fn patch_with(
+    s: &SqliteStore,
+    id: Option<&str>,
+    body: &JsValue,
+    now: i64,
+    cli: bool,
+) -> Result<()> {
     let opt = |z| Z::Opt(Box::new(z));
     let schema = Z::Obj {
         shape: vec![
@@ -473,7 +486,14 @@ pub fn patch(s: &SqliteStore, id: Option<&str>, body: &JsValue, now: i64) -> Res
         ))
     })?;
     let existing = if id.is_some() {
-        rows(s, id)?.into_iter().next()
+        if cli {
+            cli_rows_for(s, id)
+                .map_err(Failure::internal)?
+                .into_iter()
+                .next()
+        } else {
+            rows(s, id)?.into_iter().next()
+        }
     } else {
         None
     };

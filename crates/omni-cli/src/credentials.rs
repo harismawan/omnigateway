@@ -288,8 +288,7 @@ fn mutate(
                 format!("{id} {}", if enabled { "enabled" } else { "disabled" })
             };
             let patch = object(fields.clone());
-            omni_control::credentials::cli_rows_for(&store, Some(id)).map_err(|e| (1, e))?;
-            omni_control::credentials::patch(&store, Some(id), &patch, now).map_err(failure)?;
+            omni_control::credentials::cli_patch(&store, id, &patch, now).map_err(failure)?;
             fields.insert(0, ("id", string(id)));
             (object(fields), human)
         }
