@@ -42,6 +42,8 @@ hyper-util = { version = "0.1", features = ["tokio", "server", "server-graceful"
 http-body = "1"
 http-body-util = "0.1"
 bytes = "1"
+base64 = "0.22.1"
+sha1 = "0.10.7"
 async-stream = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 futures-core = "0.3"

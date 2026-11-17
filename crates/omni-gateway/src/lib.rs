@@ -28,6 +28,7 @@ pub mod screening;
 pub mod server;
 pub mod static_files;
 pub mod stream;
+pub mod stream_codec;
 pub mod telemetry;
 
 use std::sync::{Arc, Mutex};
