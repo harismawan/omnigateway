@@ -79,7 +79,8 @@ pub fn run(
         None
     };
     let store = crate::context::open(flags).map_err(|e| (1, e))?;
-    let rows = omni_control::credentials::cli_rows(&store).map_err(|e| (1, e))?;
+    let rows = omni_control::credentials::cli_rows_for(&store, id.map(|s| s.as_str()))
+        .map_err(|e| (1, e))?;
     let color = !flags.contains_key("no-color")
         && std::env::var("NO_COLOR").unwrap_or_default().is_empty()
         && std::io::stdout().is_terminal();
@@ -95,6 +96,11 @@ pub fn run(
                 .iter()
                 .map(|c| {
                     let (ok, status) = condition(c, now as f64);
+                    if prop(c, "enabled") != &J::Bool(true)
+                        && !matches!(prop(c, "disabledReason"), J::Null)
+                    {
+                        cli_cell::table_text(prop(c, "disabledReason"))?;
+                    }
                     Ok(vec![
                         cli_cell::table_text(prop(c, "id"))?,
                         {
@@ -188,8 +194,7 @@ pub fn run(
             )
         }
         "credentials-health" => {
-            let raw = omni_control::credentials::health(&store, now).map_err(|e| (1, e.message))?;
-            let data = jsjson::parse_js(&raw).map_err(|e| (1, format!("{e:?}")))?;
+            let data = omni_control::credentials::cli_health(&store, now).map_err(|e| (1, e))?;
             if !json {
                 let J::Array(health) = prop(&data, "health") else {
                     unreachable!()
@@ -218,7 +223,11 @@ pub fn run(
                     rendered.push(vec![
                         cli_cell::table_text(label).map_err(|e| (1, e))?,
                         cli_cell::table_text(prop(h, "model")).map_err(|e| (1, e))?,
-                        paint(color, closed, text(prop(h, "breakerState"))),
+                        paint(
+                            color,
+                            closed,
+                            cli_cell::table_text(prop(h, "breakerState")).map_err(|e| (1, e))?,
+                        ),
                         text(prop(h, "consecutiveFailures")),
                         if color {
                             format!("\x1b[2m{last}\x1b[0m")

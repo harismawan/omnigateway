@@ -36,6 +36,18 @@ for col in columns:
         # Relaxed tables exercise the existing X3 operator-cell coercions.
         for args in [['credentials', 'list'], ['credentials', 'show', 'c'], ['credentials', 'health']]:
             cases.append((f'{col}={value}', seed, f'UPDATE credentials SET "{col}"={value}', args))
+for col in ['credential_id', 'model', 'breaker_state', 'consecutive_failures', 'opened_at', 'rate_limited_until']:
+    for value in values:
+        for args in [['credentials', 'health'], ['credentials', 'health', '--all']]:
+            cases.append((f'health:{col}={value}', seed,
+                          f'UPDATE credential_health SET "{col}"={value}', args))
+for reason in values:
+    for args in [['credentials', 'list'], ['credentials', 'show', 'c']]:
+        cases.append((f'disabled:{reason}', seed,
+                      f'UPDATE credentials SET enabled=0, disabled_reason={reason}', args))
+cases.append(('unrelated invalid metadata', seed,
+              "INSERT INTO credentials(id,provider,label,auth_type,provider_data,created_at,updated_at) VALUES('bad','openai','bad','oauth','invalid',1,2)",
+              ['credentials', 'show', 'c']))
 results = []
 for name, data, sql, args in cases:
     for mode in [[], ['--json']]:
@@ -49,6 +61,11 @@ for name, data, sql, args in cases:
                     d.execute('DROP TABLE credentials')
                     d.execute('CREATE TABLE credentials('+','.join('"'+c+'"' for c in cols)+')')
                     d.executemany('INSERT INTO credentials VALUES('+','.join('?' for c in cols)+')', rows)
+                    cols = [r[1] for r in d.execute('pragma table_info(credential_health)')]
+                    rows = list(d.execute('SELECT * FROM credential_health'))
+                    d.execute('DROP TABLE credential_health')
+                    d.execute('CREATE TABLE credential_health('+','.join('"'+c+'"' for c in cols)+')')
+                    d.executemany('INSERT INTO credential_health VALUES('+','.join('?' for c in cols)+')', rows)
                     d.executescript(sql)
                 d.close()
             before = typed_state.snapshot(db)

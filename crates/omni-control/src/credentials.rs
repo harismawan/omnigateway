@@ -131,9 +131,16 @@ pub fn cli_list(s: &SqliteStore) -> std::result::Result<String, String> {
     )])))
 }
 pub fn cli_rows(s: &SqliteStore) -> std::result::Result<Vec<JsValue>, String> {
+    cli_rows_for(s, None)
+}
+/// A show command must not parse metadata belonging to unrelated accounts.
+pub fn cli_rows_for(
+    s: &SqliteStore,
+    id: Option<&str>,
+) -> std::result::Result<Vec<JsValue>, String> {
     let rows = rows_with(
         s,
-        None,
+        id,
         |raw, _| crate::cli_cell::json(raw).map_err(Failure::internal),
         true,
     )
@@ -141,6 +148,13 @@ pub fn cli_rows(s: &SqliteStore) -> std::result::Result<Vec<JsValue>, String> {
     Ok(rows)
 }
 pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
+    Ok(stringify(&health_value(s, now, false)?))
+}
+/// CLI keeps non-finite numbers and BLOB identities until its final renderer.
+pub fn cli_health(s: &SqliteStore, now: i64) -> std::result::Result<JsValue, String> {
+    health_value(s, now, true).map_err(|e| e.message)
+}
+fn health_value(s: &SqliteStore, now: i64, cli: bool) -> Result<JsValue> {
     let mut statement = s
         .connection()
         .prepare("SELECT * FROM credential_health")
@@ -215,7 +229,11 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
     }
     let settings = s.get_settings()?;
     // list() parses every credential's metadata before the per-id seeks.
-    rows(s, None)?;
+    if cli {
+        cli_rows(s).map_err(Failure::internal)?;
+    } else {
+        rows(s, None)?;
+    }
     let mut ids = s
         .connection()
         .prepare("SELECT id FROM credentials ORDER BY tier,label")
@@ -361,12 +379,12 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
             ])
         })
         .collect();
-    Ok(stringify(&obj(vec![
+    Ok(obj(vec![
         ("health", JsValue::Array(health)),
         ("quota", JsValue::Array(quota_json)),
         ("burn", JsValue::Array(burn)),
         ("lastUsed", JsValue::Object(last_used)),
-    ])))
+    ]))
 }
 /// Raw quota projection for CLI status, without health/burn/last-used reads.
 /// Like listQuota in frozen TS, unrelated request logs cannot affect this read.
