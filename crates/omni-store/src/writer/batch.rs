@@ -36,6 +36,8 @@ use std::collections::HashMap;
 /// What one batch did, for the writer's counters.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct Outcome {
+    pub(crate) log_notifications: usize,
+    pub(crate) finish_notifications: usize,
     /// Health rows the foreign key refused (no such credential).
     pub(crate) health_refused: u64,
     /// The rows this batch completed, as stored, in completion order: what
@@ -576,9 +578,18 @@ pub(crate) fn write(
     // rather than read a snapshot another connection could commit past.
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let mut logs = Logs::load(&tx, events)?;
+    let mut log_notifications = 0;
+    let mut finish_notifications = 0;
     for e in events {
         if let WriteEvent::Log(l) = e {
+            // begin is a plain INSERT (duplicates throw); route and append
+            // resolve successfully even when their update claims no row.
+            let publishes = !matches!(l, LogEvent::Begin(p) if logs.rows.get(&p.id).is_some_and(Option::is_some));
             logs.apply(l, node_id);
+            if publishes {
+                log_notifications += 1;
+                finish_notifications += usize::from(matches!(l, LogEvent::Finish(_)));
+            }
         }
     }
     logs.write(&tx)?;
@@ -596,6 +607,8 @@ pub(crate) fn write(
     let health_refused = write_health(&tx, events)?;
     tx.commit()?;
     Ok(Outcome {
+        log_notifications,
+        finish_notifications,
         health_refused,
         completions,
         refused: Vec::new(),

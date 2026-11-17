@@ -43,6 +43,7 @@ mod num;
 mod pg_batch;
 mod sql;
 mod task;
+pub use task::LogObserver;
 
 /// Persist recovery work directly, never through the request-path lossy queue.
 /// Each claim and its rollups commit atomically; already-completed rows count zero.

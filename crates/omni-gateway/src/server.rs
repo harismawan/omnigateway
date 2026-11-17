@@ -378,7 +378,7 @@ pub struct App {
     pub static_root: Option<std::path::PathBuf>,
     /// The session authority behind every `/api` route.
     pub admin: crate::admin_auth::AdminAuth,
-    pub stream: crate::stream_transport::Hub,
+    pub stream: Arc<crate::stream_transport::Hub>,
     /// Whether `baseUrl` (`OMNI_BASE_URL`) is https: `Secure` on the cookie.
     pub base_url_https: bool,
     /// The admin routes' own store connection (keys, models, settings).

@@ -1018,11 +1018,17 @@ pub(crate) async fn write(
     let tx = client.transaction().await?;
     let mut logs = Logs::load(&tx, events).await?;
     let mut refused = Vec::new();
+    let mut log_notifications = 0;
+    let mut finish_notifications = 0;
     for (i, e) in events.iter().enumerate() {
-        if let WriteEvent::Log(l) = e
-            && !logs.apply_logged(l, node_id)
-        {
-            refused.push(i);
+        if let WriteEvent::Log(l) = e {
+            let publishes = !matches!(l, LogEvent::Begin(p) if logs.rows.get(&p.id).is_some_and(Option::is_some));
+            if !logs.apply_logged(l, node_id) {
+                refused.push(i);
+            } else if publishes {
+                log_notifications += 1;
+                finish_notifications += usize::from(matches!(l, LogEvent::Finish(_)));
+            }
         }
     }
     logs.write(&tx).await?;
@@ -1078,6 +1084,8 @@ pub(crate) async fn write(
     let health_refused = write_health(&tx, events).await?;
     tx.commit().await?;
     Ok(Outcome {
+        log_notifications,
+        finish_notifications,
         health_refused,
         completions,
         refused,

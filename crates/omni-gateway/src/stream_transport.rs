@@ -25,6 +25,26 @@ pub struct Hub {
     shutdown: watch::Sender<bool>,
     heartbeat_epoch: Instant,
 }
+impl std::fmt::Debug for Hub {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Hub")
+    }
+}
+impl omni_store::writer::LogObserver for Hub {
+    fn committed(&self, logs: usize, finishes: usize) {
+        // No allocation, lock or send for an unsubscribed topic. Preserve
+        // every call: reducing N calls to one loses the trailing frame.
+        if !self.empty_resource("res:logs") || !self.empty_resource("res:usage") {
+            for _ in 0..logs.saturating_sub(finishes) {
+                self.invalidate("res:logs", None);
+            }
+            for _ in 0..finishes {
+                self.invalidate("res:usage", None);
+                self.invalidate("res:logs", None);
+            }
+        }
+    }
+}
 impl Default for Hub {
     fn default() -> Self {
         Self {

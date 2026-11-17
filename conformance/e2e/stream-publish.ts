@@ -2,6 +2,7 @@
 // Isolated namespace only. Partial step-3a corpus: the 14 ported admin publishers.
 // No normalization: resource frames contain no generated IDs or timestamps.
 import { mkdirSync, writeFileSync } from "node:fs";
+import { Database } from "bun:sqlite";
 const [ts, rust, work] = process.argv.slice(2);
 if (!ts || !rust || !work) throw Error("frozen rust work required");
 mkdirSync(work, { recursive: true });
@@ -50,11 +51,48 @@ async function run(binary: string, port: number, name: string) {
     for (const item of frames[role]) if (item.frame.type !== (role === "client" ? "error" : "ack")) throw Error("grant mismatch");
     frames[role] = [];
   }
-  return { api, frames, key };
+  return { api, frames, key, base, root, cookie };
 }
 try {
   const a = await run(ts, 18781, "ts"), b = await run(rust, 18782, "rust");
   const transcript: any[] = [];
+  // Only topic frames are compared: they contain no generated fields.
+  // Inference response IDs/timestamps are not compared or normalized.
+  const inference = async (x: typeof a) => {
+    const ws = new WebSocket(x.base.replace("http", "ws") + "/api/stream", { headers: { cookie: x.cookie } });
+    sockets.push(ws);
+    const got: any[] = [];
+    ws.onmessage = e => got.push(JSON.parse(String(e.data)));
+    await new Promise<void>((yes, no) => { ws.onopen = () => yes(); ws.onerror = no; });
+    for (const topic of ["res:logs", "res:usage"]) ws.send(JSON.stringify({ type: "subscribe", topic }));
+    while (got.length < 2) await Bun.sleep(10);
+    await x.api("/api/credentials", { provider: "custom", apiKey: "probe", endpointId: "writer", endpointLabel: "Writer", origin: "http://127.0.0.1:18789", protocol: "chat_completions" });
+    await x.api("/api/models/writer", { id: "writer", strategy: "priority", isAlias: false, targets: [{ provider: "custom", model: "writer", tier: 1, weight: 1, costPerMTok: { input: 1, output: 2 }, capabilities: { tools: true, images: false, reasoning: false } }] }, "PUT");
+    const results: any[] = [];
+    for (const mode of ["buffered", "stream", "error", "append-failure"]) {
+      await Bun.sleep(1250); got.length = 0;
+      if (mode === "append-failure") {
+        const db = new Database(`${x.root}/omni.db`);
+        db.run("CREATE TRIGGER refuse BEFORE INSERT ON request_logs BEGIN SELECT RAISE(FAIL, 'probe'); END"); db.close();
+      }
+      const res = await fetch(x.base + "/v1/chat/completions", { method: "POST", headers: { authorization: `Bearer ${x.key.key}`, "content-type": "application/json" }, body: JSON.stringify({ model: "writer", stream: mode === "stream", messages: [{ role: "user", content: mode }], max_tokens: 16 }) });
+      await res.text(); await Bun.sleep(1450);
+      const events = got.filter(v => v.type === "event");
+      const expected = mode === "append-failure" ? [] : ["res:logs", "res:usage", "res:logs"];
+      if (JSON.stringify(events.map(v => v.topic)) !== JSON.stringify(expected)) throw Error(`${x.root} ${mode}: ${JSON.stringify(events)}`);
+      results.push({ mode, events });
+    }
+    return results;
+  };
+  const upstream = Bun.serve({ hostname: "127.0.0.1", port: 18789, async fetch(req) {
+    const body = await req.json() as any;
+    await Bun.sleep(1300);
+    if (body.messages?.[0]?.content === "error") return Response.json({ error: { message: "probe" } }, { status: 400 });
+    if (body.stream) return new Response('data: {"id":"fixed","object":"chat.completion.chunk","model":"writer","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}\n\ndata: {"id":"fixed","object":"chat.completion.chunk","model":"writer","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1}}\n\ndata: [DONE]\n\n', { headers: { "content-type": "text/event-stream" } });
+    return Response.json({ id: "fixed", object: "chat.completion", model: "writer", choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 2, completion_tokens: 1 } });
+  } });
+  try { transcript.push({ inference: await Promise.all([inference(a), inference(b)]) }); }
+  finally { upstream.stop(true); }
   const check = async (name: string, topic: string, mutate: (x: typeof a) => Promise<unknown>, floor: number) => {
     for (const x of [a, b]) for (const role in x.frames) x.frames[role] = [];
     await Promise.all([mutate(a), mutate(b)]);

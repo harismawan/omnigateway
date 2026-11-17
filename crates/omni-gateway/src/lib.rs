@@ -306,9 +306,11 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
     let (holder, store) = holder;
 
     let (commit_tx, mut commit_rx) = tokio::sync::mpsc::channel(4096);
+    let stream = Arc::new(stream_transport::Hub::default());
     let writer = Writer::spawn(
         &path,
         WriterConfig {
+            log_observer: Some(stream.clone()),
             node_id: node_id.clone(),
             day_offset_minutes: offset,
             commit_sink: Some(commit_tx),
@@ -502,7 +504,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         body_logging_allowed: config.body_logging_allowed,
         day_offset_minutes: offset,
         reported_catalog_problems: std::sync::Mutex::default(),
-        stream: stream_transport::Hub::default(),
+        stream,
     });
 
     tracing::info!(host = %config.host, port = addr.port(), "omnigateway listening");
