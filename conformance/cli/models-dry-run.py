@@ -33,6 +33,7 @@ stored=[None,"INSERT INTO virtual_models(id,targets,strategy) VALUES('broken','{
 stored += [f"UPDATE virtual_models SET targets=json_set(targets,'$[0].{field}',{value}) WHERE id='score'" for field in ['tier','weight','costPerMTok.input','costPerMTok.output','costPerMTok.cacheRead'] for value in ["'2'","'oops'",'NULL',"'1e400'","'-0'","json('[2]')","json('{}')"]]
 stored += [f"UPDATE credentials SET {col}={value} WHERE id='ok'" for col in ['label','provider','id'] for value in ["x'6162'",'12','NULL']]
 stored += ["UPDATE credentials SET weight=1e400 WHERE id='ok'", "UPDATE credentials SET weight='oops' WHERE id='ok'", "UPDATE virtual_models SET strategy=x'6162' WHERE id='score'"]
+stored += ["UPDATE credentials SET expires_at='oops' WHERE id='expired-oauth'"]
 rows=[]
 cross=[f'UPDATE {table} SET {col}={value} WHERE {where}' for table,cols,where in [('virtual_models',['targets','strategy'],"id='score'"),('credentials',['tier','label','expires_at','disabled_at','provider_data','enabled'],"id='ok'"),('credential_health',['credential_id','model','breaker_state','consecutive_failures','opened_at','rate_limited_until'],'1')] for col in cols for value in ['1','1.5','-0.0',"'oops'","'2'","x'6162'",'NULL']]
 for args,sql in [(a,None) for a in cases]+[(['models','dry-run','score']+(['--json'] if js else []),sql) for sql in stored for js in [False,True]]+[(['models','dry-run','score','--json'],sql) for sql in cross]:
