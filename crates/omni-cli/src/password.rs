@@ -10,7 +10,7 @@ impl Drop for Terminal {
         let _restored = tcsetattr(std::io::stdin(), OptionalActions::Now, &self.0);
     }
 }
-fn secret(question: &str) -> Result<Vec<u16>, String> {
+pub(crate) fn secret(question: &str) -> Result<Vec<u16>, String> {
     let saved = tcgetattr(std::io::stdin()).map_err(|e| e.to_string())?;
     let mut raw = saved.clone();
     raw.make_raw();

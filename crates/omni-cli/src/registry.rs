@@ -356,7 +356,14 @@ pub fn implemented(name: &str) -> Option<String> {
     }
     if matches!(
         name,
-        "credentials list" | "credentials show" | "credentials health"
+        "credentials list"
+            | "credentials show"
+            | "credentials health"
+            | "credentials enable"
+            | "credentials disable"
+            | "credentials set"
+            | "credentials rm"
+            | "credentials add-key"
     ) || name.starts_with("settings ")
         || name.starts_with("models ")
     {

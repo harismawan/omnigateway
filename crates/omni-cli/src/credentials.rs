@@ -63,11 +63,255 @@ fn object(fields: Vec<(&str, J)>) -> J {
             .collect(),
     )
 }
+fn failure(e: omni_control::api::Failure) -> (u8, String) {
+    (
+        1,
+        e.code
+            .map_or(e.message.clone(), |c| format!("{c}: {}", e.message)),
+    )
+}
+fn string(s: &str) -> J {
+    J::String(s.encode_utf16().collect())
+}
+fn mutate(
+    command: &str,
+    flags: &HashMap<String, String>,
+    args: &[String],
+) -> Result<String, (u8, String)> {
+    use std::io::{BufRead, Read};
+    let id = args.first().filter(|s| !s.is_empty()).ok_or((
+        2,
+        if command == "credentials-add-key" {
+            "provider is required"
+        } else {
+            "credential id is required"
+        }
+        .into(),
+    ))?;
+    let mut fields = Vec::new();
+    if command == "credentials-set" {
+        if let Some(label) = flags.get("label") {
+            fields.push(("label", string(label)));
+        }
+        for name in ["tier", "weight"] {
+            if let Some(raw) = flags
+                .get(name)
+                .filter(|s| !s.trim_matches(omni_ir::js::is_js_whitespace).is_empty())
+            {
+                let n = cli_cell::scalar_number(&string(raw));
+                if !n.is_finite() {
+                    return Err((2, format!("--{name} must be a number, got \"{raw}\"")));
+                }
+                fields.push((name, J::Number(n)));
+            }
+        }
+        if fields.is_empty() {
+            return Err((
+                2,
+                "nothing to change: pass --label, --tier, or --weight".into(),
+            ));
+        }
+    }
+    if command == "credentials-add-key" && omni_control::catalog::descriptor(id).is_none() {
+        return Err((2, "provider must be one of anthropic, openai, codex, copilot, gemini, antigravity, kiro, qwen, qoder, iflow, custom, or a plugin that loads and supplies one; omni plugin list shows which".into()));
+    }
+    let mut secret = String::new();
+    if command == "credentials-add-key" {
+        if std::io::stdin().is_terminal() {
+            secret = String::from_utf16_lossy(
+                &crate::password::secret(&format!("{id} API key: ")).map_err(|e| (1, e))?,
+            );
+            eprintln!();
+        } else {
+            std::io::stdin()
+                .read_to_string(&mut secret)
+                .map_err(|e| (1, e.to_string()))?;
+        }
+        secret = secret.trim_matches(omni_ir::js::is_js_whitespace).into();
+        if secret.is_empty() {
+            return Err((1, "no API key given".into()));
+        }
+    }
+    let ctx = crate::context::resolve(flags).map_err(|e| (1, e))?;
+    let key = if command == "credentials-add-key" {
+        Some(omni_crypto::field::derive_key(
+            &ctx.encryption_key().map_err(|e| (1, e))?,
+        ))
+    } else {
+        None
+    };
+    let store = ctx.open().map_err(|e| (1, e))?;
+    let now = chrono::Utc::now().timestamp_millis();
+    let (result, human) = match command {
+        "credentials-add-key" => {
+            let mut input = vec![("provider", string(id)), ("apiKey", string(&secret))];
+            for (flag, name) in [
+                ("label", "label"),
+                ("endpoint-id", "endpointId"),
+                ("endpoint-label", "endpointLabel"),
+                ("origin", "origin"),
+                ("protocol", "protocol"),
+            ] {
+                if let Some(v) = flags.get(flag) {
+                    input.push((
+                        name,
+                        string(if flag == "protocol" && v == "chat-completions" {
+                            "chat_completions"
+                        } else {
+                            v
+                        }),
+                    ));
+                }
+            }
+            if id == "custom"
+                && let Some(endpoint) = flags.get("endpoint-id")
+            {
+                let rows = omni_control::credentials::cli_rows(&store).map_err(|e| (1, e))?;
+                if let Some(old) = rows.iter().find(|c| {
+                    prop(c, "provider") == &string("custom")
+                        && prop(prop(c, "providerData"), "endpointId")
+                            == &string(endpoint.trim_matches(omni_ir::js::is_js_whitespace))
+                }) {
+                    let data = prop(old, "providerData");
+                    for name in ["endpointLabel", "origin", "protocol"] {
+                        if !input.iter().any(|(k, _)| *k == name) {
+                            let v = if name == "origin" {
+                                string(&format!(
+                                    "{}{}",
+                                    cli_cell::scalar_string(prop(data, "origin")),
+                                    match prop(data, "basePath") {
+                                        J::String(_) =>
+                                            cli_cell::scalar_string(prop(data, "basePath")),
+                                        _ => String::new(),
+                                    }
+                                ))
+                            } else {
+                                prop(data, name).clone()
+                            };
+                            input.push((name, v));
+                        }
+                    }
+                }
+            }
+            let created = omni_control::credentials::create(
+                &store,
+                key.as_ref().expect("key"),
+                &object(input),
+                now,
+            )
+            .map_err(failure)?;
+            let created = jsjson::parse(&created).map_err(|e| (1, e.to_string()))?;
+            let new_id = prop(prop(&created, "credential"), "id").clone();
+            let human = format!("stored {id} api key as {}", text(&new_id));
+            (
+                object(vec![
+                    ("id", new_id),
+                    ("provider", string(id)),
+                    ("pluginFailures", J::Array(vec![])),
+                ]),
+                human,
+            )
+        }
+        "credentials-rm" => {
+            let rows =
+                omni_control::credentials::cli_rows_for(&store, Some(id)).map_err(|e| (1, e))?;
+            let c = rows
+                .first()
+                .ok_or((1, "BAD_REQUEST: no such credential".into()))?;
+            let models = omni_control::models::cli_list(&store).map_err(|e| (1, e))?;
+            let mut pins = Vec::new();
+            for m in &models {
+                if let J::Array(targets) = prop(m, "targets")
+                    && targets
+                        .iter()
+                        .any(|t| prop(t, "credentialId") == &string(id))
+                {
+                    pins.push(cli_cell::scalar_string(prop(m, "id")));
+                }
+            }
+            let mut question = format!(
+                "delete {} credential \"{}\" ({id})?",
+                cli_cell::scalar_string(prop(c, "provider")),
+                cli_cell::scalar_string(prop(c, "label"))
+            );
+            if !pins.is_empty() {
+                question.push_str(&format!(
+                    " {} {} {} to it, and {} will fail rather than fall back to another account.",
+                    if pins.len() == 1 { "model" } else { "models" },
+                    pins.join(", "),
+                    if pins.len() == 1 {
+                        "pins a target"
+                    } else {
+                        "pin targets"
+                    },
+                    if pins.len() == 1 {
+                        "that target"
+                    } else {
+                        "those targets"
+                    }
+                ));
+            }
+            if !flags.contains_key("yes") {
+                if !std::io::stdin().is_terminal() {
+                    return Err((1, format!("{question} — refusing without --yes")));
+                }
+                eprintln!("{question} [y/N] ");
+                let mut line = String::new();
+                std::io::stdin()
+                    .lock()
+                    .read_line(&mut line)
+                    .map_err(|e| (1, e.to_string()))?;
+                if !matches!(
+                    line.trim_matches(omni_ir::js::is_js_whitespace)
+                        .to_lowercase()
+                        .as_str(),
+                    "y" | "yes"
+                ) {
+                    return Err((1, "cancelled".into()));
+                }
+            }
+            omni_control::credentials::remove(&store, Some(id)).map_err(failure)?;
+            (
+                object(vec![("id", string(id)), ("removed", J::Bool(true))]),
+                format!("{id} removed"),
+            )
+        }
+        _ => {
+            let human = if command == "credentials-set" {
+                format!("{id} updated")
+            } else {
+                let enabled = command == "credentials-enable";
+                fields.push(("enabled", J::Bool(enabled)));
+                format!("{id} {}", if enabled { "enabled" } else { "disabled" })
+            };
+            let patch = object(fields.clone());
+            omni_control::credentials::cli_rows_for(&store, Some(id)).map_err(|e| (1, e))?;
+            omni_control::credentials::patch(&store, Some(id), &patch, now).map_err(failure)?;
+            fields.insert(0, ("id", string(id)));
+            (object(fields), human)
+        }
+    };
+    Ok(if flags.contains_key("json") {
+        jsjson::stringify_pretty(&result).expect("mutation result")
+    } else {
+        human
+    })
+}
 pub fn run(
     command: &str,
     flags: &HashMap<String, String>,
     positional: &[String],
 ) -> Result<String, (u8, String)> {
+    if matches!(
+        command,
+        "credentials-enable"
+            | "credentials-disable"
+            | "credentials-set"
+            | "credentials-rm"
+            | "credentials-add-key"
+    ) {
+        return mutate(command, flags, positional);
+    }
     let id = if command == "credentials-show" {
         Some(
             positional

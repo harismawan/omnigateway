@@ -106,6 +106,30 @@ pub fn parse_command(args: &[String], command: &str) -> Result<ParsedCommand, St
             .split_once('=')
             .map_or((&token[2..], None), |(k, v)| (k, Some(v)));
         match name {
+            name if (command == "credentials-set"
+                && matches!(name, "label" | "tier" | "weight"))
+                || (command == "credentials-add-key"
+                    && matches!(
+                        name,
+                        "label" | "endpoint-id" | "endpoint-label" | "origin" | "protocol"
+                    )) =>
+            {
+                let value = if let Some(v) = inline {
+                    v.to_owned()
+                } else {
+                    let v = args
+                        .get(i)
+                        .ok_or_else(|| format!("Option '--{name} <value>' argument missing"))?;
+                    if v.starts_with('-') && v != "-" {
+                        return Err(format!(
+                            "Option '--{name}' argument is ambiguous.\nDid you forget to specify the option argument for '--{name}'?\nTo specify an option argument starting with a dash use '--{name}=-XYZ'."
+                        ));
+                    }
+                    i += 1;
+                    v.clone()
+                };
+                flags.insert(name.into(), value);
+            }
             name if matches!(name, "root" | "db")
                 || (command == "db-migrate" && name == "to")
                 || (command.starts_with("setup-") && matches!(name, "dir" | "key"))

@@ -1,12 +1,12 @@
 """Frozen credentials read commands: byte output and typed-cell parity."""
 from pathlib import Path
-import collections, json, os, sqlite3, subprocess, tempfile
+import collections, json, os, sqlite3, subprocess, tempfile, time, re
 import driver_env, typed_state
 
 repo = Path.cwd()
 scratch = Path('/tmp/opencode/e2')
 scratch.mkdir(exist_ok=True)
-evidence = Path(tempfile.mkdtemp(prefix='credentials-', dir=scratch))
+evidence = Path(tempfile.mkdtemp(prefix='m-credentials-', dir=scratch))
 home = evidence / 'home'
 root = home / 'root'
 root.mkdir(parents=True)
@@ -52,6 +52,66 @@ for value in values:
 cases.append(('unrelated invalid metadata', seed,
               "INSERT INTO credentials(id,provider,label,auth_type,provider_data,created_at,updated_at) VALUES('bad','openai','bad','oauth','invalid',1,2)",
               ['credentials', 'show', 'c']))
+mutation_args = [['credentials',op,'c'] for op in ['enable','disable','rm']]
+mutation_args += [['credentials','rm','c','--yes'], ['credentials','set','c','--label','new'],
+                  ['credentials','set','c','--tier','2','--weight','0.25']]
+for args in mutation_args:
+    cases.append(('mutation',seed,'',args))
+    for col in columns + ['api_key','access_token','id_token']:
+        for value in values:
+            cases.append((f'mutation:{col}={value}',seed,f'UPDATE credentials SET "{col}"={value}',args))
+            cases.append((f'neighbor:{col}={value}',seed,
+                "INSERT INTO credentials SELECT * FROM credentials; UPDATE credentials SET id='neighbor' WHERE rowid=(SELECT max(rowid) FROM credentials); "
+                f'UPDATE credentials SET "{col}"={value} WHERE id=\'neighbor\'',args))
+for op in ['enable','disable','set','rm']:
+    for tail in [[],['missing'],['c','--unknown'],['c','--yes=x']]:
+        cases.append(('missing/flags',seed,'',['credentials',op]+tail))
+for flag in ['tier','weight','label']:
+    for value in ['', ' ', '0', '-1', '1.5', 'NaN', 'Infinity', '1e999','0x10','0b11','0o7','1e-300','雪']:
+        cases.append(('set flag',seed,'',['credentials','set','c',f'--{flag}={value}']))
+    cases.append(('missing value',seed,'',['credentials','set','c',f'--{flag}']))
+for value in ['0','1',"'1'","'0'",'1.5']:
+    for op in ['enable','disable']:
+        cases.append(('existing enabled',seed,f'UPDATE credentials SET enabled={value}',['credentials',op,'c']))
+for provider in ['anthropic','openai','codex','copilot','gemini','antigravity','kiro','qwen','qoder','iflow','custom','unknown']:
+    cases.append(('add',seed,'',['credentials','add-key',provider]))
+    cases.append(('add label',seed,'',['credentials','add-key',provider,'--label','  chosen  ']))
+custom = ['credentials','add-key','custom','--endpoint-id','ep','--endpoint-label','Endpoint','--origin','https://example.test/v1/','--protocol','chat-completions']
+cases.append(('custom',seed,'',custom))
+for flag in ['endpoint-id','endpoint-label','origin','protocol']:
+    for value in ['', ' ', 'bad', 'https://u:p@example.test', 'https://example.test?q=1','responses']:
+        args = custom.copy(); args[args.index('--'+flag)+1] = value
+        cases.append(('custom validation',seed,'',args))
+for sql in ["", "INSERT INTO models(id,targets,strategy,is_alias) VALUES('pin','[{\"provider\":\"openai\",\"model\":\"m\",\"credentialId\":\"c\"}]','score',0)"]:
+    for yes in [[],['--yes']]: cases.append(('pinned',seed,sql,['credentials','rm','c']+yes))
+
+def normalize(result, args, started, ended):
+    # Only successful target clocks and new-row UUID/ciphertext (including nonce/tag)
+    # vary. Validate clocks, decrypt secret, and retain each cell's SQLite type.
+    if result['code'] != 0 or args[:1] != ['credentials']: return
+    op = args[1]
+    if op not in ['enable','disable','set','add-key']: return
+    with sqlite3.connect(db) as conn:
+        ids = [r[0] for r in conn.execute('SELECT id FROM credentials')]
+    new_id = next((i for i in ids if i != 'c'),None) if op == 'add-key' else None
+    for row in result['types']['credentials']:
+        target = row['id'] == ('text',(new_id if op == 'add-key' else args[2]).encode().hex().upper())
+        if not target: continue
+        for col in (['created_at','updated_at'] if op == 'add-key' else ['updated_at'] + (['disabled_at'] if op == 'disable' else [])):
+            cell = row[col]; assert cell[0] == 'integer', cell
+            assert started-1000 <= int(bytes.fromhex(cell[1])) <= ended+1000, cell
+            row[col] = (cell[0],'<clock>')
+        if op == 'add-key':
+            assert re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}',new_id)
+            cell = row['api_key']; assert cell[0] == 'text'
+            script = f'import {{deriveKey,decrypt}} from {json.dumps(str(repo/"packages/store/src/encryption.ts"))}; console.log(await decrypt(await deriveKey(process.env.OMNI_ENCRYPTION_KEY),process.argv[1]));'
+            p = subprocess.run(['bun','--no-env-file','-e',script,bytes.fromhex(cell[1]).decode()],env=env,capture_output=True,check=True)
+            assert p.stdout == b'test-key\n',p.stdout
+            row['api_key'] = (cell[0],'<encrypted:test-key>')
+            row['id'] = ('text','<uuid>')
+    if new_id:
+        result['out'] = bytes.fromhex(result['out']).replace(new_id.encode(),b'<uuid>').hex()
+
 results = []
 for name, data, sql, args in cases:
     for mode in [[], ['--json']]:
@@ -73,10 +133,13 @@ for name, data, sql, args in cases:
                     d.executescript(sql)
                 d.close()
             before = typed_state.snapshot(db)
-            p = subprocess.run(command+['--root', str(root)]+args+mode, env=env, capture_output=True, timeout=20)
+            started = time.time()*1000
+            p = subprocess.run(command+['--root', str(root)]+args+mode, env=env, input=b'  test-key\n', capture_output=True, timeout=20)
+            ended = time.time()*1000
             result = dict(code=p.returncode, out=p.stdout.hex(), err=p.stderr.hex(), types=typed_state.snapshot(db))
             typed_state.no_panic(result)
-            assert before == result['types'], (name, result)
+            if args[1] in ['list','show','health']: assert before == result['types'], (name, result)
+            normalize(result,args,started,ended)
             pair.append(result)
         equal = all(pair[0][k] == pair[1][k] for k in ['code', 'out', 'err', 'types'])
         results.append(dict(name=name, args=args+mode, ts=pair[0], rust=pair[1], equal=equal))
