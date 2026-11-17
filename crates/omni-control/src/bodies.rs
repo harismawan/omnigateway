@@ -9,10 +9,10 @@ pub fn read_request_body(store: &SqliteStore, key: &FieldKey, id: &str) -> Resul
     let read = store.get_body(key, id)?;
     let (request_id, state, truncated, size, at, artifact) = match read {
         None => (
-            id.to_owned(),
+            JsValue::String(id.encode_utf16().collect()),
             "none",
             false,
-            0,
+            JsValue::Number(0.0),
             JsValue::Null,
             JsValue::Null,
         ),
@@ -21,17 +21,17 @@ pub fn read_request_body(store: &SqliteStore, key: &FieldKey, id: &str) -> Resul
             read.row.detail_state.as_str(),
             read.row.truncated,
             read.row.size_bytes,
-            JsValue::Number(read.row.at as f64),
+            read.row.at,
             read.artifact.unwrap_or(JsValue::Null),
         ),
     };
     let string = |s: &str| JsValue::String(s.encode_utf16().collect());
     let value = JsValue::Object(
         [
-            ("requestId", string(&request_id)),
+            ("requestId", request_id),
             ("detailState", string(state)),
             ("truncated", JsValue::Bool(truncated)),
-            ("sizeBytes", JsValue::Number(size as f64)),
+            ("sizeBytes", size),
             ("at", at),
             ("artifact", artifact),
         ]
