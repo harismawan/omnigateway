@@ -909,7 +909,7 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
     };
 
     let outcome: Result<Response<Body>, GatewayError> = async {
-        let (key, _snapshot) = authenticate(&app, &req, started_at)
+        let (key, snapshot) = authenticate(&app, &req, started_at)
             .await
             .inspect_err(|e| {
                 if e.code == ErrorCode::Auth {
@@ -918,8 +918,26 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
                 }
             })?;
         fin.key_id = Some(key.id.clone());
+        if app.body_logging_allowed
+            && !key.body_logging_opt_out
+            && snapshot.routing.settings.body_logging_enabled
+        {
+            fin.capture = Some(crate::body_capture::CaptureCompletion {
+                collector: crate::body_capture::Collector::new(
+                    snapshot.routing.settings.body_logging_capture_stream_chunks,
+                ),
+                sink: Default::default(),
+                store: app.deps.refresher.store.clone(),
+                key: app.credential_key.clone(),
+            });
+        }
         let headers = headers_of(&req);
         let body = read_body(req, Duration::ZERO).await?;
+        if let Some(capture) = &fin.capture
+            && let Ok(parsed) = omni_ir::jsjson::parse_js(&body)
+        {
+            capture.collector.request(parsed);
+        }
         let ingested = ingest_body(surface, &body, &headers)?;
         drop(body);
         let chat = ingested.request;
@@ -969,6 +987,16 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
         // After admission: a refused screen still counts as one request.
         let smart =
             key.smart_routing && app.deps.holder.load().routing.settings.smart_router_enabled;
+        let request_deps = fin.capture.as_ref().map_or_else(
+            || app.deps.clone(),
+            |capture| {
+                app.deps.with_http(
+                    capture
+                        .collector
+                        .wrap_for(app.deps.http.clone(), request_id.clone()),
+                )
+            },
+        );
         let dispatched = if smart || key.guardrail_policy.is_some() {
             if let Some(classifier) = &app.deps.holder.load().routing.settings.guardrail_model {
                 app.limiter
@@ -986,14 +1014,14 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
                     .record_override(&key.id, &key.limits, classifier);
             }
             crate::screening::screen_first(
-                app.deps.clone(),
+                request_deps,
                 dreq,
                 key.guardrail_policy.clone(),
                 smart,
                 sname,
             )
         } else {
-            dispatch::dispatch(app.deps.clone(), dreq)
+            dispatch::dispatch(request_deps, dreq)
         };
         let response_deadline = dispatched.deadline;
         fin.outcome = Some(dispatched.log.clone());
@@ -1121,6 +1149,11 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
             };
             response_headers.push(("x-omni-route".into(), route.into()));
         }
+        if let Some(capture) = &fin.capture
+            && let Ok(parsed) = omni_ir::jsjson::parse_js(&body)
+        {
+            capture.collector.response(parsed);
+        }
         fin.complete(false, None);
         Ok(json_response(
             status,
@@ -1139,6 +1172,14 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
             hang_up()
         }
         Err(e) => {
+            if let Some(capture) = &fin.capture {
+                capture.collector.response(
+                    omni_ir::jsjson::parse_js(&omni_ir::jsjson::to_string(
+                        &dialect.error_body(e.code, &e.message),
+                    ))
+                    .unwrap_or(omni_ir::jsjson::JsValue::Null),
+                );
+            }
             fin.reject(&e);
             let mut headers = limit_headers(&headroom, admitted);
             if let Some(v) = retry_after(&e) {
@@ -1185,10 +1226,12 @@ fn sse_body(
             };
             match next {
                 Err(_) => {
+                    if let Some(capture) = &mut fin.capture { capture.frame(": keepalive\n\n"); }
                     yield Ok::<_, std::io::Error>(Frame::data(Bytes::from_static(b": keepalive\n\n")));
                 }
                 Ok(Some(Ok(event))) => {
                     encoder.push_owned(event, &mut buf);
+                    if let Some(capture) = &mut fin.capture { capture.frame(&buf); }
                     taken += 1;
                     // Every event already decoded joins this frame: one body
                     // write (one chunk, one syscall) per upstream read rather
@@ -1205,7 +1248,9 @@ fn sse_body(
                                 break;
                             }
                             std::task::Poll::Ready(Some(Ok(event))) => {
+                                let start = buf.len();
                                 encoder.push_owned(event, &mut buf);
+                                if let Some(capture) = &mut fin.capture { capture.frame(&buf[start..]); }
                                 taken += 1;
                             }
                             std::task::Poll::Ready(other) => {
@@ -1237,6 +1282,7 @@ fn sse_body(
                 Ok(None) => {
                     drop(events);
                     encoder.finish(&mut buf);
+                    if let Some(capture) = &mut fin.capture { capture.frame(&buf); }
                     if !buf.is_empty() {
                         let frame = Bytes::copy_from_slice(buf.as_bytes());
                         buf.clear();

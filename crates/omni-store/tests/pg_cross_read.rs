@@ -307,7 +307,11 @@ async fn rust_reads_a_database_the_ts_store_wrote() {
         body.row.rel_path.as_deref(),
         Some("2026/11/06/req_b1.json.enc")
     );
-    let a = body.artifact.expect("artifact");
+    // This scalar-only fixture uses serde indexing for assertions, not client reads.
+    let a: Value = serde_json::from_str(
+        &omni_ir::jsjson::stringify(&body.artifact.expect("artifact")).expect("fixture JSON"),
+    )
+    .expect("scalar fixture JSON");
     assert_eq!(a["client"]["request"]["prompt"], "hi ✓");
     assert_eq!(a["requestId"], "req_b1");
 

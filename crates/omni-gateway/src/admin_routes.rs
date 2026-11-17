@@ -189,6 +189,7 @@ pub enum Admin {
     Usage,
     Logs,
     ExportLogs,
+    RequestBody(Option<String>),
     Nodes,
     ListCredentials,
     CreateCredential,
@@ -249,6 +250,12 @@ pub fn route(method: &hyper::Method, path: &str) -> Option<Admin> {
         }
         _ => {}
     }
+    if get
+        && let Some(rest) = path.strip_prefix("/api/requests/")
+        && let Some(id) = rest.strip_suffix("/body")
+    {
+        return param(id).map(Admin::RequestBody);
+    }
     if let Some(rest) = path.strip_prefix("/api/models/") {
         let id = param(rest)?;
         return match *method {
@@ -296,6 +303,22 @@ pub async fn serve(
     let control = app.control.clone();
     let now = crate::clock::now_ms();
     match route {
+        Admin::RequestBody(id) => {
+            require_admin(req.headers(), &app.admin).await?;
+            // Frozen GET does not apply the writer's safe-id predicate. An
+            // invalid percent escape decodes to null and is an absent lookup.
+            let Some(id) = id else {
+                return Ok(json_ok(String::from(
+                    "{\"requestId\":null,\"detailState\":\"none\",\"truncated\":false,\"sizeBytes\":0,\"at\":null,\"artifact\":null}",
+                )));
+            };
+            let key = app.credential_key.clone();
+            Ok(json_ok(
+                control
+                    .run(move |s| omni_control::bodies::read_request_body(s, &key, &id))
+                    .await?,
+            ))
+        }
         Admin::ConnectStart => Box::pin(crate::connect::serve(app, req, "start")).await,
         Admin::ConnectFinish => Box::pin(crate::connect::serve(app, req, "finish")).await,
         Admin::ConnectPoll => Box::pin(crate::connect::serve(app, req, "poll")).await,

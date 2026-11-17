@@ -115,12 +115,25 @@ enum Framing {
 /// Holds the connection. Read to its clean end, the connection returns to the
 /// pool; dropped earlier, or after an error, it is closed.
 pub struct ResponseBody {
+    observer: Option<Arc<dyn BodyObserver>>,
+    tee: Option<tokio::sync::mpsc::UnboundedReceiver<Result<Bytes, HttpError>>>,
     conn: Option<Conn>,
     given: std::collections::VecDeque<Bytes>,
     buf: BytesMut,
     framing: Framing,
     reusable: bool,
     pool: Option<(Arc<Pool>, Key)>,
+}
+
+/// Optional response decorator. Installed only by opted-in callers. Streaming
+/// reads are independently drained; buffered text keeps its original decoder.
+pub trait BodyObserver: Send + Sync {
+    fn cancelled(&self) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(std::future::pending())
+    }
+    fn chunk(&self, bytes: &[u8]);
+    fn end(&self, failed: bool);
+    fn text(&self, text: &str);
 }
 impl std::fmt::Debug for ResponseBody {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -141,6 +154,8 @@ impl ResponseBody {
         key: Key,
     ) -> Self {
         Self {
+            observer: None,
+            tee: None,
             conn: Some(Conn::Plain(socket)),
             given: Default::default(),
             buf: BytesMut::new(),
@@ -158,6 +173,8 @@ impl ResponseBody {
     /// A body yielding exactly these chunks, in order, for fakes and tests.
     pub fn from_chunks(chunks: Vec<Bytes>) -> Self {
         ResponseBody {
+            observer: None,
+            tee: None,
             conn: None,
             given: chunks.into_iter().filter(|c| !c.is_empty()).collect(),
             framing: Framing::Given,
@@ -165,6 +182,10 @@ impl ResponseBody {
             reusable: false,
             pool: None,
         }
+    }
+
+    pub fn observe(&mut self, observer: Arc<dyn BodyObserver>) {
+        self.observer = Some(observer);
     }
 
     /// Stops reading. If the rest of the body is already in hand — the
@@ -235,8 +256,53 @@ impl ResponseBody {
         }
     }
 
+    /// The adapter selected the streaming body (the frozen `body` getter).
+    pub fn start_stream(&mut self) {
+        if let Some(observer) = self.observer.take() {
+            let mut source = std::mem::replace(self, Self::from_chunks(Vec::new()));
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            self.tee = Some(rx);
+            tokio::spawn(async move {
+                let mut failed = false;
+                loop {
+                    let next = tokio::select! {
+                        biased;
+                        () = observer.cancelled() => {
+                            failed = true;
+                            tx.send(Err(HttpError::BodyAborted)).ok();
+                            break;
+                        }
+                        next = source.read_next() => next,
+                    };
+                    match next {
+                        Ok(Some(bytes)) => {
+                            observer.chunk(&bytes);
+                            // An abandoned adapter does not cancel capture.
+                            tx.send(Ok(bytes)).ok();
+                        }
+                        Ok(None) => {
+                            source.release();
+                            break;
+                        }
+                        Err(e) => {
+                            failed = true;
+                            tx.send(Err(e)).ok();
+                            break;
+                        }
+                    }
+                }
+                // Release the upstream before waking persistence/shutdown.
+                drop(source);
+                observer.end(failed);
+            });
+        }
+    }
+
     /// The next piece of the body; `None` at its end.
     pub async fn next_chunk(&mut self) -> Option<Result<Bytes, HttpError>> {
+        if let Some(rx) = &mut self.tee {
+            return rx.recv().await;
+        }
         match self.read_next().await {
             Ok(Some(bytes)) => Some(Ok(bytes)),
             Ok(None) => {
@@ -254,6 +320,7 @@ impl ResponseBody {
     /// The whole body as text, decoded as UTF-8 with replacement
     /// (`Buffer.toString("utf8")`).
     pub async fn text(mut self) -> Result<String, HttpError> {
+        let observer = self.observer.take();
         const LIMIT: usize = 1024 * 1024;
         let overflow = || HttpError::InvalidResponse("error body exceeds 1048576 bytes".into());
         if matches!(self.framing, Framing::Length(n) if n > LIMIT as u64) {
@@ -267,7 +334,11 @@ impl ResponseBody {
             }
             all.extend_from_slice(&chunk);
         }
-        Ok(String::from_utf8_lossy(&all).into_owned())
+        let text = String::from_utf8_lossy(&all).into_owned();
+        if let Some(observer) = observer {
+            observer.text(&text);
+        }
+        Ok(text)
     }
 
     /// Back to the pool only when the framing ended cleanly with nothing
@@ -606,6 +677,8 @@ fn finish_head(
     let reusable =
         !facts.close && !server_close && (!head.http10 || server_keep) && framing != Framing::Close;
     let mut body = ResponseBody {
+        observer: None,
+        tee: None,
         conn: Some(conn),
         given: std::collections::VecDeque::new(),
         buf,

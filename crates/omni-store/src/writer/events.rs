@@ -244,6 +244,8 @@ pub struct SeedRows {
 /// What the writer tells its commit sink, in the order it happened.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Committed {
+    /// FIFO fence acknowledged after prior completions have been applied.
+    Fence(CommitFence),
     /// A committed completion notification was shed. All following seeds and
     /// debits are ordered after this invalidation marker.
     Gap,
@@ -255,4 +257,12 @@ pub enum Committed {
         query: SeedQuery,
         result: Result<SeedRows, String>,
     },
+}
+
+#[derive(Debug, Clone)]
+pub struct CommitFence(pub std::sync::Arc<tokio::sync::Notify>);
+impl PartialEq for CommitFence {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
 }

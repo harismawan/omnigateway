@@ -250,3 +250,5 @@ omni-providers/src/openai/oauth_lifecycle.rs :: fn token_result( status: u16, te
 omni-providers/src/antigravity/decode.rs :: fn new(cloak: ToolCloak) -> Self	string maps only; upstream parse/serialization scoped by depth bound with Owned disposal
 omni-providers/src/antigravity/schema.rs :: fn try_prune(node: &Value) -> Result<(Value, Vec<String>), crate::codec::BuildError>	borrows input; null root returns Throw; recursion bounded to 24 schema hops; deep clone/insert for opaque JSON; caller deep-disposes returned Value
 omni-providers/src/openai/oauth_start.rs :: fn start(redirect: &str, verifier: &str, challenge: &str, state: &str) -> AuthorizeStart	string-only authorization URL construction; no client JSON crosses this function
+omni-providers/src/http/body.rs :: fn observe(&mut self, observer: Arc<dyn BodyObserver>)	Opt-in raw-byte observer; no JSON assembly crosses this seam.
+omni-providers/src/http/body.rs :: fn start_stream(&mut self)	Select streaming view and start independent capture drain; no JSON assembly.

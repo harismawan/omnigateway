@@ -24,7 +24,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-pub use body::{Headers, ResponseBody};
+pub use body::{BodyObserver, Headers, ResponseBody};
 pub use pool::PoolLimits;
 use pool::{Conn, Pool};
 
@@ -161,6 +161,11 @@ impl HttpError {
 
 /// The transport seam Task 5's dispatch calls; tests substitute their own.
 pub trait HttpClient: Send + Sync {
+    /// Opt-in request-local transport lifetime, including detached capture reads.
+    fn dispatch_scope(&self, _request_id: &str) -> Option<Box<dyn Send>> {
+        None
+    }
+
     fn send(
         &self,
         req: HttpRequest,

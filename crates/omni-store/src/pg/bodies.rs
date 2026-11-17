@@ -9,9 +9,8 @@
 //! (gzip) and the legacy `enc:v1:` hex text are read. `sha256` is over the
 //! whole stored envelope, so truncation is detectable without the key.
 //!
-//! Masking and structural bounding (`prepareArtifact`) are the capture
-//! layer's, and not ported here: [`PgStore::put_body`] seals JSON it is given
-//! and refuses JSON outside the envelope's bounds, as `sealArtifact` does.
+//! [`PgStore::put_body_artifact`] masks/bounds before persistence; the lower
+//! level [`PgStore::put_body`] accepts already prepared JSON for cross-reading.
 
 use super::PgStore;
 use crate::error::StoreError;
@@ -80,8 +79,34 @@ pub struct BodyRow {
 /// `BodyRead`: the row, and the artifact when it read back.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BodyRead {
-    pub row: BodyRow,
-    pub artifact: Option<serde_json::Value>,
+    pub row: BodyReadRow,
+    pub artifact: Option<omni_ir::jsjson::JsValue>,
+}
+
+/// Read-side metadata has JavaScript values, not the writer's integer contract.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BodyReadRow {
+    pub request_id: omni_ir::jsjson::JsValue,
+    pub at: omni_ir::jsjson::JsValue,
+    pub rel_path: Option<String>,
+    pub size_bytes: omni_ir::jsjson::JsValue,
+    pub sha256: Option<String>,
+    pub detail_state: DetailState,
+    pub truncated: bool,
+}
+impl From<BodyRow> for BodyReadRow {
+    fn from(row: BodyRow) -> Self {
+        use omni_ir::jsjson::JsValue;
+        Self {
+            request_id: JsValue::String(row.request_id.encode_utf16().collect()),
+            at: JsValue::Number(row.at as f64),
+            rel_path: row.rel_path,
+            size_bytes: JsValue::Number(row.size_bytes as f64),
+            sha256: row.sha256,
+            detail_state: row.detail_state,
+            truncated: row.truncated,
+        }
+    }
 }
 
 /// The sealed envelope and its digest.
@@ -190,7 +215,21 @@ pub fn decode(
     key: &FieldKey,
     bytes: &[u8],
     expected_sha256: Option<&str>,
-) -> Option<serde_json::Value> {
+) -> Option<omni_ir::jsjson::JsValue> {
+    let plain = decode_plaintext(key, bytes, expected_sha256)?;
+    match omni_ir::jsjson::parse_js(plain.strip_prefix('\u{feff}').unwrap_or(&plain)).ok()? {
+        v @ omni_ir::jsjson::JsValue::Object(_) => Some(v),
+        _ => None,
+    }
+}
+
+/// Authenticated, bounded plaintext, before JSON.parse. Exposed for byte-exact
+/// cross-reader verification; client reads must use `decode`'s object check.
+pub fn decode_plaintext(
+    key: &FieldKey,
+    bytes: &[u8],
+    expected_sha256: Option<&str>,
+) -> Option<String> {
     if bytes.len() > MAX_ENVELOPE_BYTES {
         return None;
     }
@@ -237,10 +276,7 @@ pub fn decode(
     } else {
         return None;
     };
-    match serde_json::from_str::<serde_json::Value>(&plain).ok()? {
-        v @ serde_json::Value::Object(_) => Some(v),
-        _ => None,
-    }
+    Some(plain)
 }
 
 /// `isLegacyStructure`.
@@ -276,6 +312,16 @@ fn to_row(r: &tokio_postgres::Row) -> Result<BodyRow, StoreError> {
 }
 
 impl PgStore {
+    /// Full frozen put: preparation is shared with SQLite; bytes and row are
+    /// committed together on PG rather than file-before-row.
+    pub async fn put_body_artifact(
+        &self,
+        key: &FieldKey,
+        input: &omni_ir::jsjson::JsValue,
+    ) -> Result<BodyRow, StoreError> {
+        let (id, at, json, truncated) = crate::bodies::prepare_put(input)?;
+        self.put_body(key, &id, at, &json, truncated).await
+    }
     /// `BodyRepo.put` for an artifact already prepared: seal `json`, and
     /// upsert its row and bytes in one statement.
     pub async fn put_body(
@@ -354,7 +400,7 @@ impl PgStore {
         let Some(found) = c.query_opt(&stmt, &[&request_id, &ceiling]).await? else {
             return Ok(None);
         };
-        let row = to_row(&found)?;
+        let row: BodyReadRow = to_row(&found)?.into();
         if row.rel_path.is_none() || row.detail_state == DetailState::None {
             return Ok(Some(BodyRead {
                 row,
@@ -383,7 +429,7 @@ impl PgStore {
                     record(DetailState::Ready).await?;
                 }
                 BodyRead {
-                    row: BodyRow {
+                    row: BodyReadRow {
                         detail_state: DetailState::Ready,
                         ..row
                     },
@@ -393,7 +439,7 @@ impl PgStore {
             Err(state) => {
                 record(state).await?;
                 BodyRead {
-                    row: BodyRow {
+                    row: BodyReadRow {
                         detail_state: state,
                         ..row
                     },
@@ -407,6 +453,40 @@ impl PgStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_pg_metadata_projects_as_js_numbers() {
+        use omni_ir::jsjson::JsValue;
+        let row: BodyReadRow = BodyRow {
+            request_id: "r".into(),
+            at: 9_007_199_254_740_993,
+            rel_path: None,
+            size_bytes: 9_007_199_254_740_993,
+            sha256: None,
+            detail_state: DetailState::Ready,
+            truncated: true,
+        }
+        .into();
+        assert_eq!(row.at, JsValue::Number(9_007_199_254_740_992.0));
+        assert_eq!(row.size_bytes, row.at);
+        assert!(row.truncated);
+        assert_eq!(row.request_id, JsValue::String(vec![114]));
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)] // Fixture setup/assertions only.
+    fn full_put_prepares_before_sealing_for_both_engines() {
+        let input=omni_ir::jsjson::parse_js(r#"{"requestId":"r","at":0,"client":{"request":"Bearer secret","response":null},"attempts":[],"error":null}"#).unwrap();
+        let (id, at, json, truncated) = crate::bodies::prepare_put(&input).unwrap();
+        assert_eq!((id.as_str(), at, truncated), ("r", 0, false));
+        assert!(json.contains("Bearer [redacted]"));
+        let key = omni_crypto::field::derive_key("s2");
+        let sealed = seal(&key, &json).unwrap();
+        assert_eq!(
+            decode(&key, &sealed.bytes, None),
+            Some(omni_ir::jsjson::parse_js(&json).unwrap())
+        );
+    }
 
     #[test]
     fn rel_paths_are_utc_dates() {
@@ -427,7 +507,7 @@ mod tests {
         assert_eq!(s.bytes.len(), OVERHEAD + 7);
         assert_eq!(
             decode(&key, &s.bytes, Some(&s.sha256)),
-            Some(serde_json::json!({"a": 1}))
+            Some(omni_ir::jsjson::parse_js(r#"{"a":1}"#).expect("JSON"))
         );
         let mut bad = s.bytes.clone();
         bad[OVERHEAD] ^= 1;

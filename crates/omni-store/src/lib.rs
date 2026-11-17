@@ -6,12 +6,14 @@
 //! reads a [`SnapshotData`] at boot and on change, and serves from memory.
 
 mod backend;
+pub mod bodies;
 pub mod credentials;
 mod error;
 mod js;
 pub mod keys;
 pub mod logs;
 pub mod maintenance;
+pub mod operator_cell;
 /// `api_keys.limits`; lives with the arithmetic in `omni-ratelimit`, as TS's
 /// store imports `@omni/ratelimit/catalog`.
 pub use omni_ratelimit::limits;

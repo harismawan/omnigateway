@@ -162,6 +162,7 @@ pub struct WriterStats {
 
 #[derive(Debug)]
 struct Counters {
+    callbacks: std::sync::Mutex<tokio::task::JoinSet<()>>,
     /// Barrier accounting, lock-free on the producer side (see `epoch.rs`).
     epochs: Epochs,
     /// Committed and failed events per epoch not yet folded into a barrier's
@@ -185,6 +186,7 @@ struct Counters {
 impl Counters {
     fn new() -> Self {
         Self {
+            callbacks: std::sync::Mutex::new(tokio::task::JoinSet::new()),
             epochs: Epochs::default(),
             resolved: std::sync::Mutex::new(Resolved::default()),
             barrier_busy: std::sync::atomic::AtomicBool::new(false),
@@ -289,6 +291,7 @@ pub fn queue_slot_bytes() -> usize {
 // cost an allocation per event.
 #[allow(clippy::large_enum_variant)]
 enum Item {
+    Fence(super::events::CommitFence),
     Event(WriteEvent),
     Barrier(Pending),
 }
@@ -298,11 +301,12 @@ enum Item {
 /// holds until it is answered or discarded.
 #[derive(Debug)]
 struct Pending {
+    fence: Option<super::events::CommitFence>,
     epoch: u64,
     produced: Produced,
     reply: oneshot::Sender<Barrier>,
     /// Held for its `Drop`, which frees the one-barrier slot.
-    _busy: BusyGuard,
+    _busy: Option<BusyGuard>,
 }
 
 /// Clears `barrier_busy` when the barrier is answered or dropped unanswered.
@@ -350,6 +354,33 @@ pub struct WriterHandle {
 }
 
 impl WriterHandle {
+    /// Completion callbacks are joined before writer shutdown. No work or
+    /// allocation on the ordinary (body logging disabled) send path.
+    pub fn completion_callback(
+        &self,
+        future: impl std::future::Future<Output = ()> + Send + 'static,
+    ) {
+        let mut tasks = self
+            .counters
+            .callbacks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while tasks.try_join_next().is_some() {}
+        tasks.spawn(future);
+    }
+    /// Wait for the queued prefix and its debit consumer, without using the
+    /// singleton diagnostic flush barrier. Only body-enabled requests use it.
+    pub async fn after_completions(&self) {
+        let fence = super::events::CommitFence(Arc::new(tokio::sync::Notify::new()));
+        let queued = Queued {
+            at: Instant::now(),
+            item: Item::Fence(fence.clone()),
+            epoch: None,
+        };
+        if self.tx.send(queued).await.is_ok() {
+            fence.0.notified().await;
+        }
+    }
     /// Queues an event. `false` means it was dropped (channel full, or the
     /// writer closed) and counted in [`Self::dropped`]; the writer task warns
     /// about it later, rate-limited. Nothing here but the `try_send` and an
@@ -435,10 +466,11 @@ impl WriterHandle {
         let queued = Queued {
             at: Instant::now(),
             item: Item::Barrier(Pending {
+                fence: None,
                 epoch,
                 produced,
                 reply: tx,
-                _busy: busy,
+                _busy: Some(busy),
             }),
             epoch: None,
         };
@@ -605,6 +637,16 @@ impl Writer {
     /// interval before the close may have had no warning; the caller reports
     /// them from this.
     pub async fn close(mut self) -> Result<WriterStats, StoreError> {
+        let mut tasks = {
+            let mut tasks = self
+                .handle
+                .counters
+                .callbacks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::take(&mut *tasks)
+        };
+        while tasks.join_next().await.is_some() {}
         if let Some(s) = self.shutdown.take() {
             // An Err means the task already ended; the join below reports why.
             s.send(()).ok();
@@ -966,6 +1008,16 @@ fn take(q: Queued, batch: &mut Vec<Tagged>, barriers: &mut Vec<Pending>) {
     match q.item {
         Item::Event(e) => batch.push((e, q.epoch)),
         Item::Barrier(b) => barriers.push(b),
+        Item::Fence(fence) => {
+            let (reply, _) = oneshot::channel();
+            barriers.push(Pending {
+                fence: Some(fence),
+                epoch: 0,
+                produced: Produced::default(),
+                reply,
+                _busy: None,
+            });
+        }
     }
 }
 
@@ -1059,8 +1111,22 @@ fn resolve(tags: &[Option<u64>], flushed: &Flushed, counters: &Counters) -> u64 
 /// publication, so every event in its epoch prefix is committed or failed.
 /// Later epochs may publish ahead of it too: global written/failed totals
 /// are not the prefix. Fold only the tagged epochs through the barrier's.
-fn answer(barriers: Vec<Pending>, counters: &Counters) {
+async fn answer(
+    barriers: Vec<Pending>,
+    counters: &Counters,
+    sink: &Option<mpsc::Sender<Committed>>,
+) {
     for b in barriers {
+        if let Some(fence) = b.fence {
+            if let Some(sink) = sink {
+                if sink.send(Committed::Fence(fence.clone())).await.is_err() {
+                    fence.0.notify_one();
+                }
+            } else {
+                fence.0.notify_one();
+            }
+            continue;
+        }
         // Fold every epoch up to the barrier's into the answered total, so
         // the map holds only the epochs after it.
         let tally = {
@@ -1172,7 +1238,7 @@ async fn run(
             }
         }
         let lost = flush_watching(&mut sink, batch, &mut warner, &mut warn_tick, &counters).await?;
-        answer(barriers, &counters);
+        answer(barriers, &counters, &sink.commit_sink).await;
         // A stop that arrived while this batch was being written (or retried)
         // waited on its outcome, so its loss is the close's to report.
         if stopping || stop_arrived(&mut stop) {
@@ -1200,7 +1266,7 @@ async fn run(
             lost_on_close +=
                 flush_watching(&mut sink, batch, &mut warner, &mut warn_tick, &counters).await?;
         }
-        answer(barriers, &counters);
+        answer(barriers, &counters, &sink.commit_sink).await;
         if ended {
             break;
         }

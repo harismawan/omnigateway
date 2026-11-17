@@ -626,6 +626,7 @@ async fn a_seed_reads_everything_committed_before_it() {
             }
             Committed::Seed { result, .. } => seed = Some(result.expect("seed read")),
             Committed::Gap => panic!("gap"),
+            Committed::Fence(_) => panic!("unexpected fence"),
         }
     }
     assert_eq!(completions, 5);
