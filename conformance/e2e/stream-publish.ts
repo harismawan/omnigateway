@@ -3,6 +3,7 @@
 // No normalization: resource frames contain no generated IDs or timestamps.
 import { mkdirSync, writeFileSync } from "node:fs";
 import { Database } from "bun:sqlite";
+import { deriveKey, encrypt } from "../../packages/store/src/encryption.ts";
 const [ts, rust, work] = process.argv.slice(2);
 if (!ts || !rust || !work) throw Error("frozen rust work required");
 mkdirSync(work, { recursive: true });
@@ -67,7 +68,7 @@ try {
     for (const topic of ["res:logs", "res:usage"]) ws.send(JSON.stringify({ type: "subscribe", topic }));
     while (got.length < 2) await Bun.sleep(10);
     await x.api("/api/credentials", { provider: "custom", apiKey: "probe", endpointId: "writer", endpointLabel: "Writer", origin: "http://127.0.0.1:18789", protocol: "chat_completions" });
-    await x.api("/api/models/writer", { id: "writer", strategy: "priority", isAlias: false, targets: [{ provider: "custom", model: "writer", tier: 1, weight: 1, costPerMTok: { input: 1, output: 2 }, capabilities: { tools: true, images: false, reasoning: false } }] }, "PUT");
+    await x.api("/api/models/writer", { id: "writer", strategy: "priority", isAlias: false, targets: [{ provider: "custom", endpointId: "writer", model: "writer", tier: 1, weight: 1, costPerMTok: { input: 1, output: 2 }, capabilities: { tools: true, images: false, reasoning: false } }] }, "PUT");
     const results: any[] = [];
     for (const mode of ["buffered", "stream", "error", "append-failure"]) {
       await Bun.sleep(1250); got.length = 0;
@@ -93,6 +94,37 @@ try {
   } });
   try { transcript.push({ inference: await Promise.all([inference(a), inference(b)]) }); }
   finally { upstream.stop(true); }
+  // Namespace binds auth.openai.com to this TLS loopback endpoint. No provider
+  // payload or database fields are normalized; only exact resource frames.
+  if (!process.env.S9_CERT || !process.env.S9_KEY) throw Error("S9_CERT/S9_KEY required for tick probes");
+  let tokenMode = "success";
+  const tokenServer = Bun.serve({ hostname: "127.0.0.1", port: 443,
+    tls: { cert: Bun.file(process.env.S9_CERT), key: Bun.file(process.env.S9_KEY) },
+    fetch() { return tokenMode === "success"
+      ? Response.json({ access_token: "new-access", refresh_token: "new-refresh", expires_in: 3600, token_type: "Bearer" })
+      : Response.json({ error: tokenMode === "auth" ? "invalid_grant" : "temporarily_unavailable" }, { status: tokenMode === "auth" ? 400 : 503 }); }
+  });
+  try {
+    const encryption = await deriveKey("stream-test-encryption-key-0123456789");
+    for (const mode of ["success", "auth", "transient", "expired"]) {
+      tokenMode = mode;
+      for (const x of [a, b]) {
+        const db = new Database(`${x.root}/omni.db`);
+        db.run("DELETE FROM credentials WHERE id='tick'");
+        db.run("INSERT INTO credentials (id,provider,label,auth_type,enabled,tier,weight,expires_at,provider_data,access_token,refresh_token,created_at,updated_at,token_version) VALUES ('tick','openai','tick','oauth',1,1,1,1,'{}',?,?,1,1,0)", [await encrypt(encryption, "old-access"), mode === "expired" ? null : await encrypt(encryption, "old-refresh")]);
+        db.close();
+        for (const role in x.frames) x.frames[role] = [];
+      }
+      // Observe a real scheduler tick, not an inference-triggered refresh.
+      await Bun.sleep(62000);
+      for (const x of [a, b]) {
+        const events = x.frames.admin.filter(v => v.frame.topic === "res:credentials").map(v => v.frame);
+        const expected = mode === "transient" ? [] : [{ type: "event", topic: "res:credentials" }];
+        if (JSON.stringify(events) !== JSON.stringify(expected)) throw Error(`${x.root} tick ${mode}: ${JSON.stringify(events)}`);
+        transcript.push({ tick: mode, events });
+      }
+    }
+  } finally { tokenServer.stop(true); }
   const check = async (name: string, topic: string, mutate: (x: typeof a) => Promise<unknown>, floor: number) => {
     for (const x of [a, b]) for (const role in x.frames) x.frames[role] = [];
     await Promise.all([mutate(a), mutate(b)]);

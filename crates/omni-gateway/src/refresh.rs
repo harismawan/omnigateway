@@ -74,13 +74,14 @@ impl Refresher {
     pub async fn sweep(
         self: &Arc<Self>,
         holder: Option<&Arc<omni_gateway_core::snapshot::SnapshotHolder>>,
-    ) -> std::result::Result<usize, GatewayError> {
+    ) -> std::result::Result<SweepOutcome, GatewayError> {
         let credentials = self
             .store
             .list_credentials(&self.key)
             .await
             .map_err(storage)?;
         let mut refreshed = 0;
+        let mut touched = 0;
         for c in credentials {
             let now = (self.now)();
             if !c.enabled
@@ -97,11 +98,13 @@ impl Refresher {
                         .disable_credential(&c.id, now, "expiredNoRefresh")
                         .await
                         .map_err(storage)?;
+                    touched += 1;
                 }
             } else {
                 match self.refresh(&c).await {
-                    Ok(_) => refreshed += 1,
+                    Ok(_) => { refreshed += 1; touched += 1; },
                     Err(error) => {
+                        touched += usize::from(error.code == ErrorCode::Auth);
                         tracing::warn!(provider = %c.provider, credentialId = %c.id, code = error.code.as_str(), "scheduled token refresh failed")
                     }
                 }
@@ -113,12 +116,13 @@ impl Refresher {
                     .map_err(storage)?;
             }
         }
-        Ok(refreshed)
+        Ok(SweepOutcome { refreshed, touched })
     }
 
     pub fn start_scheduler(
         self: &Arc<Self>,
         holder: Arc<omni_gateway_core::snapshot::SnapshotHolder>,
+        hub: Arc<crate::stream_transport::Hub>,
     ) -> tokio::task::JoinHandle<()> {
         let this = self.clone();
         tokio::spawn(async move {
@@ -126,8 +130,10 @@ impl Refresher {
             let mut next = tokio::time::Instant::now() + period;
             loop {
                 tokio::time::sleep_until(next).await;
-                if let Err(error) = this.sweep(Some(&holder)).await {
-                    tracing::warn!(code = error.code.as_str(), "token refresh sweep failed");
+                match this.sweep(Some(&holder)).await {
+                    Ok(outcome) if outcome.touched > 0 => hub.invalidate("res:credentials", None),
+                    Ok(_) => {},
+                    Err(error) => tracing::warn!(code = error.code.as_str(), "token refresh sweep failed"),
                 }
                 next = next_sweep(next, tokio::time::Instant::now());
             }
@@ -339,6 +345,12 @@ impl Refresher {
                 GatewayError::new(ErrorCode::Auth, format!("credential {} is gone", c.id))
             })
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SweepOutcome {
+    pub refreshed: usize,
+    pub touched: usize,
 }
 fn refresh_threw(provider: &str) -> GatewayError {
     GatewayError::new(

@@ -463,7 +463,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         http.clone(),
         clock::now_ms,
     ));
-    let oauth_scheduler = oauth_refresher.start_scheduler(holder.clone());
+    let oauth_scheduler = oauth_refresher.start_scheduler(holder.clone(), stream.clone());
     let mut maintenance = maintenance::start(
         path.clone(),
         offset,
