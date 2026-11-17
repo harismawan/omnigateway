@@ -81,7 +81,7 @@ pub struct BodyRow {
 #[derive(Debug, Clone, PartialEq)]
 pub struct BodyRead {
     pub row: BodyRow,
-    pub artifact: Option<serde_json::Value>,
+    pub artifact: Option<omni_ir::jsjson::JsValue>,
 }
 
 /// The sealed envelope and its digest.
@@ -190,7 +190,21 @@ pub fn decode(
     key: &FieldKey,
     bytes: &[u8],
     expected_sha256: Option<&str>,
-) -> Option<serde_json::Value> {
+) -> Option<omni_ir::jsjson::JsValue> {
+    let plain = decode_plaintext(key, bytes, expected_sha256)?;
+    match omni_ir::jsjson::parse_js(plain.strip_prefix('\u{feff}').unwrap_or(&plain)).ok()? {
+        v @ omni_ir::jsjson::JsValue::Object(_) => Some(v),
+        _ => None,
+    }
+}
+
+/// Authenticated, bounded plaintext, before JSON.parse. Exposed for byte-exact
+/// cross-reader verification; client reads must use `decode`'s object check.
+pub fn decode_plaintext(
+    key: &FieldKey,
+    bytes: &[u8],
+    expected_sha256: Option<&str>,
+) -> Option<String> {
     if bytes.len() > MAX_ENVELOPE_BYTES {
         return None;
     }
@@ -237,10 +251,7 @@ pub fn decode(
     } else {
         return None;
     };
-    match serde_json::from_str::<serde_json::Value>(&plain).ok()? {
-        v @ serde_json::Value::Object(_) => Some(v),
-        _ => None,
-    }
+    Some(plain)
 }
 
 /// `isLegacyStructure`.
@@ -427,7 +438,7 @@ mod tests {
         assert_eq!(s.bytes.len(), OVERHEAD + 7);
         assert_eq!(
             decode(&key, &s.bytes, Some(&s.sha256)),
-            Some(serde_json::json!({"a": 1}))
+            Some(omni_ir::jsjson::parse_js(r#"{"a":1}"#).expect("JSON"))
         );
         let mut bad = s.bytes.clone();
         bad[OVERHEAD] ^= 1;

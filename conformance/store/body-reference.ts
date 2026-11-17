@@ -15,7 +15,13 @@ if (input.op === "pure") {
   console.log(JSON.stringify(input.values.map((text: string) => prepareArtifact(JSON.parse(text)).json)));
 } else {
   const key = await deriveKey(input.secret);
-  if (input.op === "seal") {
+  if (input.op === "cross") {
+    const bytes = Buffer.from(input.bytes, "hex");
+    const read = await decodeArtifact(key, bytes, null);
+    const plaintext = Buffer.from(await crypto.subtle.decrypt({name:"AES-GCM",iv:bytes.subarray(10,22),additionalData:bytes.subarray(0,10),tagLength:128},key,bytes.subarray(22))).toString("utf8");
+    const sealed = await sealArtifact(key,input.json);
+    console.log(JSON.stringify({plaintext,artifactJson:read.ok ? JSON.stringify(read.artifact):null,bytes:Buffer.from(sealed.bytes).toString("hex")}));
+  } else if (input.op === "seal") {
     const sealed = await sealArtifact(key, input.json);
     console.log(JSON.stringify({ bytes: Buffer.from(sealed.bytes).toString("hex"), sha256: sealed.sha256 }));
   } else {

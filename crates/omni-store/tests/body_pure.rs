@@ -126,7 +126,7 @@ fn frozen_envelope_corpus_agrees() {
             c["name"]
         );
         if let Some(got) = got {
-            assert_eq!(got, c["artifact"]);
+            assert_eq!(got, (&c["artifact"]).into());
         }
     }
     println!("{} frozen envelope verdicts", cases.len());
@@ -159,7 +159,7 @@ fn artifacts_cross_read_both_directions() {
         .collect::<Vec<_>>();
     assert_eq!(
         omni_store::pg::bodies::decode(&key, &bytes, frozen["sha256"].as_str()),
-        Some(serde_json::from_str(json).expect("json"))
+        Some(parse_js(json).expect("json"))
     );
     for bad in [
         &bytes[..20],
@@ -205,4 +205,82 @@ fn prepared_artifacts_match_frozen_bytes() {
         let (_, json) = omni_store::bodies::prepare_artifact(&parse_js(text).expect("parse"));
         assert_eq!(json, expected[i], "prepare case {i}");
     }
+}
+
+#[test]
+fn lossless_cross_reads_and_artifact_ceiling() {
+    let secret = "a3-lossless";
+    let key = omni_crypto::field::derive_key(secret);
+    let mut cases = vec![
+        r#"{"s":"\ud800\udfff\ud800","n":9007199254740993,"z":-0,"big":1e400}"#.to_owned(),
+        "\u{feff}{\"bom\":true}".into(),
+        r#"{"a":[{"b":[{"c":{}}]}]}"#.into(),
+    ];
+    for n in [65535, 65536, 65537] {
+        cases.push(format!("{{\"s\":\"{}\"}}", "!".repeat(n)));
+    }
+    for json in &cases {
+        let sealed = omni_store::pg::bodies::seal(&key, json).expect("seal");
+        let hex = sealed
+            .bytes
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        let frozen =
+            reference(serde_json::json!({"op":"cross", "secret":secret,"json":json,"bytes":hex}));
+        assert_eq!(
+            frozen["plaintext"].as_str().unwrap().as_bytes(),
+            json.as_bytes()
+        );
+        let hex = frozen["bytes"].as_str().unwrap();
+        let bytes = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            omni_store::pg::bodies::decode_plaintext(&key, &bytes, None)
+                .unwrap()
+                .as_bytes(),
+            json.as_bytes()
+        );
+        assert_eq!(
+            omni_store::pg::bodies::decode(&key, &bytes, None),
+            Some(parse_js(json.trim_start_matches('\u{feff}')).unwrap())
+        );
+        assert_eq!(
+            stringify(&omni_store::pg::bodies::decode(&key, &bytes, None).unwrap()).unwrap(),
+            frozen["artifactJson"]
+        );
+    }
+    let base = r#"{"requestId":"limit","at":0,"client":{"request":{},"response":null},"attempts":[],"error":null}"#;
+    let (_, empty) = omni_store::bodies::prepare_artifact(&parse_js(base).unwrap());
+    let mut values = Vec::new();
+    for size in [524287, 524288, 524289] {
+        let mut value: serde_json::Value = serde_json::from_str(base).unwrap();
+        // Eight separately bounded strings; punctuation avoids secret masking.
+        for i in 0..8 {
+            value["client"]["request"][format!("k{i}")] = "!".repeat(65000).into();
+        }
+        let (_, json) =
+            omni_store::bodies::prepare_artifact(&parse_js(&value.to_string()).unwrap());
+        let delta = size - json.len();
+        value["client"]["request"]["extra"] = "!".repeat(delta - 11).into();
+        let text = value.to_string();
+        let (_, prepared) = omni_store::bodies::prepare_artifact(&parse_js(&text).unwrap());
+        if size <= 524288 {
+            assert_eq!(prepared.len(), size);
+        } else {
+            assert!(prepared.contains("omitted"));
+        }
+        values.push(text);
+    }
+    assert!(empty.len() < 1000);
+    let expected = reference(serde_json::json!({"op":"prepare","values":values}));
+    for (i, text) in values.iter().enumerate() {
+        assert_eq!(
+            omni_store::bodies::prepare_artifact(&parse_js(text).unwrap()).1,
+            expected[i]
+        );
+    }
+    println!("6 lossless bidirectional cases + 3 total-size boundaries");
 }

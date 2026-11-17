@@ -52,7 +52,7 @@ fn the_rust_reader_returns_the_frozen_readers_verdict_on_its_corpus() {
         let agrees = match (&got, want_ok) {
             (Some(artifact), true) => {
                 opened += 1;
-                *artifact == c["artifact"]
+                *artifact == (&c["artifact"]).into()
             }
             (None, false) => true,
             _ => false,
