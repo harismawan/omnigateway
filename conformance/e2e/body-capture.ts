@@ -11,6 +11,7 @@ import { deriveKey, encrypt } from "../../packages/store/src/encryption.ts";
 import { readArtifact } from "../../packages/store/src/bodies/artifact.ts";
 import { boundValue } from "../../packages/store/src/bodies/bound.ts";
 import { maskSecrets } from "../../packages/store/src/bodies/mask.ts";
+import { canonical } from "./body-capture-normalize.ts";
 
 const { values: f } = parseArgs({ options: Object.fromEntries(
   ["ts", "rust", "scratch", "cert", "key"].map(k => [k, { type: "string" as const }]),
@@ -116,19 +117,10 @@ function files(root: string): string[] {
   try { return readdirSync(root, { recursive: true, withFileTypes: true }).filter(e => e.isFile()).map(e => join(e.parentPath, e.name).slice(root.length + 1)).sort(); }
   catch (e: any) { if (e.code === "ENOENT") return []; throw e; }
 }
-function canonical(value: any): any {
-  if (typeof value === "string") return value
-    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/g, "<uuid>")
-    .replace(/"created(?:_at)?":\d{10,13}/g, '"created":<time>');
-  if (Array.isArray(value)) return value.map(canonical);
-  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([k, v]) => [k,
-    ["at", "created", "created_at"].includes(k) && typeof v === "number" ? "<time>" : canonical(v)]));
-  return value;
-}
 let rows = 0;
 function equal(label: string, a: any, b: any) {
   rows++;
-  if (!isDeepStrictEqual(canonical(a), canonical(b))) {
+  if (!isDeepStrictEqual(a, b)) {
     throw Error(`row ${rows} ${label} differs (see scratch JSON)`);
   }
 }
@@ -197,7 +189,7 @@ async function run(binary: string, label: string, c: Cell, port: number) {
     if (!on && (layout.length || db.query("SELECT * FROM request_bodies").all().length)) throw Error("OFF wrote bodies");
     // Ciphertext digest is independently verified above; random nonces make it unequal.
     const typedRows = bodyRows.map(({ sha256, ...row }) => row);
-    return { typedRows, artifacts, layout, routes, client: c.special === "abandon" ? null : client };
+    return { requestId: log.id, typedRows, artifacts, layout, routes, client: c.special === "abandon" ? null : client };
   } finally { p.kill("SIGTERM"); await p.exited; db.close(); }
 }
 try {
@@ -205,7 +197,8 @@ try {
     const ts = await run(f.ts!, "ts", c, 18491);
     const rust = await run(f.rust!, "rust", c, 18492);
     await Bun.write(join(work, `${c.name}.json`), JSON.stringify({ ts, rust }, null, 2));
-    for (const k of ["typedRows", "artifacts", "layout", "routes", "client"] as const) equal(`${c.name}/${k}`, ts[k], rust[k]);
+    const a = canonical(ts, ts.requestId), b = canonical(rust, rust.requestId);
+    for (const k of ["typedRows", "artifacts", "layout", "routes", "client"] as const) equal(`${c.name}/${k}`, a[k], b[k]);
     console.log(`equal ${c.name} (5 rows)`);
   }
   console.log(`${rows} equal / 0 failed; ${cells.length} cells; scratch ${work}`);
