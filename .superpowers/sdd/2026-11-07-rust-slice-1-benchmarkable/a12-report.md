@@ -174,3 +174,115 @@ All six complete at fb11d613 with exit 0; copied full rows beneath f2-final2-*. 
 - `env -i PATH=/usr/bin:/bin OMNI_TS_BIN=/tmp/opencode/a8/ts OMNI_GATEWAY_BIN=/tmp/opencode/a12/f2-final2-gateway python3 conformance/e2e/x3-operator.py` (inside unshare -Urn, loopback up) — exit `0` (`f2-final2-x3.exit`). Full results and summary copied to `f2-final2-x3-results.json` and `f2-final2-x3-summary.json`.
 - `bun --no-env-file conformance/e2e/run.ts --ts /tmp/opencode/a8/ts --rust /tmp/opencode/a12/f2-final2-gateway` (inside same namespace) — exit `0` (`f2-final2-run.exit`).
 All required final-HEAD gates have now completed; earlier pending notes are superseded by these results.
+
+## f3 — round-2 numeric, human rendering and ordered acceptance repair (2026-11-17)
+
+Worktree/branch unchanged; append-only commits. RED FIRST `1837ecb7` adds target numeric/cost and human stored-cell rows before product edits; final extra equal probes `17390203`. Frozen sources remain unchanged. No dependencies, router type changes, raw router carrier, strict reader changes, stash, push or merge.
+
+### Findings and frozen checks
+- Prices/nonfinite: `37cc5a2b` builds structural typed targets then assigns ToNumber f64 values directly (tier, weight, input, output, cacheRead); no JSON numeric round-trip. CacheRead null/absent retains frozen nullish input*0.1 fallback. `e37cff14`/`472ee013` repair pre-existing router cost predicate: frozen `ownCost <= 0` lets NaN reach ratio, while Rust's former `>0` wrongly assigned UNKNOWN, changing scores/order. Router types untouched. Frozen full score.ts + filters.ts read: arithmetic target inputs are tier, weight, costPerMTok.input/output/cacheRead; contextWindow, maxOutputTokens and cacheWrite5m/1h do not enter this dry-run request. Other arithmetic: credential weight; expiresAt versus now; health consecutiveFailures, openedAt, rateLimitedUntil; settings weights tier/health/quota/cost/latency/load, breakerThreshold/breakerCooldownMs/quotaPollIntervalMs; quota used/limit/resetsAt; request token estimates/maxTokens, runtime load/recent EWMA. Operator probe fixes maxTokens absent/load/recent absent/rand=0. Existing settings/quota/health projections unchanged.
+- CLI score: `4b8e1db9`/`e37cff14` retains raw f64 score in the control JsValue result until serialization, implements exact-significand Number.toFixed(3), including NaN/Infinity/-Infinity and >=1e21 Number.toString behavior. JSON nonfinite still null.
+- Echoes: `e37cff14` restores original selected target tier and raw credential label/id only in output, not router input: all new tier echoes now equal frozen (including null, '-0', [2], {}, 'oops', '1e400'). `f9a8054f` nevertheless enumerates the controller-approved NULL/'-0'/[2] HTTP, CLI JSON and precise human TIER-cell allowances, statuses 200/200 or 0/0; these new allowances are not used by final outputs. Existing seven entries retained.
+- Raw human cells: shared table_text validation checks original credential label for ranked candidates and id for exclusions, before returning any stdout. Frozen models.ts constructs whole return string before printing. BLOB label exactly exit 1, empty stdout, original replace diagnostic + newline. Corpus adds human BLOB/number/NULL label/provider/id cells; provider corrupt cells produce no matching accounts, id BLOB/NULL candidates preserve raw JSON echo. Model/tier follow frozen projection; endpoint never appears in dry-run table. No plugin parity changes claimed.
+- Acceptance: `f77fa945` compares insertion-ordered JSON after substituting only listed leaves, keeping status/stderr exact. Committed 7-case self-test rejects top-level and nested reorder, extra key, score/status/stderr changes, accepts only approved echo; reviewer CLI/HTTP six-case mutation drivers also rerun with CLI calling actual repaired checker.
+
+### Red → green
+Final corpora: 795 HTTP records (10 rejected constraints; 785 comparisons), 312 CLI records (14 rejected pairs; 298 actual comparisons). On fb11d613 supplied f2-final2 binaries, HTTP 26 unexpected / 9 accepted, CLI 65 unexpected / 9 accepted. Final counts and commands follow below. Earlier attempts retained: f3-http-green1 failed because initial gateway copy used wrong binary name; f3-cli-green1 exposed NaN cost predicate and NaN text; f3-final-clippy exit 101 identified collapsible_if, fixed in final style commit. No gate failures hidden.
+
+### Isolation / scope
+All actual work from designated worktree; own HOME `/tmp/opencode/a12/f3-home`, scratch/evidence `f3-*`, scrubbed explicit environments and Bun --no-env-file. Gateways namespaced; copied reviewer drivers only change artifact/evidence paths (CLI mutation driver switched to actual ordered checker). Six CLI drivers copied to private evidence directory to relocate their original shared scratch paths. X3 likewise relocates scratch only. `cargo --offline`, jobs=2, incremental=0/dev+test debug=0, CARGO_HOME fixed, one cargo command at a time; disk remained >=11 GiB. No admin-routes.
+
+Bounded coverage: no PostgreSQL, arbitrary plugin loading/transport, malformed target structural getter semantics, exhaustive numeric/locale/PTY/concurrency sweep. Canonical CLI JSON still masks whitespace; parsed key order is enforced. No claim that dry-run predicts live load/smart routing.
+
+Additional raw-model check: frozen number/NULL target model human returns exact table error, JSON succeeds; `3e4ff33f` converts only typed routing identity while restoring raw model on candidate/exclusion output, and adds number/NULL/object model cells. Initial isolated probe is f3-cli-model.log/rows (red before this commit). Final corpus adds six more CLI pairs.
+Operational disclosure: an intermediate gateway build was inadvertently started while the previous background workspace gate still held Cargo's lock; Cargo serialized actual compilation. No simultaneous compilation occurred, but this was not the requested one-Cargo-invocation discipline. Final gates are scheduled sequentially after the background gate completes.
+
+Intermediate supplemental probes2 startup timeout is retained under f3-final-probes2.log; later standalone namespace rerun required. Intermediate f3-last workspace/clippy/fmt/dispatch all checked separately; authoritative final-head runs use f3-end prefix.
+
+Raw-cell review source: output.table width and line both use text.replace; no partial output because the command computes header/candidates/excluded before returning. label raw, model raw, exclusion credentialId/model/reason raw; candidate tier explicitly String, candidate index String, score toFixed; provider paint returns id unchanged without color. Corrupt provider/account IDs in corpus do not become candidate raw provider cells unless exact serving identities match. Target model number/null/object cases now JSON-success and exact human failure (whole stdout empty).
+
+Final round-2 more.ts: all 31 pairs equal (includes original 14 HTTP findings). cli-more six equal, cli-numbers six equal; cli-render three equal and one JSON BLOB strategy manifest-accepted. Round-1 probes 28 pairs with one manifest BLOB strategy; probes2 28 pairs equal + eight rejected-update records; probes3 14 pairs equal + two rejected-update records. No plugin probes were changed or newly rerun in f3: prior plugin exclusions remain limitations rather than new success claims.
+
+At this checkpoint, final HEAD `3e4ff33f884d9260f91b0560a152e1b2d1b65d69` has HTTP 795 / 2 accepted / 0 unexpected and CLI 312 / 2 accepted / 0 unexpected. Workspace 1,351 passed, clippy/fmt/dispatch exit 0. The three named flaky tests passed first final attempt. Six final-head CLI suites and X3 remain running; no success is claimed yet. Their completion details will be appended below.
+
+Intermediate six CLI suites all exit 0 (f3-final-*.exit); final-head repeats remain pending. First X3 scratch-relocated attempt exit 1 (`f3-final-x3.exit`) due copied driver resolving its adjacent acceptance manifest under /tmp/opencode/a12. Fixed ONLY copied-driver acceptance path to original committed x3-accepted.json; standalone final-head retry is `f3-x3-retry`, pending. No X3 product difference inferred from setup failure.
+
+Controller correction: scratch-relocated X3 is supplemental only. It completed 4,106 pairs / 3,997 equal / 109 pre-existing accepted / zero unexpected; `f3-x3-retry.exit` is 0. The actual gate is now running the unchanged committed `conformance/e2e/x3-operator.py` from the worktree root at `3e4ff33f`; evidence `f3-x3-committed.log` and command-labelled `f3-x3-committed.exit`. No additional product changes.
+
+Final-head six CLI corpora completed: stored-cells 1,045, neighbors 3,806 (six existing exclusions), neighbors-targeted eight, wide 4,236, extra 180, quota-json 196 (45 existing human-quota accepted); zero unexpected, all exits 0 (`f3-end-{stored-cells,neighbors,neighbors-targeted,wide,extra,quota-json}.exit`). CLI was built alone after final commit. Copied-driver X3 from the long wrapper also exits 0 but remains supplemental only. Committed-driver X3 still pending.
+
+### f3 final gate completion
+
+### Final artifacts and verification
+
+Final HEAD `3e4ff33f884d9260f91b0560a152e1b2d1b65d69`; binaries built AFTER this commit; CLI built ALONE.
+
+````text
+b39a5b331266e1c003d0332f73e719aca12f55742509d1ab4f74c19cc5233e89  /tmp/opencode/a12/f3-end-gateway
+08b2993de2ad73f2f8fcc20b812446324bd108188099cf20930028f929f617d5  /tmp/opencode/a12/f3-end-omni
+````
+- `cargo build --offline -p omni-gateway` — exit `0` (`f3-end-build.exit`).
+- `cargo build --offline -p omni-cli (ALONE)` — exit `0` (`f3-end-cli-build.exit`).
+- `cargo test --offline --workspace` — exit `0` (`f3-end-workspace.exit`).
+- `cargo clippy --offline --workspace --all-targets -- -D warnings` — exit `0` (`f3-end-clippy.exit`).
+- `cargo fmt --all -- --check` — exit `0` (`f3-end-fmt.exit`).
+- `cargo test --offline -p omni-gateway --test dispatch_size` — exit `0` (`f3-end-dispatch.exit`).
+- `bun --no-env-file conformance/e2e/models-dry-run.ts --ts /tmp/opencode/a8/ts --rust /tmp/opencode/a12/f3-end-gateway --out /tmp/opencode/a12/f3-end-http` — exit `0` (`f3-end-models-dry-run.exit`).
+- `OMNI_CLI_BIN=/tmp/opencode/a12/f3-end-omni python3 conformance/cli/models-dry-run.py` — exit `0` (`f3-end-cli.exit`).
+- `bun --no-env-file conformance/e2e/run.ts --ts /tmp/opencode/a8/ts --rust /tmp/opencode/a12/f3-end-gateway (namespace; alone)` — exit `0` (`f3-end-run.exit`).
+- `env -i PATH=/usr/bin:/bin OMNI_TS_BIN=/tmp/opencode/a8/ts OMNI_GATEWAY_BIN=/tmp/opencode/a12/f3-end-gateway python3 conformance/e2e/x3-operator.py (namespace)` — exit `env -i PATH=/usr/bin:/bin OMNI_TS_BIN=/tmp/opencode/a8/ts OMNI_GATEWAY_BIN=/tmp/opencode/a12/f3-end-gateway python3 conformance/e2e/x3-operator.py: 0` (`f3-x3-committed.exit`).
+- `python3 /tmp/opencode/a12/f3-classify.py` — exit `0` (`f3-end-classify.exit`).
+- `python3 conformance/cli/models-dry-run-mutations.py` — exit `0` (`f3-end-mutations.exit`).
+- `OMNI_CLI_BIN=/tmp/opencode/a12/f3-end-omni python3 /tmp/opencode/a12/f3-suites/stored-cells.py (scratch-relocated conformance/cli driver)` — exit `0` (`f3-end-stored-cells.exit`).
+- `OMNI_CLI_BIN=/tmp/opencode/a12/f3-end-omni python3 /tmp/opencode/a12/f3-suites/neighbors.py (scratch-relocated conformance/cli driver)` — exit `0` (`f3-end-neighbors.exit`).
+- `OMNI_CLI_BIN=/tmp/opencode/a12/f3-end-omni python3 /tmp/opencode/a12/f3-suites/neighbors-targeted.py (scratch-relocated conformance/cli driver)` — exit `0` (`f3-end-neighbors-targeted.exit`).
+- `OMNI_CLI_BIN=/tmp/opencode/a12/f3-end-omni python3 /tmp/opencode/a12/f3-suites/wide.py (scratch-relocated conformance/cli driver)` — exit `0` (`f3-end-wide.exit`).
+- `OMNI_CLI_BIN=/tmp/opencode/a12/f3-end-omni python3 /tmp/opencode/a12/f3-suites/extra.py (scratch-relocated conformance/cli driver)` — exit `0` (`f3-end-extra.exit`).
+- `OMNI_CLI_BIN=/tmp/opencode/a12/f3-end-omni python3 /tmp/opencode/a12/f3-suites/quota-json.py (scratch-relocated conformance/cli driver)` — exit `0` (`f3-end-quota-json.exit`).
+- `bun --no-env-file /tmp/opencode/a12/f3-review/more.ts --ts /tmp/opencode/a8/ts --rust /tmp/opencode/a12/f3-end-gateway --out /tmp/opencode/a12/f3-end-more (namespace)` — exit `0` (`f3-end-more.exit`).
+- `bun --no-env-file /tmp/opencode/a12/f3-review/probes.ts --ts /tmp/opencode/a8/ts --rust /tmp/opencode/a12/f3-end-gateway --out /tmp/opencode/a12/f3-end-probes (namespace)` — exit `0` (`f3-end-probes.exit`).
+- `bun --no-env-file /tmp/opencode/a12/f3-review/probes2.ts --ts /tmp/opencode/a8/ts --rust /tmp/opencode/a12/f3-end-gateway --out /tmp/opencode/a12/f3-end-probes2 (namespace)` — exit `0` (`f3-end-probes2.exit`).
+- `bun --no-env-file /tmp/opencode/a12/f3-review/probes3.ts --ts /tmp/opencode/a8/ts --rust /tmp/opencode/a12/f3-end-gateway --out /tmp/opencode/a12/f3-end-probes3 (namespace)` — exit `0` (`f3-end-probes3.exit`).
+- `bun --no-env-file /tmp/opencode/a12/f3-review/rank.ts --ts /tmp/opencode/a8/ts --rust /tmp/opencode/a12/f3-end-gateway --out /tmp/opencode/a12/f3-end-rank (namespace)` — exit `0` (`f3-end-rank.exit`).
+- `bun --no-env-file /tmp/opencode/a12/f3-review/live.ts --ts /tmp/opencode/a8/ts --rust /tmp/opencode/a12/f3-end-gateway --out /tmp/opencode/a12/f3-end-live (namespace)` — exit `0` (`f3-end-live.exit`).
+- `python3 /tmp/opencode/a12/f3-review/cli-more.py` — exit `0` (`f3-end-cli-more.exit`).
+- `python3 /tmp/opencode/a12/f3-review/cli-numbers.py` — exit `0` (`f3-end-cli-numbers.exit`).
+- `python3 /tmp/opencode/a12/f3-review/cli-render.py` — exit `0` (`f3-end-cli-render.exit`).
+- `python3 /tmp/opencode/a12/f3-review/mutation-cli.py` — exit `0` (`f3-end-mutation-cli.exit`).
+- `bun --no-env-file /tmp/opencode/a12/f3-review/mutation-http.ts` — exit `0` (`f3-end-mutation-http.exit`).
+- RED `bun --no-env-file conformance/e2e/models-dry-run.ts --ts /tmp/opencode/a8/ts --rust /tmp/opencode/a12/f2-final2-gateway` — exit `1` (`f3-final-http-red.exit`).
+- RED `OMNI_CLI_BIN=/tmp/opencode/a12/f2-final2-omni python3 conformance/cli/models-dry-run.py` — exit `1` (`f3-end-cli-red.exit`).
+
+Final corpus/reviewer summaries (collector exits are not parity claims; independent classification asserts exact manifest/status/path matches):
+
+```text
+models-dry-run: {"rows":795,"accepted":2,"failures":0,"work":"/tmp/opencode/a12/f3-end-http/run-D196RC"}
+cli: {"cases": 312, "accepted": 2, "failures": 0, "work": "/tmp/opencode/a12/f3-cli/tmp7ic6e47e"}
+more: {"rows":31,"failures":0,"work":"/tmp/opencode/a12/f3-end-more/run-1fLom9"}
+probes: {"rows":28,"failures":1,"work":"/tmp/opencode/a12/f3-end-probes/run-qZE4tp"}
+probes2: {"rows":36,"failures":8,"work":"/tmp/opencode/a12/f3-end-probes2/run-0AClA7"}
+probes3: {"rows":16,"failures":0,"work":"/tmp/opencode/a12/f3-end-probes3/run-55ylDn"}
+rank: {"rows":318,"failures":0,"work":"/tmp/opencode/a12/f3-end-rank/run-P8zyGm"}
+cli-more: {"cases": 6, "failures": 0}
+cli-numbers: {"cases": 6, "failures": 0}
+cli-render: {"cases": 4, "failures": 1}
+classify: {"differences": 2, "manifest": 2, "unexpected": 0}
+x3: {"pairs": 4106, "equal": 3997, "accepted": {"routing-strict": 94, "v1-models-frozen-json": 15}, "unexpected": 0}
+```
+
+Six CLI gates (last summary lines; full rows retained at paths printed by each driver):
+
+```text
+stored-cells: cell {} | column {} | EXIT HISTOGRAM stored-cells {"exit 0": 734, "exit 1": 256, "exit 2": 55}
+neighbors: Counter({'extra-commands': 6}) | evidence /tmp/opencode/a12/f3-suites/neighbors-4xmcy13f pairs 3806 failing 0 excluded {'random-create': 2, 'unimplemented-credentials': 4} | EXIT HISTOGRAM neighbors {"exit 0": 2778, "exit 1": 1026, "exit 2": 2}
+neighbors-targeted: {"sql": "UPDATE api_keys SET label=1", "args": ["keys", "list", "--json"], "ts": {"code": 0, "out": "7b0a2020226b657973223a205b0a202020207b0a202020202020226964223a20226b222c0a202020202020226c6162656c223a20312c0a20202020202022707265666978223a202270222c0a202020202020226d6f64656c416c6c6f776c697374223a206e756c6c2c0a202020202020226c696d697473223a207b7d2c0a202020202020226c696d69745573616765223a205b5d2c0a20202020202022626f64794c6f6767696e674f70744f7574223a2066616c73652c0a20202020202022637265617465644174223a20312c0a202020202020227265766f6b65644174223a206e756c6c2c0a20202020202022657870697265734174223a206e756c6c2c0a2020202020202267756172647261696c506f6c696379223a206e756c6c2c0a20202020202022736d617274526f7574696e67223a2066616c73650a202020207d0a20205d0a7d0a", "err": "", "unchanged": true}, "rust": {"code": 0, "out": "7b0a2020226b657973223a205b0a202020207b0a202020202020226964223a20226b222c0a202020202020226c6162656c223a20312c0a20202020202022707265666978223a202270222c0a202020202020226d6f64656c416c6c6f776c697374223a206e756c6c2c0a202020202020226c696d697473223a207b7d2c0a202020202020226c696d69745573616765223a205b5d2c0a20202020202022626f64794c6f6767696e674f70744f7574223a2066616c73652c0a20202020202022637265617465644174223a20312c0a202020202020227265766f6b65644174223a206e756c6c2c0a20202020202022657870697265734174223a206e756c6c2c0a2020202020202267756172647261696c506f6c696379223a206e756c6c2c0a20202020202022736d617274526f7574696e67223a2066616c73650a202020207d0a20205d0a7d0a", "err": "", "unchanged": true}} | {"sql": "UPDATE virtual_models SET targets='[null]'", "args": ["models", "put", "v", "-f", "/tmp/opencode/a12/f3-suites/neighbors-ks5vvyd1/fixture/model.json"], "ts": {"code": 1, "out": "", "err": "6e756c6c206973206e6f7420616e206f626a65637420286576616c756174696e6720277461726765742e70726f766964657227290a", "unchanged": true}, "rust": {"code": 1, "out": "", "err": "6e756c6c206973206e6f7420616e206f626a65637420286576616c756174696e6720277461726765742e70726f766964657227290a", "unchanged": true}} | {"sql": "UPDATE virtual_models SET id=1", "args": ["models", "rm", "1", "--yes"], "ts": {"code": 1, "out": "", "err": "4d4f44454c5f554e415641494c41424c453a206e6f207669727475616c206d6f64656c202231220a", "unchanged": true}, "rust": {"code": 1, "out": "", "err": "4d4f44454c5f554e415641494c41424c453a206e6f207669727475616c206d6f64656c202231220a", "unchanged": true}}
+wide: Counter() | evidence /tmp/opencode/a12/f3-suites/wide-pxpxh03f pairs 4236 failing 0 | EXIT HISTOGRAM wide {"exit 1": 1202, "exit 0": 3034}
+extra: Counter() | evidence /tmp/opencode/a12/f3-suites/extra-5otawxa5 pairs 180 failing 0 | EXIT HISTOGRAM extra {"exit 0": 98, "exit 1": 82}
+quota-json: evidence /tmp/opencode/a12/f3-suites/r6-quota-5297rxik pairs 196 classes {'equal': 151, 'human-quota': 45} failing 0 | EXIT HISTOGRAM quota-json {"exit 0": 196}
+```
+
+Workspace passed tests: 1351. Named flaky tests all passed in the final log; no rerun needed unless documented below.
+
+Remaining differences: two manifest-only observations (HTTP BLOB strategy in round-1 probes, JSON CLI BLOB strategy); tier and BLOB label now exact. Supplemental live calls both 503; dry both 200 and identical. Rank matrix 318 equal. Plugin behavior unchanged/excluded, not claimed repaired. No other remaining difference in executed corpora. Final working tree status: `` (empty means clean).
+
+All f3 pending checkpoints above are superseded: the COMMITTED X3 gate completed with exit 0, 4,106 pairs, 3,997 equal, 109 existing accepted and zero unexpected. Full committed-driver results/summary copied to `f3-x3-committed-results.json` and `f3-x3-committed-summary.json`; original isolated evidence `/tmp/opencode/x3/operator-44h0fpcp`. Final HEAD remains clean `3e4ff33f884d9260f91b0560a152e1b2d1b65d69`. All requested gates complete; no remaining review finding in executed corpora.
