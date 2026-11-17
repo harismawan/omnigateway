@@ -9,6 +9,8 @@ import { join, resolve } from "node:path";
 import { parseArgs, isDeepStrictEqual } from "node:util";
 import { deriveKey, encrypt } from "../../packages/store/src/encryption.ts";
 import { readArtifact } from "../../packages/store/src/bodies/artifact.ts";
+import { boundValue } from "../../packages/store/src/bodies/bound.ts";
+import { maskSecrets } from "../../packages/store/src/bodies/mask.ts";
 
 const { values: f } = parseArgs({ options: Object.fromEntries(
   ["ts", "rust", "scratch", "cert", "key"].map(k => [k, { type: "string" as const }]),
@@ -169,7 +171,7 @@ async function run(binary: string, label: string, c: Cell, port: number) {
           const wireFrames = client.split("\n\n").filter(Boolean).map(x => x.replaceAll(secret, "sk-[redacted]"));
           if (!isDeepStrictEqual(captured, wireFrames)) throw Error("captured client frames differ from wire");
         } else {
-          const wire = JSON.parse(client.replaceAll(secret, "sk-[redacted]"));
+          const wire = boundValue(maskSecrets(JSON.parse(client))).value;
           if (!isDeepStrictEqual(captured, wire)) throw Error("captured client response differs from wire");
         }
       }
