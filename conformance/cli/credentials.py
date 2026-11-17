@@ -1,6 +1,6 @@
 """Frozen credentials read commands: byte output and typed-cell parity."""
 from pathlib import Path
-import collections, json, os, sqlite3, subprocess, tempfile, time, re
+import collections, json, os, sqlite3, subprocess, tempfile, time, re, select
 import driver_env, typed_state
 
 repo = Path.cwd()
@@ -84,6 +84,11 @@ for data in ['{}','null','[]','1','"x"','invalid', '{"endpointId":"ep","endpoint
         cases.append(('custom reuse',seed,sql,args))
 for tail in [[],['openai','--key','secret'],['openai','--origin'],['openai','--protocol=-bad']]:
     cases.append(('add malformed',seed,'',['credentials','add-key']+tail))
+for answer in [b'y\n', b'no\n', b'YES\n']:
+    cases.append(('tty:'+answer.hex(),seed,'',['credentials','rm','c']))
+cases.append(('tty-key',seed,'',['credentials','add-key','openai']))
+for answer in [b'',b' \n',b'one\ntwo\n',b'\xff']:
+    cases.append(('stdin:'+answer.hex(),seed,'',['credentials','add-key','openai']))
 for flag in ['endpoint-id','endpoint-label','origin','protocol']:
     for value in ['', ' ', 'bad', 'https://u:p@example.test', 'https://example.test?q=1','responses']:
         args = custom.copy(); args[args.index('--'+flag)+1] = value
@@ -91,7 +96,7 @@ for flag in ['endpoint-id','endpoint-label','origin','protocol']:
 for sql in ["", "INSERT INTO virtual_models(id,targets,strategy,is_alias) VALUES('pin','[{\"provider\":\"openai\",\"model\":\"m\",\"credentialId\":\"c\"}]','score',0)"]:
     for yes in [[],['--yes']]: cases.append(('pinned',seed,sql,['credentials','rm','c']+yes))
 
-def normalize(result, args, started, ended):
+def normalize(result, args, started, ended, expected_key):
     # Only successful target clocks and new-row UUID/ciphertext (including nonce/tag)
     # vary. Validate clocks, decrypt secret, and retain each cell's SQLite type.
     if result['code'] != 0 or args[:1] != ['credentials']: return
@@ -112,8 +117,8 @@ def normalize(result, args, started, ended):
             cell = row['api_key']; assert cell[0] == 'text'
             script = f'import {{deriveKey,decrypt}} from {json.dumps(str(repo/"packages/store/src/encryption.ts"))}; console.log(await decrypt(await deriveKey(process.env.OMNI_ENCRYPTION_KEY),process.argv[1]));'
             p = subprocess.run(['bun','--no-env-file','-e',script,bytes.fromhex(cell[1]).decode()],env=env,capture_output=True,check=True)
-            assert p.stdout == b'test-key\n',p.stdout
-            row['api_key'] = (cell[0],'<encrypted:test-key>')
+            assert p.stdout == expected_key+b'\n',(p.stdout,expected_key)
+            row['api_key'] = (cell[0],'<encrypted:'+expected_key.hex()+'>')
             row['id'] = ('text','<uuid>')
     if new_id:
         result['out'] = bytes.fromhex(result['out']).replace(new_id.encode(),b'<uuid>').hex()
@@ -140,12 +145,28 @@ for name, data, sql, args in cases:
                 d.close()
             before = typed_state.snapshot(db)
             started = time.time()*1000
-            p = subprocess.run(command+['--root', str(root)]+args+mode, env=env, input=b'  test-key\n', capture_output=True, timeout=20)
+            argv = command+['--root', str(root)]+args+mode
+            answer = bytes.fromhex(name[6:]) if name.startswith('stdin:') else b'  test-key\n'
+            if name.startswith('tty'):
+                master, slave = os.openpty()
+                p = subprocess.Popen(argv,env=env,stdin=slave,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+                err = b''
+                while b' [y/N] ' not in err and b' API key: ' not in err:
+                    assert select.select([p.stderr],[],[],20)[0], 'prompt timeout'
+                    chunk = os.read(p.stderr.fileno(),65536)
+                    if not chunk: break
+                    err += chunk
+                os.write(master,bytes.fromhex(name[4:]) if name.startswith('tty:') else b'  test-key\r')
+                out, rest = p.communicate(timeout=20)
+                p.stdout, p.stderr = out, err+rest
+                os.close(master); os.close(slave)
+            else:
+                p = subprocess.run(argv, env=env, input=answer, capture_output=True, timeout=20)
             ended = time.time()*1000
             result = dict(code=p.returncode, out=p.stdout.hex(), err=p.stderr.hex(), types=typed_state.snapshot(db))
             typed_state.no_panic(result)
             if args[1] in ['list','show','health']: assert before == result['types'], (name, result)
-            normalize(result,args,started,ended)
+            normalize(result,args,started,ended,answer.decode(errors='replace').strip().encode())
             pair.append(result)
         equal = all(pair[0][k] == pair[1][k] for k in ['code', 'out', 'err', 'types'])
         results.append(dict(name=name, args=args+mode, ts=pair[0], rust=pair[1], equal=equal))
