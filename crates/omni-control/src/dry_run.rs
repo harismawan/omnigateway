@@ -127,8 +127,7 @@ pub fn run(
             |row| row.get::<_, String>(0),
         )
         .map_err(Failure::internal)?;
-    let raw_targets: serde_json::Value =
-        serde_json::from_str(&raw_targets).map_err(Failure::internal)?;
+    let raw_targets = omni_ir::jsjson::parse_js(&raw_targets).map_err(Failure::internal)?;
     let raw_credentials = crate::credentials::rows(store, None)?;
     // Preserve nonfinite scores until the consumer chooses JSON or human output.
     if let JsValue::Object(fields) = &mut out
@@ -146,9 +145,11 @@ pub fn run(
                                 .iter()
                                 .position(|t| std::ptr::eq(t, candidate.target))
                             {
-                                *value = JsValue::from(
-                                    &raw_targets[index][String::from_utf16_lossy(key)],
-                                );
+                                if let JsValue::Array(targets) = &raw_targets {
+                                    *value = get(&targets[index], &String::from_utf16_lossy(key))
+                                        .cloned()
+                                        .unwrap_or(JsValue::Undefined);
+                                }
                             }
                         }
                         "credentialId" | "credentialLabel" => {
@@ -185,22 +186,56 @@ pub fn run(
             .find(|(k, _)| String::from_utf16_lossy(k) == "excluded")
     {
         for item in items {
-            if let JsValue::Object(fields) = item
-                && let Some((_, value)) = fields
-                    .iter_mut()
-                    .find(|(k, _)| String::from_utf16_lossy(k) == "model")
-                && let Some(raw) = raw_targets.as_array().and_then(|items| {
-                    items.iter().find(|t| {
-                        omni_ir::js::to_string(t.get("model"))
-                            == crate::cli_cell::scalar_string(value)
-                    })
-                })
-            {
-                *value = JsValue::from(&raw["model"]);
+            if let JsValue::Object(fields) = item {
+                for (key, value) in fields {
+                    match String::from_utf16_lossy(key).as_str() {
+                        "model" => {
+                            if let JsValue::Array(targets) = &raw_targets
+                                && let Some(raw) = targets.iter().find(|t| {
+                                    crate::operator_json::string(
+                                        get(t, "model").unwrap_or(&JsValue::Undefined),
+                                    )
+                                    .ok()
+                                    .as_deref()
+                                        == Some(&crate::cli_cell::scalar_string(value))
+                                })
+                            {
+                                *value = get(raw, "model").cloned().unwrap_or(JsValue::Undefined);
+                            }
+                        }
+                        "credentialId" => {
+                            if let Some(raw) = raw_credentials.iter().find_map(|r| {
+                                get(r, "id").filter(|id| {
+                                    crate::cli_cell::scalar_string(id)
+                                        == crate::cli_cell::scalar_string(value)
+                                })
+                            }) {
+                                *value = raw.clone();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
     }
     Ok(out)
+}
+
+// Only structural router fields cross this boundary. Arithmetic and output
+// restoration use the original JsValue, never this finite JSON projection.
+fn structural_value(value: &JsValue) -> serde_json::Value {
+    match value {
+        JsValue::Null | JsValue::Undefined | JsValue::Function => serde_json::Value::Null,
+        JsValue::Bool(b) => json!(b),
+        JsValue::Number(n) => json!(n),
+        JsValue::String(s) => json!(String::from_utf16_lossy(s)),
+        JsValue::Array(items) => items.iter().map(structural_value).collect(),
+        JsValue::Object(fields) => fields
+            .iter()
+            .map(|(k, v)| (String::from_utf16_lossy(k), structural_value(v)))
+            .collect(),
+    }
 }
 
 // These projections belong only to operator dry-run. Never relax live readers.
@@ -220,34 +255,36 @@ fn models(store: &SqliteStore, selected: &str) -> Result<Vec<omni_store::Virtual
         if id != selected {
             continue;
         }
-        let mut targets: serde_json::Value =
-            serde_json::from_str(&omni_ir::jsjson::stringify(&raw).unwrap_or_default())
-                .map_err(Failure::internal)?;
-        let error = if targets.is_number() {
+        let error = if matches!(raw, JsValue::Number(_)) {
             "number is not iterable"
         } else {
             "targets is not iterable"
         };
-        let list = targets
-            .as_array_mut()
-            .ok_or_else(|| Failure::internal(error))?;
+        let JsValue::Array(list) = &raw else {
+            return Err(Failure::internal(error));
+        };
         let mut typed = Vec::new();
-        for target in list.iter_mut() {
+        for raw_target in list {
             // Deserialize only the structural fields. Never send arithmetic
             // coercions through JSON: JSON cannot carry NaN or infinity.
-            let tier = omni_ir::js::to_number(target.get("tier"));
-            let weight = omni_ir::js::to_number(target.get("weight"));
-            target["model"] = json!(omni_ir::js::to_string(target.get("model")));
-            let price = |field| {
-                omni_ir::js::to_number(target.get("costPerMTok").and_then(|p| p.get(field)))
-            };
-            let input = price("input");
-            let output = price("output");
-            let cache_read = target
-                .get("costPerMTok")
-                .and_then(|p| p.get("cacheRead"))
-                .filter(|v| !v.is_null())
-                .map(|v| omni_ir::js::to_number(Some(v)));
+            let number =
+                |value| crate::database::retention_number(value).map_err(Failure::internal);
+            let tier = number(get(raw_target, "tier"))?;
+            let weight = number(get(raw_target, "weight"))?;
+            let mut target = structural_value(raw_target);
+            target["model"] = json!(
+                crate::operator_json::string(
+                    get(raw_target, "model").unwrap_or(&JsValue::Undefined)
+                )
+                .map_err(Failure::internal)?
+            );
+            let price = |field| get(raw_target, "costPerMTok").and_then(|p| get(p, field));
+            let input = number(price("input"))?;
+            let output = number(price("output"))?;
+            let cache_read = price("cacheRead")
+                .filter(|v| !matches!(v, JsValue::Null))
+                .map(|v| number(Some(v)))
+                .transpose()?;
             target["tier"] = json!(0);
             target["weight"] = json!(0);
             for field in [
@@ -265,7 +302,7 @@ fn models(store: &SqliteStore, selected: &str) -> Result<Vec<omni_store::Virtual
                 ));
             }
             let mut t: omni_store::Target =
-                serde_json::from_value(target.clone()).map_err(Failure::internal)?;
+                serde_json::from_value(target).map_err(Failure::internal)?;
             t.tier = tier;
             t.weight = weight;
             t.cost_per_m_tok.input = input;
@@ -327,10 +364,7 @@ fn credentials(store: &SqliteStore, now: f64) -> Result<Vec<omni_store::Credenti
             weight: number("weight"),
             expires_at,
             account_email: None,
-            provider_data: serde_json::from_str(
-                &omni_ir::jsjson::stringify(data).unwrap_or_default(),
-            )
-            .map_err(Failure::internal)?,
+            provider_data: structural_value(data),
             disabled_reason: None,
             disabled_at: None,
             has_refresh_token: matches!(cell("hasRefreshToken"), JsValue::Bool(true)),
