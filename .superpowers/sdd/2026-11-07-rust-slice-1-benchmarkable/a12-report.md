@@ -286,3 +286,151 @@ Workspace passed tests: 1351. Named flaky tests all passed in the final log; no 
 Remaining differences: two manifest-only observations (HTTP BLOB strategy in round-1 probes, JSON CLI BLOB strategy); tier and BLOB label now exact. Supplemental live calls both 503; dry both 200 and identical. Rank matrix 318 equal. Plugin behavior unchanged/excluded, not claimed repaired. No other remaining difference in executed corpora. Final working tree status: `` (empty means clean).
 
 All f3 pending checkpoints above are superseded: the COMMITTED X3 gate completed with exit 0, 4,106 pairs, 3,997 equal, 109 existing accepted and zero unexpected. Full committed-driver results/summary copied to `f3-x3-committed-results.json` and `f3-x3-committed-summary.json`; original isolated evidence `/tmp/opencode/x3/operator-44h0fpcp`. Final HEAD remains clean `3e4ff33f884d9260f91b0560a152e1b2d1b65d69`. All requested gates complete; no remaining review finding in executed corpora.
+
+## f4 — round-3 literal overflow, exclusion identity, table precedence (2026-11-17)
+
+Final code HEAD `1c81e278e86919de4fd8915f8ced09f466ca7132`; append-only commits `bd945c1a` (18 shared HTTP/CLI regression SQL rows), `74c302a0` (JS-exact arithmetic/restoration and excluded raw ID), `1c81e278` (frozen table visitation). No subagents, dependencies, TS product changes, router types, strict readers, stream/server edits, stash, push or merge. All commands from the designated worktree. Own HOME `/tmp/opencode/a12/f4-home`; explicit scrubbed child environments; all Bun calls --no-env-file; gateways namespaced. Disk before builds 7.7/7.6 GiB, latest 7.5 GiB. One Cargo invocation at a time.
+
+Arithmetic reads original parsed JsValue (including literal ±1e400) directly into typed f64 router inputs; restoration parses original targets with parse_js. Stored provider_data no longer stringify/reparses: structural-only serde projection used for router endpoint filtering. No raw JsValue router carrier. Exclusions restore credentialId and model; frozen projects only those plus router-generated reason. Human tables validate candidate label/provider/model before excluded id/model/reason; column-major width phase skips nullish cells exactly like frozen row[index] ?? "", followed by row-major drawing which does not skip nullish cells. Candidate table is computed first.
+
+RED on supplied base-3e4ff33f copied binaries: HTTP 813 records / 2 accepted / 13 unexpected; CLI 348 / 2 accepted / 24 unexpected. GREEN final copied binaries: HTTP 813 / 2 accepted / 0 unexpected; CLI 348 / 2 accepted / 0 unexpected. Full rows retained in paths printed in f4-{red-http,red-cli,green2-http,green-cli}.log. Rejected constraints remain records, not comparisons. Shared added rows include ten literal ±overflow arithmetic cases, BLOB/NULL/number excluded IDs, two-invalid and three-invalid cells, candidate-vs-excluded precedence, HTTP and both CLI renderings. No new manifest allowances.
+
+Failed first green HTTP attempt retained (`f4-green-http.log/.exit`): copied wrong executable basename (`omni-gateway` rather than `omnigateway`); driver could not spawn missing copied gateway. Correct copy retried as `f4-green2-http`. CLI passed initial green attempt.
+
+Review drivers copied read-only from r3 into `f4-review`, changing only scratch/evidence/binary/seed paths; original rows copied alongside. Final overflow/new HTTP exact; CLI overflow exact; CLI new has only the four explicitly out-of-scope ±1e400 settings human/JSON observations. Settings normalizer and extreme live cost logging untouched, tracked separately by controller. Final cargo and long sequential parity gates pending at this checkpoint; completion appended below.
+
+Built after final commit; CLI build ALONE. SHA256:
+```text
+3298c45a0d05dc152ea17153a11420185e74df3de4c4d485c929ede726b7dc83  /tmp/opencode/a12/f4-gateway
+59b60d831d6fd896863b6aa90da976b2ecb4091af2baa596e68ae052f1cc79fe  /tmp/opencode/a12/f4-omni
+1c81e278e86919de4fd8915f8ced09f466ca7132
+```
+
+HTTP: 813 records = 801 comparisons + 12 rejected constraints. CLI: 348 records = 330 comparisons + 18 rejected pairs. Reviewer classification: overflow HTTP 2 exact, new HTTP 7 exact, CLI overflow 4 exact, CLI extra 6 exact; CLI new 16 exact plus four pre-existing settings-normalization differences (±1e400, human/JSON), manifest 0/plugin 0/unexpected 0. `f4-classifications.json` records each driver. Reviewer mutation assertions: 12 cases; only allowed leaf accepted, score/status/header/stderr/extra/order mutations rejected.
+
+Additional evidence `f4-regressions.json` enumerates all 108 added-row observations across red/green HTTP and human/JSON CLI. Frozen column-width phase is nullish-coalescing, unlike drawing: skipping nulls only during width measurement matters when label=NULL and model is numeric. Both this sibling and three-invalid/second-table cases match final frozen diagnostics. Existing manifest is unchanged.
+
+Verified settings discrepancy scores exactly frozen 10 vs Rust 18.5 in all four pairs. Not accepted by manifest. Completed short-gate command/exit lines (verbatim .exit files):
+```text
+bun --no-env-file conformance/e2e/models-dry-run.ts (base 3e4ff33f): 1
+python3 conformance/cli/models-dry-run.py (base 3e4ff33f): 1
+bun --no-env-file conformance/e2e/models-dry-run.ts (final): 1
+bun --no-env-file conformance/e2e/models-dry-run.ts (final retry): 0
+python3 conformance/cli/models-dry-run.py (final): 0
+cargo build --offline -p omni-gateway: 0
+cargo build --offline -p omni-cli (ALONE): 0
+env -i PATH=/usr/sbin:/usr/bin:/bin:/home/homebrew/.bun/bin:/home/linuxbrew/.linuxbrew/bin HOME=/tmp/opencode/a12/f4-home python3 conformance/cli/models-dry-run-mutations.py: 0
+bun --no-env-file /tmp/opencode/a12/f4-review/mutation-http.ts: 0
+python3 /tmp/opencode/a12/f4-review/mutation-cli.py: 0
+python3 /tmp/opencode/a12/f4-classify.py: 0
+```
+
+### Final-head correction
+
+Initial workspace, fmt and dispatch passed at 1c81e278; clippy failed (`f4-clippy.exit`: `cargo clippy --offline --workspace --all-targets -- -D warnings: 101`) on collapsible_if. Retained all initial logs. Append-only style correction `36345641114bfdd1cb80f4a5b8268a8b2d55ce37` collapses that if only; fmt before commit. Gateway and CLI rebuilt sequentially AFTER this final commit, CLI alone; final authoritative gates now use **f4-end-***. Initial f4 gates above are intermediate, not final-head claims. New binaries:
+```text
+82586efdd2e314bb3518f144dff4d4cac335cbbf79d2c32af42d1d5876c81651  /tmp/opencode/a12/f4-end-gateway
+ceb5f9218f298300b2b9cbd461b779d74f67964a837b73d341c92c22e36035de  /tmp/opencode/a12/f4-end-omni
+36345641114bfdd1cb80f4a5b8268a8b2d55ce37
+```
+Final-head gates pending at this checkpoint.
+
+Final-head build commands (.exit verbatim):
+```text
+cargo build --offline -p omni-gateway: 0
+cargo build --offline -p omni-cli (ALONE): 0
+```
+
+Final-head reviewer mutation reruns assert allowed-only acceptance (12 cases):
+```text
+bun --no-env-file /tmp/opencode/a12/f4-end-review/mutation-http.ts: 0
+python3 /tmp/opencode/a12/f4-end-review/mutation-cli.py: 0
+```
+
+Final-head Cargo/HTTP/CLI gates finished: workspace 1351 tests passed; three named flaky tests pass first attempt. Final HTTP 813 / 2 accepted / 0 unexpected; CLI 348 / 2 accepted / 0 unexpected. Final review classification remains 4 pre-existing settings-only differences. Authoritative .exit lines:
+```text
+cargo test --offline --workspace: 0
+cargo clippy --offline --workspace --all-targets -- -D warnings: 0
+cargo fmt --all -- --check: 0
+cargo test --offline -p omni-gateway --test dispatch_size: 0
+bun --no-env-file conformance/e2e/models-dry-run.ts --ts /tmp/opencode/a8/ts --rust /tmp/opencode/a12/f4-end-gateway --out /tmp/opencode/a12/f4-end-http: 0
+OMNI_CLI_BIN=/tmp/opencode/a12/f4-end-omni python3 conformance/cli/models-dry-run.py: 0
+python3 /tmp/opencode/a12/f4-end-classify.py: 0
+```
+Long sequential CLI/X3/run parity gate still pending; not claimed complete.
+
+Intermediate 1c81e278 long parity completed: six CLI corpora, committed X3 and run.ts all exit 0; X3 4,106 pairs / 3,997 equal / 109 existing accepted / 0 unexpected. These do NOT replace the final-head f4-end-* repetitions still running at 36345641. No simultaneous Cargo commands were involved.
+
+Final-head six CLI suites and run.ts all exit 0. Final-head committed X3 attempt failed near row 3920: driver boot assertion tried reading a missing gateway log `/tmp/opencode/x3/operator-axpd_tc1/gateway-3920-1.log` (FileNotFoundError); retained `f4-end-x3.log/.exit`. Not counted a parity pass. Disk rose from 7.5 to 21 GiB free during gates, consistent with external cleanup but cause is unproven. Final finish collector failed intentionally because X3 exit was 1 (`f4-end-finish.log/.exit`). Standalone unchanged committed-driver retry follows; no product change.
+
+Final binary SHA256 rechecked using hashlib against both recorded digests, unchanged. Final-head six CLI suites: stored-cells 1,045; neighbors 3,806 (six existing excluded); neighbors-targeted eight; wide 4,236; extra 180; quota-json 196 (151 equal, 45 existing human-quota accepted). Zero unexpected. Exact command/exit lines:
+```text
+env -i PATH=/usr/sbin:/usr/bin:/bin:/home/homebrew/.bun/bin:/home/linuxbrew/.linuxbrew/bin HOME=/tmp/opencode/a12/f4-home OMNI_CLI_BIN=/tmp/opencode/a12/f4-end-omni CLI_CONFORMANCE_ALLOW_OMNI=OMNI_CLI_BIN python3 /tmp/opencode/a12/f4-end-suites/stored-cells.py: 0
+env -i PATH=/usr/sbin:/usr/bin:/bin:/home/homebrew/.bun/bin:/home/linuxbrew/.linuxbrew/bin HOME=/tmp/opencode/a12/f4-home OMNI_CLI_BIN=/tmp/opencode/a12/f4-end-omni CLI_CONFORMANCE_ALLOW_OMNI=OMNI_CLI_BIN python3 /tmp/opencode/a12/f4-end-suites/neighbors.py: 0
+env -i PATH=/usr/sbin:/usr/bin:/bin:/home/homebrew/.bun/bin:/home/linuxbrew/.linuxbrew/bin HOME=/tmp/opencode/a12/f4-home OMNI_CLI_BIN=/tmp/opencode/a12/f4-end-omni CLI_CONFORMANCE_ALLOW_OMNI=OMNI_CLI_BIN python3 /tmp/opencode/a12/f4-end-suites/neighbors-targeted.py: 0
+env -i PATH=/usr/sbin:/usr/bin:/bin:/home/homebrew/.bun/bin:/home/linuxbrew/.linuxbrew/bin HOME=/tmp/opencode/a12/f4-home OMNI_CLI_BIN=/tmp/opencode/a12/f4-end-omni CLI_CONFORMANCE_ALLOW_OMNI=OMNI_CLI_BIN python3 /tmp/opencode/a12/f4-end-suites/wide.py: 0
+env -i PATH=/usr/sbin:/usr/bin:/bin:/home/homebrew/.bun/bin:/home/linuxbrew/.linuxbrew/bin HOME=/tmp/opencode/a12/f4-home OMNI_CLI_BIN=/tmp/opencode/a12/f4-end-omni CLI_CONFORMANCE_ALLOW_OMNI=OMNI_CLI_BIN python3 /tmp/opencode/a12/f4-end-suites/extra.py: 0
+env -i PATH=/usr/sbin:/usr/bin:/bin:/home/homebrew/.bun/bin:/home/linuxbrew/.linuxbrew/bin HOME=/tmp/opencode/a12/f4-home OMNI_CLI_BIN=/tmp/opencode/a12/f4-end-omni CLI_CONFORMANCE_ALLOW_OMNI=OMNI_CLI_BIN python3 /tmp/opencode/a12/f4-end-suites/quota-json.py: 0
+env -i PATH=/usr/sbin:/usr/bin:/bin:/home/homebrew/.bun/bin:/home/linuxbrew/.linuxbrew/bin HOME=/tmp/opencode/a12/f4-home bun --no-env-file conformance/e2e/run.ts --ts /tmp/opencode/a8/ts --rust /tmp/opencode/a12/f4-end-gateway: 0
+```
+Standalone committed X3 retry is the sole remaining gate; no success claim yet.
+
+Controller-confirmed infrastructure cause (supersedes earlier "cause unproven"): the controller deleted and recreated `/tmp/opencode/x3` during user-approved disk cleanup while the final-head X3 run was writing its mkdtemp scratch there. The missing-log failure is controller-caused infrastructure loss, not a product or driver failure. Controller guarantees no further changes to that directory during the standalone unchanged committed-driver retry; its result will be the authoritative final-head X3 gate. No product changes.
+
+### f4 final gate completion
+
+All requested gates complete at unchanged clean HEAD `36345641`. Workspace passed tests: 1351. Three named flaky tests passed first attempt; no retry needed. Cargo gates ran sequentially, with no overlapping Cargo invocation. All six CLI corpora use the CLI built ALONE after final commit. X3 uses the unchanged committed driver from the worktree root. run.ts follows X3 and runs alone.
+
+Command/exit lines quoted verbatim from f4-*.exit files (failed attempts above retained):
+```text
+cargo test --offline --workspace: 0
+cargo clippy --offline --workspace --all-targets -- -D warnings: 0
+cargo fmt --all -- --check: 0
+cargo test --offline -p omni-gateway --test dispatch_size: 0
+env -i PATH=/usr/sbin:/usr/bin:/bin:/home/homebrew/.bun/bin:/home/linuxbrew/.linuxbrew/bin HOME=/tmp/opencode/a12/f4-home bun --no-env-file /tmp/opencode/a12/f4-end-review/overflow.ts --ts /tmp/opencode/a8/ts --rust /tmp/opencode/a12/f4-end-gateway --out /tmp/opencode/a12/f4-end-review-overflow: 0
+env -i PATH=/usr/sbin:/usr/bin:/bin:/home/homebrew/.bun/bin:/home/linuxbrew/.linuxbrew/bin HOME=/tmp/opencode/a12/f4-home bun --no-env-file /tmp/opencode/a12/f4-end-review/new.ts --ts /tmp/opencode/a8/ts --rust /tmp/opencode/a12/f4-end-gateway --out /tmp/opencode/a12/f4-end-review-new: 0
+env -i PATH=/usr/sbin:/usr/bin:/bin:/home/homebrew/.bun/bin:/home/linuxbrew/.linuxbrew/bin HOME=/tmp/opencode/a12/f4-home python3 /tmp/opencode/a12/f4-end-review/cli-overflow.py: 0
+env -i PATH=/usr/sbin:/usr/bin:/bin:/home/homebrew/.bun/bin:/home/linuxbrew/.linuxbrew/bin HOME=/tmp/opencode/a12/f4-home python3 /tmp/opencode/a12/f4-end-review/cli-new.py: 0
+env -i PATH=/usr/sbin:/usr/bin:/bin:/home/homebrew/.bun/bin:/home/linuxbrew/.linuxbrew/bin HOME=/tmp/opencode/a12/f4-home python3 /tmp/opencode/a12/f4-end-review/cli-extra.py: 0
+env -i PATH=/usr/sbin:/usr/bin:/bin:/home/homebrew/.bun/bin:/home/linuxbrew/.linuxbrew/bin HOME=/tmp/opencode/a12/f4-home python3 conformance/cli/models-dry-run-mutations.py: 0
+env -i PATH=/usr/sbin:/usr/bin:/bin:/home/homebrew/.bun/bin:/home/linuxbrew/.linuxbrew/bin HOME=/tmp/opencode/a12/f4-home OMNI_CLI_BIN=/tmp/opencode/a12/f4-end-omni CLI_CONFORMANCE_ALLOW_OMNI=OMNI_CLI_BIN python3 /tmp/opencode/a12/f4-end-suites/stored-cells.py: 0
+env -i PATH=/usr/sbin:/usr/bin:/bin:/home/homebrew/.bun/bin:/home/linuxbrew/.linuxbrew/bin HOME=/tmp/opencode/a12/f4-home OMNI_CLI_BIN=/tmp/opencode/a12/f4-end-omni CLI_CONFORMANCE_ALLOW_OMNI=OMNI_CLI_BIN python3 /tmp/opencode/a12/f4-end-suites/neighbors.py: 0
+env -i PATH=/usr/sbin:/usr/bin:/bin:/home/homebrew/.bun/bin:/home/linuxbrew/.linuxbrew/bin HOME=/tmp/opencode/a12/f4-home OMNI_CLI_BIN=/tmp/opencode/a12/f4-end-omni CLI_CONFORMANCE_ALLOW_OMNI=OMNI_CLI_BIN python3 /tmp/opencode/a12/f4-end-suites/neighbors-targeted.py: 0
+env -i PATH=/usr/sbin:/usr/bin:/bin:/home/homebrew/.bun/bin:/home/linuxbrew/.linuxbrew/bin HOME=/tmp/opencode/a12/f4-home OMNI_CLI_BIN=/tmp/opencode/a12/f4-end-omni CLI_CONFORMANCE_ALLOW_OMNI=OMNI_CLI_BIN python3 /tmp/opencode/a12/f4-end-suites/wide.py: 0
+env -i PATH=/usr/sbin:/usr/bin:/bin:/home/homebrew/.bun/bin:/home/linuxbrew/.linuxbrew/bin HOME=/tmp/opencode/a12/f4-home OMNI_CLI_BIN=/tmp/opencode/a12/f4-end-omni CLI_CONFORMANCE_ALLOW_OMNI=OMNI_CLI_BIN python3 /tmp/opencode/a12/f4-end-suites/extra.py: 0
+env -i PATH=/usr/sbin:/usr/bin:/bin:/home/homebrew/.bun/bin:/home/linuxbrew/.linuxbrew/bin HOME=/tmp/opencode/a12/f4-home OMNI_CLI_BIN=/tmp/opencode/a12/f4-end-omni CLI_CONFORMANCE_ALLOW_OMNI=OMNI_CLI_BIN python3 /tmp/opencode/a12/f4-end-suites/quota-json.py: 0
+env -i PATH=/usr/bin:/bin OMNI_TS_BIN=/tmp/opencode/a8/ts OMNI_GATEWAY_BIN=/tmp/opencode/a12/f4-end-gateway python3 conformance/e2e/x3-operator.py: 0
+env -i PATH=/usr/sbin:/usr/bin:/bin:/home/homebrew/.bun/bin:/home/linuxbrew/.linuxbrew/bin HOME=/tmp/opencode/a12/f4-home bun --no-env-file conformance/e2e/run.ts --ts /tmp/opencode/a8/ts --rust /tmp/opencode/a12/f4-end-gateway: 0
+bun --no-env-file conformance/e2e/models-dry-run.ts --ts /tmp/opencode/a8/ts --rust /tmp/opencode/a12/f4-end-gateway --out /tmp/opencode/a12/f4-end-http: 0
+OMNI_CLI_BIN=/tmp/opencode/a12/f4-end-omni python3 conformance/cli/models-dry-run.py: 0
+cargo build --offline -p omni-gateway: 0
+cargo build --offline -p omni-cli (ALONE): 0
+```
+
+Gate summaries (full logs and per-driver rows retained):
+```text
+stored-cells: evidence /tmp/opencode/a12/f4-end-suites/c-cells-yzj7t_s7 | pairs 1045 equal 1045 different 0 | EXIT HISTOGRAM stored-cells {"exit 0": 734, "exit 1": 256, "exit 2": 55}
+neighbors: evidence /tmp/opencode/a12/f4-end-suites/neighbors-wfueywjn pairs 3806 failing 0 excluded {'random-create': 2, 'unimplemented-credentials': 4} | EXIT HISTOGRAM neighbors {"exit 0": 2778, "exit 1": 1026, "exit 2": 2}
+neighbors-targeted: {"sql": "UPDATE virtual_models SET targets='[null]'", "args": ["models", "put", "v", "-f", "/tmp/opencode/a12/f4-end-suites/neighbors-55wui84z/fixture/model.json"], "ts": {"code": 1, "out": "", "err": "6e756c6c206973206e6f7420616e206f626a65637420286576616c756174696e6720277461726765742e70726f766964657227290a", "unchanged": true}, "rust": {"code": 1, "out": "", "err": "6e756c6c206973206e6f7420616e206f626a65637420286576616c756174696e6720277461726765742e70726f766964657227290a", "unchanged": true}} | {"sql": "UPDATE virtual_models SET id=1", "args": ["models", "rm", "1", "--yes"], "ts": {"code": 1, "out": "", "err": "4d4f44454c5f554e415641494c41424c453a206e6f207669727475616c206d6f64656c202231220a", "unchanged": true}, "rust": {"code": 1, "out": "", "err": "4d4f44454c5f554e415641494c41424c453a206e6f207669727475616c206d6f64656c202231220a", "unchanged": true}}
+wide: evidence /tmp/opencode/a12/f4-end-suites/wide-49j0rir1 pairs 4236 failing 0 | EXIT HISTOGRAM wide {"exit 1": 1202, "exit 0": 3034}
+extra: evidence /tmp/opencode/a12/f4-end-suites/extra-_b940edh pairs 180 failing 0 | EXIT HISTOGRAM extra {"exit 0": 98, "exit 1": 82}
+quota-json: evidence /tmp/opencode/a12/f4-end-suites/r6-quota-hqboegfy pairs 196 classes {'equal': 151, 'human-quota': 45} failing 0 | EXIT HISTOGRAM quota-json {"exit 0": 196}
+x3-retry: evidence /tmp/opencode/x3/operator-4tu71yu6 | {"pairs": 4106, "equal": 3997, "accepted": {"routing-strict": 94, "v1-models-frozen-json": 15}, "unexpected": 0}
+run:  | all rows equal
+http: {"rows":813,"accepted":2,"failures":0,"work":"/tmp/opencode/a12/f4-end-http/run-OQLz1B"}
+cli: {"cases": 348, "accepted": 2, "failures": 0, "work": "/tmp/opencode/a12/f4-cli/tmpzgim9e7f"}
+build:    Compiling omni-gateway v0.16.0 (/home/homebrew/.local/share/opencode/worktree/1600a1/rust-cli/crates/omni-gateway) |     Finished `dev` profile [unoptimized] target(s) in 9.60s
+cli-build:    Compiling omni-cli v0.16.0 (/home/homebrew/.local/share/opencode/worktree/1600a1/rust-cli/crates/omni-cli) |     Finished `dev` profile [unoptimized] target(s) in 3.61s
+```
+
+Review classification (`f4-end-classify.log/.exit`): {"drivers": [{"driver": "overflow", "rows": 2, "differences": 0}, {"driver": "new", "rows": 7, "differences": 0}, {"driver": "cli-overflow", "rows": 4, "differences": 0, "classification": "none"}, {"driver": "cli-new", "rows": 20, "differences": 4, "classification": "pre-existing settings normalization"}, {"driver": "cli-extra", "rows": 6, "differences": 0, "classification": "none"}], "settings": 4, "manifest": 0, "plugin": 0, "unexpected": 0}
+No plugin or manifest differences in the five round-3 drivers; only the four pre-existing settings differences remain. Live extreme-cost logging remains separately tracked, not repaired or claimed passing here. No other observed discrepancy in executed corpora.
+
+### f4 authoritative completion
+
+Standalone unchanged COMMITTED X3 retry completed successfully at final HEAD `36345641114bfdd1cb80f4a5b8268a8b2d55ce37`: 4,106 pairs / 3,997 equal / 109 pre-existing accepted / zero unexpected. Results and summary copied to `f4-end-x3-results.json` and `f4-end-x3-summary.json`; original isolated scratch `/tmp/opencode/x3/operator-4tu71yu6`. This is the authoritative X3 gate; the interrupted run was controller-caused cleanup, not a product/driver defect.
+```text
+env -i PATH=/usr/bin:/bin OMNI_TS_BIN=/tmp/opencode/a8/ts OMNI_GATEWAY_BIN=/tmp/opencode/a12/f4-end-gateway python3 conformance/e2e/x3-operator.py: 0
+python3 /tmp/opencode/a12/f4-end-finish.py: 0
+```
+All requested final-head gates now complete. Workspace 1,351 passed; three named flaky tests passed first attempt. Six CLI suites and run.ts pass. HTTP 813 / 2 accepted / 0 unexpected; CLI 348 / 2 accepted / 0 unexpected. Reviewer drivers: only four explicitly out-of-scope pre-existing settings differences, no other differences. Final binaries SHA256 reverified unchanged. Clean worktree. All earlier pending checkpoints superseded. Ready for the same reviewer to re-review.
