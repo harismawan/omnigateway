@@ -16,7 +16,7 @@ Done so far: slice 1 gateway (custom provider, /v1/*, /health, writer, limiter, 
 - [ ] A9 (L) /api/stream WebSocket + console live view
 - [ ] A10 (M) database routes, quiesce latch, lifecycle restart/shutdown
 - [x] A11 (S) maintenance loop (pruning, heartbeat) — merged 669984ca, approved after 3 review rounds (a11-review3.md); post-merge gates green
-- [ ] A12 (S) models dry-run (API + CLI)
+- [x] A12 (S) models dry-run (API + CLI) — merged bc00f2a3, approved after 4 review rounds (a12-review4.md); user ruling "fix crashes only" + class `dry-run-malformed-render` (conformance/e2e/models-dry-run-accepted.json); post-merge gates green
 - [ ] A13 (M) OTLP export
 - [x] A14 (S) outbound idle timeout (Bun idleTimeout 255 s parity incl. inference exemption, completed-exempt keep-alive, 10 s initial headers, inbound throughput rule) — merged f9950f56, approved after 3 review rounds (a14-review3.md); post-merge gates green
 - [x] A15 (S) /api/connect/* routes (start, finish, poll) over the B1 provider functions — merged 78e322c2, approved after 5 review rounds (a15-review5.md); connect publishes via full snapshot rebuild before ack (user ruling A); post-merge gates green
