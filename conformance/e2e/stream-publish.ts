@@ -76,7 +76,7 @@ try {
   }, 5000);
   await check("credential patch", "res:credentials", x => x.api(`/api/credentials/${ids.get(x)}`, { enabled: false }, "PATCH"), 5000);
   await check("credential delete", "res:credentials", x => x.api(`/api/credentials/${ids.get(x)}`, {}, "DELETE"), 5000);
-  await check("model put", "res:models", x => x.api("/api/models/stream", { routes: [] }, "PUT"), 1000);
+  await check("model put", "res:models", x => x.api("/api/models/stream", { id: "stream", strategy: "score", isAlias: false, targets: [{ provider: "anthropic", model: "claude-x", tier: 1, weight: 1, costPerMTok: { input: 1, output: 2 }, capabilities: { tools: true, images: false, reasoning: true } }] }, "PUT"), 1000);
   await check("model delete", "res:models", x => x.api("/api/models/stream", {}, "DELETE"), 1000);
   await check("key create", "res:keys", async x => { x.key = (await x.api("/api/keys", { label: "mutation" })).data; }, 1000);
   for (const [edit, body] of [["limits", { limits: {} }], ["models", { modelAllowlist: null }], ["expiry", { expiresAt: null }], ["guardrail", { policy: null }], ["smart-routing", { enabled: false }]] as const) {
@@ -84,7 +84,7 @@ try {
   }
   await check("key delete", "res:keys", x => x.api(`/api/keys/${x.key.id}`, {}, "DELETE"), 1000);
   // Removing viewers would close their session on the next heartbeat; keep it last.
-  await check("settings put", "res:settings", x => x.api("/api/settings", { maxAttempts: 3 }, "PUT"), 1000);
+  await check("settings put", "res:settings", x => x.api("/api/settings", { weights: { tier: 1, health: 2, quota: 3, cost: 4, latency: 5, load: 6 }, maxAttempts: 3, requestDeadlineMs: 0, breakerThreshold: 3, breakerCooldownMs: 30000, logRetentionDays: 30, quotaPollIntervalMs: 0, rtkEnabled: false, autoCacheEnabled: true, ponytailMode: "off", bodyLoggingEnabled: false, bodyLoggingCaptureStreamChunks: false }, "PUT"), 1000);
   await check("viewer password", "res:settings", x => x.api("/api/settings/viewer-password", { password: "stream-viewer-new-password" }, "PUT"), 1000);
   writeFileSync(`${work}/frames.json`, JSON.stringify(transcript, null, 2));
   console.log("14 paired admin resource publishers; admin/viewer exact frames; client denied; no generated-field normalization");
