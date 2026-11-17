@@ -16,6 +16,10 @@ use tokio::{
     time::{Duration, Instant},
 };
 
+/// Frozen's empty version rejection is delimited by connection close, not CL.
+#[derive(Clone)]
+pub(crate) struct OmitZeroLength;
+
 pub struct Hub {
     state: Arc<Mutex<State>>,
     shutdown: watch::Sender<bool>,
@@ -191,6 +195,29 @@ fn deliver(state: &mut State, topic: &str, payload: Value, seq: Option<f64>) {
     }
 }
 
+// Bun's 16 MiB backpressureLimit has closeOnBackpressureLimit=false.
+// Stop feeding at the registry's lower 512 KiB watermark; never close on it.
+fn drain(
+    entry: &mut Entry,
+    buffered: &std::sync::atomic::AtomicUsize,
+    tx: &tokio::sync::mpsc::Sender<(Vec<u8>, usize)>,
+) {
+    use std::sync::atomic::Ordering::Relaxed;
+    while buffered.load(Relaxed) < 512 * 1024 {
+        let Some(wire) = entry.queue.pop_front() else {
+            break;
+        };
+        let bytes = stream_codec::encode(1, wire.as_bytes());
+        let len = bytes.len();
+        buffered.fetch_add(len, Relaxed);
+        if tx.try_send((bytes, len)).is_err() {
+            buffered.fetch_sub(len, Relaxed);
+            entry.queue.push_front(wire);
+            break;
+        }
+    }
+}
+
 // Elysia only JSON-parses a text message whose first character is one of
 // these prefixes. Leading whitespace is not stripped by its ws adapter.
 fn parse_text(text: &str) -> Value {
@@ -200,6 +227,29 @@ fn parse_text(text: &str) -> Value {
         Value::Null
     }
 }
+
+fn upgrade_principal(
+    result: Result<Option<crate::admin_auth::Principal>, crate::admin_auth::AuthError>,
+) -> Result<crate::admin_auth::Principal, Response<Body>> {
+    use omni_ir::error::ErrorCode;
+    match result {
+        Ok(Some(p)) => Ok(p),
+        Ok(None) => Err(crate::api::error_response(
+            ErrorCode::Auth,
+            "a session is required",
+        )),
+        Err(_) => Err(crate::api::error_response(
+            ErrorCode::Internal,
+            "internal error",
+        )),
+    }
+}
+
+type Revalidate = Arc<
+    dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>
+        + Send
+        + Sync,
+>;
 
 pub async fn route(app: Arc<App>, mut req: Request<Incoming>) -> Response<Body> {
     use omni_ir::error::ErrorCode;
@@ -225,10 +275,9 @@ pub async fn route(app: Arc<App>, mut req: Request<Incoming>) -> Response<Body> 
         Some(token) => app.admin.verify(token).await,
         None => Ok(None),
     };
-    let principal = match principal {
-        Ok(Some(p)) => p,
-        Ok(None) => return crate::api::error_response(ErrorCode::Auth, "a session is required"),
-        Err(_) => return crate::api::error_response(ErrorCode::Internal, "internal error"),
+    let principal = match upgrade_principal(principal) {
+        Ok(p) => p,
+        Err(response) => return response,
     };
     let key = req
         .headers()
@@ -259,6 +308,7 @@ pub async fn route(app: Arc<App>, mut req: Request<Incoming>) -> Response<Body> 
             .body(crate::server::full(""))
             .expect("bad version");
         response.extensions_mut().insert(crate::api::NoDate);
+        response.extensions_mut().insert(OmitZeroLength);
         return response;
     }
     let accept = stream_codec::accept(key);
@@ -273,8 +323,14 @@ pub async fn route(app: Arc<App>, mut req: Request<Incoming>) -> Response<Body> 
     let upgrade = hyper::upgrade::on(&mut req);
     tokio::spawn(async move {
         if let Ok(io) = upgrade.await {
+            let auth = app.clone();
+            let verify: Revalidate = Arc::new(move |token| {
+                let auth = auth.clone();
+                Box::pin(async move { !matches!(auth.admin.verify(&token).await, Ok(None)) })
+            });
             run(
-                app,
+                &app.stream,
+                verify,
                 hyper_util::rt::TokioIo::new(io),
                 principal.kind().as_str(),
                 cookie.expect("verified cookie"),
@@ -296,12 +352,12 @@ pub async fn route(app: Arc<App>, mut req: Request<Incoming>) -> Response<Body> 
 }
 
 async fn run(
-    app: Arc<App>,
-    io: hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>,
+    hub: &Hub,
+    verify: Revalidate,
+    io: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     kind: &str,
     token: String,
 ) {
-    let hub = &app.stream;
     let notify = Arc::new(Notify::new());
     let id = {
         let mut s = hub.state.lock().expect("stream state");
@@ -357,11 +413,11 @@ async fn run(
                 if last_pong.elapsed().as_millis()>60_000 {close=Some((1001,"pong deadline"));break;}
                 if tx.try_send((stream_codec::encode(9,b""),0)).is_err(){close=Some((1001,"ping failed"));break;}
                 if validation.is_some() && validation_started.elapsed()>=Duration::from_secs(60) { validation.take().expect("validation").abort(); }
-                if validation.is_none(){ let auth=app.clone(); let token=token.clone(); validation_started=Instant::now(); validation=Some(tokio::spawn(async move{ !matches!(auth.admin.verify(&token).await,Ok(None)) })); }
+                if validation.is_none(){ let verify=verify.clone(); let token=token.clone(); validation_started=Instant::now(); validation=Some(tokio::spawn(async move{ verify(token).await })); }
             }
             _=notify.notified()=>{
                 let mut state=hub.state.lock().expect("stream state");
-                if let Some(e)=state.sockets.get_mut(&id) { while buffered.load(std::sync::atomic::Ordering::Relaxed)<512*1024 { let Some(wire)=e.queue.pop_front() else {break;};let bytes=stream_codec::encode(1,wire.as_bytes());let len=bytes.len();buffered.fetch_add(len,std::sync::atomic::Ordering::Relaxed);if tx.try_send((bytes,len)).is_err(){buffered.fetch_sub(len,std::sync::atomic::Ordering::Relaxed);e.queue.push_front(wire); break;}} }
+                if let Some(e)=state.sockets.get_mut(&id) { drain(e, &buffered, &tx); }
             }
             read=reader.read(&mut buf)=>{
                 let Ok(n)=read else {break;}; if n==0 {break;}
@@ -417,6 +473,94 @@ mod tests {
             },
         );
         hub
+    }
+    #[tokio::test(start_paused = true)]
+    async fn expired_session_upgrade_and_next_shared_heartbeat() {
+        use crate::admin_auth::{AdminAuth, Clock, MemoryKv, SessionKv};
+        use std::sync::atomic::{AtomicI64, Ordering::SeqCst};
+        let dir = tempfile::tempdir().unwrap();
+        let store = omni_store::SqliteStore::open(dir.path().join("auth.db"), 0).unwrap();
+        let now = Arc::new(AtomicI64::new(1000));
+        let clock: Clock = {
+            let now = now.clone();
+            Arc::new(move || now.load(SeqCst))
+        };
+        let kv = Arc::new(MemoryKv::new(clock.clone()));
+        let auth = Arc::new(AdminAuth::new(store, kv.clone(), clock, 100));
+        let key = omni_crypto::session::key("admin", "short");
+        kv.set(
+            &key,
+            "{\"expiresAt\":1100,\"principal\":{\"kind\":\"admin\"}}",
+            100,
+        )
+        .await
+        .unwrap();
+        assert!(upgrade_principal(auth.verify("short").await).is_ok());
+        let hub = Arc::new(Hub::default());
+        tokio::time::advance(Duration::from_secs(7)).await;
+        let (io, mut peer) = tokio::io::duplex(4096);
+        let verify: Revalidate = {
+            let auth = auth.clone();
+            Arc::new(move |token| {
+                let auth = auth.clone();
+                Box::pin(async move { !matches!(auth.verify(&token).await, Ok(None)) })
+            })
+        };
+        let h = hub.clone();
+        let task = tokio::spawn(async move { run(&h, verify, io, "admin", "short".into()).await });
+        tokio::task::yield_now().await;
+        now.store(1100, SeqCst);
+        let rejected = upgrade_principal(auth.verify("short").await).err().unwrap();
+        assert_eq!(rejected.status(), 401);
+        assert!(kv.is_empty());
+        tokio::time::advance(Duration::from_secs(12)).await;
+        tokio::task::yield_now().await;
+        assert!(!task.is_finished());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let mut bytes = Vec::new();
+        peer.read_to_end(&mut bytes).await.unwrap();
+        task.await.unwrap();
+        assert_eq!(&bytes[..4], &[0x89, 0, 0x88, 17]);
+        assert_eq!(&bytes[4..6], &4401_u16.to_be_bytes());
+        assert_eq!(&bytes[6..], b"session expired");
+        assert_eq!(hub.stats().0, 0);
+    }
+
+    #[tokio::test]
+    async fn slow_queue_drops_oldest_counts_and_resumes_without_close() {
+        use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+        let hub = hub();
+        hub.declare("stream:test");
+        hub.message(
+            1,
+            "admin",
+            json!({"type":"subscribe","topic":"stream:test"}),
+        );
+        for n in 1..=1100 {
+            hub.publish("stream:test", json!(n), None);
+        }
+        assert_eq!(hub.stats(), (1, 1000, 100));
+        let buffered = AtomicUsize::new(16 * 1024 * 1024);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let mut state = hub.state.lock().unwrap();
+        let entry = state.sockets.get_mut(&1).unwrap();
+        drain(entry, &buffered, &tx);
+        assert_eq!(entry.queue.len(), 1000);
+        for seq in 101..=1100 {
+            buffered.store(0, Relaxed);
+            drain(entry, &buffered, &tx);
+            let (bytes, _) = rx.try_recv().unwrap();
+            assert_eq!(bytes[0], 0x81);
+            let offset = if bytes[1] == 126 { 4 } else { 2 };
+            assert_eq!(
+                serde_json::from_slice::<Value>(&bytes[offset..]).unwrap()["seq"],
+                seq
+            );
+        }
+        assert!(entry.queue.is_empty());
+        assert_eq!(state.dropped, 100);
+        assert_eq!(state.sockets.len(), 1);
+        assert!(!*hub.shutdown.borrow());
     }
     #[test]
     fn messages_replay_and_caps() {

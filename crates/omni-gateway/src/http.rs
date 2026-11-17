@@ -17,12 +17,16 @@ struct Clock {
     request_changed: tokio::sync::Notify,
     received: AtomicU64,
     routed: AtomicBool,
+    omit_zero_length: AtomicBool,
 }
 
 #[derive(Clone)]
 pub(crate) struct Activity(Arc<Clock>);
 
 impl Activity {
+    pub(crate) fn omit_zero_length(&self) {
+        self.0.omit_zero_length.store(true, Relaxed);
+    }
     fn touch(&self) {
         self.0.last.store(
             u64::try_from(self.0.origin.elapsed().as_nanos()).unwrap_or(u64::MAX),
@@ -82,6 +86,7 @@ impl<T> IdleIo<T> {
             request_changed: tokio::sync::Notify::new(),
             received: AtomicU64::new(0),
             routed: AtomicBool::new(false),
+            omit_zero_length: AtomicBool::new(false),
         }));
         (
             Self {
@@ -126,6 +131,26 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for IdleIo<T> {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
+        // Hyper synthesizes CL:0 even for a close-delimited empty rejection.
+        // Its encoded head is contiguous. Only the frozen WebSocket version
+        // rejection opts in; preserve partial-write accounting around the line.
+        if self.activity.0.omit_zero_length.load(Relaxed) {
+            const LINE: &[u8] = b"content-length: 0\r\n";
+            if let Some(at) = buf.windows(LINE.len()).position(|w| w == LINE) {
+                if at == 0 {
+                    self.activity.0.omit_zero_length.store(false, Relaxed);
+                    return Poll::Ready(Ok(LINE.len()));
+                }
+                return match Pin::new(&mut self.inner).poll_write(cx, &buf[..at]) {
+                    Poll::Ready(Ok(n)) if n == at => {
+                        self.activity.touch();
+                        self.activity.0.omit_zero_length.store(false, Relaxed);
+                        Poll::Ready(Ok(n + LINE.len()))
+                    }
+                    result => result,
+                };
+            }
+        }
         let result = Pin::new(&mut self.inner).poll_write(cx, buf);
         if matches!(result, Poll::Ready(Ok(n)) if n > 0) {
             self.activity.touch();
@@ -138,6 +163,12 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for IdleIo<T> {
         cx: &mut Context<'_>,
         bufs: &[IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
+        if self.activity.0.omit_zero_length.load(Relaxed) {
+            return match bufs.iter().find(|b| !b.is_empty()) {
+                Some(buf) => self.poll_write(cx, buf),
+                None => Poll::Ready(Ok(0)),
+            };
+        }
         let result = Pin::new(&mut self.inner).poll_write_vectored(cx, bufs);
         if matches!(result, Poll::Ready(Ok(n)) if n > 0) {
             self.activity.touch();
@@ -163,6 +194,32 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for IdleIo<T> {
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn version_rejection_omits_only_zero_length_across_partial_vectored_writes() {
+        let (sock, mut peer) = tokio::io::duplex(3);
+        let (mut io, activity) = IdleIo::new(sock, Duration::ZERO);
+        activity.omit_zero_length();
+        let write = tokio::spawn(async move {
+            io.write_all(b"HTTP/1.1 426 Upgrade Required\r\nconnection: close\r\n")
+                .await
+                .unwrap();
+            let line = b"content-length: 0\r\n\r\n";
+            let n = io
+                .write_vectored(&[IoSlice::new(b""), IoSlice::new(line)])
+                .await
+                .unwrap();
+            io.write_all(&line[n..]).await.unwrap();
+            io.shutdown().await.unwrap();
+        });
+        let mut bytes = Vec::new();
+        peer.read_to_end(&mut bytes).await.unwrap();
+        write.await.unwrap();
+        assert_eq!(
+            bytes,
+            b"HTTP/1.1 426 Upgrade Required\r\nconnection: close\r\n\r\n"
+        );
+    }
 
     #[test]
     fn normalized_inference_exemptions() {

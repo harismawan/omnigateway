@@ -80,18 +80,15 @@ try {
   if(reference) {
     for(const name of [...names,"revoked"]) {
       const canonical=(b:Buffer)=>{
-        if(mode==="raw") return b.toString("latin1").replace(/(^|\r\n)([Dd]ate: )[^\r]+/g,"$1$2<date>");
         const at=b.indexOf("\r\n\r\n");if(at<0)throw Error("missing response head");
         const lines=b.subarray(0,at).toString("latin1").split("\r\n");
         // HTTP header names are case insensitive. Keep and disclose raw evidence.
-        const head=lines.slice(1).map(s=>s.replace(/^([^:]+):/,(a,n)=>n.toLowerCase()+":")).filter(s=>!s.startsWith("date:")).sort();
-        // Hyper emits CL:0 on Bun's header-only version rejection.
-        if(name==="bad-version") {const i=head.indexOf("content-length: 0");if(i>=0)head.splice(i,1);}
+        const head=lines.slice(1).map(s=>s.replace(/^([^:]+):/,(a,n)=>n.toLowerCase()+":")).map(s=>s.startsWith("date:")?"date: <date>":s).sort();
         return [lines[0],head,b.subarray(at+4).toString("hex")];
       };
       const a=canonical(readFileSync(`${reference}/${name}.raw`)), b=canonical(readFileSync(`${work}/${name}.raw`));
       if(JSON.stringify(a)!==JSON.stringify(b))throw Error(`${name}: ${JSON.stringify(a)} != ${JSON.stringify(b)}`);
     }
-    console.log(`${names.length+1} paired status/header/body/frame comparisons pass; raw header casing and bad-version CL:0 deviations retained`);
+    console.log(`${names.length+1} paired exact status/header-multiset/body/frame comparisons pass (header names lowercase; Date value masked)`);
   }
 } finally { p.kill("SIGTERM"); await p.exited; }
