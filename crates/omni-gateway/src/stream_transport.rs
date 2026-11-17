@@ -37,6 +37,7 @@ struct State {
     ring: Ring,
     declared: HashSet<String>,
     invalidations: HashMap<String, Option<Value>>,
+    dropped: u64,
 }
 struct Entry {
     topics: HashSet<String>,
@@ -45,6 +46,14 @@ struct Entry {
 }
 
 impl Hub {
+    pub fn stats(&self) -> (usize, usize, u64) {
+        let state = self.state.lock().expect("stream state");
+        (
+            state.sockets.len(),
+            state.sockets.values().map(|entry| entry.queue.len()).sum(),
+            state.dropped,
+        )
+    }
     /// Leading/trailing latest-value invalidation. No inference hook is installed here.
     pub fn invalidate(&self, topic: &str, keys: Option<Value>) {
         let payload = keys.map_or(Value::Null, |keys| json!({"keys":keys}));
@@ -175,6 +184,7 @@ fn deliver(state: &mut State, topic: &str, payload: Value, seq: Option<f64>) {
     {
         if entry.queue.len() == 1000 {
             entry.queue.pop_front();
+            state.dropped += 1;
         }
         entry.queue.push_back(wire.clone());
         entry.notify.notify_one();

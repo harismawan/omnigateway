@@ -18,9 +18,12 @@ import time
 binary, root, output = sys.argv[1:4]
 idle = len(sys.argv) > 4 and sys.argv[4] == "idle"
 phase = len(sys.argv) > 4 and sys.argv[4] == "phase"
+closed = len(sys.argv) > 4 and sys.argv[4] == "closed"
 env = dict(os.environ, OMNI_ROOT=root, OMNI_DB_PATH=root + "/omni.db",
            OMNI_ENCRYPTION_KEY="stream-test-encryption-key-0123456789",
-           OMNI_HOST="127.0.0.1", OMNI_PORT="18772", OMNI_LOG_LEVEL="warn")
+           OMNI_HOST="127.0.0.1", OMNI_PORT="18772",
+           OMNI_METRICS_TOKEN="stream-metrics-test",
+           OMNI_LOG_LEVEL="debug" if closed else "warn")
 log = open(output + ".stderr", "wb")
 p = subprocess.Popen([binary], cwd=root, env=env, stdout=log, stderr=log)
 
@@ -74,6 +77,40 @@ try:
             time.sleep(.025)
     else:
         raise RuntimeError("gateway not ready")
+    if closed:
+        def connections():
+            c = http.client.HTTPConnection("127.0.0.1", 18772, timeout=5)
+            c.request("GET", "/metrics", headers={"authorization": "Bearer stream-metrics-test"})
+            r = c.getresponse()
+            assert r.status == 200, r.status
+            text = r.read().decode()
+            c.close()
+            return next(float(line.split()[-1]) for line in text.splitlines()
+                        if line.startswith("omni_stream_connections "))
+
+        baseline = connections()
+        sockets = [opened(cookie) for _ in range(300)]
+        time.sleep(.1)
+        while_open = connections()
+        assert while_open == baseline + 300, (baseline, while_open)
+        for s in sockets:
+            # Normal client close: 1000, empty reason, masked.
+            s.sendall(b"\x88\x82\0\0\0\0\x03\xe8")
+            assert frame(s) == (8, b"\x03\xe8")
+            s.close()
+        time.sleep(.1)
+        after_close = connections()
+        assert after_close == baseline, (baseline, while_open, after_close)
+        s = opened(cookie)
+        s.close()
+        time.sleep(.1)
+        after_eof = connections()
+        assert after_eof == baseline, (baseline, after_eof)
+        Path(output).write_text(json.dumps({"baseline": baseline, "whileOpen": while_open,
+                                           "afterClose": after_close, "afterEof": after_eof,
+                                           "concurrentUpgrades": 300}))
+        print("PASS client close / EOF cleanup / no 256-connection cap", output)
+        sys.exit(0)
     if phase:
         # A socket opened halfway through a registry tick must share the first
         # socket's ping/validation phase, not wait its own full 20 seconds.

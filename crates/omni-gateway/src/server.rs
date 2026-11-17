@@ -623,7 +623,10 @@ fn metrics(app: &App, req: &Request<Incoming>) -> Response<Body> {
         *res.status_mut() = StatusCode::UNAUTHORIZED;
         return res;
     }
-    let text = app.deps.telemetry.scrape(&app.deps.load.provider_counts());
+    let text = app
+        .deps
+        .telemetry
+        .scrape_with_streams(&app.deps.load.provider_counts(), app.stream.stats());
     let mut res = Response::new(full(text));
     res.headers_mut().insert(
         "content-type",
