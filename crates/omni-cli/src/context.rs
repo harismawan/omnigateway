@@ -113,6 +113,12 @@ pub fn resolve(flags: &HashMap<String, String>) -> Result<Context, String> {
 }
 
 impl Context {
+    pub fn encryption_key(&self) -> Result<String, String> {
+        self.config
+            .as_ref()
+            .map(|c| c.encryption_key.clone())
+            .map_err(|e| e.to_string())
+    }
     pub fn base_url(&self) -> Result<String, String> {
         self.config
             .as_ref()

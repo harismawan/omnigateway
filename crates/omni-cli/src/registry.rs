@@ -354,7 +354,7 @@ pub fn implemented(name: &str) -> Option<String> {
     if let Some(key) = name.strip_prefix("keys ") {
         return Some(key.into());
     }
-    if name.starts_with("settings ") || (name.starts_with("models ") && name != "models dry-run") {
+    if name.starts_with("settings ") || name.starts_with("models ") {
         return Some(name.replace(' ', "-"));
     }
     None

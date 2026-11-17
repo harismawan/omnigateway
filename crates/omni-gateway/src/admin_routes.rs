@@ -197,6 +197,7 @@ pub enum Admin {
     RemoveCredential(Option<String>),
     CredentialHealth,
     ListModels,
+    DryRun(Option<String>),
     PutModel(Option<String>),
     RemoveModel(Option<String>),
     Catalog,
@@ -257,6 +258,11 @@ pub fn route(method: &hyper::Method, path: &str) -> Option<Admin> {
         return param(id).map(Admin::RequestBody);
     }
     if let Some(rest) = path.strip_prefix("/api/models/") {
+        if *method == M::POST
+            && let Some(id) = rest.strip_suffix("/dry-run")
+        {
+            return param(id).map(Admin::DryRun);
+        }
         let id = param(rest)?;
         return match *method {
             M::PUT => Some(Admin::PutModel(id)),
@@ -405,6 +411,28 @@ pub async fn serve(
         Admin::ListCredentials => {
             require_reader(req.headers(), &app.admin).await?;
             Ok(json_ok(control.run(omni_control::credentials::list).await?))
+        }
+        Admin::DryRun(id) => {
+            require_admin(req.headers(), &app.admin).await?;
+            let body = read_json(req, app.idle_timeout).await?;
+            let key = app.credential_key.clone();
+            let providers = app.deps.providers.clone();
+            Ok(json_ok(
+                control
+                    .run(move |s| {
+                        #[allow(clippy::cast_precision_loss)]
+                        let result = omni_control::dry_run::run(
+                            s,
+                            &key,
+                            id.as_deref().unwrap_or("null"),
+                            &body,
+                            now as f64,
+                            &providers,
+                        )?;
+                        Ok(omni_ir::jsjson::stringify(&result).unwrap_or_default())
+                    })
+                    .await?,
+            ))
         }
         Admin::CredentialHealth => {
             require_reader(req.headers(), &app.admin).await?;
