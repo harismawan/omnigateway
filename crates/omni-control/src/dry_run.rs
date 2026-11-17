@@ -9,6 +9,27 @@ use omni_router::{Providers, RankInput, Snapshot, rank};
 use omni_store::SqliteStore;
 use serde_json::json;
 
+pub fn cli(
+    store: &SqliteStore,
+    secret: &str,
+    id: &str,
+    input: &JsValue,
+    now: f64,
+) -> Result<JsValue, String> {
+    run(
+        store,
+        &omni_crypto::field::derive_key(secret),
+        id,
+        input,
+        now,
+        &Providers::builtin(),
+    )
+    .map_err(|e| match e.code {
+        Some(code) => format!("{code}: {}", e.message),
+        None => e.message,
+    })
+}
+
 pub fn run(
     store: &SqliteStore,
     key: &omni_crypto::field::FieldKey,

@@ -162,6 +162,8 @@ pub fn parse_command(args: &[String], command: &str) -> Result<ParsedCommand, St
                 || ((command.starts_with("setup-") || command == "db-restore")
                     && name == "dry-run")
                 || (command == "models-put" && name == "alias")
+                || (command == "models-dry-run"
+                    && matches!(name, "tools" | "images" | "reasoning"))
                 || (command == "create" && matches!(name, "smart-routing" | "no-bodies"))
                 || (command == "expiry" && name == "never")
                 || (command == "models" && matches!(name, "all" | "none"))
