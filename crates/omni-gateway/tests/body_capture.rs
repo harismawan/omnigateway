@@ -5,6 +5,33 @@ use std::io::Write as _;
 use std::process::{Command, Stdio};
 
 #[test]
+fn client_capture_frames_exclude_sse_record_delimiters() {
+    let fixture = common::fixture(&["c0"]);
+    let mut capture = omni_gateway::body_capture::CaptureCompletion {
+        collector: Collector::new(true),
+        sink: FrameSink::default(),
+        store: std::sync::Arc::new(omni_store::Store::Sqlite {
+            store: std::sync::Arc::new(std::sync::Mutex::new(
+                omni_store::SqliteStore::open(&fixture.path, 0).unwrap(),
+            )),
+            path: fixture.path.clone(),
+            day_offset_minutes: 0,
+        }),
+        key: common::key(),
+    };
+    capture.frame("event: message\ndata: first\n\nevent: message\ndata: second\n\n");
+    assert_eq!(
+        capture.sink.frames,
+        [
+            "event: message\ndata: first",
+            "event: message\ndata: second"
+        ]
+    );
+}
+
+mod common;
+
+#[test]
 fn attempts_record_wire_order_throw_and_buffered_response() {
     let c = Collector::new(true);
     c.request(parse_js(r#"{"original":"\ud800"}"#).unwrap());

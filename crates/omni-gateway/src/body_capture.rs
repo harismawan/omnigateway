@@ -14,7 +14,8 @@ pub struct CaptureCompletion {
 
 impl CaptureCompletion {
     pub fn frame(&mut self, frame: &str) {
-        for frame in frame.split_inclusive("\n\n") {
+        // Frozen sseResponse calls onFrame before appending the wire delimiter.
+        for frame in frame.split("\n\n") {
             if !frame.is_empty() {
                 self.sink.write(frame);
             }
