@@ -8,7 +8,10 @@ use hyper::{Request, Response, body::Incoming};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering::Relaxed},
+    },
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -17,6 +20,7 @@ use tokio::{
 };
 
 pub struct Hub {
+    subscribers: [AtomicUsize; RESOURCE_TOPICS.len()],
     state: Arc<Mutex<State>>,
     shutdown: watch::Sender<bool>,
     heartbeat_epoch: Instant,
@@ -24,11 +28,28 @@ pub struct Hub {
 impl Default for Hub {
     fn default() -> Self {
         Self {
+            subscribers: std::array::from_fn(|_| AtomicUsize::new(0)),
             state: Arc::default(),
             shutdown: watch::channel(false).0,
             heartbeat_epoch: Instant::now(),
         }
     }
+}
+// All resource publisher topics; arbitrary extension topics retain normal delivery.
+const RESOURCE_TOPICS: [&str; 8] = [
+    "res:credentials",
+    "res:quota",
+    "res:models",
+    "res:keys",
+    "res:settings",
+    "res:usage",
+    "res:logs",
+    "res:*",
+];
+fn resource_index(topic: &str) -> Option<usize> {
+    RESOURCE_TOPICS
+        .iter()
+        .position(|candidate| *candidate == topic)
 }
 #[derive(Default)]
 struct State {
@@ -47,6 +68,19 @@ struct Entry {
 }
 
 impl Hub {
+    fn empty_resource(&self, topic: &str) -> bool {
+        resource_index(topic).is_some_and(|index| self.subscribers[index].load(Relaxed) == 0)
+    }
+    fn remove(&self, id: u64) {
+        let mut state = self.state.lock().expect("stream state");
+        if let Some(entry) = state.sockets.remove(&id) {
+            for topic in entry.topics {
+                if let Some(index) = resource_index(&topic) {
+                    self.subscribers[index].fetch_sub(1, Relaxed);
+                }
+            }
+        }
+    }
     pub fn stats(&self) -> (usize, usize, u64) {
         let state = self.state.lock().expect("stream state");
         (
@@ -64,8 +98,11 @@ impl Hub {
             tracing::warn!(count, "stream queue overflowed");
         }
     }
-    /// Leading/trailing latest-value invalidation. No inference hook is installed here.
+    /// Leading/trailing latest-value invalidation; empty resource topics do no work.
     pub fn invalidate(&self, topic: &str, keys: Option<Value>) {
+        if self.empty_resource(topic) {
+            return;
+        }
         let payload = keys.map_or(Value::Null, |keys| json!({"keys":keys}));
         {
             let mut state = self.state.lock().expect("stream state");
@@ -105,6 +142,9 @@ impl Hub {
     }
     /// External sequence is the D4 coordinator seam. Local numbering otherwise.
     pub fn publish(&self, topic: &str, payload: Value, seq: Option<f64>) {
+        if self.empty_resource(topic) {
+            return;
+        }
         let mut state = self.state.lock().expect("stream state");
         deliver(&mut state, topic, payload, seq);
     }
@@ -136,7 +176,11 @@ impl Hub {
             Some("topic is read-only")
         } else if frame["type"] == "unsubscribe" {
             if let Some(e) = state.sockets.get_mut(&id) {
-                e.topics.remove(topic);
+                if e.topics.remove(topic)
+                    && let Some(index) = resource_index(topic)
+                {
+                    self.subscribers[index].fetch_sub(1, Relaxed);
+                }
             }
             None
         } else if topic.starts_with("stream:") && !state.declared.contains(topic) {
@@ -145,7 +189,11 @@ impl Hub {
             if !e.topics.contains(topic) && e.topics.len() >= 256 {
                 Some("too many topics")
             } else {
-                e.topics.insert(topic.into());
+                if e.topics.insert(topic.into())
+                    && let Some(index) = resource_index(topic)
+                {
+                    self.subscribers[index].fetch_add(1, Relaxed);
+                }
                 None
             }
         } else {
@@ -449,7 +497,7 @@ async fn run(
     if let Some(v) = validation {
         v.abort();
     }
-    hub.state.lock().expect("stream state").sockets.remove(&id);
+    hub.remove(id);
     if let Some((code, reason)) = close {
         let mut payload = code.to_be_bytes().to_vec();
         payload.extend_from_slice(reason.as_bytes());
@@ -468,7 +516,44 @@ async fn run(
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
+    #[test]
+    fn empty_resource_publish_never_locks_even_with_other_subscribers() {
+        let hub = hub();
+        hub.message(1, "admin", json!({"type":"subscribe","topic":"res:logs"}));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = hub.state.lock().expect("stream state");
+            panic!("poison state to detect any empty-path locking");
+        }));
+        hub.invalidate("res:usage", None);
+        hub.publish("res:usage", Value::Null, None);
+    }
     use super::*;
+    #[test]
+    fn resource_counts_follow_unique_subscriptions_and_disconnect() {
+        let hub = hub();
+        for _ in 0..2 {
+            hub.message(1, "admin", json!({"type":"subscribe","topic":"res:usage"}));
+        }
+        let index = resource_index("res:usage").unwrap();
+        assert_eq!(hub.subscribers[index].load(Relaxed), 1);
+        assert!(hub.empty_resource("res:logs"));
+        for _ in 0..2 {
+            hub.message(
+                1,
+                "admin",
+                json!({"type":"unsubscribe","topic":"res:usage"}),
+            );
+        }
+        assert!(hub.empty_resource("res:usage"));
+        hub.message(1, "admin", json!({"type":"subscribe","topic":"res:usage"}));
+        hub.remove(1);
+        hub.remove(1);
+        assert!(hub.empty_resource("res:usage"));
+        assert!(hub.empty_resource("res:*"));
+        // Unknown resources and sequenced topics must not lose their semantics.
+        assert!(!hub.empty_resource("res:extension"));
+        assert!(!hub.empty_resource("stream:console"));
+    }
     fn hub() -> Hub {
         let hub = Hub::default();
         hub.state.lock().unwrap().sockets.insert(
@@ -479,6 +564,7 @@ mod tests {
                 notify: Arc::new(Notify::new()),
             },
         );
+        hub.subscribers[resource_index("res:*").unwrap()].store(1, Relaxed);
         hub
     }
     #[tokio::test(start_paused = true)]
