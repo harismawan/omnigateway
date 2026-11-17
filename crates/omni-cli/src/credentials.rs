@@ -4,7 +4,8 @@ use omni_ir::jsjson::{self, JsValue as J};
 use std::{collections::HashMap, io::IsTerminal};
 
 fn prop<'a>(v: &'a J, k: &str) -> &'a J {
-    get(v, k).unwrap_or(&J::Undefined)
+    static UNDEFINED: J = J::Undefined;
+    get(v, k).unwrap_or(&UNDEFINED)
 }
 fn text(v: &J) -> String {
     omni_control::operator_json::string(v).unwrap_or_default()
@@ -175,8 +176,7 @@ pub fn run(
         }
         "credentials-health" => {
             let raw = omni_control::credentials::health(&store, now).map_err(|e| (1, e.message))?;
-            let data = jsjson::parse(&raw.encode_utf16().collect::<Vec<_>>())
-                .map_err(|e| (1, format!("{e:?}")))?;
+            let data = jsjson::parse_js(&raw).map_err(|e| (1, format!("{e:?}")))?;
             if !json {
                 let J::Array(health) = prop(&data, "health") else {
                     unreachable!()
