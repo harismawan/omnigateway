@@ -210,6 +210,20 @@ pub enum Admin {
     ViewerPassword,
 }
 
+impl Admin {
+    fn resource_topic(&self) -> Option<&'static str> {
+        match self {
+            Self::CreateCredential | Self::PatchCredential(_) | Self::RemoveCredential(_) => {
+                Some("res:credentials")
+            }
+            Self::PutModel(_) | Self::RemoveModel(_) => Some("res:models"),
+            Self::CreateKey | Self::EditKey(_, _) | Self::RevokeKey(_) => Some("res:keys"),
+            Self::PutSettings | Self::ViewerPassword => Some("res:settings"),
+            _ => None,
+        }
+    }
+}
+
 /// `fast-decode-uri-component`, which Elysia's router runs on every path
 /// parameter: `None` where it returns `null` (a bad escape or ill-formed
 /// UTF-8). The router matched on the raw (normalized) path, so `%2F` in a
@@ -296,6 +310,19 @@ pub fn route(method: &hyper::Method, path: &str) -> Option<Admin> {
 
 /// Serves a matched admin route.
 pub async fn serve(
+    app: &App,
+    route: Admin,
+    req: Request<Incoming>,
+) -> Result<Response<Body>, ApiError> {
+    let topic = route.resource_topic();
+    let response = serve_inner(app, route, req).await?;
+    if let Some(topic) = topic {
+        app.stream.invalidate(topic, None);
+    }
+    Ok(response)
+}
+
+async fn serve_inner(
     app: &App,
     route: Admin,
     req: Request<Incoming>,
@@ -638,6 +665,45 @@ async fn viewer_password(app: &App, req: Request<Incoming>) -> Result<Response<B
 mod tests {
     use super::*;
     use hyper::Method;
+
+    #[test]
+    fn frozen_resource_publisher_routes() {
+        for (method, path, topic) in [
+            (Method::POST, "/api/credentials", "res:credentials"),
+            (Method::PATCH, "/api/credentials/c", "res:credentials"),
+            (Method::DELETE, "/api/credentials/c", "res:credentials"),
+            (Method::PUT, "/api/models/m", "res:models"),
+            (Method::DELETE, "/api/models/m", "res:models"),
+            (Method::POST, "/api/keys", "res:keys"),
+            (Method::PUT, "/api/keys/k/limits", "res:keys"),
+            (Method::PUT, "/api/keys/k/models", "res:keys"),
+            (Method::PUT, "/api/keys/k/expiry", "res:keys"),
+            (Method::PUT, "/api/keys/k/guardrail", "res:keys"),
+            (Method::PUT, "/api/keys/k/smart-routing", "res:keys"),
+            (Method::DELETE, "/api/keys/k", "res:keys"),
+            (Method::PUT, "/api/settings/viewer-password", "res:settings"),
+            (Method::PUT, "/api/settings", "res:settings"),
+        ] {
+            assert_eq!(
+                route(&method, path).unwrap().resource_topic(),
+                Some(topic),
+                "{method} {path}"
+            );
+        }
+        for (method, path) in [
+            (Method::PUT, "/api/settings/password"),
+            (Method::GET, "/api/settings"),
+            (Method::POST, "/api/connect/start"),
+            (Method::POST, "/api/connect/finish"),
+            (Method::POST, "/api/connect/poll"),
+        ] {
+            assert_eq!(
+                route(&method, path).unwrap().resource_topic(),
+                None,
+                "{method} {path}"
+            );
+        }
+    }
 
     #[test]
     fn cancelled_queued_open_keeps_its_permit() {
