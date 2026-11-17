@@ -42,6 +42,7 @@ struct State {
     declared: HashSet<String>,
     invalidations: HashMap<String, Option<Value>>,
     dropped: u64,
+    dropped_since_report: u64,
 }
 struct Entry {
     topics: HashSet<String>,
@@ -57,6 +58,15 @@ impl Hub {
             state.sockets.values().map(|entry| entry.queue.len()).sum(),
             state.dropped,
         )
+    }
+    fn report_drops(&self) {
+        let count = {
+            let mut state = self.state.lock().expect("stream state");
+            std::mem::take(&mut state.dropped_since_report)
+        };
+        if count > 0 {
+            tracing::warn!(count, "stream queue overflowed");
+        }
     }
     /// Leading/trailing latest-value invalidation. No inference hook is installed here.
     pub fn invalidate(&self, topic: &str, keys: Option<Value>) {
@@ -189,6 +199,7 @@ fn deliver(state: &mut State, topic: &str, payload: Value, seq: Option<f64>) {
         if entry.queue.len() == 1000 {
             entry.queue.pop_front();
             state.dropped += 1;
+            state.dropped_since_report += 1;
         }
         entry.queue.push_back(wire.clone());
         entry.notify.notify_one();
@@ -409,6 +420,7 @@ async fn run(
             }
             _=stop.changed()=>{close=Some((1001,"restart"));break;}
             _=heartbeat.tick()=>{
+                hub.report_drops();
                 // Date.now() has millisecond precision in the frozen registry.
                 if last_pong.elapsed().as_millis()>60_000 {close=Some((1001,"pong deadline"));break;}
                 if tx.try_send((stream_codec::encode(9,b""),0)).is_err(){close=Some((1001,"ping failed"));break;}
@@ -496,6 +508,16 @@ mod tests {
         .await
         .unwrap();
         assert!(upgrade_principal(auth.verify("short").await).is_ok());
+        // A distinct record lets upgrade discover one expiry without deleting
+        // the live connection's record before heartbeat discovers its expiry.
+        let live_key = omni_crypto::session::key("admin", "live");
+        kv.set(
+            &live_key,
+            "{\"expiresAt\":1100,\"principal\":{\"kind\":\"admin\"}}",
+            100,
+        )
+        .await
+        .unwrap();
         let hub = Arc::new(Hub::default());
         tokio::time::advance(Duration::from_secs(7)).await;
         let (io, mut peer) = tokio::io::duplex(4096);
@@ -507,12 +529,12 @@ mod tests {
             })
         };
         let h = hub.clone();
-        let task = tokio::spawn(async move { run(&h, verify, io, "admin", "short".into()).await });
+        let task = tokio::spawn(async move { run(&h, verify, io, "admin", "live".into()).await });
         tokio::task::yield_now().await;
         now.store(1100, SeqCst);
         let rejected = upgrade_principal(auth.verify("short").await).err().unwrap();
         assert_eq!(rejected.status(), 401);
-        assert!(kv.is_empty());
+        assert_eq!(kv.len(), 1);
         tokio::time::advance(Duration::from_secs(12)).await;
         tokio::task::yield_now().await;
         assert!(!task.is_finished());
@@ -520,6 +542,7 @@ mod tests {
         let mut bytes = Vec::new();
         peer.read_to_end(&mut bytes).await.unwrap();
         task.await.unwrap();
+        assert!(kv.is_empty());
         assert_eq!(&bytes[..4], &[0x89, 0, 0x88, 17]);
         assert_eq!(&bytes[4..6], &4401_u16.to_be_bytes());
         assert_eq!(&bytes[6..], b"session expired");
@@ -561,6 +584,12 @@ mod tests {
         assert_eq!(state.dropped, 100);
         assert_eq!(state.sockets.len(), 1);
         assert!(!*hub.shutdown.borrow());
+        assert_eq!(state.dropped_since_report, 100);
+        drop(state);
+        hub.report_drops();
+        hub.report_drops();
+        assert_eq!(hub.state.lock().unwrap().dropped_since_report, 0);
+        assert_eq!(hub.stats(), (1, 0, 100));
     }
     #[test]
     fn messages_replay_and_caps() {
