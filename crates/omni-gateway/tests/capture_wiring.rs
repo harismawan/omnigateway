@@ -22,7 +22,7 @@ async fn dispatch_termination_releases_held_capture_and_writer() {
         let peer = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut request = vec![0; 8192];
-            socket.read(&mut request).await.unwrap();
+            assert!(socket.read(&mut request).await.unwrap() > 0);
             let common::Reply::Http(_, _, chunks) = common::sse_ok(1) else {
                 unreachable!()
             };
@@ -33,11 +33,11 @@ async fn dispatch_termination_releases_held_capture_and_writer() {
                 tokio::select! {
                     _ = socket.read(&mut byte) => {},
                     () = tokio::time::sleep(Duration::from_secs(1)) => {
-                        let _ = socket.write_all(b"TAIL_AFTER_TERMINAL\n\n").await;
+                        socket.write_all(b"TAIL_AFTER_TERMINAL\n\n").await.ok();
                     }
                 }
             } else {
-                socket.read(&mut byte).await.unwrap();
+                assert_eq!(socket.read(&mut byte).await.unwrap(), 0);
             }
         });
         let f = common::fixture(&["c0"]);
