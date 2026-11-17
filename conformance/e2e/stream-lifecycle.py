@@ -17,6 +17,7 @@ import time
 
 binary, root, output = sys.argv[1:4]
 idle = len(sys.argv) > 4 and sys.argv[4] == "idle"
+phase = len(sys.argv) > 4 and sys.argv[4] == "phase"
 env = dict(os.environ, OMNI_ROOT=root, OMNI_DB_PATH=root + "/omni.db",
            OMNI_ENCRYPTION_KEY="stream-test-encryption-key-0123456789",
            OMNI_HOST="127.0.0.1", OMNI_PORT="18772", OMNI_LOG_LEVEL="warn")
@@ -73,6 +74,31 @@ try:
             time.sleep(.025)
     else:
         raise RuntimeError("gateway not ready")
+    if phase:
+        # A socket opened halfway through a registry tick must share the first
+        # socket's ping/validation phase, not wait its own full 20 seconds.
+        first = opened(cookie)
+        time.sleep(8)
+        second = opened(cookie)
+        start = time.monotonic()
+        assert frame(first)[0] == 9
+        first_at = time.monotonic() - start
+        assert frame(second)[0] == 9
+        second_at = time.monotonic() - start
+        assert abs(second_at - first_at) < 1, (first_at, second_at)
+        assert 9 <= second_at <= 15, second_at
+        api("/api/logout", {}, cookie)
+        for s in (first, second):
+            op, data = frame(s)
+            if op == 9:
+                op, data = frame(s)
+            assert op == 8 and data == struct.pack(">H", 4401) + b"session expired", (op, data)
+            s.close()
+        Path(output).write_text(json.dumps({"firstPingSeconds": first_at,
+                                           "secondPingSeconds": second_at,
+                                           "close": "4401 session expired, shared tick"}))
+        print("PASS registry-wide heartbeat phase / revalidation", output)
+        sys.exit(0)
     s = opened(cookie)
     start = time.monotonic()
     op, data = frame(s)

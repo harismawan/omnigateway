@@ -16,10 +16,19 @@ use tokio::{
     time::{Duration, Instant},
 };
 
-#[derive(Default)]
 pub struct Hub {
     state: Arc<Mutex<State>>,
     shutdown: watch::Sender<bool>,
+    heartbeat_epoch: Instant,
+}
+impl Default for Hub {
+    fn default() -> Self {
+        Self {
+            state: Arc::default(),
+            shutdown: watch::channel(false).0,
+            heartbeat_epoch: Instant::now(),
+        }
+    }
 }
 #[derive(Default)]
 struct State {
@@ -296,10 +305,12 @@ async fn run(
     });
     let mut codec = Codec::new(stream_codec::MAX_PAYLOAD);
     let mut buf = [0; 8192];
-    let mut heartbeat = tokio::time::interval_at(
-        Instant::now() + Duration::from_secs(20),
-        Duration::from_secs(20),
-    );
+    // Frozen starts the registry timer at application construction, not open.
+    // Every socket therefore shares the same phase, including revalidation.
+    let next_tick = hub.heartbeat_epoch
+        + Duration::from_secs((hub.heartbeat_epoch.elapsed().as_secs() / 20 + 1) * 20);
+    let mut heartbeat = tokio::time::interval_at(next_tick, Duration::from_secs(20));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let last_pong = Instant::now();
     let mut stop = hub.shutdown.subscribe();
     let mut validation: Option<tokio::task::JoinHandle<bool>> = None;
@@ -313,7 +324,8 @@ async fn run(
             }
             _=stop.changed()=>{close=Some((1001,"restart"));break;}
             _=heartbeat.tick()=>{
-                if last_pong.elapsed()>Duration::from_secs(60) {close=Some((1001,"pong deadline"));break;}
+                // Date.now() has millisecond precision in the frozen registry.
+                if last_pong.elapsed().as_millis()>60_000 {close=Some((1001,"pong deadline"));break;}
                 if tx.try_send((stream_codec::encode(9,b""),0)).is_err(){close=Some((1001,"ping failed"));break;}
                 if validation.is_some() && validation_started.elapsed()>=Duration::from_secs(60) { validation.take().expect("validation").abort(); }
                 if validation.is_none(){ let auth=app.clone(); let token=token.clone(); validation_started=Instant::now(); validation=Some(tokio::spawn(async move{ !matches!(auth.admin.verify(&token).await,Ok(None)) })); }
