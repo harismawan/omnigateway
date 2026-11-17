@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 use omni_gateway::stream_codec::{Codec, Event, accept, encode};
 
 fn frame(op: u8, fin: bool, data: &[u8]) -> Vec<u8> {

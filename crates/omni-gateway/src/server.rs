@@ -378,6 +378,7 @@ pub struct App {
     pub static_root: Option<std::path::PathBuf>,
     /// The session authority behind every `/api` route.
     pub admin: crate::admin_auth::AdminAuth,
+    pub stream: crate::stream_transport::Hub,
     /// Whether `baseUrl` (`OMNI_BASE_URL`) is https: `Secure` on the cookie.
     pub base_url_https: bool,
     /// The admin routes' own store connection (keys, models, settings).
@@ -509,6 +510,9 @@ pub async fn handle(app: Arc<App>, req: Request<Incoming>) -> Result<Response<Bo
     }
     let get = matches!(method, Method::GET | Method::HEAD);
     let res = match (method.clone(), route.as_ref()) {
+        (Method::GET | Method::HEAD, "/api/stream") => {
+            crate::stream_transport::route(app, req).await
+        }
         (Method::GET | Method::HEAD, "/health") => health(&app),
         (Method::POST, "/__omni/bench/flush") if app.bench_endpoints => bench_flush(&app).await,
         (Method::POST, "/v1/messages") => proxy(app, Surface::Anthropic, req).await,

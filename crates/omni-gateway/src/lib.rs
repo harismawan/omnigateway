@@ -29,6 +29,7 @@ pub mod server;
 pub mod static_files;
 pub mod stream;
 pub mod stream_codec;
+pub mod stream_transport;
 pub mod telemetry;
 
 use std::sync::{Arc, Mutex};
@@ -501,6 +502,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         body_logging_allowed: config.body_logging_allowed,
         day_offset_minutes: offset,
         reported_catalog_problems: std::sync::Mutex::default(),
+        stream: stream_transport::Hub::default(),
     });
 
     tracing::info!(host = %config.host, port = addr.port(), "omnigateway listening");
@@ -511,7 +513,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
     #[cfg(test)]
     let test_app = app.clone();
     let task = tokio::spawn(async move {
-        let graceful = hyper_util::server::graceful::GracefulShutdown::new();
+        let (drain, _) = tokio::sync::watch::channel(false);
         let builder = http1_builder(idle);
         // Every connection task, so a drain that runs out of time can cancel
         // and join them (their finishers file 499s) before the writer closes.
@@ -532,16 +534,22 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
                             "/v1/messages" | "/v1/responses" | "/v1/chat/completions"));
                         server::handle(app.clone(), req)
                     });
-                    let conn = graceful.watch(builder.serve_connection(TokioIo::new(sock), service));
+                    let conn = builder.serve_connection(TokioIo::new(sock), service).with_upgrades();
+                    let mut draining = drain.subscribe();
                     conns.spawn(async move {
+                        tokio::pin!(conn);
                         tokio::select! {
-                            result = conn => if let Err(e) = result {
+                            result = &mut conn => if let Err(e) = result {
                                 tracing::debug!(reason = %e, "connection ended with an error");
                             },
                             () = activity.expired() => {
                                 // Dropping hyper drops the service/body as on a
                                 // client disconnect: pumps, claims and finishers.
                                 tracing::debug!("connection idle timeout");
+                            }
+                            _ = draining.changed() => {
+                                conn.as_mut().graceful_shutdown();
+                                drop(conn.await);
                             }
                         }
                     });
@@ -550,14 +558,18 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
             }
         }
         drop(listener);
+        app.stream.stop();
         let shutdown_until = tokio::time::Instant::now() + deadline;
         drop(tokio::time::timeout_at(shutdown_until, maintenance.stop()).await);
         oauth_scheduler.abort();
         drop(oauth_scheduler.await);
         tracing::info!(reason = "signal", "shutdown requested");
-        if tokio::time::timeout_at(shutdown_until, graceful.shutdown())
-            .await
-            .is_err()
+        drain.send_replace(true);
+        if tokio::time::timeout_at(shutdown_until, async {
+            while conns.join_next().await.is_some() {}
+        })
+        .await
+        .is_err()
         {
             tracing::warn!(
                 reason = "signal",
