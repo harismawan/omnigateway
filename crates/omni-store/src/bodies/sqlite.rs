@@ -2,7 +2,10 @@
 use super::{node_join, prepare_put};
 use crate::{
     SqliteStore, StoreError,
-    pg::bodies::{BodyRead, BodyRow, DetailState, MAX_ENVELOPE_BYTES, decode, rel_path_for, seal},
+    operator_cell::Cell,
+    pg::bodies::{
+        BodyRead, BodyReadRow, BodyRow, DetailState, MAX_ENVELOPE_BYTES, decode, rel_path_for, seal,
+    },
 };
 use omni_crypto::field::FieldKey;
 use omni_ir::jsjson::JsValue;
@@ -45,9 +48,35 @@ pub fn get(
     dir: &Path,
     id: &str,
 ) -> Result<Option<BodyRead>, StoreError> {
-    let row = c.query_row("SELECT request_id,at,rel_path,size_bytes,sha256,detail_state,truncated FROM request_bodies WHERE request_id=?",[id],|r| Ok(BodyRow { request_id:r.get(0)?,at:r.get(1)?,rel_path:r.get(2)?,size_bytes:r.get(3)?,sha256:r.get(4)?,detail_state:DetailState::parse(&r.get::<_,String>(5)?),truncated:r.get::<_,i64>(6)? == 1 })).optional()?;
-    let Some(mut row) = row else {
+    let found = c.query_row("SELECT request_id,at,rel_path,size_bytes,sha256,detail_state,truncated FROM request_bodies WHERE request_id=?", [id], |r| {
+        (0..7).map(|i| Ok(Cell::read(r.get_ref(i)?))).collect::<Result<Vec<_>, rusqlite::Error>>()
+    }).optional()?;
+    let Some(cells) = found else {
         return Ok(None);
+    };
+    let state = match &cells[5] {
+        Cell::String(s) => DetailState::parse(s),
+        _ => DetailState::None,
+    };
+    // Only null short-circuits path validation. path.join throws for every
+    // other non-string, outside acquireArtifact's catch in frozen.
+    let rel_path = match &cells[2] {
+        Cell::String(s) => Some(s.clone()),
+        Cell::Null => None,
+        _ if state == DetailState::None => None,
+        _ => return Err(StoreError::Refused("artifact path must be a string".into())),
+    };
+    let mut row = BodyReadRow {
+        request_id: cells[0].json(),
+        at: cells[1].json(),
+        rel_path,
+        size_bytes: cells[3].json(),
+        sha256: match &cells[4] {
+            Cell::String(s) => Some(s.clone()),
+            _ => None,
+        },
+        detail_state: state,
+        truncated: matches!(cells[6], Cell::Number(n) if n == 1.0),
     };
     let Some(rel) = &row.rel_path else {
         return Ok(Some(BodyRead {
@@ -75,7 +104,13 @@ pub fn get(
         if bytes.len() as u64 > size {
             return Err(DetailState::Corrupt);
         }
-        decode(key, &bytes, row.sha256.as_deref()).ok_or(DetailState::Corrupt)
+        // Strict digest equality: a non-null non-string can never equal hex.
+        let digest = match &cells[4] {
+            Cell::Null => None,
+            Cell::String(s) => Some(s.as_str()),
+            _ => return Err(DetailState::Corrupt),
+        };
+        decode(key, &bytes, digest).ok_or(DetailState::Corrupt)
     })();
     let (state, artifact) = match read {
         Ok(a) => (DetailState::Ready, Some(a)),

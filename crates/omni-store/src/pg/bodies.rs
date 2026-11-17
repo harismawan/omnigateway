@@ -79,8 +79,34 @@ pub struct BodyRow {
 /// `BodyRead`: the row, and the artifact when it read back.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BodyRead {
-    pub row: BodyRow,
+    pub row: BodyReadRow,
     pub artifact: Option<omni_ir::jsjson::JsValue>,
+}
+
+/// Read-side metadata has JavaScript values, not the writer's integer contract.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BodyReadRow {
+    pub request_id: omni_ir::jsjson::JsValue,
+    pub at: omni_ir::jsjson::JsValue,
+    pub rel_path: Option<String>,
+    pub size_bytes: omni_ir::jsjson::JsValue,
+    pub sha256: Option<String>,
+    pub detail_state: DetailState,
+    pub truncated: bool,
+}
+impl From<BodyRow> for BodyReadRow {
+    fn from(row: BodyRow) -> Self {
+        use omni_ir::jsjson::JsValue;
+        Self {
+            request_id: JsValue::String(row.request_id.encode_utf16().collect()),
+            at: JsValue::Number(row.at as f64),
+            rel_path: row.rel_path,
+            size_bytes: JsValue::Number(row.size_bytes as f64),
+            sha256: row.sha256,
+            detail_state: row.detail_state,
+            truncated: row.truncated,
+        }
+    }
 }
 
 /// The sealed envelope and its digest.
@@ -374,7 +400,7 @@ impl PgStore {
         let Some(found) = c.query_opt(&stmt, &[&request_id, &ceiling]).await? else {
             return Ok(None);
         };
-        let row = to_row(&found)?;
+        let row: BodyReadRow = to_row(&found)?.into();
         if row.rel_path.is_none() || row.detail_state == DetailState::None {
             return Ok(Some(BodyRead {
                 row,
@@ -403,7 +429,7 @@ impl PgStore {
                     record(DetailState::Ready).await?;
                 }
                 BodyRead {
-                    row: BodyRow {
+                    row: BodyReadRow {
                         detail_state: DetailState::Ready,
                         ..row
                     },
@@ -413,7 +439,7 @@ impl PgStore {
             Err(state) => {
                 record(state).await?;
                 BodyRead {
-                    row: BodyRow {
+                    row: BodyReadRow {
                         detail_state: state,
                         ..row
                     },
@@ -427,6 +453,25 @@ impl PgStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_pg_metadata_projects_as_js_numbers() {
+        use omni_ir::jsjson::JsValue;
+        let row: BodyReadRow = BodyRow {
+            request_id: "r".into(),
+            at: 9_007_199_254_740_993,
+            rel_path: None,
+            size_bytes: 9_007_199_254_740_993,
+            sha256: None,
+            detail_state: DetailState::Ready,
+            truncated: true,
+        }
+        .into();
+        assert_eq!(row.at, JsValue::Number(9_007_199_254_740_992.0));
+        assert_eq!(row.size_bytes, row.at);
+        assert!(row.truncated);
+        assert_eq!(row.request_id, JsValue::String(vec![114]));
+    }
 
     #[test]
     #[allow(clippy::unwrap_used)] // Fixture setup/assertions only.

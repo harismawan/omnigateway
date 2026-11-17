@@ -132,7 +132,7 @@ async fn frozen_body_route_matrix() {
             let read = store().get_body(&common::key(), id).unwrap().map(|r| {
                 let a = r.artifact.as_ref().map(|a| stringify(a).unwrap()).unwrap_or("null".into());
                 format!(r#"{{"row":{{"requestId":"present","detailState":"{}","truncated":{},"sizeBytes":{},"at":{}}},"artifact":{a}}}"#,
-                    r.row.detail_state.as_str(), r.row.truncated, r.row.size_bytes, r.row.at)
+                    r.row.detail_state.as_str(), r.row.truncated, stringify(&r.row.size_bytes).unwrap(), stringify(&r.row.at).unwrap())
             }).unwrap_or("null".into());
             cells.push(format!(
                 r#"{{"role":"{role}","path":"{target}","read":{read}}}"#
