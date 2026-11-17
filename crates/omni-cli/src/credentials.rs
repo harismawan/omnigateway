@@ -236,12 +236,39 @@ fn mutate(
             let models = omni_control::models::cli_list(&store).map_err(|e| (1, e))?;
             let mut pins = Vec::new();
             for m in &models {
-                if let J::Array(targets) = prop(m, "targets")
-                    && targets
-                        .iter()
-                        .any(|t| prop(t, "credentialId") == &string(id))
-                {
-                    pins.push(cli_cell::scalar_string(prop(m, "id")));
+                let targets = match prop(m, "targets") {
+                    J::Array(a) => a,
+                    J::Null => {
+                        return Err((
+                            1,
+                            "null is not an object (evaluating 'model.targets.some')".into(),
+                        ));
+                    }
+                    v => {
+                        return Err((
+                            1,
+                            crate::models::method_error(
+                                "model.targets.some",
+                                "(target) => target.credentialId === id",
+                                prop(v, "some"),
+                            ),
+                        ));
+                    }
+                };
+                for target in targets {
+                    if matches!(target, J::Null) {
+                        return Err((
+                            1,
+                            "null is not an object (evaluating 'target.credentialId')".into(),
+                        ));
+                    }
+                    if prop(target, "credentialId") == &string(id) {
+                        pins.push(
+                            omni_control::operator_json::string(prop(m, "id"))
+                                .map_err(|e| (1, e))?,
+                        );
+                        break;
+                    }
                 }
             }
             let mut question = format!(

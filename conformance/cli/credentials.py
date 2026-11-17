@@ -101,6 +101,9 @@ for flag in ['endpoint-id','endpoint-label','origin','protocol']:
 for sql in ["", "INSERT INTO virtual_models(id,targets,strategy,is_alias) VALUES('pin','[{\"provider\":\"openai\",\"model\":\"m\",\"credentialId\":\"c\"}]','score',0)"]:
     for yes in [[],['--yes']]: cases.append(('pinned',seed,sql,['credentials','rm','c']+yes))
 
+for targets in ['null','{}','1','true','"x"','[null]','[1,true,"x"]','[{"credentialId":"c"},null]','invalid']:
+    cases.append(('pinned malformed',seed,"INSERT INTO virtual_models(id,targets,strategy,is_alias) VALUES('pin','"+targets+"','score',0)",['credentials','rm','c','--yes']))
+
 def normalize(result, args, started, ended, expected_key):
     # Only successful target clocks and new-row UUID/ciphertext (including nonce/tag)
     # vary. Validate clocks, decrypt secret, and retain each cell's SQLite type.

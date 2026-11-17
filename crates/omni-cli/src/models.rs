@@ -160,7 +160,7 @@ fn price(v: &JsValue) -> Result<String, String> {
         _ => Err(method_error("value.toFixed", "2", prop(v, "toFixed"))),
     }
 }
-fn method_error(path: &str, args: &str, method: &JsValue) -> String {
+pub(crate) fn method_error(path: &str, args: &str, method: &JsValue) -> String {
     let description = match method {
         JsValue::Object(_) => "an instance of Object".into(),
         JsValue::Array(_) => "an instance of Array".into(),
