@@ -58,7 +58,7 @@ fn targets(v: &JsValue, show: bool) -> Result<&[JsValue], String> {
 }
 /// `provider()`: the descriptor's tone through the CLI's own escape table,
 /// cyan for an unknown provider or a tone this terminal cannot paint.
-fn provider(v: &JsValue, color: bool) -> Result<String, String> {
+pub(crate) fn provider(v: &JsValue, color: bool) -> Result<String, String> {
     let s = text(v)?;
     let tone = omni_control::catalog::descriptor(&s)
         .and_then(|d| get(d, "presentation"))
@@ -84,7 +84,7 @@ fn provider(v: &JsValue, color: bool) -> Result<String, String> {
         s
     })
 }
-fn table(headers: &[&str], right: &[usize], rows: Vec<Vec<String>>) -> String {
+pub(crate) fn table(headers: &[&str], right: &[usize], rows: Vec<Vec<String>>) -> String {
     let rows: Vec<Vec<String>> = std::iter::once(headers.iter().map(|s| (*s).into()).collect())
         .chain(rows)
         .collect();

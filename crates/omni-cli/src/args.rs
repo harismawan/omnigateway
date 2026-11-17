@@ -158,6 +158,7 @@ pub fn parse_command(args: &[String], command: &str) -> Result<ParsedCommand, St
                 flags.insert(name.into(), value);
             }
             name if matches!(name, "json" | "no-color" | "yes" | "help" | "version")
+                || (command == "credentials-health" && name == "all")
                 || (command == "status" && name == "system")
                 || ((command.starts_with("setup-") || command == "db-restore")
                     && name == "dry-run")
