@@ -113,7 +113,7 @@ fn mutate(
         }
     }
     if command == "credentials-add-key" && omni_control::catalog::descriptor(id).is_none() {
-        return Err((2, "provider must be one of anthropic, openai, codex, copilot, gemini, antigravity, kiro, qwen, qoder, iflow, custom, or a plugin that loads and supplies one; omni plugin list shows which".into()));
+        return Err((2, "provider must be one of anthropic, openai, kimi, kilo, grok, antigravity, muse, qoder, custom, or a plugin that loads and supplies one; omni plugin list shows which".into()));
     }
     let mut secret = String::new();
     if command == "credentials-add-key" {
@@ -200,7 +200,10 @@ fn mutate(
                 now,
             )
             .map_err(failure)?;
-            let created = J::from(&serde_json::from_str::<serde_json::Value>(&created).map_err(|e| (1, e.to_string()))?);
+            let created = J::from(
+                &serde_json::from_str::<serde_json::Value>(&created)
+                    .map_err(|e| (1, e.to_string()))?,
+            );
             let new_id = prop(prop(&created, "credential"), "id").clone();
             let human = format!("stored {id} api key as {}", text(&new_id));
             (

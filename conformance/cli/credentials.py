@@ -73,7 +73,7 @@ for flag in ['tier','weight','label']:
 for value in ['0','1',"'1'","'0'",'1.5']:
     for op in ['enable','disable']:
         cases.append(('existing enabled',seed,f'UPDATE credentials SET enabled={value}',['credentials',op,'c']))
-for provider in ['anthropic','openai','codex','copilot','gemini','antigravity','kiro','qwen','qoder','iflow','custom','unknown']:
+for provider in ['anthropic','openai','kimi','kilo','grok','antigravity','muse','qoder','custom','unknown']:
     cases.append(('add',seed,'',['credentials','add-key',provider]))
     cases.append(('add label',seed,'',['credentials','add-key',provider,'--label','  chosen  ']))
 custom = ['credentials','add-key','custom','--endpoint-id','ep','--endpoint-label','Endpoint','--origin','https://example.test/v1/','--protocol','chat-completions']
