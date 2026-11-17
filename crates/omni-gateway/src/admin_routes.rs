@@ -251,10 +251,10 @@ pub fn route(method: &hyper::Method, path: &str) -> Option<Admin> {
         _ => {}
     }
     if let Some(rest) = path.strip_prefix("/api/models/") {
-        if *method == M::POST {
-            if let Some(id) = rest.strip_suffix("/dry-run") {
-                return param(id).map(Admin::DryRun);
-            }
+        if *method == M::POST
+            && let Some(id) = rest.strip_suffix("/dry-run")
+        {
+            return param(id).map(Admin::DryRun);
         }
         let id = param(rest)?;
         return match *method {
