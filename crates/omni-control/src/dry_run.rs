@@ -143,7 +143,8 @@ fn credentials(store: &SqliteStore, now: f64) -> Result<Vec<omni_store::Credenti
     use crate::cli_cell::{scalar_number, scalar_string};
     let mut out = Vec::new();
     for row in crate::credentials::rows(store, None)? {
-        let cell = |k| get(&row, k).unwrap_or(&JsValue::Null);
+        let null = JsValue::Null;
+        let cell = |k| get(&row, k).unwrap_or(&null);
         let text = |k| scalar_string(cell(k));
         let number = |k| scalar_number(cell(k));
         let data = cell("providerData");
@@ -222,9 +223,9 @@ fn health(store: &SqliteStore) -> Result<Vec<omni_store::CredentialHealth>, Fail
             rate_limited_until: time("rate_limited_until")?,
             scalar: Some(std::sync::Arc::new(
                 omni_store::credentials::HealthScalars {
-                    failures: failures.into(),
-                    opened: cell("opened_at")?.into(),
-                    until: cell("rate_limited_until")?.into(),
+                    failures: crate::database::bun_cell(failures),
+                    opened: crate::database::bun_cell(cell("opened_at")?),
+                    until: crate::database::bun_cell(cell("rate_limited_until")?),
                     count,
                     score: 1.0 / denominator,
                 },
