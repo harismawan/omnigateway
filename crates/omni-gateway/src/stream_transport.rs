@@ -230,18 +230,18 @@ fn parse_text(text: &str) -> Value {
 
 fn upgrade_principal(
     result: Result<Option<crate::admin_auth::Principal>, crate::admin_auth::AuthError>,
-) -> Result<crate::admin_auth::Principal, Response<Body>> {
+) -> Result<crate::admin_auth::Principal, Box<Response<Body>>> {
     use omni_ir::error::ErrorCode;
     match result {
         Ok(Some(p)) => Ok(p),
-        Ok(None) => Err(crate::api::error_response(
+        Ok(None) => Err(Box::new(crate::api::error_response(
             ErrorCode::Auth,
             "a session is required",
-        )),
-        Err(_) => Err(crate::api::error_response(
+        ))),
+        Err(_) => Err(Box::new(crate::api::error_response(
             ErrorCode::Internal,
             "internal error",
-        )),
+        ))),
     }
 }
 
@@ -277,7 +277,7 @@ pub async fn route(app: Arc<App>, mut req: Request<Incoming>) -> Response<Body> 
     };
     let principal = match upgrade_principal(principal) {
         Ok(p) => p,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let key = req
         .headers()
