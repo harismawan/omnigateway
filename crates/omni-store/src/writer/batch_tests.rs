@@ -7,17 +7,17 @@ use std::sync::{Arc, Mutex};
 
 #[test]
 fn notifications_count_calls_not_coalesced_rows_and_failure_returns_none() {
-    let mut conn = Connection::open_in_memory().unwrap();
-    migrate::migrate(&mut conn, 0).unwrap();
+    let mut conn = Connection::open_in_memory().expect("open");
+    migrate::migrate(&mut conn, 0).expect("migrate");
     let finish = LogEvent::Finish(RequestLog::new("same", 1000, 200));
     let events = vec![finish.clone().into(), finish.into()];
-    let outcome = write(&mut conn, &events, "n", 0).unwrap();
+    let outcome = write(&mut conn, &events, "n", 0).expect("write");
     assert_eq!(
         (outcome.log_notifications, outcome.finish_notifications),
         (2, 2)
     );
     assert_eq!(outcome.completions.len(), 1);
-    conn.execute_batch("CREATE TRIGGER refuse BEFORE INSERT ON request_logs BEGIN SELECT RAISE(FAIL, 'refused'); END;").unwrap();
+    conn.execute_batch("CREATE TRIGGER refuse BEFORE INSERT ON request_logs BEGIN SELECT RAISE(FAIL, 'refused'); END;").expect("trigger");
     assert!(
         write(
             &mut conn,
