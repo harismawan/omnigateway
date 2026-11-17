@@ -8,6 +8,90 @@ use omni_providers::http::{
 };
 
 struct Script;
+
+// A scripted HTTP peer emits a complete terminal stream but withholds EOF.
+// Dispatch completion (or dropping dispatch) must close it, not await its tail.
+#[tokio::test]
+async fn dispatch_termination_releases_held_capture_and_writer() {
+    use futures_util::StreamExt;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    for mode in ["delayed-tail", "nonclosing", "shutdown", "abandon"] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 8192];
+            socket.read(&mut request).await.unwrap();
+            let common::Reply::Http(_, _, chunks) = common::sse_ok(1) else {
+                unreachable!()
+            };
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").await.unwrap();
+            socket.write_all(chunks.concat().as_bytes()).await.unwrap();
+            let mut byte = [0];
+            if mode == "delayed-tail" {
+                tokio::select! {
+                    _ = socket.read(&mut byte) => {},
+                    () = tokio::time::sleep(Duration::from_secs(1)) => {
+                        let _ = socket.write_all(b"TAIL_AFTER_TERMINAL\n\n").await;
+                    }
+                }
+            } else {
+                socket.read(&mut byte).await.unwrap();
+            }
+        });
+        let f = common::fixture(&["c0"]);
+        let h = common::harness(&f, vec![]);
+        struct Redirect(std::net::SocketAddr, omni_providers::http::Client);
+        impl HttpClient for Redirect {
+            fn send(
+                &self,
+                mut req: HttpRequest,
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<HttpResponse, HttpError>> + Send + '_>,
+            > {
+                req.url = format!("http://{}/", self.0);
+                Box::pin(self.1.send(req))
+            }
+        }
+        let collector = Collector::new(true);
+        let deps = h.deps.with_http(collector.wrap(Arc::new(Redirect(
+            addr,
+            omni_providers::http::Client::new(),
+        ))));
+        let mut d = omni_gateway::dispatch::dispatch(
+            deps,
+            omni_gateway::dispatch::Request {
+                request: common::chat("m1", true),
+                request_id: mode.into(),
+                api_key_id: None,
+                route_started_at: 0,
+            },
+        );
+        if mode == "abandon" {
+            d.events.next().await.unwrap().unwrap();
+            drop(d);
+        } else {
+            while d.events.next().await.is_some() {}
+            drop(d);
+        }
+        tokio::time::timeout(Duration::from_millis(500), collector.settle())
+            .await
+            .expect("capture persists without provider EOF");
+        let artifact = collector.artifact(mode, 0, None);
+        let text = omni_ir::jsjson::stringify(&artifact).unwrap();
+        assert!(text.contains("\"truncated\":true"), "{mode}: {text}");
+        assert!(!text.contains("TAIL_AFTER_TERMINAL"));
+        tokio::time::timeout(Duration::from_millis(500), h.writer.close())
+            .await
+            .expect("shutdown bounded by dispatch termination")
+            .unwrap();
+        tokio::time::timeout(Duration::from_millis(500), peer)
+            .await
+            .expect("socket released")
+            .unwrap();
+    }
+}
 impl HttpClient for Script {
     fn send(
         &self,

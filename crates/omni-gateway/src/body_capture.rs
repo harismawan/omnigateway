@@ -23,6 +23,7 @@ impl CaptureCompletion {
     }
 
     pub async fn persist(self, log: &omni_store::writer::RequestLog) {
+        self.collector.terminate();
         self.collector.settle().await;
         if self.sink.truncated {
             self.collector.truncated();
@@ -206,7 +207,11 @@ struct State {
 /// Shared with independent provider drains and the completion callback. All
 /// locks cover only in-memory updates; no network or persistence await holds one.
 #[derive(Clone)]
-pub struct Collector(Arc<Mutex<State>>, Arc<tokio::sync::Notify>);
+pub struct Collector(
+    Arc<Mutex<State>>,
+    Arc<tokio::sync::Notify>,
+    tokio::sync::watch::Sender<bool>,
+);
 
 impl Collector {
     pub fn new(capture_stream_chunks: bool) -> Self {
@@ -220,7 +225,12 @@ impl Collector {
                 capture_stream_chunks,
             })),
             Arc::new(tokio::sync::Notify::new()),
+            tokio::sync::watch::channel(false).0,
         )
+    }
+
+    fn terminate(&self) {
+        self.2.send_replace(true);
     }
 
     pub async fn settle(&self) {
@@ -407,6 +417,14 @@ struct Observer {
     index: usize,
 }
 
+struct DispatchScope(Collector);
+
+impl Drop for DispatchScope {
+    fn drop(&mut self) {
+        self.0.terminate();
+    }
+}
+
 impl Drop for Observer {
     fn drop(&mut self) {
         self.collector.lock().pending -= 1;
@@ -415,6 +433,16 @@ impl Drop for Observer {
 }
 
 impl omni_providers::http::BodyObserver for Observer {
+    fn cancelled(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        let mut signal = self.collector.2.subscribe();
+        Box::pin(async move {
+            while !*signal.borrow_and_update() {
+                if signal.changed().await.is_err() {
+                    break;
+                }
+            }
+        })
+    }
     fn chunk(&self, bytes: &[u8]) {
         self.collector.chunk(self.index, bytes);
     }
@@ -427,6 +455,9 @@ impl omni_providers::http::BodyObserver for Observer {
 }
 
 impl omni_providers::http::HttpClient for CaptureHttp {
+    fn dispatch_scope(&self) -> Option<Box<dyn Send>> {
+        Some(Box::new(DispatchScope(self.collector.clone())))
+    }
     fn send(
         &self,
         req: omni_providers::http::HttpRequest,

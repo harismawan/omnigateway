@@ -645,7 +645,9 @@ async fn within<F: std::future::Future>(
 
 #[allow(clippy::too_many_lines)]
 fn run(mut s: RunState) -> EventsStream {
+    let termination = s.deps.http.dispatch_scope();
     Box::pin(async_stream::stream! {
+        let _termination = termination;
         let deps = s.deps.clone();
         let now = deps.now;
         let log = s.log.clone();

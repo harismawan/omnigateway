@@ -128,6 +128,9 @@ pub struct ResponseBody {
 /// Optional response decorator. Installed only by opted-in callers. Streaming
 /// reads are independently drained; buffered text keeps its original decoder.
 pub trait BodyObserver: Send + Sync {
+    fn cancelled(&self) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(std::future::pending())
+    }
     fn chunk(&self, bytes: &[u8]);
     fn end(&self, failed: bool);
     fn text(&self, text: &str);
@@ -262,7 +265,16 @@ impl ResponseBody {
             tokio::spawn(async move {
                 let mut failed = false;
                 loop {
-                    match source.read_next().await {
+                    let next = tokio::select! {
+                        biased;
+                        () = observer.cancelled() => {
+                            failed = true;
+                            tx.send(Err(HttpError::BodyAborted)).ok();
+                            break;
+                        }
+                        next = source.read_next() => next,
+                    };
+                    match next {
                         Ok(Some(bytes)) => {
                             observer.chunk(&bytes);
                             // An abandoned adapter does not cancel capture.
@@ -279,6 +291,8 @@ impl ResponseBody {
                         }
                     }
                 }
+                // Release the upstream before waking persistence/shutdown.
+                drop(source);
                 observer.end(failed);
             });
         }

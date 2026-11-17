@@ -69,13 +69,13 @@ for (const path of ["chat/completions", "messages", "responses"])
   for (const stream of [false, true])
     for (const gate of ["on", "opt-out", "setting-off", "env-off"])
       cells.push({ name: `${path.replaceAll("/", "-")}-${stream}-${gate}`, path, stream, gate });
-for (const special of ["string-bound", "artifact-omission", "retry", "abandon"])
+for (const special of ["delayed-tail", "held-tail", "shutdown-tail", "string-bound", "artifact-omission", "retry", "abandon"])
   cells.push({ name: special, path: "messages", stream: special === "abandon", gate: "on", special });
 let active: Cell;
 let inference = 0;
 let refresh = 0;
 let drained = false;
-const stub = Bun.serve({ hostname: "127.0.0.1", port: 443, tls: { cert: Bun.file(f.cert!), key: Bun.file(f.key!) },
+const stub = Bun.serve({ hostname: "127.0.0.1", port: 443, idleTimeout: 0, tls: { cert: Bun.file(f.cert!), key: Bun.file(f.key!) },
   async fetch(req) {
     await req.text();
     if (new URL(req.url).pathname === "/v1/oauth/token") {
@@ -86,6 +86,16 @@ const stub = Bun.serve({ hostname: "127.0.0.1", port: 443, tls: { cert: Bun.file
     inference++;
     if (active.special === "retry" && inference === 1) return Response.json({ error: { type: "authentication_error", message: "retry fixture" } }, { status: 401 });
     const bytes = new TextEncoder().encode(sse(`hello ${secret}`));
+    if (active.special?.endsWith("-tail")) {
+      const delay = active.special === "delayed-tail" ? 1000 : 60000;
+      return new Response(new ReadableStream({ start(controller) {
+        controller.enqueue(bytes);
+        const timer = setTimeout(() => {
+          try { controller.enqueue(new TextEncoder().encode("TAIL_AFTER_TERMINAL\n\n")); controller.close(); } catch {}
+        }, delay);
+        timer.unref();
+      } }), { headers: { "content-type": "text/event-stream" } });
+    }
     if (active.special !== "abandon") return new Response(bytes, { headers: { "content-type": "text/event-stream" } });
     let offset = 0;
     const split = bytes.indexOf(10, bytes.indexOf(10) + 1) + 1;
@@ -143,6 +153,14 @@ async function run(binary: string, label: string, c: Cell, port: number) {
     if (c.special === "abandon") {
       const reader = res.body!.getReader(); const first = await reader.read(); client = new TextDecoder().decode(first.value); await reader.cancel();
     } else client = await res.text();
+    let exitClass: string | null = null;
+    async function stop() {
+      p.kill("SIGTERM");
+      const prompt = await Promise.race([p.exited.then(() => true), Bun.sleep(5000).then(() => false)]);
+      if (!prompt) { p.kill("SIGKILL"); await p.exited; throw Error(`${label}: shutdown exceeded 5s`); }
+      exitClass = "under-5s";
+    }
+    if (c.special === "shutdown-tail") await stop();
     const on = c.gate === "on";
     await until(() => db.query(`SELECT * FROM ${on ? "request_bodies" : "request_logs"}`).all(), x => x.length === 1, `${label} ${c.name} persistence`);
     const bodyRows = db.query("SELECT * FROM request_bodies").all() as any[];
@@ -168,11 +186,12 @@ async function run(binary: string, label: string, c: Cell, port: number) {
         }
       }
       if (c.special === "retry" && (read.artifact.attempts.length !== 2 || refresh !== 1)) throw Error("retry must capture two inference attempts, not refresh");
+      if (c.special?.endsWith("-tail") && (!row.truncated || !read.artifact.attempts[0]?.truncated || plain.includes("TAIL_AFTER_TERMINAL"))) throw Error("terminal drain must abort with partial bytes");
       if (c.special === "abandon" && (!drained || !JSON.stringify(read.artifact.attempts).includes("message_stop"))) throw Error("tee failed to drain abandoned provider");
       artifacts.push(read.artifact);
     }
     const routes = [];
-    for (const role of ["admin", "viewer", "none"] as const) {
+    for (const role of (c.special === "shutdown-tail" ? [] : ["admin", "viewer", "none"]) as ("admin" | "viewer" | "none")[]) {
       let cookie = "";
       if (role !== "none") {
         const login = await fetch(base + "/api/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ password: passwords[role], ...(role === "viewer" ? { mode: "viewer" } : {}) }) });
@@ -184,12 +203,12 @@ async function run(binary: string, label: string, c: Cell, port: number) {
         routes.push({ role, present: id !== "absent", status: r.status, type: r.headers.get("content-type"), cache: r.headers.get("cache-control"), body: await r.json() });
       }
     }
-    p.kill("SIGTERM"); await p.exited;
+    if (exitClass === null) await stop();
     const layout = files(join(root, "request_bodies"));
     if (!on && (layout.length || db.query("SELECT * FROM request_bodies").all().length)) throw Error("OFF wrote bodies");
     // Ciphertext digest is independently verified above; random nonces make it unequal.
     const typedRows = bodyRows.map(({ sha256, ...row }) => row);
-    return { requestId: log.id, typedRows, artifacts, layout, routes, client: c.special === "abandon" ? null : client };
+    return { requestId: log.id, typedRows, artifacts, layout, routes, exitClass, client: c.special === "abandon" ? null : client };
   } finally { p.kill("SIGTERM"); await p.exited; db.close(); }
 }
 try {
@@ -198,8 +217,8 @@ try {
     const rust = await run(f.rust!, "rust", c, 18492);
     await Bun.write(join(work, `${c.name}.json`), JSON.stringify({ ts, rust }, null, 2));
     const a = canonical(ts, ts.requestId), b = canonical(rust, rust.requestId);
-    for (const k of ["typedRows", "artifacts", "layout", "routes", "client"] as const) equal(`${c.name}/${k}`, a[k], b[k]);
-    console.log(`equal ${c.name} (5 rows)`);
+    for (const k of ["typedRows", "artifacts", "layout", "routes", "client", "exitClass"] as const) equal(`${c.name}/${k}`, a[k], b[k]);
+    console.log(`equal ${c.name} (6 rows)`);
   }
   console.log(`${rows} equal / 0 failed; ${cells.length} cells; scratch ${work}`);
 } finally { stub.stop(true); }
