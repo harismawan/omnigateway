@@ -3,7 +3,7 @@ import driver_env
 from dry_run_acceptance import accepted
 import itertools, json, os, pathlib, shutil, subprocess, tempfile, time, sqlite3
 
-scratch = pathlib.Path('/tmp/opencode/a12/f3-cli')
+scratch = pathlib.Path('/tmp/opencode/a12/f4-cli')
 scratch.mkdir(parents=True, exist_ok=True)
 work = pathlib.Path(tempfile.mkdtemp(dir=scratch))
 home = work/'home'
@@ -35,6 +35,7 @@ stored += [f"UPDATE credentials SET {col}={value} WHERE id='ok'" for col in ['la
 stored += ["UPDATE credentials SET weight=1e400 WHERE id='ok'", "UPDATE credentials SET weight='oops' WHERE id='ok'", "UPDATE virtual_models SET strategy=x'6162' WHERE id='score'"]
 stored += ["UPDATE credentials SET expires_at='oops' WHERE id='expired-oauth'"]
 stored += [f"UPDATE virtual_models SET targets=json_set(targets,'$[0].model',{value}) WHERE id='score'" for value in ["json('{}')",'12','NULL']]
+stored += json.loads((pathlib.Path.cwd()/'conformance/e2e/models-dry-run-r3.json').read_text())
 rows=[]
 cross=[f'UPDATE {table} SET {col}={value} WHERE {where}' for table,cols,where in [('virtual_models',['targets','strategy'],"id='score'"),('credentials',['tier','label','expires_at','disabled_at','provider_data','enabled'],"id='ok'"),('credential_health',['credential_id','model','breaker_state','consecutive_failures','opened_at','rate_limited_until'],'1')] for col in cols for value in ['1','1.5','-0.0',"'oops'","'2'","x'6162'",'NULL']]
 for args,sql in [(a,None) for a in cases]+[(['models','dry-run','score']+(['--json'] if js else []),sql) for sql in stored for js in [False,True]]+[(['models','dry-run','score','--json'],sql) for sql in cross]:
@@ -43,7 +44,7 @@ for args,sql in [(a,None) for a in cases]+[(['models','dry-run','score']+(['--js
         (home/'omnigateway.db').write_bytes(seed)
         if sql:
             db=sqlite3.connect(home/'omnigateway.db')
-            try: db.execute(sql);db.commit()
+            try: db.executescript(sql);db.commit()
             except sqlite3.IntegrityError:
                 db.close();pair.append(dict(constraintRejected=True));continue
             db.close()

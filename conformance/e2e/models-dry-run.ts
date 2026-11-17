@@ -45,6 +45,7 @@ try{
  // Fresh stored rows; reset each case rather than accumulating mutations.
  const dbs=[0,1].map(i=>new Database(`${work}/${i}.db`));
  const cases=[
+ ...JSON.parse(await Bun.file(new URL('./models-dry-run-r3.json', import.meta.url)).text()),
  ...['tier','weight'].map(field=>`UPDATE virtual_models SET targets=json_set(targets,'$[0].${field}',9007199254740993) WHERE id='score'`),
  ...["'false'",'0','1.0'].map(value=>`UPDATE virtual_models SET targets=json_set(targets,'$[0].capabilities.tools',${value}) WHERE id='score'`),
  ...['tier','weight','costPerMTok.input','costPerMTok.output','costPerMTok.cacheRead'].flatMap(field=>["'2'","'oops'",'NULL',"'1e400'","'-0'","json('[2]')","json('{}')"].map(value=>`UPDATE virtual_models SET targets=json_set(targets,'$[0].${field}',${value}) WHERE id='score'`)),
