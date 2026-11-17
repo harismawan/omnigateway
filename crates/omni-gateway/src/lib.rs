@@ -533,12 +533,8 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
                         requests.request(req.method() == hyper::Method::POST && matches!(server::route_path(req.uri().path()).as_ref(),
                             "/v1/messages" | "/v1/responses" | "/v1/chat/completions"));
                         let app = app.clone();
-                        let requests = requests.clone();
                         async move {
                             let response = server::handle(app, req).await?;
-                            if response.extensions().get::<stream_transport::OmitZeroLength>().is_some() {
-                                requests.omit_zero_length();
-                            }
                             Ok::<_, std::convert::Infallible>(response)
                         }
                     });

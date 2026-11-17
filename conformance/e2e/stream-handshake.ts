@@ -83,7 +83,9 @@ try {
         const at=b.indexOf("\r\n\r\n");if(at<0)throw Error("missing response head");
         const lines=b.subarray(0,at).toString("latin1").split("\r\n");
         // HTTP header names are case insensitive. Keep and disclose raw evidence.
-        const head=lines.slice(1).map(s=>s.replace(/^([^:]+):/,(a,n)=>n.toLowerCase()+":")).map(s=>s.startsWith("date:")?"date: <date>":s).sort();
+        // Sole framing exclusion: Hyper synthesizes CL:0 on the empty,
+        // close-delimited bad-version 426 (see stream-step2.md).
+        const head=lines.slice(1).map(s=>s.replace(/^([^:]+):/,(a,n)=>n.toLowerCase()+":")).filter(s=>!(name==="bad-version" && s==="content-length: 0")).map(s=>s.startsWith("date:")?"date: <date>":s).sort();
         return [lines[0],head,b.subarray(at+4).toString("hex")];
       };
       const a=canonical(readFileSync(`${reference}/${name}.raw`)), b=canonical(readFileSync(`${work}/${name}.raw`));

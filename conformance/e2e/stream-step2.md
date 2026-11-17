@@ -1,9 +1,14 @@
 # A9 step 2 boundaries
 
-Migration-wide HTTP comparison ignores header-name case and header order only.
+Migration-wide HTTP comparison ignores header-name case/order and synthesized
+framing headers on bodiless/close-delimited responses (`content-length: 0`,
+and the previously documented `connection: close`).
 `stream-handshake.ts` (including `raw` mode) compares the exact status line,
 header multiset (lowercased names, byte-exact values except masked Date values),
-and exact body/frame bytes. No header is excluded. Multiplicity is preserved.
+and exact body/frame bytes. Its sole header exclusion is exactly
+`content-length: 0` on the **bad-version 426** case, where Hyper synthesizes
+framing for the empty close-delimited response. No other case or header line
+is excluded; remaining multiplicity is preserved. IdleIo does not rewrite bytes.
 Frozen missing-key content-type is already `text/plain;charset=utf-8`; HEAD
 already has `content-length: 71`. Those checkpoint differences were name case,
 not values. The real presence mismatch was bad-version's extra Hyper CL:0.

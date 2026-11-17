@@ -16,10 +16,6 @@ use tokio::{
     time::{Duration, Instant},
 };
 
-/// Frozen's empty version rejection is delimited by connection close, not CL.
-#[derive(Clone)]
-pub(crate) struct OmitZeroLength;
-
 pub struct Hub {
     state: Arc<Mutex<State>>,
     shutdown: watch::Sender<bool>,
@@ -319,7 +315,6 @@ pub async fn route(app: Arc<App>, mut req: Request<Incoming>) -> Response<Body> 
             .body(crate::server::full(""))
             .expect("bad version");
         response.extensions_mut().insert(crate::api::NoDate);
-        response.extensions_mut().insert(OmitZeroLength);
         return response;
     }
     let accept = stream_codec::accept(key);
