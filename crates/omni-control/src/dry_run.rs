@@ -110,9 +110,14 @@ fn models(store: &SqliteStore, selected: &str) -> Result<Vec<omni_store::Virtual
         let mut targets: serde_json::Value =
             serde_json::from_str(&omni_ir::jsjson::stringify(&raw).unwrap_or_default())
                 .map_err(Failure::internal)?;
+        let error = if targets.is_number() {
+            "number is not iterable"
+        } else {
+            "targets is not iterable"
+        };
         let list = targets
             .as_array_mut()
-            .ok_or_else(|| Failure::internal("targets is not iterable"))?;
+            .ok_or_else(|| Failure::internal(error))?;
         for target in list.iter_mut() {
             for field in ["tier", "weight"] {
                 target[field] = json!(omni_ir::js::to_number(target.get(field)));
@@ -141,6 +146,16 @@ fn models(store: &SqliteStore, selected: &str) -> Result<Vec<omni_store::Virtual
 
 fn credentials(store: &SqliteStore, now: f64) -> Result<Vec<omni_store::Credential>, Failure> {
     use crate::cli_cell::{scalar_number, scalar_string};
+    // Keep bare JSON.parse errors for CLI as well as whole-call HTTP failure.
+    let mut stmt = store
+        .connection()
+        .prepare("SELECT provider_data FROM credentials ORDER BY tier,label")
+        .map_err(Failure::internal)?;
+    let mut rows = stmt.query([]).map_err(Failure::internal)?;
+    while let Some(row) = rows.next().map_err(Failure::internal)? {
+        crate::cli_cell::json(row.get_ref(0).map_err(Failure::internal)?)
+            .map_err(Failure::internal)?;
+    }
     let mut out = Vec::new();
     for row in crate::credentials::rows(store, None)? {
         let null = JsValue::Null;

@@ -52,9 +52,16 @@ try{
  "UPDATE virtual_models SET strategy=x'73636f7265' WHERE id='score'",
  ...["tier='oops'","label=x'6162'","expires_at=1.5","disabled_at=1.5","provider_data=x'7b7d'","provider_data='null'"].map(x=>`UPDATE credentials SET ${x} WHERE id='ok'`),
  "UPDATE credential_health SET credential_id=x'6162'",
+ ...[
+ ['virtual_models','targets',"id='score'"],['virtual_models','strategy',"id='score'"],
+ ...['tier','label','expires_at','disabled_at','provider_data','enabled'].map(c=>['credentials',c,"id='ok'"]),
+ ...['credential_id','model','breaker_state','consecutive_failures','opened_at','rate_limited_until'].map(c=>['credential_health',c,'1']),
+ ].flatMap(([table,column,where])=>['1','1.5','-0.0',"'oops'","'2'","x'6162'",'NULL'].map(value=>`UPDATE ${table} SET ${column}=${value} WHERE ${where}`)),
  ];
  for(const sql of cases){
-  for(const db of dbs){db.run('PRAGMA foreign_keys=OFF');db.run(sql);}
+  let rejected=false;
+  for(const db of dbs){db.run('PRAGMA foreign_keys=OFF');try{db.run(sql);}catch(e){rejected=true;}}
+  if(rejected){rows.push({sql,constraintRejected:true,equal:true});continue;}
   const pair=await Promise.all([19612,19613].map((port,i)=>req(port,'/api/models/score/dry-run',{},cookies[i])));pair.forEach(x=>delete (x as any).cookie);
   rows.push({sql,pair,equal:JSON.stringify(pair[0])===JSON.stringify(pair[1])});
   for(const db of dbs){db.run(`ATTACH DATABASE '${seed}' AS original`);for(const t of ['credentials','credential_health','virtual_models']){db.run(`DELETE FROM ${t}`);db.run(`INSERT INTO ${t} SELECT * FROM original.${t}`);}db.run('DETACH DATABASE original');}
@@ -71,6 +78,24 @@ try{
  for(const raw of ['{','no-json','']){const pair=await Promise.all([19612,19613].map((port,i)=>req(port,'/api/models/score/dry-run',raw,cookies[i],true)));pair.forEach(x=>delete (x as any).cookie);rows.push({matrix:'heterogeneous',raw,pair,equal:JSON.stringify(pair[0])===JSON.stringify(pair[1])});}
  for(const db of dbs)db.close();
 }finally{for(const child of children)child.kill();await Promise.all(children.map(p=>p.exited));}
+// Review's live discrimination: poison exists before boot; no provider traffic.
+const liveChildren=[];
+try{
+ for(const [i,bin] of [f.ts!,f.rust!].entries()){
+  const file=`${work}/live-${i}.db`;copyFileSync(seed,file);const db=new Database(file);
+  db.run('UPDATE credentials SET enabled=0');db.run("INSERT INTO virtual_models(id,targets,strategy) VALUES('broken','{}','score')");db.close();
+  liveChildren.push(await start(bin,file,19612+i,i===0));
+ }
+ const pair=[];
+ for(const port of [19612,19613]){
+  const cookie=(await req(port,'/api/login',{password:'a12-password-long-enough'})).cookie;
+  const created=await req(port,'/api/keys',{},cookie);
+  const live=await fetch(`http://127.0.0.1:${port}/v1/chat/completions`,{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${created.body.key}`},body:JSON.stringify({model:'score',messages:[{role:'user',content:'hi'}],stream:false})});
+  const dry=await req(port,'/api/models/score/dry-run',{},cookie);delete (dry as any).cookie;
+  pair.push({live:{status:live.status,body:await live.text()},dry});
+ }
+ rows.push({identity:'live-unrelated-poison',pair,equal:JSON.stringify(pair[0])===JSON.stringify(pair[1])&&pair.every(p=>p.live.status===503&&p.dry.status===200)});
+}finally{for(const p of liveChildren)p.kill();await Promise.all(liveChildren.map(p=>p.exited));}
 const manifest=JSON.parse(readFileSync(new URL('./models-dry-run-accepted.json',import.meta.url),'utf8'));
 function differences(a:any,b:any,path=''):string[]{
  if(JSON.stringify(a)===JSON.stringify(b))return [];
