@@ -45,6 +45,10 @@ for reason in values:
     for args in [['credentials', 'list'], ['credentials', 'show', 'c']]:
         cases.append((f'disabled:{reason}', seed,
                       f'UPDATE credentials SET enabled=0, disabled_reason={reason}', args))
+for value in values:
+    cases.append((f'closed failures:{value}', seed,
+                  f"UPDATE credential_health SET breaker_state='closed', consecutive_failures={value}",
+                  ['credentials', 'health']))
 cases.append(('unrelated invalid metadata', seed,
               "INSERT INTO credentials(id,provider,label,auth_type,provider_data,created_at,updated_at) VALUES('bad','openai','bad','oauth','invalid',1,2)",
               ['credentials', 'show', 'c']))

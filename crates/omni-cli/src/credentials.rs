@@ -205,7 +205,8 @@ pub fn run(
                         prop(h, "breakerState") == &J::String("closed".encode_utf16().collect());
                     if !flags.contains_key("all")
                         && closed
-                        && cli_cell::scalar_number(prop(h, "consecutiveFailures")) <= 0.0
+                        && cli_cell::scalar_number(prop(h, "consecutiveFailures")).partial_cmp(&0.0)
+                            != Some(std::cmp::Ordering::Greater)
                     {
                         continue;
                     }
