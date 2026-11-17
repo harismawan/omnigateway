@@ -644,7 +644,11 @@ fn create_with(
             let undefined = JsValue::Undefined;
             let old = get(&row, "providerData").unwrap_or(&undefined);
             if matches!(old, JsValue::Null) {
-                return Err(Failure::internal("null provider data"));
+                return Err(Failure::internal(if cli {
+                    "null is not an object (evaluating 'credential.providerData.endpointId')"
+                } else {
+                    "null provider data"
+                }));
             }
             if get(old, "endpointId") == get(&data, "endpointId")
                 && ["endpointLabel", "origin", "basePath", "protocol"]

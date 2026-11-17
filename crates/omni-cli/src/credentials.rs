@@ -121,11 +121,12 @@ fn mutate(
             secret = String::from_utf16_lossy(
                 &crate::password::secret(&format!("{id} API key: ")).map_err(|e| (1, e))?,
             );
-            eprintln!();
         } else {
+            let mut bytes = Vec::new();
             std::io::stdin()
-                .read_to_string(&mut secret)
+                .read_to_end(&mut bytes)
                 .map_err(|e| (1, e.to_string()))?;
+            secret = String::from_utf8_lossy(&bytes).into_owned();
         }
         secret = secret.trim_matches(omni_ir::js::is_js_whitespace).into();
         if secret.is_empty() {
@@ -167,6 +168,16 @@ fn mutate(
                 && let Some(endpoint) = flags.get("endpoint-id")
             {
                 let rows = omni_control::credentials::cli_rows(&store).map_err(|e| (1, e))?;
+                if rows.iter().any(|c| {
+                    prop(c, "provider") == &string("custom")
+                        && matches!(prop(c, "providerData"), J::Null)
+                }) {
+                    return Err((
+                        1,
+                        "null is not an object (evaluating 'credential.providerData.endpointId')"
+                            .into(),
+                    ));
+                }
                 if let Some(old) = rows.iter().find(|c| {
                     prop(c, "provider") == &string("custom")
                         && prop(prop(c, "providerData"), "endpointId")
