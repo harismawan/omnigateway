@@ -30,17 +30,12 @@ fn sql_value(v: ValueRef<'_>) -> JsValue {
     }
 }
 fn provider_data(raw: ValueRef<'_>, id: ValueRef<'_>) -> Result<JsValue> {
-    if matches!(raw, ValueRef::Null) {
-        return Ok(JsValue::Null);
-    }
-    let invalid = || {
+    crate::cli_cell::json(raw).map_err(|_| {
         Failure::internal(format!(
             "invalid credential provider_data: id={}",
-            stringify(&sql_value(id))
+            stringify(&crate::cli_cell::Cell::read(id).json())
         ))
-    };
-    let bytes = raw.as_bytes().map_err(|_| invalid())?;
-    crate::operator_json::parse(&String::from_utf8_lossy(bytes)).map_err(|_| invalid())
+    })
 }
 
 /// Match credentials.list's whole-list JSON failure without opening secret columns.
@@ -58,8 +53,20 @@ pub(crate) fn validate_client_metadata(s: &SqliteStore) -> Result<()> {
     }
     Ok(())
 }
-fn rows(s: &SqliteStore, id: Option<&str>) -> Result<Vec<JsValue>> {
-    rows_with(s, id, provider_data, false)
+pub(crate) fn rows(s: &SqliteStore, id: Option<&str>) -> Result<Vec<JsValue>> {
+    rows_with(
+        s,
+        id,
+        |raw, id| {
+            crate::cli_cell::json(raw).map_err(|_| {
+                Failure::internal(format!(
+                    "invalid credential provider_data: id={}",
+                    stringify(&crate::cli_cell::Cell::read(id).json())
+                ))
+            })
+        },
+        true,
+    )
 }
 fn rows_with(
     s: &SqliteStore,
@@ -152,7 +159,7 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
         ] {
             fields.push((
                 name,
-                sql_value(row.get_ref(column).map_err(Failure::internal)?),
+                crate::cli_cell::Cell::read(row.get_ref(column).map_err(Failure::internal)?).json(),
             ));
         }
         health.push(obj(fields));
@@ -178,16 +185,11 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
         ] {
             fields.push((
                 name,
-                sql_value(row.get_ref(column).map_err(Failure::internal)?),
+                crate::cli_cell::Cell::read(row.get_ref(column).map_err(Failure::internal)?).json(),
             ));
         }
         let value = obj(fields);
-        let number = |name| match get(&value, name) {
-            Some(JsValue::Number(n)) => *n,
-            Some(JsValue::Null) => 0.0,
-            Some(JsValue::String(u)) => omni_ir::js::string_to_number(&String::from_utf16_lossy(u)),
-            _ => f64::NAN,
-        };
+        let number = |name| crate::cli_cell::scalar_number(get(&value, name).expect("quota field"));
         let optional = |name| {
             if matches!(get(&value, name), Some(JsValue::Null)) {
                 None
@@ -197,11 +199,11 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
         };
         quota.push(omni_store::QuotaWindow {
             text_spent: None,
-            credential_id: row.get("credential_id").map_err(Failure::internal)?,
-            window_type: omni_store::quota::WindowType::parse(
-                &row.get::<_, String>("window_type")
-                    .map_err(Failure::internal)?,
-            ),
+            credential_id: String::new(), // output retains the raw SQLite identity below
+            window_type: omni_store::quota::WindowType::parse(&match get(&value, "windowType") {
+                Some(JsValue::String(units)) => String::from_utf16_lossy(units),
+                _ => String::new(),
+            }),
             starts_at: number("startsAt"),
             used: number("used"),
             limit: optional("limit"),
@@ -212,21 +214,30 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
         quota_json.push(value);
     }
     let settings = s.get_settings()?;
-    let credentials = rows(s, None)?;
+    // list() parses every credential's metadata before the per-id seeks.
+    rows(s, None)?;
+    let mut ids = s
+        .connection()
+        .prepare("SELECT id FROM credentials ORDER BY tier,label")
+        .map_err(Failure::internal)?;
+    let mut credentials = ids.query([]).map_err(Failure::internal)?;
     let mut last_used = Vec::new();
-    for c in credentials {
-        if let Some(JsValue::String(id)) = get(&c, "id") {
-            let at: Option<f64> = s
-                .connection()
-                .query_row(
-                    "SELECT MAX(at) FROM request_logs WHERE credential_id=?",
-                    [String::from_utf16_lossy(id)],
-                    |r| r.get(0),
-                )
-                .map_err(Failure::internal)?;
-            if let Some(at) = at {
-                last_used.push((id.clone(), JsValue::Number(at)));
-            }
+    while let Some(c) = credentials.next().map_err(Failure::internal)? {
+        let raw = c.get_ref(0).map_err(Failure::internal)?;
+        let id = crate::cli_cell::Cell::read(raw).json();
+        let at = s
+            .connection()
+            .query_row(
+                "SELECT MAX(at) FROM request_logs WHERE credential_id=?",
+                [crate::database::bun_cell(raw)],
+                |r| Ok(crate::cli_cell::Cell::read(r.get_ref(0)?).json()),
+            )
+            .map_err(Failure::internal)?;
+        if !matches!(at, JsValue::Null) {
+            last_used.push((
+                crate::cli_cell::scalar_string(&id).encode_utf16().collect(),
+                at,
+            ));
         }
     }
     let burn = quota
@@ -251,7 +262,8 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
             } else {
                 start.map(|start| {
                     let elapsed = (q.observed_at - start) / 3_600_000.0;
-                    if elapsed <= 0.0 || q.used == 0.0 {
+                    // Frozen tests raw `window.used === 0`, not ToNumber(used).
+                    if elapsed <= 0.0 || get(raw, "used") == Some(&JsValue::Number(0.0)) {
                         0.0
                     } else {
                         q.used / elapsed
@@ -275,7 +287,7 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
                 }
             });
             let exhaust_value = match (exhausts, get(raw, "observedAt")) {
-                (Some(_), Some(JsValue::String(units))) => {
+                (Some(_), Some(observed @ (JsValue::String(_) | JsValue::Object(_)))) => {
                     let remaining = q.limit.unwrap_or(f64::NAN) - q.used;
                     let delta = (if remaining.is_nan() {
                         f64::NAN
@@ -294,7 +306,9 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
                         omni_ir::jsjson::write_number(delta, &mut s);
                         s
                     };
-                    let mut value = units.clone();
+                    let mut value: Vec<u16> = crate::cli_cell::scalar_string(observed)
+                        .encode_utf16()
+                        .collect();
                     value.extend(suffix.encode_utf16());
                     JsValue::String(value)
                 }
@@ -305,6 +319,14 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
             } else {
                 match (&exhaust_value, get(raw, "resetsAt")) {
                     (JsValue::String(a), Some(JsValue::String(b))) => a >= b,
+                    (JsValue::String(a), Some(b @ JsValue::Object(_))) => {
+                        // Uint8Array ToPrimitive is a comma-joined string, so
+                        // two strings compare lexically, not numerically.
+                        a.iter()
+                            .copied()
+                            .cmp(crate::cli_cell::scalar_string(b).encode_utf16())
+                            != std::cmp::Ordering::Less
+                    }
                     (JsValue::String(a), _) => {
                         omni_ir::js::string_to_number(&String::from_utf16_lossy(a))
                             >= q.resets_at.unwrap_or(f64::NAN)
@@ -313,8 +335,14 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
                 }
             };
             obj(vec![
-                ("credentialId", text(&q.credential_id)),
-                ("windowType", text(q.window_type.as_str())),
+                (
+                    "credentialId",
+                    get(raw, "credentialId").expect("quota field").clone(),
+                ),
+                (
+                    "windowType",
+                    get(raw, "windowType").expect("quota field").clone(),
+                ),
                 (
                     "windowStartsAt",
                     start.map_or(JsValue::Null, JsValue::Number),
@@ -449,7 +477,7 @@ pub fn patch(s: &SqliteStore, id: Option<&str>, body: &JsValue, now: i64) -> Res
             _ => unreachable!(),
         }
     }
-    omni_store::credentials::patch_metadata(s.connection(), id, &mutation, now)?;
+    s.connection().execute("UPDATE credentials SET label=COALESCE(?1,label),enabled=COALESCE(?2,enabled),tier=COALESCE(?3,tier),weight=COALESCE(?4,weight),disabled_reason=CASE WHEN ?2 IS NULL THEN disabled_reason WHEN ?2=1 THEN NULL ELSE 'manual' END,disabled_at=CASE WHEN ?2 IS NULL THEN disabled_at WHEN ?2=1 THEN NULL ELSE ?5 END,updated_at=?5 WHERE id=?6", rusqlite::params![mutation.label, mutation.enabled, mutation.tier.map(crate::cli_cell::bind_number), mutation.weight.map(crate::cli_cell::bind_number), now, id]).map_err(Failure::internal)?;
     if let Some(enabled) = mutation.enabled
         && get(&existing, "enabled") != Some(&JsValue::Bool(enabled))
     {
@@ -596,6 +624,8 @@ pub fn create(
         for (k, v) in fields {
             if k.iter().copied().eq("label".encode_utf16()) {
                 *v = JsValue::String(label.clone());
+            } else if k.iter().copied().eq("tokenVersion".encode_utf16()) {
+                *v = JsValue::Number(0.0);
             }
         }
     }
