@@ -69,3 +69,32 @@ fn number(n: f64) -> String {
     omni_ir::jsjson::write_number(n, &mut s);
     s
 }
+
+/// bun:sqlite binds safe integral JS numbers as INTEGER, except negative zero.
+pub(crate) fn bind_number(n: f64) -> rusqlite::types::Value {
+    if n.is_finite()
+        && n.fract() == 0.0
+        && n.abs() <= 9_007_199_254_740_991.0
+        && !(n == 0.0 && n.is_sign_negative())
+    {
+        rusqlite::types::Value::Integer(n as i64)
+    } else {
+        rusqlite::types::Value::Real(n)
+    }
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::bind_number;
+    use rusqlite::types::Value;
+
+    #[test]
+    fn bun_number_binding_boundary() {
+        for n in [0.0, 2.0, 2_147_483_648.0, 9_007_199_254_740_991.0] {
+            assert!(matches!(bind_number(n), Value::Integer(_)));
+        }
+        for n in [-0.0, 2.5, 9_007_199_254_740_992.0, 1e20, f64::INFINITY] {
+            assert!(matches!(bind_number(n), Value::Real(_)));
+        }
+    }
+}

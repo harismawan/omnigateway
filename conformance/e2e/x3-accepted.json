@@ -1,0 +1,2263 @@
+[
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "id",
+      "integer",
+      "1"
+    ],
+    "request": [
+      "GET",
+      "/api/client/summary",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "id",
+      "integer",
+      "1"
+    ],
+    "request": [
+      "GET",
+      "/api/client/quota",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "id",
+      "integer",
+      "1"
+    ],
+    "request": [
+      "GET",
+      "/api/client/quota/history?since=0&until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "id",
+      "integer",
+      "1"
+    ],
+    "request": [
+      "GET",
+      "/api/client/usage?since=0&until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "id",
+      "integer",
+      "1"
+    ],
+    "request": [
+      "GET",
+      "/api/client/logs?until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "id",
+      "integer",
+      "1"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      500
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b2274797065223a226572726f72222c226572726f72223a7b2274797065223a226170695f6572726f72222c226d657373616765223a22696e7465726e616c206572726f72227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "id",
+      "real",
+      "1.5"
+    ],
+    "request": [
+      "GET",
+      "/api/client/summary",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "id",
+      "real",
+      "1.5"
+    ],
+    "request": [
+      "GET",
+      "/api/client/quota",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "id",
+      "real",
+      "1.5"
+    ],
+    "request": [
+      "GET",
+      "/api/client/quota/history?since=0&until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "id",
+      "real",
+      "1.5"
+    ],
+    "request": [
+      "GET",
+      "/api/client/usage?since=0&until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "id",
+      "real",
+      "1.5"
+    ],
+    "request": [
+      "GET",
+      "/api/client/logs?until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "id",
+      "real",
+      "1.5"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      500
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b2274797065223a226572726f72222c226572726f72223a7b2274797065223a226170695f6572726f72222c226d657373616765223a22696e7465726e616c206572726f72227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "id",
+      "blob",
+      "X'7178'"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      500
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b2274797065223a226572726f72222c226572726f72223a7b2274797065223a226170695f6572726f72222c226d657373616765223a22696e7465726e616c206572726f72227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "id",
+      "null",
+      "NULL"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      500
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b2274797065223a226572726f72222c226572726f72223a7b2274797065223a226170695f6572726f72222c226d657373616765223a22696e7465726e616c206572726f72227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "label",
+      "integer",
+      "1"
+    ],
+    "request": [
+      "GET",
+      "/api/client/summary",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "label",
+      "integer",
+      "1"
+    ],
+    "request": [
+      "GET",
+      "/api/client/quota",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "label",
+      "integer",
+      "1"
+    ],
+    "request": [
+      "GET",
+      "/api/client/quota/history?since=0&until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "label",
+      "integer",
+      "1"
+    ],
+    "request": [
+      "GET",
+      "/api/client/usage?since=0&until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "label",
+      "integer",
+      "1"
+    ],
+    "request": [
+      "GET",
+      "/api/client/logs?until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "label",
+      "integer",
+      "1"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      500
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b2274797065223a226572726f72222c226572726f72223a7b2274797065223a226170695f6572726f72222c226d657373616765223a22696e7465726e616c206572726f72227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "label",
+      "real",
+      "1.5"
+    ],
+    "request": [
+      "GET",
+      "/api/client/summary",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "label",
+      "real",
+      "1.5"
+    ],
+    "request": [
+      "GET",
+      "/api/client/quota",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "label",
+      "real",
+      "1.5"
+    ],
+    "request": [
+      "GET",
+      "/api/client/quota/history?since=0&until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "label",
+      "real",
+      "1.5"
+    ],
+    "request": [
+      "GET",
+      "/api/client/usage?since=0&until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "label",
+      "real",
+      "1.5"
+    ],
+    "request": [
+      "GET",
+      "/api/client/logs?until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "label",
+      "real",
+      "1.5"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      500
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b2274797065223a226572726f72222c226572726f72223a7b2274797065223a226170695f6572726f72222c226d657373616765223a22696e7465726e616c206572726f72227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "label",
+      "blob",
+      "X'7178'"
+    ],
+    "request": [
+      "GET",
+      "/api/client/summary",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "label",
+      "blob",
+      "X'7178'"
+    ],
+    "request": [
+      "GET",
+      "/api/client/quota",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "label",
+      "blob",
+      "X'7178'"
+    ],
+    "request": [
+      "GET",
+      "/api/client/quota/history?since=0&until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "label",
+      "blob",
+      "X'7178'"
+    ],
+    "request": [
+      "GET",
+      "/api/client/usage?since=0&until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "label",
+      "blob",
+      "X'7178'"
+    ],
+    "request": [
+      "GET",
+      "/api/client/logs?until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "label",
+      "blob",
+      "X'7178'"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      500
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b2274797065223a226572726f72222c226572726f72223a7b2274797065223a226170695f6572726f72222c226d657373616765223a22696e7465726e616c206572726f72227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "label",
+      "null",
+      "NULL"
+    ],
+    "request": [
+      "GET",
+      "/api/client/summary",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "label",
+      "null",
+      "NULL"
+    ],
+    "request": [
+      "GET",
+      "/api/client/quota",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "label",
+      "null",
+      "NULL"
+    ],
+    "request": [
+      "GET",
+      "/api/client/quota/history?since=0&until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "label",
+      "null",
+      "NULL"
+    ],
+    "request": [
+      "GET",
+      "/api/client/usage?since=0&until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "label",
+      "null",
+      "NULL"
+    ],
+    "request": [
+      "GET",
+      "/api/client/logs?until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "label",
+      "null",
+      "NULL"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      500
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b2274797065223a226572726f72222c226572726f72223a7b2274797065223a226170695f6572726f72222c226d657373616765223a22696e7465726e616c206572726f72227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "prefix",
+      "integer",
+      "1"
+    ],
+    "request": [
+      "GET",
+      "/api/client/summary",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "prefix",
+      "integer",
+      "1"
+    ],
+    "request": [
+      "GET",
+      "/api/client/quota",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "prefix",
+      "integer",
+      "1"
+    ],
+    "request": [
+      "GET",
+      "/api/client/quota/history?since=0&until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "prefix",
+      "integer",
+      "1"
+    ],
+    "request": [
+      "GET",
+      "/api/client/usage?since=0&until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "prefix",
+      "integer",
+      "1"
+    ],
+    "request": [
+      "GET",
+      "/api/client/logs?until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "prefix",
+      "integer",
+      "1"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      500
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b2274797065223a226572726f72222c226572726f72223a7b2274797065223a226170695f6572726f72222c226d657373616765223a22696e7465726e616c206572726f72227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "prefix",
+      "real",
+      "1.5"
+    ],
+    "request": [
+      "GET",
+      "/api/client/summary",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "prefix",
+      "real",
+      "1.5"
+    ],
+    "request": [
+      "GET",
+      "/api/client/quota",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "prefix",
+      "real",
+      "1.5"
+    ],
+    "request": [
+      "GET",
+      "/api/client/quota/history?since=0&until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "prefix",
+      "real",
+      "1.5"
+    ],
+    "request": [
+      "GET",
+      "/api/client/usage?since=0&until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "prefix",
+      "real",
+      "1.5"
+    ],
+    "request": [
+      "GET",
+      "/api/client/logs?until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "prefix",
+      "real",
+      "1.5"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      500
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b2274797065223a226572726f72222c226572726f72223a7b2274797065223a226170695f6572726f72222c226d657373616765223a22696e7465726e616c206572726f72227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "prefix",
+      "blob",
+      "X'7178'"
+    ],
+    "request": [
+      "GET",
+      "/api/client/summary",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "prefix",
+      "blob",
+      "X'7178'"
+    ],
+    "request": [
+      "GET",
+      "/api/client/quota",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "prefix",
+      "blob",
+      "X'7178'"
+    ],
+    "request": [
+      "GET",
+      "/api/client/quota/history?since=0&until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "prefix",
+      "blob",
+      "X'7178'"
+    ],
+    "request": [
+      "GET",
+      "/api/client/usage?since=0&until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "prefix",
+      "blob",
+      "X'7178'"
+    ],
+    "request": [
+      "GET",
+      "/api/client/logs?until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "prefix",
+      "blob",
+      "X'7178'"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      500
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b2274797065223a226572726f72222c226572726f72223a7b2274797065223a226170695f6572726f72222c226d657373616765223a22696e7465726e616c206572726f72227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "prefix",
+      "null",
+      "NULL"
+    ],
+    "request": [
+      "GET",
+      "/api/client/summary",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "prefix",
+      "null",
+      "NULL"
+    ],
+    "request": [
+      "GET",
+      "/api/client/quota",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "prefix",
+      "null",
+      "NULL"
+    ],
+    "request": [
+      "GET",
+      "/api/client/quota/history?since=0&until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "prefix",
+      "null",
+      "NULL"
+    ],
+    "request": [
+      "GET",
+      "/api/client/usage?since=0&until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "prefix",
+      "null",
+      "NULL"
+    ],
+    "request": [
+      "GET",
+      "/api/client/logs?until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "api_keys",
+      "prefix",
+      "null",
+      "NULL"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      500
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b2274797065223a226572726f72222c226572726f72223a7b2274797065223a226170695f6572726f72222c226d657373616765223a22696e7465726e616c206572726f72227d7d"
+  },
+  {
+    "case": [
+      "a",
+      "virtual_models",
+      "id",
+      "integer",
+      "1"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      200
+    ],
+    "reason": "snapshot skips strict-invalid model"
+  },
+  {
+    "case": [
+      "a",
+      "virtual_models",
+      "id",
+      "real",
+      "1.5"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      200
+    ],
+    "reason": "snapshot skips strict-invalid model"
+  },
+  {
+    "case": [
+      "a",
+      "virtual_models",
+      "id",
+      "blob",
+      "X'7178'"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      200
+    ],
+    "reason": "snapshot skips strict-invalid model"
+  },
+  {
+    "case": [
+      "a",
+      "virtual_models",
+      "id",
+      "null",
+      "NULL"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      200
+    ],
+    "reason": "snapshot skips strict-invalid model"
+  },
+  {
+    "case": [
+      "a",
+      "virtual_models",
+      "strategy",
+      "integer",
+      "1"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      200
+    ],
+    "reason": "snapshot skips strict-invalid model"
+  },
+  {
+    "case": [
+      "a",
+      "virtual_models",
+      "strategy",
+      "real",
+      "1.5"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      200
+    ],
+    "reason": "snapshot skips strict-invalid model"
+  },
+  {
+    "case": [
+      "a",
+      "virtual_models",
+      "strategy",
+      "blob",
+      "X'7178'"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      200
+    ],
+    "reason": "snapshot skips strict-invalid model"
+  },
+  {
+    "case": [
+      "a",
+      "virtual_models",
+      "strategy",
+      "null",
+      "NULL"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      200
+    ],
+    "reason": "snapshot skips strict-invalid model"
+  },
+  {
+    "case": [
+      "b",
+      "credentials",
+      "provider_data",
+      "truncated",
+      "'\"canary_x3'"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "v1-models-frozen-json",
+    "statuses": [
+      500,
+      200
+    ],
+    "reason": "frozen snapshot throws; Rust isolates invalid row"
+  },
+  {
+    "case": [
+      "b",
+      "credentials",
+      "provider_data",
+      "bare",
+      "'broken'"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "v1-models-frozen-json",
+    "statuses": [
+      500,
+      200
+    ],
+    "reason": "frozen snapshot throws; Rust isolates invalid row"
+  },
+  {
+    "case": [
+      "b",
+      "credentials",
+      "provider_data",
+      "empty",
+      "''"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "v1-models-frozen-json",
+    "statuses": [
+      500,
+      200
+    ],
+    "reason": "frozen snapshot throws; Rust isolates invalid row"
+  },
+  {
+    "case": [
+      "b",
+      "credentials",
+      "provider_data",
+      "null",
+      "NULL"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "v1-models-frozen-json",
+    "statuses": [
+      500,
+      200
+    ],
+    "reason": "frozen snapshot throws; Rust isolates invalid row"
+  },
+  {
+    "case": [
+      "b",
+      "credentials",
+      "provider_data",
+      "blob",
+      "X'7b7d'"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "v1-models-frozen-json",
+    "statuses": [
+      500,
+      200
+    ],
+    "reason": "frozen snapshot throws; Rust isolates invalid row"
+  },
+  {
+    "case": [
+      "b",
+      "api_keys",
+      "model_allowlist",
+      "object",
+      "'{}'"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "v1-models-frozen-json",
+    "statuses": [
+      500,
+      200
+    ],
+    "reason": "frozen snapshot throws; Rust isolates invalid row"
+  },
+  {
+    "case": [
+      "b",
+      "api_keys",
+      "model_allowlist",
+      "integer",
+      "1"
+    ],
+    "request": [
+      "GET",
+      "/api/client/summary",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "b",
+      "api_keys",
+      "model_allowlist",
+      "integer",
+      "1"
+    ],
+    "request": [
+      "GET",
+      "/api/client/quota",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "b",
+      "api_keys",
+      "model_allowlist",
+      "integer",
+      "1"
+    ],
+    "request": [
+      "GET",
+      "/api/client/quota/history?since=0&until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "b",
+      "api_keys",
+      "model_allowlist",
+      "integer",
+      "1"
+    ],
+    "request": [
+      "GET",
+      "/api/client/usage?since=0&until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "b",
+      "api_keys",
+      "model_allowlist",
+      "integer",
+      "1"
+    ],
+    "request": [
+      "GET",
+      "/api/client/logs?until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "b",
+      "api_keys",
+      "model_allowlist",
+      "integer",
+      "1"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      500,
+      500
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b2274797065223a226572726f72222c226572726f72223a7b2274797065223a226170695f6572726f72222c226d657373616765223a22696e7465726e616c206572726f72227d7d"
+  },
+  {
+    "case": [
+      "b",
+      "api_keys",
+      "model_allowlist",
+      "real",
+      "1.5"
+    ],
+    "request": [
+      "GET",
+      "/api/client/summary",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "b",
+      "api_keys",
+      "model_allowlist",
+      "real",
+      "1.5"
+    ],
+    "request": [
+      "GET",
+      "/api/client/quota",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "b",
+      "api_keys",
+      "model_allowlist",
+      "real",
+      "1.5"
+    ],
+    "request": [
+      "GET",
+      "/api/client/quota/history?since=0&until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "b",
+      "api_keys",
+      "model_allowlist",
+      "real",
+      "1.5"
+    ],
+    "request": [
+      "GET",
+      "/api/client/usage?since=0&until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "b",
+      "api_keys",
+      "model_allowlist",
+      "real",
+      "1.5"
+    ],
+    "request": [
+      "GET",
+      "/api/client/logs?until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "b",
+      "api_keys",
+      "model_allowlist",
+      "real",
+      "1.5"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      500,
+      500
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b2274797065223a226572726f72222c226572726f72223a7b2274797065223a226170695f6572726f72222c226d657373616765223a22696e7465726e616c206572726f72227d7d"
+  },
+  {
+    "case": [
+      "b",
+      "api_keys",
+      "model_allowlist",
+      "blob",
+      "X'7b7d'"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      500,
+      500
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b2274797065223a226572726f72222c226572726f72223a7b2274797065223a226170695f6572726f72222c226d657373616765223a22696e7465726e616c206572726f72227d7d"
+  },
+  {
+    "case": [
+      "b",
+      "api_keys",
+      "model_allowlist",
+      "blobnum",
+      "X'31'"
+    ],
+    "request": [
+      "GET",
+      "/api/client/summary",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "b",
+      "api_keys",
+      "model_allowlist",
+      "blobnum",
+      "X'31'"
+    ],
+    "request": [
+      "GET",
+      "/api/client/quota",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "b",
+      "api_keys",
+      "model_allowlist",
+      "blobnum",
+      "X'31'"
+    ],
+    "request": [
+      "GET",
+      "/api/client/quota/history?since=0&until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "b",
+      "api_keys",
+      "model_allowlist",
+      "blobnum",
+      "X'31'"
+    ],
+    "request": [
+      "GET",
+      "/api/client/usage?since=0&until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "b",
+      "api_keys",
+      "model_allowlist",
+      "blobnum",
+      "X'31'"
+    ],
+    "request": [
+      "GET",
+      "/api/client/logs?until=1800000000000",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      401
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b226572726f72223a7b22636f6465223a2241555448222c226d657373616765223a22636c69656e742073657373696f6e207265717569726564227d7d"
+  },
+  {
+    "case": [
+      "b",
+      "api_keys",
+      "model_allowlist",
+      "blobnum",
+      "X'31'"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      500,
+      500
+    ],
+    "reason": "key lookup/auth refusal",
+    "rust_body": "7b2274797065223a226572726f72222c226572726f72223a7b2274797065223a226170695f6572726f72222c226d657373616765223a22696e7465726e616c206572726f72227d7d"
+  },
+  {
+    "case": [
+      "b",
+      "virtual_models",
+      "targets",
+      "truncated",
+      "'\"canary_x3'"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "v1-models-frozen-json",
+    "statuses": [
+      500,
+      200
+    ],
+    "reason": "frozen snapshot throws; Rust isolates invalid row"
+  },
+  {
+    "case": [
+      "b",
+      "virtual_models",
+      "targets",
+      "bare",
+      "'broken'"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "v1-models-frozen-json",
+    "statuses": [
+      500,
+      200
+    ],
+    "reason": "frozen snapshot throws; Rust isolates invalid row"
+  },
+  {
+    "case": [
+      "b",
+      "virtual_models",
+      "targets",
+      "empty",
+      "''"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "v1-models-frozen-json",
+    "statuses": [
+      500,
+      200
+    ],
+    "reason": "frozen snapshot throws; Rust isolates invalid row"
+  },
+  {
+    "case": [
+      "b",
+      "virtual_models",
+      "targets",
+      "object",
+      "'{}'"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "v1-models-frozen-json",
+    "statuses": [
+      500,
+      200
+    ],
+    "reason": "frozen snapshot throws; Rust isolates invalid row"
+  },
+  {
+    "case": [
+      "b",
+      "virtual_models",
+      "targets",
+      "null",
+      "NULL"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "v1-models-frozen-json",
+    "statuses": [
+      500,
+      200
+    ],
+    "reason": "frozen snapshot throws; Rust isolates invalid row"
+  },
+  {
+    "case": [
+      "b",
+      "virtual_models",
+      "targets",
+      "integer",
+      "1"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "v1-models-frozen-json",
+    "statuses": [
+      500,
+      200
+    ],
+    "reason": "frozen snapshot throws; Rust isolates invalid row"
+  },
+  {
+    "case": [
+      "b",
+      "virtual_models",
+      "targets",
+      "real",
+      "1.5"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "v1-models-frozen-json",
+    "statuses": [
+      500,
+      200
+    ],
+    "reason": "frozen snapshot throws; Rust isolates invalid row"
+  },
+  {
+    "case": [
+      "b",
+      "virtual_models",
+      "targets",
+      "blob",
+      "X'7b7d'"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "v1-models-frozen-json",
+    "statuses": [
+      500,
+      200
+    ],
+    "reason": "frozen snapshot throws; Rust isolates invalid row"
+  },
+  {
+    "case": [
+      "b",
+      "virtual_models",
+      "targets",
+      "blobnum",
+      "X'31'"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "v1-models-frozen-json",
+    "statuses": [
+      500,
+      200
+    ],
+    "reason": "frozen snapshot throws; Rust isolates invalid row"
+  },
+  {
+    "case": [
+      "b",
+      "virtual_models",
+      "targets",
+      "invalidutf",
+      "CAST(X'22ff22' AS TEXT)"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      200
+    ],
+    "reason": "snapshot skips strict-invalid model"
+  },
+  {
+    "case": [
+      "a",
+      "virtual_models",
+      "targets.credentialId",
+      "integer",
+      "'[{\"provider\": \"openai\", \"model\": \"gpt-4o\", \"credentialId\": 1, \"tier\": 1, \"weight\": 1, \"costPerMTok\": {\"input\": 1, \"output\": 1}, \"capabilities\": {\"tools\": true, \"images\": true, \"reasoning\": false}}]'"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      200
+    ],
+    "reason": "snapshot skips strict-invalid model"
+  },
+  {
+    "case": [
+      "a",
+      "virtual_models",
+      "targets.credentialId",
+      "real",
+      "'[{\"provider\": \"openai\", \"model\": \"gpt-4o\", \"credentialId\": 1.5, \"tier\": 1, \"weight\": 1, \"costPerMTok\": {\"input\": 1, \"output\": 1}, \"capabilities\": {\"tools\": true, \"images\": true, \"reasoning\": false}}]'"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      200
+    ],
+    "reason": "snapshot skips strict-invalid model"
+  },
+  {
+    "case": [
+      "a",
+      "virtual_models",
+      "targets.credentialId",
+      "object",
+      "'[{\"provider\": \"openai\", \"model\": \"gpt-4o\", \"credentialId\": {}, \"tier\": 1, \"weight\": 1, \"costPerMTok\": {\"input\": 1, \"output\": 1}, \"capabilities\": {\"tools\": true, \"images\": true, \"reasoning\": false}}]'"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      200
+    ],
+    "reason": "snapshot skips strict-invalid model"
+  },
+  {
+    "case": [
+      "a",
+      "virtual_models",
+      "targets.credentialId",
+      "array",
+      "'[{\"provider\": \"openai\", \"model\": \"gpt-4o\", \"credentialId\": [], \"tier\": 1, \"weight\": 1, \"costPerMTok\": {\"input\": 1, \"output\": 1}, \"capabilities\": {\"tools\": true, \"images\": true, \"reasoning\": false}}]'"
+    ],
+    "request": [
+      "GET",
+      "/v1/models",
+      null
+    ],
+    "accepted": "routing-strict",
+    "statuses": [
+      200,
+      200
+    ],
+    "reason": "snapshot skips strict-invalid model"
+  }
+]
