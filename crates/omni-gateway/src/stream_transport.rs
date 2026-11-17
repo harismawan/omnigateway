@@ -68,6 +68,21 @@ struct Entry {
 }
 
 impl Hub {
+    fn register(&self, notify: Arc<Notify>) -> u64 {
+        let mut state = self.state.lock().expect("stream state");
+        state.next += 1;
+        let id = state.next;
+        state.sockets.insert(
+            id,
+            Entry {
+                topics: HashSet::from(["res:*".into()]),
+                queue: VecDeque::new(),
+                notify,
+            },
+        );
+        self.subscribers[resource_index("res:*").expect("global resource")].fetch_add(1, Relaxed);
+        id
+    }
     fn empty_resource(&self, topic: &str) -> bool {
         resource_index(topic).is_some_and(|index| self.subscribers[index].load(Relaxed) == 0)
     }
@@ -412,20 +427,7 @@ async fn run(
     token: String,
 ) {
     let notify = Arc::new(Notify::new());
-    let id = {
-        let mut s = hub.state.lock().expect("stream state");
-        s.next += 1;
-        let id = s.next;
-        s.sockets.insert(
-            id,
-            Entry {
-                topics: HashSet::from(["res:*".into()]),
-                queue: VecDeque::new(),
-                notify: notify.clone(),
-            },
-        );
-        id
-    };
+    let id = hub.register(notify.clone());
     let (mut reader, mut writer) = tokio::io::split(io);
     let (tx, mut rx) = tokio::sync::mpsc::channel::<(Vec<u8>, usize)>(1000);
     let buffered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -558,15 +560,7 @@ mod tests {
     }
     fn hub() -> Hub {
         let hub = Hub::default();
-        hub.state.lock().unwrap().sockets.insert(
-            1,
-            Entry {
-                topics: HashSet::from(["res:*".into()]),
-                queue: VecDeque::new(),
-                notify: Arc::new(Notify::new()),
-            },
-        );
-        hub.subscribers[resource_index("res:*").unwrap()].store(1, Relaxed);
+        assert_eq!(hub.register(Arc::new(Notify::new())), 1);
         hub
     }
     #[tokio::test(start_paused = true)]
