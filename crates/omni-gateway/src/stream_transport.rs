@@ -203,11 +203,12 @@ fn parse_text(text: &str) -> Value {
 
 pub async fn route(app: Arc<App>, mut req: Request<Incoming>) -> Response<Body> {
     use omni_ir::error::ErrorCode;
-    if req
-        .headers()
-        .get("upgrade")
-        .and_then(|v| v.to_str().ok())
-        .is_none_or(|v| !v.eq_ignore_ascii_case("websocket"))
+    if req.method() == hyper::Method::HEAD
+        || req
+            .headers()
+            .get("upgrade")
+            .and_then(|v| v.to_str().ok())
+            .is_none_or(|v| !v.eq_ignore_ascii_case("websocket"))
     {
         return crate::api::json(
             426,
@@ -229,11 +230,17 @@ pub async fn route(app: Arc<App>, mut req: Request<Incoming>) -> Response<Body> 
         Ok(None) => return crate::api::error_response(ErrorCode::Auth, "a session is required"),
         Err(_) => return crate::api::error_response(ErrorCode::Internal, "internal error"),
     };
-    let Some(key) = req
+    let key = req
         .headers()
         .get("sec-websocket-key")
-        .and_then(|v| v.to_str().ok())
-    else {
+        .and_then(|v| v.to_str().ok());
+    use base64::Engine;
+    let key = key.filter(|key| {
+        base64::engine::general_purpose::STANDARD
+            .decode(key)
+            .is_ok_and(|bytes| bytes.len() == 16)
+    });
+    let Some(key) = key else {
         return Response::builder()
             .status(400)
             .header("content-type", "text/plain;charset=utf-8")
@@ -255,6 +262,14 @@ pub async fn route(app: Arc<App>, mut req: Request<Incoming>) -> Response<Body> 
         return response;
     }
     let accept = stream_codec::accept(key);
+    let protocol = req
+        .headers()
+        .get("sec-websocket-protocol")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_owned);
     let upgrade = hyper::upgrade::on(&mut req);
     tokio::spawn(async move {
         if let Ok(io) = upgrade.await {
@@ -267,11 +282,15 @@ pub async fn route(app: Arc<App>, mut req: Request<Incoming>) -> Response<Body> 
             .await;
         }
     });
-    Response::builder()
+    let mut response = Response::builder()
         .status(101)
         .header("upgrade", "websocket")
         .header("connection", "Upgrade")
-        .header("sec-websocket-accept", accept)
+        .header("sec-websocket-accept", accept);
+    if let Some(protocol) = protocol {
+        response = response.header("sec-websocket-protocol", protocol);
+    }
+    response
         .body(crate::server::full(""))
         .expect("upgrade response")
 }
@@ -348,7 +367,7 @@ async fn run(
                 let Ok(n)=read else {break;}; if n==0 {break;}
                 if let Err(code)=codec.feed(&buf[..n]){close=Some((code,"Received too big message"));break;}
                 loop {
-                    let event=match codec.next_event(){Ok(Some(e))=>e,Ok(None)=>break,Err(code)=>{close=Some((code,if code==1009 {"Received too big message"} else {""}));break 'connection;}};
+                    let event=match codec.next_event(){Ok(Some(e))=>e,Ok(None)=>break,Err(code)=>{close=Some((code,if code==1009 {"Received too big message"} else {codec.error_reason}));break 'connection;}};
                     let wire=match event {
                         Event::Ping(p)=>Some(stream_codec::encode(10,&p)),
                         // Frozen Elysia passes a raw socket to pong(), whereas

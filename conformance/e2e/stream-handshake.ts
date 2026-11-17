@@ -29,6 +29,8 @@ try {
   if(!viewerCookie || !clientCookie) throw Error(`role sessions ${viewer.status} ${client.status} key ${keyResponse.status} ${JSON.stringify(keyData)}`);
   const upgrade="Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n";
   const text=(s:string)=>{const b=Buffer.from(s);if(b.length>125)throw Error("probe too long");return Buffer.concat([Buffer.from([0x81,0x80|b.length,1,2,3,4]),Buffer.from(b.map((v,i)=>v^[1,2,3,4][i%4]))]);};
+  const mask=(op:number,p:number[])=>Buffer.concat([Buffer.from([op,128|p.length,1,2,3,4]),Buffer.from(p.map((v,i)=>v^[1,2,3,4][i%4]))]);
+  const names:string[]=[];
   for(const [name,headers,extra] of [
     ["plain","",Buffer.alloc(0)], ["none",upgrade,Buffer.alloc(0)],
     ["bearer",upgrade+"Authorization: Bearer x\r\n",Buffer.alloc(0)],
@@ -39,6 +41,16 @@ try {
     ["client",upgrade+`Cookie: ${clientCookie}\r\n`,Buffer.alloc(0)],
     ["bad-version",upgrade.replace("Version: 13","Version: 12")+`Cookie: ${cookie}\r\n`,Buffer.alloc(0)],
     ["missing-key",upgrade.replace("Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n","")+`Cookie: ${cookie}\r\n`,Buffer.alloc(0)],
+    ...["x", "!!!!!!!!!!!!!!!!!!!!!!!!", "", "dGhlIHNhbXBsZSBub25jZQ="].map((key,i)=>[`bad-key-${i}`,upgrade.replace("dGhlIHNhbXBsZSBub25jZQ==",key)+`Cookie: ${cookie}\r\n`,Buffer.alloc(0)] as const),
+    ["no-connection",upgrade.replace("Connection: Upgrade\r\n","")+`Cookie: ${cookie}\r\n`,Buffer.alloc(0)],
+    ["subprotocol",upgrade+`Cookie: ${cookie}\r\nSec-WebSocket-Protocol: chat, other\r\n`,Buffer.alloc(0)],
+    ["head",upgrade+`Cookie: ${cookie}\r\n`,Buffer.alloc(0)],
+    ["unmasked",upgrade+`Cookie: ${cookie}\r\n`,Buffer.from([0x81,1,0x78])],
+    ["reserved-opcode",upgrade+`Cookie: ${cookie}\r\n`,mask(0x83,[])],
+    ["oversize-control",upgrade+`Cookie: ${cookie}\r\n`,Buffer.from([0x89,0xfe,0,126,1,2,3,4,...Array(126).fill(0)])],
+    ["invalid-utf8",upgrade+`Cookie: ${cookie}\r\n`,mask(0x81,[0xff])],
+    ["invalid-close",upgrade+`Cookie: ${cookie}\r\n`,mask(0x88,[3,237])],
+    ["fragmented-control",upgrade+`Cookie: ${cookie}\r\n`,mask(0x09,[])],
     ["oversize",upgrade+`Cookie: ${cookie}\r\n`,Buffer.from([0x81,0xff,0,0,0,0,1,0,0,1,1,2,3,4])],
     ...[
       ["malformed","wat",cookie],
@@ -49,9 +61,10 @@ try {
       ["read-only",JSON.stringify({type:"send",topic:"res:logs",payload:{}}),cookie],
     ].map(([n,s,c])=>[n,upgrade+`Cookie: ${c}\r\n`,text(s)] as const),
   ] as const) {
+    names.push(name);
     const result=await new Promise<Buffer>((yes,no)=>{
       const chunks:Buffer[]=[]; let sent=false;
-      const s=connect(18771,"127.0.0.1",()=>s.write(`GET /api/stream HTTP/1.1\r\nHost: localhost\r\n${headers}\r\n`));
+      const s=connect(18771,"127.0.0.1",()=>s.write(`${name==="head"?"HEAD":"GET"} /api/stream HTTP/1.1\r\nHost: localhost\r\n${headers}\r\n`));
       s.on("data",b=>{chunks.push(b); const all=Buffer.concat(chunks); if(all.includes(Buffer.from("\r\n\r\n"))) {
         if(extra.length && !sent){ sent=true; s.write(extra); return; }
         if(!extra.length || all.indexOf(Buffer.from("\r\n\r\n"))+4<all.length) { s.destroy(); yes(all); }
@@ -65,7 +78,7 @@ try {
   const revoked=await new Promise<Buffer>((yes,no)=>{const chunks:Buffer[]=[];const s=connect(18771,"127.0.0.1",()=>s.write(`GET /api/stream HTTP/1.1\r\nHost: localhost\r\n${upgrade}Cookie: ${cookie}\r\n\r\n`));s.on("data",b=>{chunks.push(b);s.destroy();yes(Buffer.concat(chunks));});s.on("error",no);});
   writeFileSync(`${work}/revoked.raw`,revoked);if(!revoked.toString().startsWith("HTTP/1.1 401"))throw Error("revoked session upgraded");
   if(reference) {
-    for(const name of ["plain","none","bearer","both","invalid","success","viewer","client","bad-version","missing-key","oversize","revoked","malformed","no-source","denied","subscribe","unsubscribe","read-only"]) {
+    for(const name of [...names,"revoked"]) {
       const canonical=(b:Buffer)=>{
         const at=b.indexOf("\r\n\r\n");if(at<0)throw Error("missing response head");
         const lines=b.subarray(0,at).toString("latin1").split("\r\n");
@@ -78,6 +91,6 @@ try {
       const a=canonical(readFileSync(`${reference}/${name}.raw`)), b=canonical(readFileSync(`${work}/${name}.raw`));
       if(JSON.stringify(a)!==JSON.stringify(b))throw Error(`${name}: ${JSON.stringify(a)} != ${JSON.stringify(b)}`);
     }
-    console.log("18 paired status/header/body/frame comparisons pass; raw header casing and bad-version CL:0 deviations retained");
+    console.log(`${names.length+1} paired status/header/body/frame comparisons pass; raw header casing and bad-version CL:0 deviations retained`);
   }
 } finally { p.kill("SIGTERM"); await p.exited; }

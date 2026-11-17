@@ -43,6 +43,7 @@ pub struct Codec {
     offset: usize,
     fragment: Option<(u8, Vec<u8>)>,
     max: usize,
+    pub error_reason: &'static str,
 }
 
 impl Codec {
@@ -52,6 +53,7 @@ impl Codec {
             offset: 0,
             fragment: None,
             max,
+            error_reason: "",
         }
     }
 
@@ -79,15 +81,24 @@ impl Codec {
             let fin = b[0] & 128 != 0;
             let op = b[0] & 15;
             let control = op >= 8;
-            if b[0] & 112 != 0
-                || b[1] & 128 == 0
-                || !matches!(op, 0 | 1 | 2 | 8 | 9 | 10)
-                || (control && !fin)
-            {
+            if b[0] & 112 != 0 {
+                return Err(1002);
+            }
+            if b[1] & 128 == 0 {
+                self.error_reason = "Received an incorrectly masked frame";
+                return Err(1002);
+            }
+            if !matches!(op, 0 | 1 | 2 | 8 | 9 | 10) {
+                self.error_reason = "Received invalid opcode";
+                return Err(1002);
+            }
+            if control && !fin {
+                self.error_reason = "Received fragmented control frame";
                 return Err(1002);
             }
             let short = b[1] & 127;
             if control && short > 125 {
+                self.error_reason = "Received too big control frame";
                 return Err(1002);
             }
             let (len, at) = match short {
@@ -144,8 +155,10 @@ impl Codec {
                         if !(matches!(code, 1000..=1003 | 1007..=1014)
                             || (3000..=4999).contains(&code))
                         {
+                            self.error_reason = "Received invalid close code";
                             return Err(1002);
                         }
+                        self.error_reason = "Received invalid UTF-8";
                         std::str::from_utf8(&payload[2..]).map_err(|_| 1007u16)?;
                     }
                     return Ok(Some(Event::Close(payload)));
@@ -165,6 +178,7 @@ impl Codec {
                         continue;
                     }
                     return Ok(Some(if kind == 1 {
+                        self.error_reason = "Received invalid UTF-8";
                         Event::Text(String::from_utf8(data).map_err(|_| 1007u16)?)
                     } else {
                         Event::Binary(data)
