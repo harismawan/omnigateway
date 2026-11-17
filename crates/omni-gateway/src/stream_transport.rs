@@ -172,6 +172,16 @@ fn deliver(state: &mut State, topic: &str, payload: Value, seq: Option<f64>) {
     }
 }
 
+// Elysia only JSON-parses a text message whose first character is one of
+// these prefixes. Leading whitespace is not stripped by its ws adapter.
+fn parse_text(text: &str) -> Value {
+    if matches!(text.as_bytes().first(), Some(b'"' | b'/' | b'[' | b'{')) {
+        serde_json::from_str(text).unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    }
+}
+
 pub async fn route(app: Arc<App>, mut req: Request<Incoming>) -> Response<Body> {
     use omni_ir::error::ErrorCode;
     if req
@@ -305,7 +315,7 @@ async fn run(
             _=heartbeat.tick()=>{
                 if last_pong.elapsed()>Duration::from_secs(60) {close=Some((1001,"pong deadline"));break;}
                 if tx.try_send((stream_codec::encode(9,b""),0)).is_err(){close=Some((1001,"ping failed"));break;}
-                if validation.is_some() && validation_started.elapsed()>Duration::from_secs(60) { validation.take().expect("validation").abort(); }
+                if validation.is_some() && validation_started.elapsed()>=Duration::from_secs(60) { validation.take().expect("validation").abort(); }
                 if validation.is_none(){ let auth=app.clone(); let token=token.clone(); validation_started=Instant::now(); validation=Some(tokio::spawn(async move{ !matches!(auth.admin.verify(&token).await,Ok(None)) })); }
             }
             _=notify.notified()=>{
@@ -321,7 +331,7 @@ async fn run(
                         Event::Ping(p)=>Some(stream_codec::encode(10,&p)),
                         Event::Pong(_)=>{last_pong=Instant::now();None},
                         Event::Close(p)=>{drop(tx.send((stream_codec::encode(8,&p),0)).await);break 'connection;},
-                        Event::Text(text)=>{for wire in hub.message(id,kind,serde_json::from_str(&text).unwrap_or(Value::Null)){if tx.send((stream_codec::encode(1,wire.as_bytes()),0)).await.is_err(){break 'connection;}} None},
+                        Event::Text(text)=>{for wire in hub.message(id,kind,parse_text(&text)){if tx.send((stream_codec::encode(1,wire.as_bytes()),0)).await.is_err(){break 'connection;}} None},
                         Event::Binary(_)=>Some(stream_codec::encode(1,b"{\"type\":\"error\",\"message\":\"malformed frame\"}")),
                     };
                     if let Some(wire)=wire && tx.send((wire,0)).await.is_err(){break 'connection;}
@@ -367,6 +377,8 @@ mod tests {
     #[test]
     fn messages_replay_and_caps() {
         let hub = hub();
+        assert!(parse_text(" {\"type\":\"subscribe\",\"topic\":\"res:logs\"}").is_null());
+        assert!(parse_text("{\"type\":\"subscribe\",\"topic\":\"res:logs\"}").is_object());
         for (raw, kind, error) in [
             (json!(null), "admin", "malformed frame"),
             (

@@ -27,6 +27,12 @@ fn handshake() {
 
 #[test]
 fn lengths_and_incremental() {
+    let mut c = Codec::new(125);
+    let mut joined = frame(1, true, &[b'x'; 125]);
+    joined.extend(frame(9, true, b"p"));
+    c.feed(&joined).unwrap();
+    assert!(matches!(c.next_event().unwrap(), Some(Event::Text(_))));
+    assert_eq!(c.next_event().unwrap(), Some(Event::Ping(b"p".to_vec())));
     for n in [0, 1, 125, 126, 65535, 65536] {
         let payload = vec![b'x'; n];
         let wire = frame(1, true, &payload);

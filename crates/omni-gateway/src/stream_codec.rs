@@ -61,7 +61,9 @@ impl Codec {
             self.input.drain(..self.offset);
             self.offset = 0;
         }
-        if self.input.len().saturating_add(bytes.len()) > self.max.saturating_add(14).max(139) {
+        if self.input.len().saturating_add(bytes.len())
+            > self.max.saturating_add(14).max(139).saturating_add(8192)
+        {
             return Err(1009);
         }
         self.input.extend_from_slice(bytes);
