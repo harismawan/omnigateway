@@ -9,9 +9,8 @@
 //! (gzip) and the legacy `enc:v1:` hex text are read. `sha256` is over the
 //! whole stored envelope, so truncation is detectable without the key.
 //!
-//! Masking and structural bounding (`prepareArtifact`) are the capture
-//! layer's, and not ported here: [`PgStore::put_body`] seals JSON it is given
-//! and refuses JSON outside the envelope's bounds, as `sealArtifact` does.
+//! [`PgStore::put_body_artifact`] masks/bounds before persistence; the lower
+//! level [`PgStore::put_body`] accepts already prepared JSON for cross-reading.
 
 use super::PgStore;
 use crate::error::StoreError;
@@ -287,6 +286,16 @@ fn to_row(r: &tokio_postgres::Row) -> Result<BodyRow, StoreError> {
 }
 
 impl PgStore {
+    /// Full frozen put: preparation is shared with SQLite; bytes and row are
+    /// committed together on PG rather than file-before-row.
+    pub async fn put_body_artifact(
+        &self,
+        key: &FieldKey,
+        input: &omni_ir::jsjson::JsValue,
+    ) -> Result<BodyRow, StoreError> {
+        let (id, at, json, truncated) = crate::bodies::prepare_put(input)?;
+        self.put_body(key, &id, at, &json, truncated).await
+    }
     /// `BodyRepo.put` for an artifact already prepared: seal `json`, and
     /// upsert its row and bytes in one statement.
     pub async fn put_body(
@@ -418,6 +427,21 @@ impl PgStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[allow(clippy::unwrap_used)] // Fixture setup/assertions only.
+    fn full_put_prepares_before_sealing_for_both_engines() {
+        let input=omni_ir::jsjson::parse_js(r#"{"requestId":"r","at":0,"client":{"request":"Bearer secret","response":null},"attempts":[],"error":null}"#).unwrap();
+        let (id, at, json, truncated) = crate::bodies::prepare_put(&input).unwrap();
+        assert_eq!((id.as_str(), at, truncated), ("r", 0, false));
+        assert!(json.contains("Bearer [redacted]"));
+        let key = omni_crypto::field::derive_key("s2");
+        let sealed = seal(&key, &json).unwrap();
+        assert_eq!(
+            decode(&key, &sealed.bytes, None),
+            Some(omni_ir::jsjson::parse_js(&json).unwrap())
+        );
+    }
 
     #[test]
     fn rel_paths_are_utc_dates() {

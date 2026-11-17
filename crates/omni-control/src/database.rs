@@ -141,33 +141,7 @@ pub(crate) fn bun_cell(cell: rusqlite::types::ValueRef<'_>) -> rusqlite::types::
 }
 
 // Node's POSIX path.join concatenates before normalizing, including absolute rels.
-fn node_join(root: &str, rel: &str) -> std::path::PathBuf {
-    let joined = [root, rel]
-        .into_iter()
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("/");
-    let absolute = joined.starts_with('/');
-    let mut parts = Vec::new();
-    for part in joined.split('/') {
-        match part {
-            "" | "." => {}
-            ".." if parts.last().is_some_and(|p| *p != "..") => {
-                parts.pop();
-            }
-            ".." if absolute => {}
-            _ => parts.push(part),
-        }
-    }
-    let mut result = format!("{}{}", if absolute { "/" } else { "" }, parts.join("/"));
-    if result.is_empty() {
-        result.push('.');
-    }
-    if joined.ends_with('/') && !result.ends_with('/') {
-        result.push('/');
-    }
-    result.into()
-}
+use omni_store::bodies::node_join;
 
 fn delete_artifact(dir: &std::path::Path, rel: &str) {
     let full = node_join(&dir.to_string_lossy(), rel);

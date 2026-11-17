@@ -2,6 +2,65 @@
 //! and uncut bounding preserve lone surrogates, while TextEncoder truncation
 //! replaces them only when an over-budget string is actually encoded/cut.
 use omni_ir::jsjson::JsValue;
+mod sqlite;
+pub use sqlite::{get as get_sqlite, put as put_sqlite};
+
+/// Node POSIX path.join, shared with the A11 prune/orphan implementation.
+pub fn node_join(root: &str, rel: &str) -> std::path::PathBuf {
+    let joined = [root, rel]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("/");
+    let absolute = joined.starts_with('/');
+    let mut parts = Vec::new();
+    for part in joined.split('/') {
+        match part {
+            "" | "." => {}
+            ".." if parts.last().is_some_and(|p| *p != "..") => {
+                parts.pop();
+            }
+            ".." if absolute => {}
+            _ => parts.push(part),
+        }
+    }
+    let mut result = format!("{}{}", if absolute { "/" } else { "" }, parts.join("/"));
+    if result.is_empty() {
+        result.push('.');
+    }
+    if joined.ends_with('/') && !result.ends_with('/') {
+        result.push('/');
+    }
+    result.into()
+}
+
+/// Prepare the common SQLite/PG input before any persistent write.
+pub fn prepare_put(input: &JsValue) -> Result<(String, i64, String, bool), crate::StoreError> {
+    let id = match get(input, "requestId") {
+        JsValue::String(s) => String::from_utf16(s).ok(),
+        _ => None,
+    }
+    .filter(|s| crate::pg::bodies::is_safe_request_id(s))
+    .ok_or_else(|| {
+        crate::StoreError::Corrupt(
+            "request id is not safe to use as an artifact path segment".into(),
+        )
+    })?;
+    let at = match get(input, "at") {
+        JsValue::Number(n) if n.is_finite() => *n as i64,
+        _ => {
+            return Err(crate::StoreError::Corrupt(
+                "invalid artifact timestamp".into(),
+            ));
+        }
+    };
+    let (artifact, json) = prepare_artifact(input);
+    let truncated = matches!(
+        get(get(&artifact, "client"), "truncated"),
+        JsValue::Bool(true)
+    ) || matches!(get(&artifact,"attempts"), JsValue::Array(a) if a.iter().any(|a| matches!(get(a,"truncated"),JsValue::Bool(true))));
+    Ok((id, at, json, truncated))
+}
 
 pub const MAX_STRING_BYTES: usize = 64 * 1024;
 pub const MAX_ARRAY_ITEMS: usize = 24;

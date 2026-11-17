@@ -208,6 +208,7 @@ fn prepared_artifacts_match_frozen_bytes() {
 }
 
 #[test]
+#[allow(clippy::unwrap_used)] // Fixture setup/assertions only.
 fn lossless_cross_reads_and_artifact_ceiling() {
     let secret = "a3-lossless";
     let key = omni_crypto::field::derive_key(secret);
