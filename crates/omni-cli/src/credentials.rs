@@ -200,7 +200,7 @@ fn mutate(
                 now,
             )
             .map_err(failure)?;
-            let created = jsjson::parse(&created).map_err(|e| (1, e.to_string()))?;
+            let created = J::from(&serde_json::from_str::<serde_json::Value>(&created).map_err(|e| (1, e.to_string()))?);
             let new_id = prop(prop(&created, "credential"), "id").clone();
             let human = format!("stored {id} api key as {}", text(&new_id));
             (
