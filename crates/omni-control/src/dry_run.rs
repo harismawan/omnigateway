@@ -144,12 +144,11 @@ pub fn run(
                                 .targets
                                 .iter()
                                 .position(|t| std::ptr::eq(t, candidate.target))
+                                && let JsValue::Array(targets) = &raw_targets
                             {
-                                if let JsValue::Array(targets) = &raw_targets {
-                                    *value = get(&targets[index], &String::from_utf16_lossy(key))
-                                        .cloned()
-                                        .unwrap_or(JsValue::Undefined);
-                                }
+                                *value = get(&targets[index], &String::from_utf16_lossy(key))
+                                    .cloned()
+                                    .unwrap_or(JsValue::Undefined);
                             }
                         }
                         "credentialId" | "credentialLabel" => {
