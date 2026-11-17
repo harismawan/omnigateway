@@ -7,7 +7,7 @@ Done so far: slice 1 gateway (custom provider, /v1/*, /health, writer, limiter, 
 ## A. Single-node gateway parity
 - [x] A1 (S) /metrics + telemetry registry (same series, cardinality cap) — 6e63d9f3+bb6d3401, reviewed clean
 - [x] A2 (S) static serving OMNI_STATIC_DIR + SPA fallback; plugin boot warning; /api/plugins* 501 — 6e63d9f3+bb6d3401, reviewed clean
-- [ ] A3 (M) body capture: OGBA seal, request_bodies files via writer, read path
+- [x] A3 (M) body capture: OGBA seal, request_bodies files, capture behind the three gates (tee bound to dispatch termination), GET /api/requests/:id/body (raw-cell reader) — merged 7e3c3042, approved after 2 review rounds (a3-review2.md); post-merge gates green; CLI `bodies` stays E3
 - [x] A4 (M) admin auth core: argon2, sessions, cookie, /api/status setup login logout, /api router — 369aaf0d+49923524, reviewed clean
 - [x] A5 (M) admin keys/models/catalog/settings/password routes — 5da6af7e..9248cd45, reviewed clean (3 fix rounds)
 - [x] A6 (M) credentials routes — d2757acb..9624fa13, approved after 2 fix rounds; routing-path bench vs 66020396: no measurable regression; PG gateway leg + live-PG proof + PG row isolation → D4 + encrypted credential writes + health
