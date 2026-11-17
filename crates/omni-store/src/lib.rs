@@ -6,6 +6,7 @@
 //! reads a [`SnapshotData`] at boot and on change, and serves from memory.
 
 mod backend;
+pub mod bodies;
 pub mod credentials;
 mod error;
 mod js;
