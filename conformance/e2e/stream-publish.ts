@@ -85,6 +85,23 @@ try {
   await check("key delete", "res:keys", x => x.api(`/api/keys/${x.key.id}`, {}, "DELETE"), 1000);
   // Removing viewers would close their session on the next heartbeat; keep it last.
   await check("settings put", "res:settings", x => x.api("/api/settings", { weights: { tier: 1, health: 2, quota: 3, cost: 4, latency: 5, load: 6 }, maxAttempts: 3, requestDeadlineMs: 0, breakerThreshold: 3, breakerCooldownMs: 30000, logRetentionDays: 30, quotaPollIntervalMs: 0, rtkEnabled: false, autoCacheEnabled: true, ponytailMode: "off", bodyLoggingEnabled: false, bodyLoggingCaptureStreamChunks: false }, "PUT"), 1000);
+  for (const x of [a, b]) for (const role in x.frames) x.frames[role] = [];
+  // Two quick writes: leading immediately, exactly one trailing at the floor.
+  await Promise.all([a, b].map(async x => {
+    await x.api("/api/keys", { label: "coalesce-leading" });
+    await x.api("/api/keys", { label: "coalesce-trailing" });
+  }));
+  await Bun.sleep(1250);
+  for (const x of [a, b]) {
+    for (const role of ["admin", "viewer"]) {
+      const got = x.frames[role];
+      if (got.length !== 2 || got.some(v => JSON.stringify(v.frame) !== JSON.stringify({ type: "event", topic: "res:keys" }))) throw Error("coalescing frames");
+      const delta = got[1].at - got[0].at;
+      if (delta < 900 || delta > 1200) throw Error(`coalescing timing ${delta}`);
+    }
+    if (x.frames.client.length) throw Error("client received keys");
+  }
+  transcript.push({ name: "keys leading/trailing", tsMs: a.frames.admin[1].at - a.frames.admin[0].at, rustMs: b.frames.admin[1].at - b.frames.admin[0].at });
   await check("viewer password", "res:settings", x => x.api("/api/settings/viewer-password", { password: "stream-viewer-new-password" }, "PUT"), 1000);
   writeFileSync(`${work}/frames.json`, JSON.stringify(transcript, null, 2));
   console.log("14 paired admin resource publishers; admin/viewer exact frames; client denied; no generated-field normalization");
