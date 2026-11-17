@@ -116,6 +116,17 @@ pub fn run(
         .collect();
     let out = json!({"modelId":model.id,"strategy":strategy,"deterministic":strategy != "weighted","rankedAt":now,"candidates":candidates,"excluded":excluded});
     let mut out = JsValue::from(&out);
+    let raw_targets = store
+        .connection()
+        .query_row(
+            "SELECT targets FROM virtual_models WHERE id=?1",
+            [id],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(Failure::internal)?;
+    let raw_targets: serde_json::Value =
+        serde_json::from_str(&raw_targets).map_err(Failure::internal)?;
+    let raw_credentials = crate::credentials::rows(store, None)?;
     // Preserve nonfinite scores until the consumer chooses JSON or human output.
     if let JsValue::Object(fields) = &mut out {
         if let Some((_, JsValue::Array(items))) = fields
@@ -124,6 +135,36 @@ pub fn run(
         {
             for (item, candidate) in items.iter_mut().zip(&result.candidates) {
                 if let JsValue::Object(fields) = item {
+                    for (key, value) in fields.iter_mut() {
+                        match String::from_utf16_lossy(key).as_str() {
+                            "tier" => {
+                                if let Some(index) = model
+                                    .targets
+                                    .iter()
+                                    .position(|t| std::ptr::eq(t, candidate.target))
+                                {
+                                    *value = JsValue::from(&raw_targets[index]["tier"]);
+                                }
+                            }
+                            "credentialId" | "credentialLabel" => {
+                                if let Some(row) = raw_credentials.iter().find(|r| {
+                                    get(r, "id").is_some_and(|v| {
+                                        crate::cli_cell::scalar_string(v) == candidate.credential.id
+                                    })
+                                }) {
+                                    let field = if String::from_utf16_lossy(key) == "credentialId" {
+                                        "id"
+                                    } else {
+                                        "label"
+                                    };
+                                    if let Some(raw) = get(row, field) {
+                                        *value = raw.clone();
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                     if let Some((_, score)) = fields
                         .iter_mut()
                         .find(|(k, _)| String::from_utf16_lossy(k) == "score")

@@ -114,7 +114,7 @@ pub(crate) fn score<'a>(pairs: &[Pair<'a>], input: &RankInput<'a>) -> Vec<Candid
                 snapshot.settings.quota_poll_interval_ms,
             );
             let cost = match best_cost {
-                Some(best) if *own_cost > 0.0 => ratio(*own_cost, best),
+                Some(best) if !(*own_cost <= 0.0) => ratio(*own_cost, best),
                 _ => UNKNOWN,
             };
             let latency = match (ewma_of(key), best_latency) {

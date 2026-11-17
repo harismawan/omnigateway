@@ -123,6 +123,9 @@ fn fixed(n: f64) -> String {
 }
 
 fn fixed_digits(n: f64, digits: u32) -> String {
+    if n.is_nan() {
+        return "NaN".into();
+    }
     if !n.is_finite() || n.abs() >= 1e21 {
         return text(&JsValue::Number(n)).expect("number");
     }
