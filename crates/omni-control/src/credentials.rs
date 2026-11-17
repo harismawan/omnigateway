@@ -262,7 +262,8 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
             } else {
                 start.map(|start| {
                     let elapsed = (q.observed_at - start) / 3_600_000.0;
-                    if elapsed <= 0.0 || q.used == 0.0 {
+                    // Frozen tests raw `window.used === 0`, not ToNumber(used).
+                    if elapsed <= 0.0 || get(raw, "used") == Some(&JsValue::Number(0.0)) {
                         0.0
                     } else {
                         q.used / elapsed
@@ -318,6 +319,14 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
             } else {
                 match (&exhaust_value, get(raw, "resetsAt")) {
                     (JsValue::String(a), Some(JsValue::String(b))) => a >= b,
+                    (JsValue::String(a), Some(b @ JsValue::Object(_))) => {
+                        // Uint8Array ToPrimitive is a comma-joined string, so
+                        // two strings compare lexically, not numerically.
+                        a.iter()
+                            .copied()
+                            .cmp(crate::cli_cell::scalar_string(b).encode_utf16())
+                            != std::cmp::Ordering::Less
+                    }
                     (JsValue::String(a), _) => {
                         omni_ir::js::string_to_number(&String::from_utf16_lossy(a))
                             >= q.resets_at.unwrap_or(f64::NAN)

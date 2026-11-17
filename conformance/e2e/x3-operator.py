@@ -125,7 +125,7 @@ def state(db, creation=False):
     return out
 
 
-def prepare(db, table, column, sql_value, recreate=True, multi=False):
+def prepare(db, table, column, sql_value, recreate=True, multi=False, burn=None):
     shutil.copyfile(ROOT/'seed.db', db)
     d = sqlite3.connect(db)
     if multi:
@@ -140,18 +140,20 @@ def prepare(db, table, column, sql_value, recreate=True, multi=False):
             d.execute('drop table ' + table)
             d.execute('create table ' + table + '(' + ','.join('"'+n+'"'+(' PRIMARY KEY' if n in ['id', 'key'] else '') for n in names) + ')')
             d.executemany('insert into ' + table + ' values(' + ','.join('?' for _ in names) + ')', rows)
+        if burn:
+            d.execute('UPDATE quota_windows SET '+','.join(k+'='+v for k,v in burn.items()))
         d.execute('update ' + table + ' set ' + column.split('.')[0] + '=' + sql_value +
                   (" where key='settings'" if table == 'settings' else " where id='unrelated-credential'" if multi else ''))
     d.commit()
     d.close()
 
 
-def run_case(case, batch, recreate=True, multi=False):
+def run_case(case, batch, recreate=True, multi=False, burn=None):
     group, table, column, cell, value = case
     sides = []
     for i in range(2):
         db = ROOT / ('case-' + str(len(RESULTS)) + '-' + str(i) + '.db')
-        prepare(db, table, column, value, recreate, multi)
+        prepare(db, table, column, value, recreate, multi, burn)
         p, log = boot(i, db)
         try:
             login = request(i, 'POST', '/api/login', {'password': PASSWORD})
@@ -260,6 +262,22 @@ def main():
     # Synthetic create: response metadata must not depend on missing defaults.
     run_case(('create', 'credentials', 'label', 'integer', '1'),
              [('POST', '/api/credentials', {'provider': 'openai', 'apiKey': 'sk-synthetic-second', 'label': 'second'})])
+    # Cross-cell live/NaN, stale and rolled burn branches, not merely past observations.
+    burn_cells = dict(scalar, textzero="'0'", realzero='0.0', negzero='-0.0',
+                      blobzero="X'30'", blobnum="X'31'", future='4800000000000')
+    for mode, observed, reset in [('active', '4800000000000', '4800000000000'),
+                                  ('nan', "X'7178'", '4800000000000'),
+                                  ('stale', '0', '4800000000000'),
+                                  ('rolled', '4800000000000', '1')]:
+        base = dict(used='1', limit_value='10', observed_at=observed,
+                    starts_at='1700000000000', resets_at=reset, window_ms='86400000')
+        for column in base:
+            for cell, value in burn_cells.items():
+                run_case(('burn-'+mode, 'quota_windows', column, cell, value),
+                         [('GET', '/api/credentials/health', None)], burn=base)
+    run_case(('burn-shipped', 'quota_windows', 'used', 'blobempty', "X''"),
+             [('GET', '/api/credentials/health', None)], recreate=False,
+             burn=dict(observed_at="X'7178'", resets_at='4800000000000'))
     counts = collections.Counter(r['accepted'] for r in RESULTS if r['accepted'])
     failures = [r for r in RESULTS if not r['equal'] and not r['accepted']]
     (ROOT/'results.json').write_text(json.dumps(RESULTS, indent=2))
