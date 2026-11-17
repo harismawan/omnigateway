@@ -3,7 +3,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
 import { resolve } from "node:path";
-const [binary, workArg, reference] = process.argv.slice(2);
+const [binary, workArg, reference, mode] = process.argv.slice(2);
 if (!binary || !workArg) throw Error("binary work required");
 const work = resolve(workArg); mkdirSync(work, {recursive:true});
 const p = Bun.spawn([binary], {cwd:work, env:{...process.env, OMNI_ROOT:work,
@@ -80,6 +80,7 @@ try {
   if(reference) {
     for(const name of [...names,"revoked"]) {
       const canonical=(b:Buffer)=>{
+        if(mode==="raw") return b.toString("latin1").replace(/(^|\r\n)([Dd]ate: )[^\r]+/g,"$1$2<date>");
         const at=b.indexOf("\r\n\r\n");if(at<0)throw Error("missing response head");
         const lines=b.subarray(0,at).toString("latin1").split("\r\n");
         // HTTP header names are case insensitive. Keep and disclose raw evidence.

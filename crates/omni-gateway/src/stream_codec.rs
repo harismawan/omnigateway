@@ -73,6 +73,7 @@ impl Codec {
     }
 
     pub fn next_event(&mut self) -> Result<Option<Event>, u16> {
+        self.error_reason = "";
         loop {
             let b = &self.input[self.offset..];
             if b.len() < 2 {

@@ -109,3 +109,44 @@ fn malformed() {
     c.feed(&wire).unwrap();
     assert_eq!(c.next_event().unwrap_err(), 1002);
 }
+
+#[test]
+fn frozen_close_reasons() {
+    for (wire, code, reason) in [
+        (
+            encode(1, b"x"),
+            1002,
+            "Received an incorrectly masked frame",
+        ),
+        (frame(3, true, b""), 1002, "Received invalid opcode"),
+        (
+            frame(9, false, b""),
+            1002,
+            "Received fragmented control frame",
+        ),
+        (
+            frame(9, true, &[0; 126]),
+            1002,
+            "Received too big control frame",
+        ),
+        (frame(1, true, b"\xff"), 1007, "Received invalid UTF-8"),
+        (
+            frame(8, true, b"\x03\xed"),
+            1002,
+            "Received invalid close code",
+        ),
+    ] {
+        let mut codec = Codec::new(1000);
+        codec.feed(&wire).unwrap();
+        assert_eq!(codec.next_event().unwrap_err(), code);
+        assert_eq!(codec.error_reason, reason);
+    }
+    // A successful text decode must not leave a reason for a later,
+    // unrelated protocol error on the same connection.
+    let mut codec = Codec::new(1000);
+    codec.feed(&frame(1, true, b"ok")).unwrap();
+    codec.next_event().unwrap();
+    codec.feed(&frame(0, true, b"")).unwrap();
+    assert_eq!(codec.next_event().unwrap_err(), 1002);
+    assert_eq!(codec.error_reason, "");
+}
