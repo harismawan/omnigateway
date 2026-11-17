@@ -36,6 +36,9 @@ pub fn cli_table_cells(store: &SqliteStore, result: &JsValue) -> Result<(), Stri
     for collection in ["candidates", "excluded"] {
         if let Some(JsValue::Array(items)) = get(result, collection) {
             for item in items {
+                if let Some(value) = get(item, "model") {
+                    crate::cli_cell::table_text(value)?;
+                }
                 let id = get(item, "credentialId")
                     .map(crate::cli_cell::scalar_string)
                     .unwrap_or_default();
@@ -137,13 +140,15 @@ pub fn run(
             if let JsValue::Object(fields) = item {
                 for (key, value) in fields.iter_mut() {
                     match String::from_utf16_lossy(key).as_str() {
-                        "tier" => {
+                        "tier" | "model" => {
                             if let Some(index) = model
                                 .targets
                                 .iter()
                                 .position(|t| std::ptr::eq(t, candidate.target))
                             {
-                                *value = JsValue::from(&raw_targets[index]["tier"]);
+                                *value = JsValue::from(
+                                    &raw_targets[index][String::from_utf16_lossy(key)],
+                                );
                             }
                         }
                         "credentialId" | "credentialLabel" => {
@@ -171,6 +176,27 @@ pub fn run(
                 {
                     *score = JsValue::Number(candidate.score);
                 }
+            }
+        }
+    }
+    if let JsValue::Object(fields) = &mut out
+        && let Some((_, JsValue::Array(items))) = fields
+            .iter_mut()
+            .find(|(k, _)| String::from_utf16_lossy(k) == "excluded")
+    {
+        for item in items {
+            if let JsValue::Object(fields) = item
+                && let Some((_, value)) = fields
+                    .iter_mut()
+                    .find(|(k, _)| String::from_utf16_lossy(k) == "model")
+                && let Some(raw) = raw_targets.as_array().and_then(|items| {
+                    items.iter().find(|t| {
+                        omni_ir::js::to_string(t.get("model"))
+                            == crate::cli_cell::scalar_string(value)
+                    })
+                })
+            {
+                *value = JsValue::from(&raw["model"]);
             }
         }
     }
@@ -211,6 +237,7 @@ fn models(store: &SqliteStore, selected: &str) -> Result<Vec<omni_store::Virtual
             // coercions through JSON: JSON cannot carry NaN or infinity.
             let tier = omni_ir::js::to_number(target.get("tier"));
             let weight = omni_ir::js::to_number(target.get("weight"));
+            target["model"] = json!(omni_ir::js::to_string(target.get("model")));
             let price = |field| {
                 omni_ir::js::to_number(target.get("costPerMTok").and_then(|p| p.get(field)))
             };
