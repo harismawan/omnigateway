@@ -488,14 +488,19 @@ fn not_found_other() -> Response<Body> {
 /// applied. A plain path (every `/v1/*` call a client makes) skips
 /// normalization; the one copy below is the same `to_owned` the router made
 /// before normalization existed, needed because handlers take `req` by value.
+pub(crate) fn route_path(raw: &str) -> std::borrow::Cow<'_, str> {
+    let mut path = crate::static_files::pathname(raw);
+    // Elysia matches a route with one trailing slash as the route itself.
+    if path.len() > 1 && path.ends_with('/') && !path.ends_with("//") {
+        let len = path.len() - 1;
+        path.to_mut().truncate(len);
+    }
+    path
+}
+
 pub async fn handle(app: Arc<App>, req: Request<Incoming>) -> Result<Response<Body>, Infallible> {
     let path = crate::static_files::pathname(req.uri().path()).into_owned();
-    // Elysia matches a route with one trailing slash as the route itself.
-    let route = if path.len() > 1 && path.ends_with('/') && !path.ends_with("//") {
-        &path[..path.len() - 1]
-    } else {
-        path.as_str()
-    };
+    let route = route_path(req.uri().path());
     let method = req.method().clone();
     // Bun refuses a declared body over `maxRequestBodySize` before routing,
     // on every route but `/v1/*` (whose own limit is stricter).
@@ -503,7 +508,7 @@ pub async fn handle(app: Arc<App>, req: Request<Incoming>) -> Result<Response<Bo
         return Ok(crate::api::payload_too_large());
     }
     let get = matches!(method, Method::GET | Method::HEAD);
-    let res = match (method.clone(), route) {
+    let res = match (method.clone(), route.as_ref()) {
         (Method::GET | Method::HEAD, "/health") => health(&app),
         (Method::POST, "/__omni/bench/flush") if app.bench_endpoints => bench_flush(&app).await,
         (Method::POST, "/v1/messages") => proxy(app, Surface::Anthropic, req).await,
@@ -754,13 +759,30 @@ fn body_error(e: &(dyn std::error::Error + 'static)) -> GatewayError {
 async fn read_body(req: Request<Incoming>, idle: Duration) -> Result<String, GatewayError> {
     let mut body = Limited::new(req.into_body(), BODY_LIMIT);
     let mut bytes = bytes::BytesMut::new();
+    let mut deadline = tokio::time::Instant::now() + idle;
+    let mut received = 0_u64;
     loop {
-        match tokio::time::timeout(idle, body.frame()).await {
+        let frame = async {
+            if idle.is_zero() {
+                Ok(body.frame().await)
+            } else {
+                tokio::time::timeout_at(deadline, body.frame()).await
+            }
+        }
+        .await;
+        match frame {
             Err(_) => return Err(BodyIdle.into()),
             Ok(None) => break,
             Ok(Some(Err(e))) => return Err(body_error(e.as_ref())),
             Ok(Some(Ok(frame))) => {
                 if let Ok(data) = frame.into_data() {
+                    received = received.saturating_add(data.len() as u64);
+                    if u128::from(received)
+                        >= idle.as_nanos().saturating_mul(16_384) / 1_000_000_000
+                    {
+                        deadline = tokio::time::Instant::now() + idle;
+                        received = 0;
+                    }
                     bytes.extend_from_slice(&data);
                 }
             }
@@ -897,7 +919,7 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
             })?;
         fin.key_id = Some(key.id.clone());
         let headers = headers_of(&req);
-        let body = read_body(req, app.idle_timeout).await?;
+        let body = read_body(req, Duration::ZERO).await?;
         let ingested = ingest_body(surface, &body, &headers)?;
         drop(body);
         let chat = ingested.request;

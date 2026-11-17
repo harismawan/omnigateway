@@ -14,6 +14,7 @@ pub mod clock;
 pub mod connect;
 pub mod dispatch;
 pub mod finish;
+mod http;
 pub mod jsc_json;
 pub mod load;
 pub mod logging;
@@ -191,6 +192,8 @@ pub struct Options {
     /// Bun's `idleTimeout` (255 s, its maximum, which TS sets): how long a
     /// request's headers may take, how long a keep-alive connection may sit
     /// between requests, and how long the request body may go without a byte.
+    /// Also bounds socket inactivity during responses, except the three
+    /// inference POST routes (frozen TS's `server.timeout(request, 0)`).
     /// There is no total body deadline, as in TS.
     pub idle_timeout: Duration,
     /// `OMNI_BENCH=1`: serve `POST /__omni/bench/flush`, the bench harness's
@@ -233,16 +236,17 @@ impl Default for Options {
 }
 
 /// The HTTP/1 server configuration every connection is served with.
-/// `idle` is the header read timeout: armed from the moment hyper waits for a
-/// request head, so it bounds both a slow head and the idle wait between
-/// keep-alive requests.
+/// The transport timer bounds slow heads and keep-alive waits, retaining the
+/// last inference request's exemption until an ordinary request is routed.
 ///
 /// hyper's own `date` header is off: Bun writes one on every response but a
 /// HEAD's, so [`server::handle`] stamps it (see `server::stamp_date`).
-pub fn http1_builder(idle: Duration) -> hyper::server::conn::http1::Builder {
+pub fn http1_builder(_idle: Duration) -> hyper::server::conn::http1::Builder {
     let mut builder = hyper::server::conn::http1::Builder::new();
     builder.timer(hyper_util::rt::TokioTimer::new());
-    builder.header_read_timeout(idle);
+    // The transport timer also covers headers. Hyper's independent header
+    // deadline would close a completed inference connection even while exempt.
+    builder.header_read_timeout(None);
     builder.auto_date_header(false);
     builder
 }
@@ -518,13 +522,24 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
                         tracing::debug!("could not set TCP_NODELAY");
                     }
                     let app = app.clone();
+                    let (sock, activity) = http::IdleIo::new(sock, idle);
+                    let requests = activity.clone();
                     let service = hyper::service::service_fn(move |req| {
+                        requests.request(req.method() == hyper::Method::POST && matches!(server::route_path(req.uri().path()).as_ref(),
+                            "/v1/messages" | "/v1/responses" | "/v1/chat/completions"));
                         server::handle(app.clone(), req)
                     });
                     let conn = graceful.watch(builder.serve_connection(TokioIo::new(sock), service));
                     conns.spawn(async move {
-                        if let Err(e) = conn.await {
-                            tracing::debug!(reason = %e, "connection ended with an error");
+                        tokio::select! {
+                            result = conn => if let Err(e) = result {
+                                tracing::debug!(reason = %e, "connection ended with an error");
+                            },
+                            () = activity.expired() => {
+                                // Dropping hyper drops the service/body as on a
+                                // client disconnect: pumps, claims and finishers.
+                                tracing::debug!("connection idle timeout");
+                            }
                         }
                     });
                 }
