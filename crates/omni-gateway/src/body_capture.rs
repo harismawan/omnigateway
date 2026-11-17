@@ -5,6 +5,58 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use omni_ir::jsjson::{JsValue, parse_js};
 
+pub struct CaptureCompletion {
+    pub collector: Collector,
+    pub sink: FrameSink,
+    pub store: Arc<omni_store::Store>,
+    pub key: omni_crypto::field::FieldKey,
+}
+
+impl CaptureCompletion {
+    pub fn frame(&mut self, frame: &str) {
+        for frame in frame.split_inclusive("\n\n") {
+            if !frame.is_empty() {
+                self.sink.write(frame);
+            }
+        }
+    }
+
+    pub async fn persist(self, log: &omni_store::writer::RequestLog) {
+        self.collector.settle().await;
+        if self.sink.truncated {
+            self.collector.truncated();
+        }
+        let artifact = self.collector.artifact(
+            &log.id,
+            log.at,
+            log.error_code
+                .as_deref()
+                .map(|code| (code, u16::try_from(log.status).unwrap_or(500))),
+        );
+        let key = self.key;
+        let result = match self.store.as_ref() {
+            omni_store::Store::Postgres(store) => {
+                store.put_body_artifact(&key, &artifact).await.map(|_| ())
+            }
+            omni_store::Store::Sqlite { store, .. } => {
+                let store = store.clone();
+                tokio::task::spawn_blocking(move || {
+                    store
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .put_body(&key, &artifact)
+                        .map(|_| ())
+                })
+                .await
+                .unwrap_or_else(|e| Err(omni_store::StoreError::Writer(e.to_string())))
+            }
+        };
+        if let Err(error) = result {
+            tracing::warn!(requestId = %log.id, reason = %error, "failed to persist request bodies");
+        }
+    }
+}
+
 pub const MAX_CAPTURED_BODY_BYTES: usize = 512 * 1024;
 
 fn string(s: &str) -> JsValue {
@@ -142,6 +194,7 @@ struct Attempt {
 }
 
 struct State {
+    pending: usize,
     request: JsValue,
     response: JsValue,
     truncated: bool,
@@ -152,17 +205,59 @@ struct State {
 /// Shared with independent provider drains and the completion callback. All
 /// locks cover only in-memory updates; no network or persistence await holds one.
 #[derive(Clone)]
-pub struct Collector(Arc<Mutex<State>>);
+pub struct Collector(Arc<Mutex<State>>, Arc<tokio::sync::Notify>);
 
 impl Collector {
     pub fn new(capture_stream_chunks: bool) -> Self {
-        Self(Arc::new(Mutex::new(State {
-            request: JsValue::Null,
-            response: JsValue::Null,
-            truncated: false,
-            attempts: Vec::new(),
-            capture_stream_chunks,
-        })))
+        Self(
+            Arc::new(Mutex::new(State {
+                pending: 0,
+                request: JsValue::Null,
+                response: JsValue::Null,
+                truncated: false,
+                attempts: Vec::new(),
+                capture_stream_chunks,
+            })),
+            Arc::new(tokio::sync::Notify::new()),
+        )
+    }
+
+    pub async fn settle(&self) {
+        // Pending drains can finish before this waiter is created.
+        loop {
+            let notified = self.1.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.lock().pending == 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    pub fn wrap(
+        &self,
+        inner: Arc<dyn omni_providers::http::HttpClient>,
+    ) -> Arc<dyn omni_providers::http::HttpClient> {
+        Arc::new(CaptureHttp {
+            inner,
+            collector: self.clone(),
+            request_id: None,
+        })
+    }
+
+    /// Classifier requests have their own ids and must not enter the parent's
+    /// artifact even though screening shares its dependency bundle.
+    pub fn wrap_for(
+        &self,
+        inner: Arc<dyn omni_providers::http::HttpClient>,
+        request_id: String,
+    ) -> Arc<dyn omni_providers::http::HttpClient> {
+        Arc::new(CaptureHttp {
+            inner,
+            collector: self.clone(),
+            request_id: Some(request_id),
+        })
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -297,5 +392,70 @@ impl Collector {
                 }),
             ),
         ])
+    }
+}
+
+struct CaptureHttp {
+    request_id: Option<String>,
+    inner: Arc<dyn omni_providers::http::HttpClient>,
+    collector: Collector,
+}
+
+struct Observer {
+    collector: Collector,
+    index: usize,
+}
+
+impl Drop for Observer {
+    fn drop(&mut self) {
+        self.collector.lock().pending -= 1;
+        self.collector.1.notify_waiters();
+    }
+}
+
+impl omni_providers::http::BodyObserver for Observer {
+    fn chunk(&self, bytes: &[u8]) {
+        self.collector.chunk(self.index, bytes);
+    }
+    fn end(&self, failed: bool) {
+        self.collector.end(self.index, failed);
+    }
+    fn text(&self, text: &str) {
+        self.collector.text(self.index, text);
+    }
+}
+
+impl omni_providers::http::HttpClient for CaptureHttp {
+    fn send(
+        &self,
+        req: omni_providers::http::HttpRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        omni_providers::http::HttpResponse,
+                        omni_providers::http::HttpError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            if self
+                .request_id
+                .as_ref()
+                .is_some_and(|id| req.request_id.as_ref() != Some(id))
+            {
+                return self.inner.send(req).await;
+            }
+            let index = self.collector.attempt(&req.provider, &req.body);
+            let mut response = self.inner.send(req).await?;
+            self.collector.lock().pending += 1;
+            response.body.observe(Arc::new(Observer {
+                collector: self.collector.clone(),
+                index,
+            }));
+            Ok(response)
+        })
     }
 }

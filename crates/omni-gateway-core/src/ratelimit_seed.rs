@@ -88,6 +88,7 @@ impl RateLimiter {
     /// Persisted request timestamps remain separate for seed/reset semantics.
     pub fn apply_at(&self, event: Committed, now: f64) {
         match event {
+            Committed::Fence(fence) => fence.0.notify_one(),
             Committed::Gap => {
                 let mut state = self.lock();
                 state.long.clear();

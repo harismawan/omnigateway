@@ -28,6 +28,7 @@ enum Phase {
 }
 
 pub struct Finisher {
+    pub capture: Option<crate::body_capture::CaptureCompletion>,
     writer: WriterHandle,
     /// `telemetry.record` after the row is handed to the writer.
     telemetry: Option<Arc<crate::telemetry::Telemetry>>,
@@ -70,6 +71,7 @@ impl Finisher {
         now: fn() -> i64,
     ) -> Self {
         Self {
+            capture: None,
             writer,
             telemetry: None,
             request_id,
@@ -141,7 +143,26 @@ impl Finisher {
         if let Some(t) = &self.telemetry {
             t.record(&log);
         }
-        self.writer.send(LogEvent::Finish(log));
+        if let Some(capture) = self.capture.take() {
+            if self.phase == Phase::Streaming {
+                capture.collector.response(omni_ir::jsjson::JsValue::Array(
+                    capture
+                        .sink
+                        .frames
+                        .iter()
+                        .map(|s| omni_ir::jsjson::JsValue::String(s.encode_utf16().collect()))
+                        .collect(),
+                ));
+            }
+            let writer = self.writer.clone();
+            self.writer.send(LogEvent::Finish(log.clone()));
+            self.writer.completion_callback(async move {
+                writer.after_completions().await;
+                capture.persist(&log).await;
+            });
+        } else {
+            self.writer.send(LogEvent::Finish(log));
+        }
     }
 
     /// The success path's `log(cancelled, failure)`: dispatch's log as it
@@ -181,6 +202,9 @@ impl Finisher {
     }
 
     fn cancelled(&mut self) {
+        if let Some(capture) = &self.capture {
+            capture.collector.truncated();
+        }
         match self.phase {
             Phase::Streaming => self.complete(true, None),
             Phase::Handler => {

@@ -163,6 +163,24 @@ pub struct Deps {
     pub rand: fn() -> f64,
 }
 
+impl Deps {
+    pub fn with_http(&self, http: Arc<dyn HttpClient>) -> Arc<Self> {
+        Arc::new(Self {
+            http,
+            refresher: self.refresher.clone(),
+            writer: self.writer.clone(),
+            holder: self.holder.clone(),
+            load: self.load.clone(),
+            probes: self.probes.clone(),
+            providers: self.providers.clone(),
+            health: self.health.clone(),
+            telemetry: self.telemetry.clone(),
+            now: self.now,
+            rand: self.rand,
+        })
+    }
+}
+
 pub use crate::overlay::HealthOverlay;
 
 impl std::fmt::Debug for Deps {

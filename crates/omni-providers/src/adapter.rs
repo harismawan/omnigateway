@@ -178,7 +178,7 @@ pub async fn send<C: ProviderCodec>(
     }
     let degradations = bounded_degradations(&built.degradations);
 
-    let res = http
+    let mut res = http
         .send(HttpRequest {
             provider: id.to_string(),
             url: request.url,
@@ -210,6 +210,7 @@ pub async fn send<C: ProviderCodec>(
         .into());
     }
 
+    res.body.start_stream();
     Ok(AdapterResult {
         events: EventStream {
             id: id.to_string(),

@@ -24,7 +24,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-pub use body::{Headers, ResponseBody};
+pub use body::{BodyObserver, Headers, ResponseBody};
 pub use pool::PoolLimits;
 use pool::{Conn, Pool};
 
