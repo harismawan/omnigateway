@@ -45,6 +45,8 @@ try{
  // Fresh stored rows; reset each case rather than accumulating mutations.
  const dbs=[0,1].map(i=>new Database(`${work}/${i}.db`));
  const cases=[
+ ...['tier','weight','costPerMTok.input','costPerMTok.output','costPerMTok.cacheRead'].flatMap(field=>["'2'","'oops'",'NULL',"'1e400'","'-0'","json('[2]')","json('{}')"].map(value=>`UPDATE virtual_models SET targets=json_set(targets,'$[0].${field}',${value}) WHERE id='score'`)),
+ ...["weight='2'","weight='oops'","weight=x'32'","weight=1e400","weight=-0.0","expires_at='oops'","disabled_at='oops'","expires_at='1e400'"].map(x=>`UPDATE credentials SET ${x} WHERE id='${x.startsWith('weight')?'ok':'expired-oauth'}'`),
  "INSERT INTO virtual_models(id,targets,strategy) VALUES('broken','{}','score')",
  "INSERT INTO virtual_models(id,targets,strategy) VALUES('broken','not-json','score')",
  "UPDATE virtual_models SET targets=json_set(targets,'$[0].tier','2') WHERE id='score'",
