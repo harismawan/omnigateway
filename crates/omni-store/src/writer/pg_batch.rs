@@ -1031,10 +1031,10 @@ pub(crate) async fn write(
     let mut refused = Vec::new();
     let mut notifications = Outcome::default();
     for (i, e) in events.iter().enumerate() {
-        if let WriteEvent::Log(l) = e {
-            if !logs.apply_notified(l, node_id, &mut notifications) {
-                refused.push(i);
-            }
+        if let WriteEvent::Log(l) = e
+            && !logs.apply_notified(l, node_id, &mut notifications)
+        {
+            refused.push(i);
         }
     }
     logs.write(&tx).await?;
