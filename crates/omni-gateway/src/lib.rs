@@ -9,6 +9,7 @@
 pub mod admin_auth;
 pub mod admin_routes;
 pub mod api;
+pub mod body_capture;
 pub mod client_routes;
 pub mod clock;
 pub mod connect;
