@@ -31,27 +31,27 @@ pub fn cli(
 }
 
 /// Validate cells passed raw to the frozen human table, before any output.
-pub fn cli_table_cells(store: &SqliteStore, result: &JsValue) -> Result<(), String> {
-    let rows = crate::credentials::rows(store, None).map_err(|e| e.message)?;
-    for collection in ["candidates", "excluded"] {
+pub fn cli_table_cells(_store: &SqliteStore, result: &JsValue) -> Result<(), String> {
+    // Frozen constructs candidates before exclusions. Each table first measures
+    // widths column-major (nullish cells become ""), then draws row-major
+    // without the nullish fallback. Preserve both phases' error precedence.
+    for (collection, columns) in [
+        ("candidates", &["credentialLabel", "provider", "model"][..]),
+        ("excluded", &["credentialId", "model", "reason"][..]),
+    ] {
         if let Some(JsValue::Array(items)) = get(result, collection) {
-            for item in items {
-                if let Some(value) = get(item, "model") {
-                    crate::cli_cell::table_text(value)?;
+            for column in columns {
+                for item in items {
+                    if let Some(value) = get(item, column)
+                        && !matches!(value, JsValue::Null | JsValue::Undefined)
+                    {
+                        crate::cli_cell::table_text(value)?;
+                    }
                 }
-                let id = get(item, "credentialId")
-                    .map(crate::cli_cell::scalar_string)
-                    .unwrap_or_default();
-                if let Some(row) = rows
-                    .iter()
-                    .find(|r| get(r, "id").is_some_and(|v| crate::cli_cell::scalar_string(v) == id))
-                {
-                    let field = if collection == "candidates" {
-                        "label"
-                    } else {
-                        "id"
-                    };
-                    if let Some(value) = get(row, field) {
+            }
+            for item in items {
+                for column in columns {
+                    if let Some(value) = get(item, column) {
                         crate::cli_cell::table_text(value)?;
                     }
                 }
