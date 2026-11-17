@@ -193,7 +193,7 @@ fn mutate(
                     }
                 }
             }
-            let created = omni_control::credentials::create(
+            let created = omni_control::credentials::cli_create(
                 &store,
                 key.as_ref().expect("key"),
                 &object(input),

@@ -551,6 +551,23 @@ pub fn create(
     body: &JsValue,
     now: i64,
 ) -> Result<String> {
+    create_with(s, key, body, now, false)
+}
+pub fn cli_create(
+    s: &SqliteStore,
+    key: &omni_crypto::field::FieldKey,
+    body: &JsValue,
+    now: i64,
+) -> Result<String> {
+    create_with(s, key, body, now, true)
+}
+fn create_with(
+    s: &SqliteStore,
+    key: &omni_crypto::field::FieldKey,
+    body: &JsValue,
+    now: i64,
+    cli: bool,
+) -> Result<String> {
     if !matches!(body, JsValue::Object(_) | JsValue::Array(_)) {
         return Err(Failure::bad("credential body is required"));
     }
@@ -616,7 +633,11 @@ pub fn create(
             ("basePath", text(url.path().trim_end_matches('/'))),
             ("protocol", protocol),
         ]);
-        for row in rows(s, None)? {
+        for row in if cli {
+            cli_rows(s).map_err(Failure::internal)?
+        } else {
+            rows(s, None)?
+        } {
             if get(&row, "provider") != Some(&text("custom")) {
                 continue;
             }

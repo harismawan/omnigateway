@@ -104,13 +104,14 @@ def normalize(result, args, started, ended, expected_key):
     if op not in ['enable','disable','set','add-key']: return
     with sqlite3.connect(db) as conn:
         ids = [r[0] for r in conn.execute('SELECT id FROM credentials')]
+    conn.close()
     new_id = next((i for i in ids if i not in ['c','old']),None) if op == 'add-key' else None
     for row in result['types']['credentials']:
         target = row['id'] == ('text',(new_id if op == 'add-key' else args[2]).encode().hex().upper())
         if not target: continue
         for col in (['created_at','updated_at'] if op == 'add-key' else ['updated_at'] + (['disabled_at'] if op == 'disable' else [])):
             cell = row[col]; assert cell[0] == 'integer', cell
-            assert started-1000 <= int(bytes.fromhex(cell[1])) <= ended+1000, cell
+            assert started-1000 <= int(bytes.fromhex(cell[1])) <= ended+1000, (name,args,col,cell,started,ended)
             row[col] = (cell[0],'<clock>')
         if op == 'add-key':
             assert re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}',new_id)
