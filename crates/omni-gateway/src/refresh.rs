@@ -102,7 +102,10 @@ impl Refresher {
                 }
             } else {
                 match self.refresh(&c).await {
-                    Ok(_) => { refreshed += 1; touched += 1; },
+                    Ok(_) => {
+                        refreshed += 1;
+                        touched += 1;
+                    }
                     Err(error) => {
                         touched += usize::from(error.code == ErrorCode::Auth);
                         tracing::warn!(provider = %c.provider, credentialId = %c.id, code = error.code.as_str(), "scheduled token refresh failed")
@@ -132,8 +135,10 @@ impl Refresher {
                 tokio::time::sleep_until(next).await;
                 match this.sweep(Some(&holder)).await {
                     Ok(outcome) if outcome.touched > 0 => hub.invalidate("res:credentials", None),
-                    Ok(_) => {},
-                    Err(error) => tracing::warn!(code = error.code.as_str(), "token refresh sweep failed"),
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(code = error.code.as_str(), "token refresh sweep failed")
+                    }
                 }
                 next = next_sweep(next, tokio::time::Instant::now());
             }
