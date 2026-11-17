@@ -1,0 +1,43 @@
+//! Operator-only body read projection. Artifact values stay in the lossless
+//! JavaScript carrier all the way to JSON.stringify-compatible HTTP bytes.
+use crate::api::Failure;
+use omni_crypto::field::FieldKey;
+use omni_ir::jsjson::{JsValue, stringify};
+use omni_store::SqliteStore;
+
+pub fn read_request_body(store: &SqliteStore, key: &FieldKey, id: &str) -> Result<String, Failure> {
+    let read = store.get_body(key, id)?;
+    let (request_id, state, truncated, size, at, artifact) = match read {
+        None => (
+            id.to_owned(),
+            "none",
+            false,
+            0,
+            JsValue::Null,
+            JsValue::Null,
+        ),
+        Some(read) => (
+            read.row.request_id,
+            read.row.detail_state.as_str(),
+            read.row.truncated,
+            read.row.size_bytes,
+            JsValue::Number(read.row.at as f64),
+            read.artifact.unwrap_or(JsValue::Null),
+        ),
+    };
+    let string = |s: &str| JsValue::String(s.encode_utf16().collect());
+    let value = JsValue::Object(
+        [
+            ("requestId", string(&request_id)),
+            ("detailState", string(state)),
+            ("truncated", JsValue::Bool(truncated)),
+            ("sizeBytes", JsValue::Number(size as f64)),
+            ("at", at),
+            ("artifact", artifact),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.encode_utf16().collect(), v))
+        .collect(),
+    );
+    stringify(&value).ok_or_else(|| Failure::internal("body projection could not be encoded"))
+}

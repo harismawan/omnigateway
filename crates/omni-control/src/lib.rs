@@ -2,6 +2,7 @@
 //! Shared operator configuration and storage operations, without gateway runtime.
 pub mod admin_password;
 pub mod api;
+pub mod bodies;
 pub mod body_schema;
 pub mod catalog;
 pub mod cli_cell;
