@@ -30,6 +30,34 @@ pub fn cli(
     })
 }
 
+/// Validate cells passed raw to the frozen human table, before any output.
+pub fn cli_table_cells(store: &SqliteStore, result: &JsValue) -> Result<(), String> {
+    let rows = crate::credentials::rows(store, None).map_err(|e| e.message)?;
+    for collection in ["candidates", "excluded"] {
+        if let Some(JsValue::Array(items)) = get(result, collection) {
+            for item in items {
+                let id = get(item, "credentialId")
+                    .map(crate::cli_cell::scalar_string)
+                    .unwrap_or_default();
+                if let Some(row) = rows
+                    .iter()
+                    .find(|r| get(r, "id").is_some_and(|v| crate::cli_cell::scalar_string(v) == id))
+                {
+                    let field = if collection == "candidates" {
+                        "label"
+                    } else {
+                        "id"
+                    };
+                    if let Some(value) = get(row, field) {
+                        crate::cli_cell::table_text(value)?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn run(
     store: &SqliteStore,
     _key: &omni_crypto::field::FieldKey,
@@ -87,7 +115,26 @@ pub fn run(
         .map(|e| json!({"credentialId":e.credential_id,"model":e.model,"reason":e.reason}))
         .collect();
     let out = json!({"modelId":model.id,"strategy":strategy,"deterministic":strategy != "weighted","rankedAt":now,"candidates":candidates,"excluded":excluded});
-    Ok(JsValue::from(&out))
+    let mut out = JsValue::from(&out);
+    // Preserve nonfinite scores until the consumer chooses JSON or human output.
+    if let JsValue::Object(fields) = &mut out {
+        if let Some((_, JsValue::Array(items))) = fields
+            .iter_mut()
+            .find(|(k, _)| String::from_utf16_lossy(k) == "candidates")
+        {
+            for (item, candidate) in items.iter_mut().zip(&result.candidates) {
+                if let JsValue::Object(fields) = item {
+                    if let Some((_, score)) = fields
+                        .iter_mut()
+                        .find(|(k, _)| String::from_utf16_lossy(k) == "score")
+                    {
+                        *score = JsValue::Number(candidate.score);
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 // These projections belong only to operator dry-run. Never relax live readers.
@@ -118,15 +165,46 @@ fn models(store: &SqliteStore, selected: &str) -> Result<Vec<omni_store::Virtual
         let list = targets
             .as_array_mut()
             .ok_or_else(|| Failure::internal(error))?;
+        let mut typed = Vec::new();
         for target in list.iter_mut() {
-            for field in ["tier", "weight"] {
-                target[field] = json!(omni_ir::js::to_number(target.get(field)));
+            // Deserialize only the structural fields. Never send arithmetic
+            // coercions through JSON: JSON cannot carry NaN or infinity.
+            let tier = omni_ir::js::to_number(target.get("tier"));
+            let weight = omni_ir::js::to_number(target.get("weight"));
+            let price = |field| {
+                omni_ir::js::to_number(target.get("costPerMTok").and_then(|p| p.get(field)))
+            };
+            let input = price("input");
+            let output = price("output");
+            let cache_read = target
+                .get("costPerMTok")
+                .and_then(|p| p.get("cacheRead"))
+                .filter(|v| !v.is_null())
+                .map(|v| omni_ir::js::to_number(Some(v)));
+            target["tier"] = json!(0);
+            target["weight"] = json!(0);
+            for field in [
+                "input",
+                "output",
+                "cacheRead",
+                "cacheWrite5m",
+                "cacheWrite1h",
+            ] {
+                target["costPerMTok"][field] = json!(0);
             }
             for cap in ["tools", "images", "reasoning"] {
                 target["capabilities"][cap] = json!(omni_ir::js::truthy(
                     target.get("capabilities").and_then(|c| c.get(cap))
                 ));
             }
+            let mut t: omni_store::Target =
+                serde_json::from_value(target.clone()).map_err(Failure::internal)?;
+            t.tier = tier;
+            t.weight = weight;
+            t.cost_per_m_tok.input = input;
+            t.cost_per_m_tok.output = output;
+            t.cost_per_m_tok.cache_read = cache_read;
+            typed.push(t);
         }
         let strategy =
             match cli_cell::Cell::read(row.get_ref("strategy").map_err(Failure::internal)?) {
@@ -136,7 +214,7 @@ fn models(store: &SqliteStore, selected: &str) -> Result<Vec<omni_store::Virtual
             };
         out.push(omni_store::VirtualModel {
             id,
-            targets: serde_json::from_value(targets).map_err(Failure::internal)?,
+            targets: typed,
             strategy,
             is_alias: false,
         });
