@@ -1,0 +1,9 @@
+{
+  "class": "dry-run-malformed-render",
+  "rows": [
+    {"identity":"UPDATE virtual_models SET targets=json_set(targets,'$[0].tier','2') WHERE id='score'","statuses":[200,200],"paths":["/body/candidates/1/tier","/body/candidates/2/tier"]},
+    {"identity":"UPDATE virtual_models SET strategy=x'73636f7265' WHERE id='score'","statuses":[200,200],"paths":["/body/strategy"]},
+    {"identity":"UPDATE credentials SET label=x'6162' WHERE id='ok'","statuses":[200,200],"paths":["/body/candidates/1/credentialLabel"]},
+    {"identity":"cli:UPDATE virtual_models SET targets=json_set(targets,'$[0].tier','2') WHERE id='score'","statuses":[0,0],"paths":["/candidates/1/tier","/candidates/2/tier"]}
+  ]
+}

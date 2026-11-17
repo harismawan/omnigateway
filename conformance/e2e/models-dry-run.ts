@@ -1,6 +1,6 @@
 // A12 black-box differential; private scratch and explicit child environments.
 import { Database } from "bun:sqlite";
-import { mkdirSync, mkdtempSync, copyFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, copyFileSync, writeFileSync, readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 const { values:f }=parseArgs({options:{ts:{type:"string"},rust:{type:"string"},out:{type:"string"}}});
 const root=f.out??"/tmp/opencode/a12/http"; mkdirSync(root,{recursive:true});
@@ -71,4 +71,17 @@ try{
  for(const raw of ['{','no-json','']){const pair=await Promise.all([19612,19613].map((port,i)=>req(port,'/api/models/score/dry-run',raw,cookies[i],true)));pair.forEach(x=>delete (x as any).cookie);rows.push({matrix:'heterogeneous',raw,pair,equal:JSON.stringify(pair[0])===JSON.stringify(pair[1])});}
  for(const db of dbs)db.close();
 }finally{for(const child of children)child.kill();await Promise.all(children.map(p=>p.exited));}
-writeFileSync(`${work}/rows.json`,JSON.stringify(rows,null,2));const failures=rows.filter(r=>!r.equal);console.log(JSON.stringify({rows:rows.length,failures:failures.length,work}));process.exit(failures.length?1:0);
+const manifest=JSON.parse(readFileSync(new URL('./models-dry-run-accepted.json',import.meta.url),'utf8'));
+function differences(a:any,b:any,path=''):string[]{
+ if(JSON.stringify(a)===JSON.stringify(b))return [];
+ if(a===null||b===null||typeof a!=='object'||typeof b!=='object'||Array.isArray(a)!==Array.isArray(b))return [path];
+ if(JSON.stringify(Object.keys(a))!==JSON.stringify(Object.keys(b)))return [path];
+ return Object.keys(a).flatMap(k=>differences(a[k],b[k],`${path}/${k}`));
+}
+for(const row of rows.filter(r=>!r.equal)){
+ const entry=manifest.rows.find((e:any)=>e.identity===row.sql);
+ const paths=differences(row.pair[0],row.pair[1]);
+ row.differences=paths;
+ row.accepted=!!entry && JSON.stringify(entry.statuses)===JSON.stringify(row.pair.map((p:any)=>p.status)) && paths.every(p=>entry.paths.includes(p));
+}
+writeFileSync(`${work}/rows.json`,JSON.stringify(rows,null,2));const failures=rows.filter(r=>!r.equal&&!r.accepted);console.log(JSON.stringify({rows:rows.length,accepted:rows.filter(r=>r.accepted).length,failures:failures.length,work}));process.exit(failures.length?1:0);

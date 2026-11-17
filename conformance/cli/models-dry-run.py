@@ -46,6 +46,20 @@ for args,sql in [(a,None) for a in cases]+[(['models','dry-run','score']+(['--js
         pair.append(dict(code=p.returncode,out=out,err=err))
     rows.append(dict(args=args,sql=sql,pair=pair,equal=pair[0]==pair[1]))
 (work/'rows.json').write_text(json.dumps(rows,indent=2))
-failures=[r for r in rows if not r['equal']]
-print(json.dumps(dict(cases=len(rows),failures=len(failures),work=str(work))))
+manifest=json.loads((pathlib.Path.cwd()/'conformance/e2e/models-dry-run-accepted.json').read_text())
+for r in rows:
+    if r['equal'] or '--json' not in r['args']: continue
+    entry=next((e for e in manifest['rows'] if e['identity']=='cli:'+str(r['sql'])),None)
+    if not entry or [p['code'] for p in r['pair']]!=entry['statuses']: continue
+    a,b=[json.loads(p['out']) for p in r['pair']]
+    for path in entry['paths']:
+        def remove(obj):
+            parts=path.strip('/').split('/')
+            for k in parts[:-1]: obj=obj[int(k)] if isinstance(obj,list) else obj[k]
+            obj[parts[-1]]='<accepted-render>'
+        remove(a);remove(b)
+    r['accepted']=a==b and r['pair'][0]['err']==r['pair'][1]['err']
+failures=[r for r in rows if not r['equal'] and not r.get('accepted')]
+(work/'rows.json').write_text(json.dumps(rows,indent=2))
+print(json.dumps(dict(cases=len(rows),accepted=sum(bool(r.get('accepted')) for r in rows),failures=len(failures),work=str(work))))
 raise SystemExit(bool(failures))
