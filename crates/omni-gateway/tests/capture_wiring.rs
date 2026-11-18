@@ -187,6 +187,7 @@ async fn surfaces_gates_oversize_and_persistence_isolation() {
                 body_logging_allowed: allowed,
                 day_offset_minutes: 0,
                 reported_catalog_problems: Mutex::default(),
+                stream: Default::default(),
             });
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();

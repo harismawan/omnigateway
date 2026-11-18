@@ -13,6 +13,7 @@ pub mod body_capture;
 pub mod client_routes;
 pub mod clock;
 pub mod connect;
+pub mod console;
 pub mod dispatch;
 pub mod finish;
 mod http;
@@ -27,6 +28,9 @@ pub mod price;
 pub mod screening;
 pub mod server;
 pub mod static_files;
+pub mod stream;
+pub mod stream_codec;
+pub mod stream_transport;
 pub mod telemetry;
 
 use std::sync::{Arc, Mutex};
@@ -303,9 +307,11 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
     let (holder, store) = holder;
 
     let (commit_tx, mut commit_rx) = tokio::sync::mpsc::channel(4096);
+    let stream = Arc::new(stream_transport::Hub::default());
     let writer = Writer::spawn(
         &path,
         WriterConfig {
+            log_observer: Some(stream.clone()),
             node_id: node_id.clone(),
             day_offset_minutes: offset,
             commit_sink: Some(commit_tx),
@@ -458,7 +464,8 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         http.clone(),
         clock::now_ms,
     ));
-    let oauth_scheduler = oauth_refresher.start_scheduler(holder.clone());
+    let oauth_scheduler = oauth_refresher.start_scheduler(holder.clone(), stream.clone());
+    let console_stream = console::start(stream.clone(), &node_id);
     let mut maintenance = maintenance::start(
         path.clone(),
         offset,
@@ -499,6 +506,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         body_logging_allowed: config.body_logging_allowed,
         day_offset_minutes: offset,
         reported_catalog_problems: std::sync::Mutex::default(),
+        stream,
     });
 
     tracing::info!(host = %config.host, port = addr.port(), "omnigateway listening");
@@ -509,7 +517,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
     #[cfg(test)]
     let test_app = app.clone();
     let task = tokio::spawn(async move {
-        let graceful = hyper_util::server::graceful::GracefulShutdown::new();
+        let (drain, _) = tokio::sync::watch::channel(false);
         let builder = http1_builder(idle);
         // Every connection task, so a drain that runs out of time can cancel
         // and join them (their finishers file 499s) before the writer closes.
@@ -528,18 +536,28 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
                     let service = hyper::service::service_fn(move |req| {
                         requests.request(req.method() == hyper::Method::POST && matches!(server::route_path(req.uri().path()).as_ref(),
                             "/v1/messages" | "/v1/responses" | "/v1/chat/completions"));
-                        server::handle(app.clone(), req)
+                        let app = app.clone();
+                        async move {
+                            let response = server::handle(app, req).await?;
+                            Ok::<_, std::convert::Infallible>(response)
+                        }
                     });
-                    let conn = graceful.watch(builder.serve_connection(TokioIo::new(sock), service));
+                    let conn = builder.serve_connection(TokioIo::new(sock), service).with_upgrades();
+                    let mut draining = drain.subscribe();
                     conns.spawn(async move {
+                        tokio::pin!(conn);
                         tokio::select! {
-                            result = conn => if let Err(e) = result {
+                            result = &mut conn => if let Err(e) = result {
                                 tracing::debug!(reason = %e, "connection ended with an error");
                             },
                             () = activity.expired() => {
                                 // Dropping hyper drops the service/body as on a
                                 // client disconnect: pumps, claims and finishers.
                                 tracing::debug!("connection idle timeout");
+                            }
+                            _ = draining.changed() => {
+                                conn.as_mut().graceful_shutdown();
+                                drop(conn.await);
                             }
                         }
                     });
@@ -548,14 +566,20 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
             }
         }
         drop(listener);
+        app.stream.stop();
+        console_stream.abort();
+        drop(console_stream.await);
         let shutdown_until = tokio::time::Instant::now() + deadline;
         drop(tokio::time::timeout_at(shutdown_until, maintenance.stop()).await);
         oauth_scheduler.abort();
         drop(oauth_scheduler.await);
         tracing::info!(reason = "signal", "shutdown requested");
-        if tokio::time::timeout_at(shutdown_until, graceful.shutdown())
-            .await
-            .is_err()
+        drain.send_replace(true);
+        if tokio::time::timeout_at(shutdown_until, async {
+            while conns.join_next().await.is_some() {}
+        })
+        .await
+        .is_err()
         {
             tracing::warn!(
                 reason = "signal",
@@ -567,6 +591,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         // files the 499 row into the writer, which is closed only after.
         conns.abort_all();
         while conns.join_next().await.is_some() {}
+        drop(tokio::time::timeout_at(shutdown_until, app.stream.drain_connections()).await);
         // Abort only requests cancellation. Join the body pumps as well so
         // their source/Finisher destructors finish before the writer closes.
         app.deadline_workers.shutdown().await;

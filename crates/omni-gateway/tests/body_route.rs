@@ -58,6 +58,7 @@ async fn frozen_body_route_matrix() {
         body_logging_allowed: true,
         day_offset_minutes: 0,
         reported_catalog_problems: Mutex::default(),
+        stream: Default::default(),
     });
     let artifact = parse_js(r#"{"requestId":"foreign","at":0,"client":{"request":"\ud800","response":null},"attempts":[],"error":null}"#).unwrap();
     let row = store().put_body(&common::key(), &artifact).unwrap();

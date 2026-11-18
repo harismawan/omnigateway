@@ -578,7 +578,10 @@ async fn null_expiry_does_not_trigger_refresh() {
         assert_eq!(seen.len(), 1);
         assert!(seen[0].url.ends_with("/v1/messages"));
     }
-    assert_eq!(h.deps.refresher.sweep(None).await.expect("sweep"), 0);
+    assert_eq!(
+        h.deps.refresher.sweep(None).await.expect("sweep").touched,
+        0
+    );
     flush(h).await;
 }
 

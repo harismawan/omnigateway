@@ -191,6 +191,7 @@ pub enum Admin {
     ExportLogs,
     RequestBody(Option<String>),
     Nodes,
+    Console,
     ListCredentials,
     CreateCredential,
     PatchCredential(Option<String>),
@@ -209,6 +210,20 @@ pub enum Admin {
     PutSettings,
     Password,
     ViewerPassword,
+}
+
+impl Admin {
+    fn resource_topic(&self) -> Option<&'static str> {
+        match self {
+            Self::CreateCredential | Self::PatchCredential(_) | Self::RemoveCredential(_) => {
+                Some("res:credentials")
+            }
+            Self::PutModel(_) | Self::RemoveModel(_) => Some("res:models"),
+            Self::CreateKey | Self::EditKey(_, _) | Self::RevokeKey(_) => Some("res:keys"),
+            Self::PutSettings | Self::ViewerPassword => Some("res:settings"),
+            _ => None,
+        }
+    }
 }
 
 /// `fast-decode-uri-component`, which Elysia's router runs on every path
@@ -236,6 +251,7 @@ pub fn route(method: &hyper::Method, path: &str) -> Option<Admin> {
         "/api/logs" if get => return Some(Admin::Logs),
         "/api/logs/export" if get => return Some(Admin::ExportLogs),
         "/api/nodes" if get => return Some(Admin::Nodes),
+        "/api/console" if get => return Some(Admin::Console),
         "/api/credentials" if get => return Some(Admin::ListCredentials),
         "/api/credentials" if *method == M::POST => return Some(Admin::CreateCredential),
         "/api/credentials/health" if get => return Some(Admin::CredentialHealth),
@@ -306,9 +322,31 @@ pub async fn serve(
     route: Admin,
     req: Request<Incoming>,
 ) -> Result<Response<Body>, ApiError> {
+    let topic = route.resource_topic();
+    let response = serve_inner(app, route, req).await?;
+    if let Some(topic) = topic {
+        app.stream.invalidate(topic, None);
+    }
+    Ok(response)
+}
+
+async fn serve_inner(
+    app: &App,
+    route: Admin,
+    req: Request<Incoming>,
+) -> Result<Response<Body>, ApiError> {
     let control = app.control.clone();
     let now = crate::clock::now_ms();
     match route {
+        Admin::Console => {
+            require_reader(req.headers(), &app.admin).await?;
+            let source = app.stream.console.clone();
+            let query = crate::console::Query::from_query(req.uri().query().unwrap_or(""));
+            let read = tokio::task::spawn_blocking(move || source.read(&query))
+                .await
+                .map_err(|_| ApiError::internal())?;
+            Ok(json_ok(read.to_string()))
+        }
         Admin::RequestBody(id) => {
             require_admin(req.headers(), &app.admin).await?;
             // Frozen GET does not apply the writer's safe-id predicate. An
@@ -666,6 +704,49 @@ async fn viewer_password(app: &App, req: Request<Incoming>) -> Result<Response<B
 mod tests {
     use super::*;
     use hyper::Method;
+
+    #[test]
+    fn frozen_resource_publisher_routes() {
+        for (method, path, topic) in [
+            (Method::POST, "/api/credentials", "res:credentials"),
+            (Method::PATCH, "/api/credentials/c", "res:credentials"),
+            (Method::DELETE, "/api/credentials/c", "res:credentials"),
+            (Method::PUT, "/api/models/m", "res:models"),
+            (Method::DELETE, "/api/models/m", "res:models"),
+            (Method::POST, "/api/keys", "res:keys"),
+            (Method::PUT, "/api/keys/k/limits", "res:keys"),
+            (Method::PUT, "/api/keys/k/models", "res:keys"),
+            (Method::PUT, "/api/keys/k/expiry", "res:keys"),
+            (Method::PUT, "/api/keys/k/guardrail", "res:keys"),
+            (Method::PUT, "/api/keys/k/smart-routing", "res:keys"),
+            (Method::DELETE, "/api/keys/k", "res:keys"),
+            (Method::PUT, "/api/settings/viewer-password", "res:settings"),
+            (Method::PUT, "/api/settings", "res:settings"),
+        ] {
+            assert_eq!(
+                route(&method, path)
+                    .expect("publisher route")
+                    .resource_topic(),
+                Some(topic),
+                "{method} {path}"
+            );
+        }
+        for (method, path) in [
+            (Method::PUT, "/api/settings/password"),
+            (Method::GET, "/api/settings"),
+            (Method::POST, "/api/connect/start"),
+            (Method::POST, "/api/connect/finish"),
+            (Method::POST, "/api/connect/poll"),
+        ] {
+            assert_eq!(
+                route(&method, path)
+                    .expect("non-publisher route")
+                    .resource_topic(),
+                None,
+                "{method} {path}"
+            );
+        }
+    }
 
     #[test]
     fn cancelled_queued_open_keeps_its_permit() {

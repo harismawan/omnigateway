@@ -35,6 +35,9 @@ const RETRY_BASE: Duration = Duration::from_millis(100);
 /// The 200 ms bound on how long an event waits is unchanged.
 #[derive(Debug, Clone)]
 pub struct WriterConfig {
+    /// Successful log calls, after the transaction commits; independent of the
+    /// lossy limiter sink. Called once per batch, with no per-row allocation.
+    pub log_observer: Option<Arc<dyn LogObserver>>,
     /// `request_logs.node_id` for every row this process files.
     pub node_id: String,
     /// The fixed offset `usage_daily` days are cut at.
@@ -113,6 +116,7 @@ pub struct WriterConfig {
 impl Default for WriterConfig {
     fn default() -> Self {
         Self {
+            log_observer: None,
             node_id: String::new(),
             day_offset_minutes: 0,
             capacity: 131_072,
@@ -126,6 +130,11 @@ impl Default for WriterConfig {
             seed_delay: Duration::ZERO,
         }
     }
+}
+
+/// Resource notifications are not debits or queue acknowledgments.
+pub trait LogObserver: std::fmt::Debug + Send + Sync {
+    fn committed(&self, logs: usize, finishes: usize);
 }
 
 /// What the writer has done so far.
@@ -723,6 +732,7 @@ enum Backend {
 
 /// Owns the connection between batches.
 struct Sink {
+    log_observer: Option<Arc<dyn LogObserver>>,
     backend: Backend,
     node_id: Arc<str>,
     day_offset_minutes: i64,
@@ -881,6 +891,7 @@ impl Sink {
     /// Writes `events` off the async threads, retrying a busy database with
     /// backoff. Returns what became of them. Only losing the connection
     /// itself ends the writer.
+    #[allow(clippy::cast_precision_loss)]
     async fn flush(&mut self, mut events: Vec<WriteEvent>) -> Result<Flushed, StoreError> {
         let n = events.len() as u64;
         if n == 0 {
@@ -935,6 +946,9 @@ impl Sink {
             let c = Arc::clone(&self.counters);
             match result {
                 Ok(outcome) => {
+                    if let Some(observer) = &self.log_observer {
+                        observer.committed(outcome.log_notifications, outcome.finish_notifications);
+                    }
                     self.deliver(outcome.completions);
                     let refused = outcome.refused.len() as u64;
                     c.batches.fetch_add(1, Ordering::Relaxed);
@@ -966,6 +980,30 @@ impl Sink {
                     attempt += 1;
                 }
                 Err(e) => {
+                    // Spending is independent of persistence, just as frozen
+                    // finishLog debits even when usage.append throws.
+                    let debits = events
+                        .iter()
+                        .filter_map(|event| {
+                            let WriteEvent::Log(super::events::LogEvent::Finish(log)) = event
+                            else {
+                                return None;
+                            };
+                            Some(super::events::Completion {
+                                id: log.id.clone(),
+                                api_key_id: log.api_key_id.clone(),
+                                requested_model: log.requested_model.clone(),
+                                tokens: (log.input_tokens as f64)
+                                    + (log.output_tokens as f64)
+                                    + (log.cache_read_tokens as f64)
+                                    + (log.cache_write_tokens as f64),
+                                cost_usd: log.cost_usd,
+                                at: log.at as f64,
+                                debit_model: !log.model_unencodable,
+                            })
+                        })
+                        .collect();
+                    self.deliver(debits);
                     c.failed.fetch_add(n, Ordering::Relaxed);
                     tracing::error!(
                         count = n,
@@ -1175,6 +1213,7 @@ async fn run(
 ) -> Result<(), StoreError> {
     let max_batch = config.max_batch.max(1);
     let mut sink = Sink {
+        log_observer: config.log_observer.clone(),
         backend,
         node_id: Arc::from(config.node_id.as_str()),
         day_offset_minutes: config.day_offset_minutes,

@@ -1558,6 +1558,7 @@ version = "0.16.0"
 dependencies = [
  "arc-swap",
  "async-stream",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "foldhash",
@@ -1585,6 +1586,7 @@ dependencies = [
  "rand 0.9.5",
  "rusqlite",
  "serde_json",
+ "sha1",
  "subtle",
  "tempfile",
  "thiserror",

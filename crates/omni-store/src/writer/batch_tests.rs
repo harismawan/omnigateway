@@ -6,6 +6,30 @@ use rusqlite::trace::{TraceEvent, TraceEventCodes};
 use std::sync::{Arc, Mutex};
 
 #[test]
+fn notifications_count_calls_not_coalesced_rows_and_failure_returns_none() {
+    let mut conn = Connection::open_in_memory().expect("open");
+    migrate::migrate(&mut conn, 0).expect("migrate");
+    let finish = LogEvent::Finish(RequestLog::new("same", 1000, 200));
+    let events = vec![finish.clone().into(), finish.into()];
+    let outcome = write(&mut conn, &events, "n", 0).expect("write");
+    assert_eq!(
+        (outcome.log_notifications, outcome.finish_notifications),
+        (2, 2)
+    );
+    assert_eq!(outcome.completions.len(), 1);
+    conn.execute_batch("CREATE TRIGGER refuse BEFORE INSERT ON request_logs BEGIN SELECT RAISE(FAIL, 'refused'); END;").expect("trigger");
+    assert!(
+        write(
+            &mut conn,
+            &[LogEvent::Finish(RequestLog::new("fail", 1000, 200)).into()],
+            "n",
+            0
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn a_full_batch_is_a_few_multi_row_inserts_per_table() {
     let mut conn = Connection::open_in_memory().expect("open");
     migrate::migrate(&mut conn, 0).expect("migrate");

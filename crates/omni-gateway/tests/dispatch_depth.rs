@@ -47,6 +47,7 @@ async fn server_stream(
         body_logging_allowed: false,
         day_offset_minutes: 0,
         reported_catalog_problems: Mutex::default(),
+        stream: Default::default(),
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
