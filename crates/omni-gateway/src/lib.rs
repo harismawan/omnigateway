@@ -22,6 +22,7 @@ pub mod load;
 pub mod logging;
 pub mod maintenance;
 pub mod models;
+pub mod otlp;
 mod output_budget;
 pub mod overlay;
 pub mod price;
@@ -437,11 +438,19 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
     let health = Arc::new(dispatch::HealthOverlay::default());
     let overlay_sweeper =
         dispatch::HealthOverlay::spawn_sweeper(health.clone(), overlay::OVERLAY_TTL);
-    let telemetry = Arc::new(telemetry::Telemetry::new(
-        config.metrics_token.is_some(),
-        config.metrics_max_series,
-        &options.version,
-    ));
+    let telemetry = Arc::new(
+        telemetry::Telemetry::new(
+            config.metrics_token.is_some(),
+            config.metrics_max_series,
+            &options.version,
+        )
+        .with_tracing(
+            config.otlp_endpoint.as_deref(),
+            config.otlp_headers.as_deref(),
+            config.trace_sample,
+            &options.version,
+        ),
+    );
     let http = {
         let t = telemetry.clone();
         let client = omni_providers::http::Client::new();
@@ -451,7 +460,16 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
             client
         }
     };
-    let http = Arc::new(http);
+    let http: Arc<dyn omni_providers::http::HttpClient> = Arc::new(http);
+    let http: Arc<dyn omni_providers::http::HttpClient> = if let Some(traces) = &telemetry.tracing {
+        Arc::new(otlp::TraceHttp {
+            inner: http,
+            traces: traces.clone(),
+            now: clock::now_ms,
+        })
+    } else {
+        http
+    };
     let refresh_store = omni_store::Store::open(
         omni_store::StoreConfig::Sqlite { path: path.clone() },
         offset,
@@ -569,6 +587,9 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         app.stream.stop();
         console_stream.abort();
         drop(console_stream.await);
+        if let Some(t) = &app.deps.telemetry.tracing {
+            t.stop();
+        }
         let shutdown_until = tokio::time::Instant::now() + deadline;
         drop(tokio::time::timeout_at(shutdown_until, maintenance.stop()).await);
         oauth_scheduler.abort();

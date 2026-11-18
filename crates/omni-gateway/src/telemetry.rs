@@ -703,11 +703,12 @@ fn push_number(out: &mut String, v: f64) {
 }
 
 /// `createTelemetry`'s metrics half. Recording is a no-op unless metrics are
-/// enabled (`OMNI_METRICS_TOKEN` set), as in TS; OTLP export is not ported.
+/// enabled (`OMNI_METRICS_TOKEN` set), as in TS. Tracing is independently optional.
 #[derive(Debug)]
 pub struct Telemetry {
     enabled: bool,
-    registry: Registry,
+    registry: Arc<Registry>,
+    pub tracing: Option<Arc<crate::otlp::Tracing>>,
     /// `openBreakers`: per provider, in first-seen order.
     open_breakers: Mutex<Vec<(String, f64)>>,
 }
@@ -728,7 +729,8 @@ impl Telemetry {
     pub fn new(enabled: bool, max_series: f64, version: &str) -> Self {
         let t = Self {
             enabled,
-            registry: Registry::new(max_series),
+            registry: Arc::new(Registry::new(max_series)),
+            tracing: None,
             open_breakers: Mutex::new(Vec::new()),
         };
         if enabled {
@@ -747,9 +749,28 @@ impl Telemetry {
         self.enabled
     }
 
+    pub fn with_tracing(
+        mut self,
+        endpoint: Option<&str>,
+        headers: Option<&str>,
+        sample: f64,
+        version: &str,
+    ) -> Self {
+        self.tracing = endpoint
+            .map(|e| crate::otlp::Tracing::new(e, headers, sample, version, self.registry.clone()));
+        self
+    }
+
+    pub fn trace(&self, request_id: &str) -> Option<crate::otlp::SharedTrace> {
+        self.tracing.as_ref().and_then(|t| t.get(request_id))
+    }
+
     /// `record(log, keyId)`: one finished request, from `finishLog`.
     #[allow(clippy::cast_precision_loss)]
     pub fn record(&self, log: &omni_store::writer::RequestLog) {
+        if let Some(t) = &self.tracing {
+            t.finish(log);
+        }
         if !self.enabled {
             return;
         }

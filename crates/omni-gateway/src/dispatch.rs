@@ -575,6 +575,19 @@ pub fn dispatch_with_options(
         .collect();
     drop(ranked);
 
+    if let Some(trace) = deps.telemetry.trace(&request_id) {
+        lock(&trace).route(
+            started_at,
+            (deps.now)(),
+            crate::otlp::Attrs {
+                candidates: Some(candidates.len()),
+                chosen_provider: candidates.first().map(|c| c.target.provider.clone()),
+                chosen_model: candidates.first().map(|c| c.target.model.clone()),
+                ..crate::otlp::Attrs::default()
+            },
+        );
+    }
+
     if candidates.is_empty() {
         let message = format!(
             "no eligible credential for model \"{}\"",
@@ -702,6 +715,12 @@ fn run(mut s: RunState) -> EventsStream {
 
             let i = attempts;
             attempts += 1;
+            let trace = deps.telemetry.trace(&rid);
+            let attempt_span = trace.as_ref().map(|t| crate::otlp::Trace::attempt(t, now(), crate::otlp::Attrs {
+                attempt: Some(i + 1), provider: Some(c.target.provider.clone()),
+                model: Some(c.target.model.clone()), credential_id: Some(c.credential.id.clone()),
+                ..crate::otlp::Attrs::default()
+            }, now));
             {
                 let mut l = lock(&log);
                 l.attempts = i64::from(i + 1);
@@ -824,6 +843,9 @@ fn run(mut s: RunState) -> EventsStream {
                             committed = true;
                             let ttft = now() - s.started_at;
                             lock(&log).ttft_ms = Some(ttft);
+                            if matches!(event, StreamEvent::BlockDelta { .. }) && let Some(t) = &trace {
+                                lock(t).commit(now(), &c.target.provider, &c.target.model);
+                            }
                             slot.observed(ttft);
                             tracing::debug!(requestId = %rid, provider = %c.target.provider,
                                 model = %c.target.model, credentialId = %c.credential.id,
@@ -929,6 +951,7 @@ fn run(mut s: RunState) -> EventsStream {
                 };
                 note(&log, &error.degradations);
                 let mut failure = classified;
+                if let Some(span) = &attempt_span { span.code(failure.code.as_str()); }
 
                 if failure.code == ErrorCode::Auth
                     && !committed
