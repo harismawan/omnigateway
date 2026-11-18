@@ -259,7 +259,7 @@ fn secret(
     key: &omni_crypto::field::FieldKey,
     id: &str,
 ) -> Result<Option<String>> {
-    let raw: Option<String> = s
+    let raw: rusqlite::types::Value = s
         .connection()
         .query_row(
             "SELECT refresh_token FROM credentials WHERE id=?",
@@ -267,8 +267,15 @@ fn secret(
             |r| r.get(0),
         )
         .map_err(error)?;
-    raw.map(|v| omni_crypto::field::decrypt(key, &v).map_err(error))
-        .transpose()
+    match raw {
+        rusqlite::types::Value::Null => Ok(None),
+        rusqlite::types::Value::Text(v) => omni_crypto::field::decrypt(key, &v)
+            .map(Some)
+            .map_err(error),
+        _ => Err(error(
+            "value.split is not a function. (In 'value.split(\":\")', 'value.split' is undefined)",
+        )),
+    }
 }
 fn persist(
     s: &omni_store::SqliteStore,

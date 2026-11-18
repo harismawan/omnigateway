@@ -11,4 +11,5 @@ set -euo pipefail
 ip link set lo up
 mount --bind "$2/hosts" /etc/hosts
 bun --no-env-file conformance/cli/credentials-network.ts "$1" "$2"
+python3 conformance/cli/credentials-tty.py "$1" "$2"
 ' bash "$(realpath "$1")" "$work"

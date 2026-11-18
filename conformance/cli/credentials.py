@@ -114,6 +114,8 @@ for col in columns + ['api_key','access_token','id_token']:
             f'UPDATE credentials SET "{col}"={value} WHERE id=\'neighbor\'',['credentials','refresh','c']))
 for auth in ["'apiKey'","'unknown'",'NULL']:
     cases.append(('refresh auth',seed,f'UPDATE credentials SET auth_type={auth}',['credentials','refresh','c']))
+for value in values:
+    cases.append(('refresh secret',seed,f'UPDATE credentials SET refresh_token={value}',['credentials','refresh','c']))
 
 def normalize(result, args, started, ended, expected_key):
     # Only successful target clocks and new-row UUID/ciphertext (including nonce/tag)
