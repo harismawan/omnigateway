@@ -66,12 +66,14 @@ fn wire(
     else {
         return Ok(None);
     };
+    let timeout = r.timeout;
+    let r = r.http;
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(fail)?;
     let response = rt.block_on(async {
-        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        tokio::time::timeout(timeout, async {
             let r = omni_providers::http::Client::new()
                 .send(omni_providers::http::HttpRequest {
                     provider: provider.into(),

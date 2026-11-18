@@ -22,3 +22,6 @@ reset-credit listing and confirmed redemption. Expiring credentials reuse
 the existing E2 OAuth refresh/CAS path. No scheduler or gateway quota routes
 are introduced. Stub coverage includes JSON/human, explicit all/credit,
 confirmation/cancel/refusal, provider failures and failed post-reset reads.
+Quota requests compare the captured Accept values with the frozen JSON
+override. One OpenAI redemption response is delayed 16 seconds to pin the
+30-second POST deadline; quota GETs and Antigravity usage retain 15 seconds.

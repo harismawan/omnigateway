@@ -1,13 +1,18 @@
 //! One-shot quota wire operations shared by operator hosts; no scheduling.
 use crate::oauth::AuthRequest;
 use serde_json::{Value, json};
+/// Quota-only transport contract; OAuth token requests retain their existing host.
+pub struct QuotaRequest {
+    pub http: AuthRequest,
+    pub timeout: std::time::Duration,
+}
 pub fn request(
     provider: &str,
     operation: &str,
     token: &str,
     data: &Value,
     body: Value,
-) -> Option<AuthRequest> {
+) -> Option<QuotaRequest> {
     let url = match (provider, operation) {
         ("openai", "usage") => "https://chatgpt.com/backend-api/wham/usage".into(),
         ("openai", "list") => {
@@ -34,7 +39,10 @@ pub fn request(
         _ => return None,
     };
     let post = operation == "redeem" || provider == "antigravity";
-    let mut headers = vec![("Authorization".into(), format!("Bearer {token}"))];
+    let mut headers = vec![
+        ("Authorization".into(), format!("Bearer {token}")),
+        ("Accept".into(), "application/json".into()),
+    ];
     if provider == "openai"
         && let Some(id) = data["accountId"].as_str().filter(|s| !s.trim().is_empty())
     {
@@ -60,18 +68,23 @@ pub fn request(
         "anthropic" => crate::anthropic::profile::headers(headers),
         _ => crate::antigravity::profile::headers(headers),
     };
-    Some(AuthRequest {
-        url,
-        method: if post { "POST" } else { "GET" }.into(),
-        headers,
-        body: if post {
-            crate::quota::encode(&if provider == "antigravity" {
-                json!({"project":data["projectId"]})
+    Some(QuotaRequest {
+        // Frozen JSON GETs specify 15s. Redemption POSTs use the host's
+        // 30s ceiling; Antigravity's usage POST explicitly specifies 15s.
+        timeout: std::time::Duration::from_secs(if operation == "redeem" { 30 } else { 15 }),
+        http: AuthRequest {
+            url,
+            method: if post { "POST" } else { "GET" }.into(),
+            headers,
+            body: if post {
+                crate::quota::encode(&if provider == "antigravity" {
+                    json!({"project":data["projectId"]})
+                } else {
+                    body
+                })
             } else {
-                body
-            })
-        } else {
-            String::new()
+                String::new()
+            },
         },
     })
 }
@@ -298,6 +311,32 @@ pub fn redeemed(provider: &str, result: &Value) -> Result<Option<f64>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn quota_json_headers_and_operation_deadlines() {
+        let data = json!({"accountId":"workspace","projectId":"project","organization":"org"});
+        for (provider, operations) in [
+            ("openai", &["usage", "list", "redeem"][..]),
+            ("anthropic", &["usage", "list", "profile", "redeem"][..]),
+            ("antigravity", &["usage"][..]),
+        ] {
+            for operation in operations {
+                let request = request(provider, operation, "access", &data, Value::Null)
+                    .expect("supported quota operation");
+                let accept = request
+                    .http
+                    .headers
+                    .iter()
+                    .filter(|(name, _)| name.eq_ignore_ascii_case("accept"))
+                    .map(|(_, value)| value.as_str())
+                    .collect::<Vec<_>>();
+                assert_eq!(accept, ["application/json"]);
+                assert_eq!(
+                    request.timeout.as_secs(),
+                    if *operation == "redeem" { 30 } else { 15 }
+                );
+            }
+        }
+    }
     #[test]
     fn provider_windows_and_reset_capabilities_match_frozen_shapes() {
         let rows = usage(

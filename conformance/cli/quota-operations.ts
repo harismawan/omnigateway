@@ -100,9 +100,14 @@ const server = Bun.listen<{ bytes: Buffer }>({
         };
       else result = { five_hour: { utilization: 25, resets_at: "2030-01-01T00:00:00Z" } };
       const raw = JSON.stringify(result);
-      s.end(
-        `HTTP/1.1 ${status} OK\r\nContent-Length: ${Buffer.byteLength(raw)}\r\nConnection: close\r\n\r\n${raw}`,
-      );
+      const respond = () =>
+        s.end(
+          `HTTP/1.1 ${status} OK\r\nContent-Length: ${Buffer.byteLength(raw)}\r\nConnection: close\r\n\r\n${raw}`,
+        );
+      if (mode === "slow-redeem" && path.includes("consume")) {
+        // One normal successful spend lasting beyond the old 15s cutoff.
+        setTimeout(respond, 16_000);
+      } else respond();
     },
   },
 });
@@ -129,7 +134,7 @@ for (const provider of ["openai", "anthropic", "antigravity"])
     "repeat",
     "disabled",
     "unsupported",
-    ...(provider === "openai" ? ["empty"] : []),
+    ...(provider === "openai" ? ["empty", "slow-redeem"] : []),
   ]) {
     if (provider === "antigravity" && !["refresh", "noData", "limited"].includes(test)) continue;
     const pair: unknown[] = [];
@@ -175,7 +180,7 @@ for (const provider of ["openai", "anthropic", "antigravity"])
             ? "limited"
             : test === "empty"
               ? "empty"
-              : ["redeem-failed", "reread-failed"].includes(test)
+              : ["redeem-failed", "reread-failed", "slow-redeem"].includes(test)
                 ? test
                 : "ok";
       requests = [];
@@ -185,6 +190,7 @@ for (const provider of ["openai", "anthropic", "antigravity"])
           ? "resets"
           : [
                 "redeem",
+                "slow-redeem",
                 "credit",
                 "redeem-failed",
                 "reread-failed",
@@ -199,7 +205,11 @@ for (const provider of ["openai", "anthropic", "antigravity"])
       ];
       if (!["refuse", "cancel", "confirm", "human", "list-human"].includes(test))
         args.push("--json");
-      if (["redeem", "credit", "redeem-failed", "reread-failed", "empty"].includes(test))
+      if (
+        ["redeem", "slow-redeem", "credit", "redeem-failed", "reread-failed", "empty"].includes(
+          test,
+        )
+      )
         args.push("--yes");
       if (test === "credit") args.push("--credit", provider === "openai" ? "credit" : "grant-u2");
       if (test === "all") args = ["quota", "refresh", "--all", "--json"];
@@ -273,9 +283,19 @@ for (const provider of ["openai", "anthropic", "antigravity"])
             throw Error("invalid request UUID");
           fields[name] = "<validated-request-uuid>";
         }
-        return { path: r.path, body };
+        // Compare the actual negotiated representation, including duplicate
+        // headers, while leaving unrelated profile fingerprint fields alone.
+        const accept = r.head
+          .split("\r\n")
+          .filter((line) => /^accept:/i.test(line))
+          .map((line) => line.slice(line.indexOf(":") + 1).trim());
+        if (index === 0 && !r.path.includes("/oauth/token") && !equal(accept, ["application/json"]))
+          throw Error(`oracle quota Accept drift: ${r.path}`);
+        return { path: r.path, body, accept };
       });
       if (index === 0) {
+        if (test === "slow-redeem" && end - start < 16_000)
+          throw Error("delayed redemption did not cross the 15s boundary");
         const terminal = ["cancel", "confirm"].includes(test)
           ? (JSON.parse(out) as { code: number })
           : null;
