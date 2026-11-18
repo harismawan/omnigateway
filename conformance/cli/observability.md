@@ -13,13 +13,12 @@ Follow checks require the same delta/output and SIGINT termination (-2 or 130).
 Fixtures cover empty/populated reads, filters, cursor pagination, human/JSON,
 file console filtering, export files, ordinary read failures, and absence states.
 
-## Outstanding provider dependency
+## Provider quota operations
 
-`quota refresh`, `quota resets`, and `quota reset` are registered and parse
-their frozen options, but provider execution is **not migrated**. This tree's
-Rust providers have no quota usage probe, reset-credit listing, or redemption
-APIs. Supported-provider invocations fail explicitly rather than claiming a
-refresh or spending a credit. Unknown account and unsupported reset-provider
-refusals are covered. Provider success/failure stubs and reset confirmation
-cannot be release gates until that shared provider operation seam exists.
-This is a release blocker for claiming full E3, not an accepted parity difference.
+Run `bash conformance/cli/quota-operations-ns.sh CLI_BINARY SCRATCH` for
+private TLS provider-stub pairs. OpenAI, Anthropic and Antigravity usage
+probes persist snapshots and changed history; OpenAI and Anthropic support
+reset-credit listing and confirmed redemption. Expiring credentials reuse
+the existing E2 OAuth refresh/CAS path. No scheduler or gateway quota routes
+are introduced. Stub coverage includes JSON/human, explicit all/credit,
+confirmation/cancel/refusal, provider failures and failed post-reset reads.
