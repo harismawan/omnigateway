@@ -290,7 +290,8 @@ async fn sweep_refreshes_due_rows_and_disables_expired_without_token() {
             .unwrap();
         db.connection().execute("INSERT INTO credentials (id,provider,label,auth_type,expires_at,created_at,updated_at) VALUES ('empty','anthropic','empty','oauth',1,0,0)", []).unwrap();
     }
-    assert_eq!(service.sweep(None).await.unwrap(), 1);
+    let outcome = service.sweep(None).await.unwrap();
+    assert_eq!((outcome.refreshed, outcome.touched), (1, 2));
     assert_eq!(http.calls.load(Ordering::SeqCst), 1);
     let empty = service
         .store
@@ -300,7 +301,7 @@ async fn sweep_refreshes_due_rows_and_disables_expired_without_token() {
         .unwrap();
     assert!(!empty.enabled);
     assert_eq!(empty.disabled_reason.unwrap().as_str(), "expiredNoRefresh");
-    assert_eq!(service.sweep(None).await.unwrap(), 0);
+    assert_eq!(service.sweep(None).await.unwrap().touched, 0);
 }
 
 #[tokio::test]
@@ -341,7 +342,7 @@ async fn openai_expired_refresh_retains_identity_and_extra_metadata() {
             )
             .unwrap();
     }
-    assert_eq!(service.sweep(None).await.unwrap(), 1);
+    assert_eq!(service.sweep(None).await.unwrap().refreshed, 1);
     let stored = service
         .store
         .credential(&service.key, "c")

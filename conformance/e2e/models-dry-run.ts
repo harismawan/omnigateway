@@ -43,7 +43,12 @@ try{
  }
  for(const raw of ["{","no-json",""]){const pair=await Promise.all([19612,19613].map((port,i)=>req(port,"/api/models/score/dry-run",raw,cookies[i],true)));pair.forEach(x=>delete (x as any).cookie);rows.push({raw,pair,equal:JSON.stringify(pair[0])===JSON.stringify(pair[1])});}
  // Fresh stored rows; reset each case rather than accumulating mutations.
- const dbs=[0,1].map(i=>new Database(`${work}/${i}.db`));
+ const dbs=[0,1].map(i=>{
+  const db=new Database(`${work}/${i}.db`);
+  // Fixture writes share the WAL with live gateway writers; match openDb's wait.
+  db.run('PRAGMA busy_timeout=5000');
+  return db;
+ });
  const cases=[
  ...JSON.parse(await Bun.file(new URL('./models-dry-run-r3.json', import.meta.url)).text()),
  ...['tier','weight'].map(field=>`UPDATE virtual_models SET targets=json_set(targets,'$[0].${field}',9007199254740993) WHERE id='score'`),

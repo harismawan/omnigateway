@@ -42,6 +42,8 @@ hyper-util = { version = "0.1", features = ["tokio", "server", "server-graceful"
 http-body = "1"
 http-body-util = "0.1"
 bytes = "1"
+base64 = "0.22.1"
+sha1 = "0.10.7"
 async-stream = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 futures-core = "0.3"
@@ -59,7 +61,7 @@ mimalloc = { version = "0.1", default-features = false, features = ["v2"] }
 # arenas fault in 2 MiB pages, which took idle RSS from 7 to 17.5 MiB. Linux
 # only: `nix::sys::prctl` does not exist elsewhere, and neither does THP.
 [target.'cfg(target_os = "linux")'.dependencies]
-nix = { version = "0.31", default-features = false, features = ["process"] }
+nix = { version = "0.31", default-features = false, features = ["process", "inotify"] }
 
 [dev-dependencies]
 nix = { version = "0.31", default-features = false, features = ["fs"] }

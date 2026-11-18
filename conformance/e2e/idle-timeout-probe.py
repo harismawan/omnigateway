@@ -96,9 +96,9 @@ for label, rows in results.items():
         elif kind == "json":
             ok = "200 OK" in row["head"] and row["bytes"] >= 6 * 1024 * 1024
         elif kind == "websocket":
-            # Rust has no upgrade route yet; record the existing mismatch,
-            # rather than making this independent migration item gate on it.
-            ok = "101" in row["head"] if label == "ts" else "404" in row["head"]
+            # A9 now upgrades in both runtimes. This raw peer never pongs,
+            # so the application heartbeat (not the HTTP idle guard) closes it.
+            ok = "101" in row["head"] and row["eof"] and "706f6e6720646561646c696e65" in row["sampleHex"]
         elif kind == "active":
             ok = not row["eof"] or row["bytes"] >= 32 * 1024 * 1024
         else:

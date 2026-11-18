@@ -871,17 +871,25 @@ impl Telemetry {
     }
 
     /// `scrape(...)`: the gauges read at scrape time, then the text. This
-    /// process has no stream sockets (0, 0, 0) and an in-memory coordinator
-    /// (never in fallback, no faults), which is what TS reports for them.
+    /// In-memory coordinator is never in fallback and has no faults.
     #[allow(clippy::cast_precision_loss)]
     pub fn scrape(&self, inflight: &[(String, u64)]) -> String {
+        self.scrape_with_streams(inflight, (0, 0, 0))
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    pub fn scrape_with_streams(
+        &self,
+        inflight: &[(String, u64)],
+        streams: (usize, usize, u64),
+    ) -> String {
         let r = &self.registry;
         for (provider, n) in inflight {
             r.set(Metric::Inflight, &[("provider", provider)], *n as f64);
         }
-        r.set(Metric::StreamConnections, &[], 0.0);
-        r.set(Metric::StreamQueued, &[], 0.0);
-        r.set(Metric::StreamDroppedTotal, &[], 0.0);
+        r.set(Metric::StreamConnections, &[], streams.0 as f64);
+        r.set(Metric::StreamQueued, &[], streams.1 as f64);
+        r.set(Metric::StreamDroppedTotal, &[], streams.2 as f64);
         r.set(Metric::CoordFallback, &[], 0.0);
         r.set(Metric::CoordFaultsTotal, &[], 0.0);
         r.render()
