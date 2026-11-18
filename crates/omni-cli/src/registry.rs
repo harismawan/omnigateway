@@ -354,7 +354,21 @@ pub fn implemented(name: &str) -> Option<String> {
     if let Some(key) = name.strip_prefix("keys ") {
         return Some(key.into());
     }
-    if name.starts_with("settings ") || name.starts_with("models ") {
+    if matches!(
+        name,
+        "connect"
+            | "credentials list"
+            | "credentials refresh"
+            | "credentials show"
+            | "credentials health"
+            | "credentials enable"
+            | "credentials disable"
+            | "credentials set"
+            | "credentials rm"
+            | "credentials add-key"
+    ) || name.starts_with("settings ")
+        || name.starts_with("models ")
+    {
         return Some(name.replace(' ', "-"));
     }
     None
