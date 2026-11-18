@@ -113,9 +113,7 @@ impl Codec {
                         return Ok(None);
                     }
                     let n = u16::from_be_bytes([b[2], b[3]]) as u64;
-                    if n < 126 {
-                        return Err(1002);
-                    }
+
                     (n, 4)
                 }
                 127 => {
@@ -126,9 +124,7 @@ impl Codec {
                     if n >> 63 != 0 {
                         return Err(1009);
                     }
-                    if n < 65536 {
-                        return Err(1002);
-                    }
+
                     (n, 10)
                 }
                 n => (n as u64, 2),

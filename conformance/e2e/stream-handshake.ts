@@ -52,6 +52,7 @@ try {
     ["invalid-close",upgrade+`Cookie: ${cookie}\r\n`,mask(0x88,[3,237])],
     ["fragmented-control",upgrade+`Cookie: ${cookie}\r\n`,mask(0x09,[])],
     ...[["rsv1",0xc1],["rsv2",0xa1],["rsv3",0x91],["orphan-continuation",0x80]].map(([n,op])=>[n,upgrade+`Cookie: ${cookie}\r\n`,mask(op as number,[])] as const),
+    ...[16,64].map(width=>{const data=Buffer.from('{"type":"subscribe","topic":"res:logs"}');const header=width===16?Buffer.from([0x81,254,0,data.length,0,0,0,0]):Buffer.from([0x81,255,0,0,0,0,0,0,0,data.length,0,0,0,0]);return [`nonminimal-${width}`,upgrade+`Cookie: ${cookie}\r\n`,Buffer.concat([header,data])] as const;}),
     ["length-high",upgrade+`Cookie: ${cookie}\r\n`,Buffer.from([0x81,0xff,0x80,0,0,0,0,0,0,0,1,2,3,4])],
     ["short-close",upgrade+`Cookie: ${cookie}\r\n`,mask(0x88,[1])],
     ["nested-fragment",upgrade+`Cookie: ${cookie}\r\n`,Buffer.concat([mask(1,[]),mask(0x81,[])])],

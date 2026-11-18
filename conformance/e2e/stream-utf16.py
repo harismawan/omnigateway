@@ -39,20 +39,20 @@ def run(binary,label):
   for name,text in cases.items():result[name]=ask(encoded(text))
   normal='{"type":"subscribe","topic":"res:logs"}'
   for width in [16,64]:result['noncanonical-'+str(width)]=ask(encoded(normal,width))
-   result['medium64']=ask(encoded('{"type":"subscribe","topic":"res:logs","extra":"'+'x'*200+'"}',64))
-   sock=opened()
-   identities=['res:'+chr(0xd800),'res:'+chr(0xdc00),'res:'+chr(0xfffd),'res:😀']
-   records=[]
-   for topic in identities:
-    for kind in ['subscribe','unsubscribe','subscribe']:
-     sock.sendall(encoded(json.dumps({'type':kind,'topic':topic})));op,data=w.frame(sock);records.append(data.hex())
-   for topic in ['res:'+chr(0xd800)*124,'res:'+chr(0xd800)*125,'stream:'+chr(0xd800)]:
-    sock.sendall(encoded(json.dumps({'type':'subscribe','topic':topic})));op,data=w.frame(sock);records.append(data.hex())
-   sock.close();result['identities']=records
-   sock=opened();raw=encoded(normal,64)
-   for byte in raw:sock.sendall(bytes([byte]));time.sleep(.001)
-   result['incremental64']=w.frame(sock)[1].hex();sock.close()
-   result['control16']=ask(bytes([0x89,254,0,1])+b'1234'+b'I')
+  result['medium64']=ask(encoded('{"type":"subscribe","topic":"res:logs","extra":"'+'x'*200+'"}',64))
+  sock=opened()
+  identities=['res:'+chr(0xd800),'res:'+chr(0xdc00),'res:'+chr(0xfffd),'res:😀']
+  records=[]
+  for topic in identities:
+   for kind in ['subscribe','unsubscribe','subscribe']:
+    sock.sendall(encoded(json.dumps({'type':kind,'topic':topic})));op,data=w.frame(sock);records.append(data.hex())
+  for topic in ['res:'+chr(0xd800)*124,'res:'+chr(0xd800)*125,'stream:'+chr(0xd800)]:
+   sock.sendall(encoded(json.dumps({'type':'subscribe','topic':topic})));op,data=w.frame(sock);records.append(data.hex())
+  sock.close();result['identities']=records
+  sock=opened();raw=encoded(normal,64)
+  for byte in raw:sock.sendall(bytes([byte]));time.sleep(.001)
+  result['incremental64']=w.frame(sock)[1].hex();sock.close()
+  result['control16']=ask(bytes([0x89,254,0,1])+b'1234'+b'I')
   for name,raw in {'rsv':b'\xc1\x80'+b'1234','continuation':b'\x80\x80'+b'1234','short-close':b'\x88\x81'+b'1234'+b'I'}.items():result[name]=ask(raw)
  finally:p.terminate();p.wait(timeout=15);log.close()
  return result

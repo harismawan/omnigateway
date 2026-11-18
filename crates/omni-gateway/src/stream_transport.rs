@@ -86,7 +86,7 @@ struct State {
     dropped_since_report: u64,
 }
 struct Entry {
-    topics: HashSet<String>,
+    topics: HashSet<Vec<u16>>,
     queue: VecDeque<String>,
     notify: Arc<Notify>,
 }
@@ -107,7 +107,7 @@ impl Hub {
         state.sockets.insert(
             id,
             Entry {
-                topics: HashSet::from(["res:*".into()]),
+                topics: HashSet::from(["res:*".encode_utf16().collect()]),
                 queue: VecDeque::new(),
                 notify,
             },
@@ -122,7 +122,11 @@ impl Hub {
         let mut state = self.state.lock().expect("stream state");
         if let Some(entry) = state.sockets.remove(&id) {
             for topic in entry.topics {
-                if let Some(index) = resource_index(&topic) {
+                if let Some(index) = String::from_utf16(&topic)
+                    .ok()
+                    .as_deref()
+                    .and_then(resource_index)
+                {
                     self.subscribers[index].fetch_sub(1, Relaxed);
                 }
             }
@@ -212,12 +216,20 @@ impl Hub {
             drop(task.await);
         }
     }
+    #[cfg(test)]
     fn message(&self, id: u64, kind: &str, raw: Value) -> Vec<String> {
+        self.message_topic(id, kind, raw, None)
+    }
+    fn message_topic(&self, id: u64, kind: &str, raw: Value, units: Option<&[u16]>) -> Vec<String> {
         let frame = stream::parse_client_frame(&raw);
         if frame.is_null() {
             return vec!["{\"type\":\"error\",\"message\":\"malformed frame\"}".into()];
         }
         let topic = frame["topic"].as_str().expect("parsed topic");
+        // Lossless UTF16 is the authoritative registry identity. The scalar
+        // projection is used only for ASCII prefix/role checks, never keys or
+        // declaration lookup of an ill-formed UTF16 string.
+        let key: Vec<u16> = units.map_or_else(|| topic.encode_utf16().collect(), <[u16]>::to_vec);
         let mut result = serde_json::Map::new();
         if let Some(id) = frame.get("id") {
             result.insert("id".into(), id.clone());
@@ -231,19 +243,21 @@ impl Hub {
             Some("topic is read-only")
         } else if frame["type"] == "unsubscribe" {
             if let Some(e) = state.sockets.get_mut(&id)
-                && e.topics.remove(topic)
+                && e.topics.remove(&key)
                 && let Some(index) = resource_index(topic)
             {
                 self.subscribers[index].fetch_sub(1, Relaxed);
             }
             None
-        } else if topic.starts_with("stream:") && !state.declared.contains(topic) {
+        } else if topic.starts_with("stream:")
+            && (units.is_some() || !state.declared.contains(topic))
+        {
             Some("no source")
         } else if let Some(e) = state.sockets.get_mut(&id) {
-            if !e.topics.contains(topic) && e.topics.len() >= 256 {
+            if !e.topics.contains(&key) && e.topics.len() >= 256 {
                 Some("too many topics")
             } else {
-                if e.topics.insert(topic.into())
+                if e.topics.insert(key)
                     && let Some(index) = resource_index(topic)
                 {
                     self.subscribers[index].fetch_add(1, Relaxed);
@@ -262,7 +276,14 @@ impl Hub {
             && frame["type"] == "subscribe"
             && let Some(since) = frame["sinceSeq"].as_f64()
         {
-            let slice = state.ring.since(topic, since);
+            let slice = if units.is_some() {
+                // No local publisher can name an ill-formed UTF16 topic through
+                // its Rust str API. Its replay is empty, never another topic's
+                // projected key. D4 lossless publication remains separate.
+                Ring::default().since("", since)
+            } else {
+                state.ring.since(topic, since)
+            };
             if slice["kind"] == "gap" {
                 out.push(stream::encode(
                     &json!({"type":"gap","topic":topic,"seq":slice["seq"]}),
@@ -292,7 +313,7 @@ fn deliver(state: &mut State, topic: &str, payload: Value, seq: Option<f64>) {
     for entry in state
         .sockets
         .values_mut()
-        .filter(|e| e.topics.contains(topic))
+        .filter(|e| e.topics.contains(&topic.encode_utf16().collect::<Vec<_>>()))
     {
         if entry.queue.len() == 1000 {
             entry.queue.pop_front();
@@ -332,25 +353,43 @@ fn drain(
 pub fn parse_text(text: &str) -> Value {
     parse_text_parts(text).0
 }
-fn parse_text_parts(text: &str) -> (Value, Option<Vec<u16>>) {
+fn parse_text_parts(text: &str) -> (Value, Option<Vec<u16>>, Option<Vec<u16>>) {
     use omni_ir::jsjson::{JsValue, parse_js, stringify};
     if !matches!(text.as_bytes().first(), Some(b'"' | b'/' | b'[' | b'{')) {
-        return (Value::Null, None);
+        return (Value::Null, None, None);
     }
     let Ok(parsed) = parse_js(text) else {
-        return (Value::Null, None);
+        return (Value::Null, None, None);
     };
     let JsValue::Object(entries) = &parsed else {
-        return (Value::Null, None);
+        return (Value::Null, None, None);
     };
     let mut object = serde_json::Map::new();
     let mut id = None;
+    let mut topic_units = None;
     for (key, value) in entries {
         let Ok(key) = String::from_utf16(key) else {
             continue;
         };
         if !matches!(key.as_str(), "type" | "topic" | "id" | "sinceSeq") {
             continue;
+        }
+        if key == "topic" {
+            topic_units = None;
+        }
+        if key == "topic"
+            && let JsValue::String(units) = value
+        {
+            if String::from_utf16(units).is_err() {
+                let carrier: String = units
+                    .iter()
+                    .map(|u| char::from_u32(u32::from(*u)).unwrap_or('x'))
+                    .collect();
+                object.insert(key, json!(carrier));
+                topic_units = Some(units.clone());
+                continue;
+            }
+            topic_units = None;
         }
         if key == "id" {
             id = if let JsValue::String(units) = value {
@@ -375,12 +414,26 @@ fn parse_text_parts(text: &str) -> (Value, Option<Vec<u16>>) {
         };
         object.insert(key, scalar);
     }
-    (Value::Object(object), id)
+    (Value::Object(object), id, topic_units)
 }
 impl Hub {
     fn text_message(&self, socket: u64, kind: &str, text: &str) -> Vec<String> {
-        let (raw, id) = parse_text_parts(text);
-        let mut frames = self.message(socket, kind, raw);
+        let (raw, id, topic) = parse_text_parts(text);
+        let mut frames = self.message_topic(socket, kind, raw, topic.as_deref());
+        if let Some(topic) = topic {
+            for frame in &mut frames {
+                if let Ok(mut value) = omni_ir::jsjson::parse_js(frame) {
+                    if let omni_ir::jsjson::JsValue::Object(entries) = &mut value {
+                        for (key, value) in entries {
+                            if key == &"topic".encode_utf16().collect::<Vec<_>>() {
+                                *value = omni_ir::jsjson::JsValue::String(topic.clone());
+                            }
+                        }
+                    }
+                    *frame = omni_ir::jsjson::stringify(&value).expect("frame JSON");
+                }
+            }
+        }
         if let Some(id) = id
             && let Some(first) = frames.first_mut()
             && first.starts_with("{\"id\":\"\",")
@@ -624,6 +677,23 @@ async fn run(
 mod tests {
     #![allow(clippy::unwrap_used)]
     #[test]
+    fn utf16_registry_keys_do_not_collide() {
+        let hub = hub();
+        for topic in [r"res:\ud800", r"res:\udc00", "res:�", "res:😀"] {
+            let raw = format!(r#"{{"type":"subscribe","topic":"{topic}"}}"#);
+            assert!(hub.text_message(1, "admin", &raw)[0].contains("ack"));
+        }
+        assert_eq!(hub.state.lock().expect("state").sockets[&1].topics.len(), 5);
+        hub.text_message(1, "admin", r#"{"type":"unsubscribe","topic":"res:\ud800"}"#);
+        let state = hub.state.lock().expect("state");
+        assert_eq!(state.sockets[&1].topics.len(), 4);
+        assert!(
+            state.sockets[&1]
+                .topics
+                .contains(&vec![114, 101, 115, 58, 0xdc00])
+        );
+    }
+    #[test]
     fn text_id_utf16_roundtrip() {
         let hub = hub();
         assert_eq!(
@@ -855,7 +925,7 @@ mod tests {
         assert!(
             !hub.state.lock().unwrap().sockets[&1]
                 .topics
-                .contains("stream:console")
+                .contains(&"stream:console".encode_utf16().collect::<Vec<_>>())
         );
     }
     #[tokio::test(start_paused = true)]
