@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 mod args;
+mod bodies;
+mod console;
 mod context;
 mod credentials;
 mod database;
@@ -8,9 +10,11 @@ mod limits;
 mod models;
 mod mutations;
 mod oauth;
+mod observability;
 mod output;
 mod password;
 mod process;
+mod quota;
 mod registry;
 mod settings;
 mod setup;
@@ -75,13 +79,17 @@ pub fn run(argv: Vec<String>) -> ExitCode {
                     oauth::connect(&flags, &positional)
                 } else if command.starts_with("settings-") {
                     settings::run(&command, &flags, &positional)
+                } else if observability::owns(&command) {
+                    observability::run(&command, &flags, &positional)
                 } else {
                     mutations::run(&command, &flags, &positional, &allow)
                 }
             });
         return match result {
             Ok(out) => {
-                println!("{out}");
+                if !observability::owns(&command) {
+                    println!("{out}");
+                }
                 if command.starts_with("setup-")
                     && let Ok((flags, _, _)) = args::parse_command(&rest, &command)
                     && !flags.contains_key("json")

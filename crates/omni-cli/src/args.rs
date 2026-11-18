@@ -53,6 +53,19 @@ pub fn parse_command(args: &[String], command: &str) -> Result<ParsedCommand, St
             continue;
         }
         if !token.starts_with("--") {
+            if matches!(command, "logs" | "console") && token.starts_with("-n") {
+                let value = if token.len() > 2 {
+                    token[2..].to_owned()
+                } else {
+                    let value = args
+                        .get(i)
+                        .ok_or("Option '-n, --number <value>' argument missing")?;
+                    i += 1;
+                    value.clone()
+                };
+                flags.insert("number".into(), value);
+                continue;
+            }
             let file_at = token
                 .char_indices()
                 .skip(1)
@@ -106,6 +119,23 @@ pub fn parse_command(args: &[String], command: &str) -> Result<ParsedCommand, St
             .split_once('=')
             .map_or((&token[2..], None), |(k, v)| (k, Some(v)));
         match name {
+            name if crate::observability::string_option(command, name) => {
+                let value = if let Some(v) = inline {
+                    v.to_owned()
+                } else {
+                    let value = args
+                        .get(i)
+                        .ok_or_else(|| format!("Option '--{name} <value>' argument missing"))?;
+                    if value.starts_with('-') && value != "-" {
+                        return Err(format!(
+                            "Option '--{name}' argument is ambiguous.\nDid you forget to specify the option argument for '--{name}'?\nTo specify an option argument starting with a dash use '--{name}=-XYZ'."
+                        ));
+                    }
+                    i += 1;
+                    value.clone()
+                };
+                flags.insert(name.into(), value);
+            }
             name if (command == "credentials-set"
                 && matches!(name, "label" | "tier" | "weight"))
                 || (command == "connect" && matches!(name, "label" | "credential"))
@@ -183,6 +213,7 @@ pub fn parse_command(args: &[String], command: &str) -> Result<ParsedCommand, St
                 flags.insert(name.into(), value);
             }
             name if matches!(name, "json" | "no-color" | "yes" | "help" | "version")
+                || crate::observability::bool_option(command, name)
                 || (command == "credentials-health" && name == "all")
                 || (command == "status" && name == "system")
                 || ((command.starts_with("setup-") || command == "db-restore")

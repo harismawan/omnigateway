@@ -332,6 +332,20 @@ pub fn command_help(name: &str) -> String {
 pub fn implemented(name: &str) -> Option<String> {
     if matches!(
         name,
+        "logs"
+            | "logs export"
+            | "usage"
+            | "bodies"
+            | "console"
+            | "quota"
+            | "quota refresh"
+            | "quota resets"
+            | "quota reset"
+    ) {
+        return Some(name.replace(' ', "-"));
+    }
+    if matches!(
+        name,
         "db stats"
             | "db snapshots"
             | "db backup"
