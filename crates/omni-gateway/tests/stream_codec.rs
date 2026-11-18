@@ -177,3 +177,17 @@ fn additional_frozen_reason_bytes() {
         assert_eq!(codec.error_reason, reason);
     }
 }
+
+#[test]
+fn tolerated_nonminimal_data_lengths_incremental() {
+    for (payload,width) in [(vec![b'x';5],16),(vec![b'x';5],64),(vec![b'x';200],64)] {
+        let mut bytes=vec![0x82, if width==16 {254}else{255}];
+        if width==16 {bytes.extend_from_slice(&(payload.len() as u16).to_be_bytes());}
+        else {bytes.extend_from_slice(&(payload.len() as u64).to_be_bytes());}
+        bytes.extend_from_slice(&[0;4]);bytes.extend_from_slice(&payload);
+        let mut codec=Codec::new(1024);
+        for byte in &bytes[..bytes.len()-1] {codec.feed(&[*byte]).expect("feed");assert_eq!(codec.next_event(),Ok(None));}
+        codec.feed(&bytes[bytes.len()-1..]).expect("last");
+        assert_eq!(codec.next_event(),Ok(Some(Event::Binary(payload))));
+    }
+}
