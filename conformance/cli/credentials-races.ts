@@ -24,12 +24,12 @@ function start(command:string[],root:string,args:string[],input='') {
     return {code:await p.exited,out:await new Response(p.stdout).text(),err:err.replace(/(code_challenge=)[^&\n]+/g,'$1<challenge>').replace(/(state=)[^&\n]+/g,'$1<state>')};
   })(); return {p,done};
 }
-async function snapshot(file:string){
+async function snapshot(file:string,raw=false){
   const db=new Database(file); const rows:any[]=[];
   for(const row of db.query('select * from credentials order by rowid').all() as any[]){
     const typed:any={};for(const k of Object.keys(row))typed[k]=db.query(`select typeof("${k}") t from credentials where rowid=(select rowid from credentials where id=?)`).get(row.id);
-    for(const k of ['access_token','refresh_token','api_key','id_token'])if(row[k]!==null)row[k]=await decrypt(key,row[k]);
-    if(row.id!=='neighbor'){
+    for(const k of ['access_token','refresh_token','api_key','id_token'])if(!raw&&row[k]!==null)row[k]=await decrypt(key,row[k]);
+    if(!raw&&row.id!=='neighbor'){
       for(const k of ['created_at','updated_at'])if(row[k]>2){if(row[k]<began||row[k]>Date.now())throw Error('clock outside run');row[k]='<clock>';}
       const data=JSON.parse(row.provider_data);if(data.installationId&&data.installationId!=='11111111-1111-4111-8111-111111111111')data.installationId='<uuid>';
       if(data.idSalt&&data.idSalt!=='a'.repeat(64))data.idSalt='<salt>';row.provider_data=JSON.stringify(data);
@@ -52,10 +52,11 @@ for(const provider of ['openai','anthropic','antigravity'])for(const scenario of
   if(scenario==='overlap')second=await start(cmd,root,args).done;
   else if(scenario==='deleted')d.run("DELETE FROM credentials WHERE id='c'");
   else d.run("UPDATE credentials SET token_version=7,access_token=?,refresh_token=?,account_email='winner@test',provider_data='{}' WHERE id='c'",[await encrypt(key,'winner-access'),await encrypt(key,'winner-refresh')]);
-  const before=await snapshot(file);held.shift()!();const firstResult=await first.done;
+  const before=await snapshot(file);const exactBefore=await snapshot(file,true);held.shift()!();const firstResult=await first.done;
   const after=await snapshot(file);d.close();
+  const exactStable=eq(exactBefore,await snapshot(file,true));
   if(i===0&&!eq(before,after))throw Error('frozen stale write');
-  pair.push({first:firstResult,second,before,after});
+  pair.push({first:firstResult,second,before,after,exactStable});
  }
  results.push({provider,scenario,json,equal:eq(pair[0],pair[1]),pair});
 }
@@ -69,9 +70,11 @@ for(const scenario of ['full-insert','insert-rejected','after-insert-rejected','
   if(scenario==='insert-rejected')d.run("CREATE TRIGGER reject_insert BEFORE INSERT ON credentials BEGIN SELECT RAISE(ABORT,'fixture insert rejected'); END");
   if(scenario==='after-insert-rejected')d.run("CREATE TRIGGER reject_insert AFTER INSERT ON credentials BEGIN SELECT RAISE(ABORT,'fixture insert rejected'); END");
   if(scenario==='no-update'||scenario==='reconnect-failure')d.run("CREATE TRIGGER reject_metadata BEFORE UPDATE OF provider_data ON credentials BEGIN SELECT RAISE(ABORT,'fixture metadata rejected'); END");
-  const before=await snapshot(file);const output=await start(cmd,root,['connect','anthropic',...(scenario==='reconnect-failure'?['--credential','c']:[]),...(json?['--json']:[])],'@').done;
+  const before=await snapshot(file);const exactBefore=await snapshot(file,true);const output=await start(cmd,root,['connect','anthropic',...(scenario==='reconnect-failure'?['--credential','c']:[]),...(json?['--json']:[])],'@').done;
   output.out=output.out.replace(/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}/g,'<uuid>');
-  const after=await snapshot(file);d.close();
+  const after=await snapshot(file);const exactAfter=await snapshot(file,true);d.close();
+  if(!eq(exactBefore.filter(v=>v.row.id==='neighbor'),exactAfter.filter(v=>v.row.id==='neighbor')))throw Error('neighbor changed');
+  if(scenario.includes('rejected')&&!eq(exactBefore,exactAfter))throw Error('rejected insert changed cells');
   if(i===0&&scenario.includes('rejected')&&!eq(before,after))throw Error('frozen partial insert');
   pair.push({output,before,after});
  }
