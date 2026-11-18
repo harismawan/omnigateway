@@ -310,10 +310,11 @@ fn deliver(state: &mut State, topic: &str, payload: Value, seq: Option<f64>) {
         json!({"type":"event","topic":topic,"seq":seq,"payload":payload})
     };
     let wire = stream::encode(&frame);
+    let topic_key: Vec<u16> = topic.encode_utf16().collect();
     for entry in state
         .sockets
         .values_mut()
-        .filter(|e| e.topics.contains(&topic.encode_utf16().collect::<Vec<_>>()))
+        .filter(|e| e.topics.contains(&topic_key))
     {
         if entry.queue.len() == 1000 {
             entry.queue.pop_front();
