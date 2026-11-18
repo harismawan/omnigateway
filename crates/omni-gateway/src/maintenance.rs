@@ -53,6 +53,7 @@ pub fn start(
                     let path = path.clone();
                     let node = node.clone();
                     jobs.spawn_blocking(move || {
+                        let _access = omni_store::lifecycle::access();
                         let result = omni_store::open_connection(&path).and_then(|c| omni_store::maintenance::heartbeat(&c, &node, crate::clock::now_ms()));
                         if let Err(e) = result { tracing::warn!(reason = %e, "heartbeat failed"); }
                     });
@@ -79,6 +80,7 @@ async fn run_sweep(path: PathBuf, offset: i64, node: String, writer: WriterHandl
     let pending = tokio::task::spawn_blocking({
         let path = path.clone();
         move || {
+            let _access = omni_store::lifecycle::access();
             let mut c = omni_store::open_connection(&path)?;
             omni_store::writer::recover_pending(&mut c, &node, crate::clock::now_ms(), offset)
         }
@@ -93,6 +95,7 @@ async fn run_sweep(path: PathBuf, offset: i64, node: String, writer: WriterHandl
     let files = tokio::task::spawn_blocking({
         let path = path.clone();
         move || {
+            let _access = omni_store::lifecycle::access();
             let result = (|| -> Result<usize, String> {
                 let s = omni_store::SqliteStore::open(&path, offset)
                     .map_err(|e| e.to_string())?
@@ -114,6 +117,7 @@ async fn run_sweep(path: PathBuf, offset: i64, node: String, writer: WriterHandl
         }
     });
     let logs = tokio::task::spawn_blocking(move || {
+        let _access = omni_store::lifecycle::access();
         match prune_logs(&path, offset, crate::clock::now_ms()) {
             Ok([raw, daily, quota, bodies]) => tracing::debug!(
                 rawCount = raw,

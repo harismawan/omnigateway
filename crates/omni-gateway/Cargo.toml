@@ -34,7 +34,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 url = "2.5"
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "sync", "time", "macros", "signal", "io-util"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "sync", "time", "macros", "signal", "io-util", "fs"] }
 # 1.11.1: fixes the 1.10 regression that stranded a chunked body's terminator
 # in the write buffer (hyperium/hyper#4143; `tests/http1_flush.rs`).
 hyper = { version = "1.11.1", features = ["server", "http1"] }

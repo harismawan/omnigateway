@@ -241,6 +241,7 @@ fn start_read(
     // A found key is published into the snapshot: the shutdown drain waits.
     let job = holder.publication_job();
     let read = tokio::task::spawn_blocking(move || {
+        let _access = omni_store::lifecycle::access();
         let _job = job;
         let store = store.lock().unwrap_or_else(PoisonError::into_inner);
         holder.lookup_miss(&store, &read_hash)

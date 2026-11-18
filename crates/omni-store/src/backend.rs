@@ -52,6 +52,7 @@ macro_rules! on_sqlite {
     ($store:expr, |$s:ident| $body:expr) => {{
         let store = Arc::clone($store);
         tokio::task::spawn_blocking(move || {
+            let _runtime_access = crate::lifecycle::access();
             let $s = store.lock().unwrap_or_else(PoisonError::into_inner);
             $body
         })
@@ -77,7 +78,7 @@ impl Store {
                         .await
                         .map_err(|e| StoreError::Writer(format!("store open panicked: {e}")))??;
                 Ok(Self::Sqlite {
-                    store: Arc::new(Mutex::new(store)),
+                    store: crate::lifecycle::shared(store),
                     path,
                     day_offset_minutes,
                 })

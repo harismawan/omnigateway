@@ -14,10 +14,13 @@ pub mod client_routes;
 pub mod clock;
 pub mod connect;
 pub mod console;
+pub mod database_routes;
+pub mod database_swap;
 pub mod dispatch;
 pub mod finish;
 mod http;
 pub mod jsc_json;
+pub mod lifecycle;
 pub mod load;
 pub mod logging;
 pub mod maintenance;
@@ -26,6 +29,7 @@ pub mod otlp;
 mod output_budget;
 pub mod overlay;
 pub mod price;
+pub mod quiesce;
 pub mod screening;
 pub mod server;
 pub mod static_files;
@@ -34,7 +38,7 @@ pub mod stream_codec;
 pub mod stream_transport;
 pub mod telemetry;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use hyper_util::rt::TokioIo;
@@ -183,8 +187,14 @@ impl Running {
     }
 
     /// Waits for the server to finish draining and the writer to flush.
-    pub async fn wait(self) -> Result<(), String> {
-        self.task
+    pub async fn wait(mut self) -> Result<(), String> {
+        self.wait_for_stop().await
+    }
+
+    /// Observe HTTP-initiated completion while retaining the signal stop handle.
+    /// Cancellation safe; do not call again after it returns.
+    pub async fn wait_for_stop(&mut self) -> Result<(), String> {
+        (&mut self.task)
             .await
             .map_err(|e| format!("gateway task failed: {e}"))?
     }
@@ -219,6 +229,8 @@ pub struct Options {
     pub version: String,
     /// `OMNI_ROOT`, where `plugins/` lives (else the database's directory).
     pub root: Option<String>,
+    /// Injectable environment/probe/command effects for lifecycle routes.
+    pub lifecycle: lifecycle::Lifecycle,
 }
 
 /// `idleTimeout: 255`.
@@ -237,6 +249,7 @@ impl Default for Options {
             seed_delay: Duration::ZERO,
             version: "0.0.0-dev".to_owned(),
             root: None,
+            lifecycle: lifecycle::Lifecycle::default(),
         }
     }
 }
@@ -384,7 +397,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
     .map_err(|e| e.to_string())??;
     let miss = MissResolver::new(
         holder.clone(),
-        Arc::new(Mutex::new(miss_store)),
+        omni_store::lifecycle::shared(miss_store),
         MissConfig::default(),
     );
     // The admin surface's own connection: password rows and client-session
@@ -504,7 +517,14 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         now: clock::now_ms,
         rand: clock::random,
     });
+    let (stop, mut stopped) = tokio::sync::watch::channel(false);
     let app = Arc::new(server::App {
+        database_swap: tokio::sync::Mutex::new(()),
+        quiesce: Arc::new(quiesce::Quiesce::default()),
+        lifecycle: options.lifecycle,
+        version: options.version.clone(),
+        cluster: config.cluster_mode,
+        stop: stop.clone(),
         deadline_workers: server::DeadlineWorkers::new(),
         deps,
         limiter,
@@ -529,7 +549,6 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
 
     tracing::info!(host = %config.host, port = addr.port(), "omnigateway listening");
 
-    let (stop, mut stopped) = tokio::sync::watch::channel(false);
     let deadline = options.stop_deadline;
     let idle = options.idle_timeout;
     #[cfg(test)]
