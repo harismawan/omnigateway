@@ -71,14 +71,26 @@ async function snapshot(file: string, started: number, ended: number, connectedI
 }
 const results: any[] = [];
 try {
-  for (const provider of ['openai','anthropic','antigravity']) for (const scenario of ['success','auth','upstream','invalid','close','truncated','no-token','missing']) for (const json of [false,true]) {
+  for (const provider of ['openai','anthropic','antigravity']) for (const scenario of ['success','auth','upstream','invalid','close','truncated','no-token','missing', 'data-string','data-array','data-units','data-null','data-number','data-bool','data-order','version-blob','version-empty-blob','version-text','version-null','version-real','version-integer']) for (const json of [false,true]) {
     const pair: any[] = [];
     for (const [index, command] of [ts,[binary!]].entries()) {
-      mode = scenario; requests = [];
+      mode = scenario.startsWith('data-') || scenario.startsWith('version-') ? 'success' : scenario; requests = [];
       const root = join(work!,`${provider}-${scenario}-${json}-${index}`); mkdirSync(root); const file = join(root,'omnigateway.db'); copyFileSync(join(seed,'omnigateway.db'),file);
       const d = new Database(file);
       d.run("INSERT INTO credentials(id,provider,label,auth_type,refresh_token,provider_data,created_at,updated_at) VALUES('c',?,'account','oauth',?,?,1,2)",[provider,scenario === 'no-token' ? null : await encrypt(key,'old-refresh'),JSON.stringify({installationId:'11111111-1111-4111-8111-111111111111',idSalt:'a'.repeat(64),neighbor:true})]);
       d.run("INSERT INTO credentials(id,provider,label,auth_type,created_at,updated_at) VALUES('neighbor','openai','neighbor','apiKey',1,2)"); d.close();
+      { const x=new Database(file);
+        const data: Record<string,unknown> = {'data-string':'abc','data-array':[1,true,'x'],'data-units':'雪😀\ud800Z','data-null':null,'data-number':42,'data-bool':true,'data-order':{'2':'two','0':'zero',accountId:'old',installationId:'11111111-1111-4111-8111-111111111111',idSalt:'a'.repeat(64),tail:true}};
+        if (scenario in data) x.run("UPDATE credentials SET provider_data=? WHERE id='c'",[JSON.stringify(data[scenario])]);
+        if (scenario.startsWith('version-')) {
+          const cols=(x.query('pragma table_info(credentials)').all() as any[]).map(v=>v.name);
+          x.run('ALTER TABLE credentials RENAME TO old_credentials');
+          x.run('CREATE TABLE credentials('+cols.map(c=>'"'+c+'"').join(',')+')');
+          x.run('INSERT INTO credentials SELECT * FROM old_credentials');x.run('DROP TABLE old_credentials');
+          const value:Record<string,string>={'version-blob':"X'0102ff'",'version-empty-blob':"X''",'version-text':"'abc'",'version-null':'NULL','version-real':'1.5','version-integer':'7'};
+          x.run('UPDATE credentials SET token_version='+value[scenario]+" WHERE id='c'");
+        }
+        x.close(); }
       const started = Date.now(); const output = await call(command,root,['credentials','refresh',scenario === 'missing' ? 'missing' : 'c',...(json ? ['--json'] : [])]);
       pair.push({...output,rows: await snapshot(file,started,Date.now()),requests});
     }

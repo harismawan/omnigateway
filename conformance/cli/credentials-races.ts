@@ -16,11 +16,11 @@ const stub=Bun.serve({hostname:'127.0.0.1',port:443,tls:{cert:Bun.file(join(work
   const claims=Buffer.from(JSON.stringify({email:`email-${n}@test`, 'https://api.openai.com/auth':{chatgpt_account_id:`account-${n}`}})).toString('base64url');
   return Response.json({access_token:`access-${n}`,refresh_token:`refresh-${n}`,id_token:`a.${claims}.b`,account:{email_address:`email-${n}@test`}});
 }});
-function start(command:string[],root:string,args:string[],input='') {
+function start(command:string[],root:string,args:string[],input='',beforePaste?:()=>void) {
   const dynamic=input==='@';
   const p=Bun.spawn([...command,'--root',root,...args],{env,stdin:dynamic?'pipe':new Response(input),stdout:'pipe',stderr:'pipe'});
   const done=(async()=>{
-    let err=''; for await(const chunk of p.stderr){err+=new TextDecoder().decode(chunk);if(dynamic&&err.includes('state=')){const state=new URL(err.match(/  (https:\/\/[^\n]+)/)![1]!).searchParams.get('state');(p.stdin as any).end(`code#${state}`);}}
+    let err='',sent=false; for await(const chunk of p.stderr){err+=new TextDecoder().decode(chunk);if(dynamic&&!sent&&err.includes('state=')){sent=true;beforePaste?.();const state=new URL(err.match(/  (https:\/\/[^\n]+)/)![1]!).searchParams.get('state');(p.stdin as any).end(`code#${state}`);}}
     return {code:await p.exited,out:await new Response(p.stdout).text(),err:err.replace(/(code_challenge=)[^&\n]+/g,'$1<challenge>').replace(/(state=)[^&\n]+/g,'$1<state>')};
   })(); return {p,done};
 }
@@ -77,6 +77,26 @@ for(const scenario of ['full-insert','insert-rejected','after-insert-rejected','
   if(scenario.includes('rejected')&&!eq(exactBefore,exactAfter))throw Error('rejected insert changed cells');
   if(i===0&&scenario.includes('rejected')&&!eq(before,after))throw Error('frozen partial insert');
   pair.push({output,before,after});
+ }
+ results.push({scenario,json,equal:eq(pair[0],pair[1]),pair});
+}
+for(const scenario of ['paste-deleted','paste-metadata','paste-provider'])for(const json of [false,true]){
+ const pair:any[]=[];
+ for(const [i,cmd] of [ts,[binary!]].entries()){
+  serial=0;const root=join(work!,`${scenario}-${json}-${i}`);mkdirSync(root);const file=join(root,'omnigateway.db');copyFileSync(join(work!,'seed/omnigateway.db'),file);
+  const d=new Database(file);d.run("INSERT INTO credentials(id,provider,label,auth_type,provider_data,created_at,updated_at) VALUES('c','openai','keep','oauth',?,1,2)",[JSON.stringify({installationId:'11111111-1111-4111-8111-111111111111',idSalt:'a'.repeat(64)})]);d.close();
+  const output=await start(cmd,root,['connect','openai','--credential','c',...(json?['--json']:[])],'@',()=>{
+    const x=new Database(file);
+    if(scenario==='paste-deleted')x.run("DELETE FROM credentials WHERE id='c'");
+    else x.run("UPDATE credentials SET provider=?,provider_data=? WHERE id='c'",[scenario==='paste-provider'?'anthropic':'openai',JSON.stringify({installationId:'22222222-2222-4222-8222-222222222222',idSalt:'b'.repeat(64)})]);x.close();
+  }).done;
+  const rows=await snapshot(file);
+  if(scenario==='paste-metadata'){
+    const x=new Database(file);const data=JSON.parse((x.query("select provider_data from credentials where id='c'").get() as any).provider_data);x.close();
+    if(i===0&&(data.installationId!=='22222222-2222-4222-8222-222222222222'||data.idSalt!=='b'.repeat(64)))throw Error('frozen lost current identity');
+    rows.push({identity:data});
+  }
+  pair.push({output,requests:serial,rows});
  }
  results.push({scenario,json,equal:eq(pair[0],pair[1]),pair});
 }
