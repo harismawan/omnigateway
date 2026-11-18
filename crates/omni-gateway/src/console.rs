@@ -70,6 +70,9 @@ pub struct Query {
     since: Option<f64>,
 }
 fn number(s: &str) -> Option<f64> {
+    if s.trim().is_empty() {
+        return None;
+    }
     let n = omni_ir::js::string_to_number(s);
     n.is_finite().then_some(n)
 }
@@ -377,6 +380,7 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0]["msg"], "failed");
         assert_eq!(Query::from_query("lines=oops").lines, 200);
+        assert_eq!(Query::from_query("lines=%20").lines, 200);
         assert_eq!(Query::from_query("lines=0").lines, 1);
         assert_eq!(Query::from_query("lines=999").lines, 500);
         assert_eq!(Source::None.read(&q), json!({"source":"none","lines":[]}));

@@ -62,7 +62,7 @@ def run(binary, root, kind):
         key=api('/api/keys',{'label':'console-client'},'POST')[1]
         client=api('/api/client/login',{'key':key['key']},'POST')[2]
         result['client']=api('/api/console',credential=client)[:2]
-        for q in ('','?lines=0','?lines=1.9','?lines=bad','?lines=999','?level=error','?level=%20ERROR%20','?since=1','?since=bad','?node='):
+        for q in ('','?lines=0','?lines=1.9','?lines=bad','?lines=%20','?lines=999','?level=error','?level=%20ERROR%20','?since=1','?since=bad','?node='):
             value=api('/api/console'+q)[:2]
             if kind=='file':value[1]['path']='<private-file>'
             if kind=='missing':value[1]['path']='<private-missing>'
