@@ -14,7 +14,10 @@ sys.dont_write_bytecode=True
 spec=importlib.util.spec_from_file_location('wire',Path(__file__).with_name('stream-slow-reader.py'))
 w=importlib.util.module_from_spec(spec);spec.loader.exec_module(w)
 
-def run(binary,root,count,delay):
+def assert_results(results):
+    assert results and all(r.get('opcode')==8 and r.get('hex')=='03e972657374617274' and r.get('process_exit')==0 for r in results), results
+
+def run(binary,root,count,delay,strict=False):
     root.mkdir(parents=True)
     env=dict(os.environ,OMNI_ROOT=str(root),OMNI_DB_PATH=str(root/'omni.db'),OMNI_HOST='127.0.0.1',OMNI_PORT='18794',OMNI_LOG_LEVEL='debug',OMNI_ENCRYPTION_KEY='stream-test-encryption-key-0123456789')
     results=[]
@@ -51,9 +54,14 @@ def run(binary,root,count,delay):
                 if s:s.close()
                 if p.poll() is None:p.terminate();p.wait(timeout=10)
     (root/'results.json').write_text(json.dumps(results,indent=2))
+    if strict: assert_results(results)
     print(binary,delay,dict((k,sum(str(r.get('error',r.get('opcode')))==k for r in results)) for k in {str(r.get('error',r.get('opcode'))) for r in results}),flush=True)
 
 if __name__=='__main__':
+    if sys.argv[1]=='--verify-results':
+        assert_results(json.loads(Path(sys.argv[2]).read_text()));sys.exit(0)
+    strict='--assert' in sys.argv
+    if strict:sys.argv.remove('--assert')
     root=Path(sys.argv[1]);count=int(sys.argv[2])
     for index,binary in enumerate(sys.argv[3:]):
-        for delay in (0,.01):run(binary,root/f'{index}-{delay}',count,delay)
+        for delay in (0,.01):run(binary,root/f'{index}-{delay}',count,delay,strict)

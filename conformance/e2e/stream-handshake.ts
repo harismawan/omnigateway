@@ -28,7 +28,7 @@ try {
   const clientCookie=client.headers.get("set-cookie")?.split(";")[0];
   if(!viewerCookie || !clientCookie) throw Error(`role sessions ${viewer.status} ${client.status} key ${keyResponse.status} ${JSON.stringify(keyData)}`);
   const upgrade="Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n";
-  const text=(s:string)=>{const b=Buffer.from(s);if(b.length>125)throw Error("probe too long");return Buffer.concat([Buffer.from([0x81,0x80|b.length,1,2,3,4]),Buffer.from(b.map((v,i)=>v^[1,2,3,4][i%4]))]);};
+  const text=(s:string)=>{const b=Buffer.from(s);return Buffer.concat([b.length<126?Buffer.from([0x81,0x80|b.length,1,2,3,4]):Buffer.from([0x81,0xfe,b.length>>8,b.length&255,1,2,3,4]),Buffer.from(b.map((v,i)=>v^[1,2,3,4][i%4]))]);};
   const mask=(op:number,p:number[])=>Buffer.concat([Buffer.from([op,128|p.length,1,2,3,4]),Buffer.from(p.map((v,i)=>v^[1,2,3,4][i%4]))]);
   const names:string[]=[];
   for(const [name,headers,extra] of [
@@ -51,8 +51,15 @@ try {
     ["invalid-utf8",upgrade+`Cookie: ${cookie}\r\n`,mask(0x81,[0xff])],
     ["invalid-close",upgrade+`Cookie: ${cookie}\r\n`,mask(0x88,[3,237])],
     ["fragmented-control",upgrade+`Cookie: ${cookie}\r\n`,mask(0x09,[])],
+    ...[["rsv1",0xc1],["rsv2",0xa1],["rsv3",0x91],["orphan-continuation",0x80]].map(([n,op])=>[n,upgrade+`Cookie: ${cookie}\r\n`,mask(op as number,[])] as const),
+    ["short-close",upgrade+`Cookie: ${cookie}\r\n`,mask(0x88,[1])],
+    ["nested-fragment",upgrade+`Cookie: ${cookie}\r\n`,Buffer.concat([mask(1,[]),mask(0x81,[])])],
+    ["close-invalid-utf8",upgrade+`Cookie: ${cookie}\r\n`,mask(0x88,[3,232,255])],
     ["oversize",upgrade+`Cookie: ${cookie}\r\n`,Buffer.from([0x81,0xff,0,0,0,0,1,0,0,1,1,2,3,4])],
     ...[
+      ["surrogate-id",'{"type":"subscribe","topic":"res:logs","id":"\\ud800"}',cookie],
+      ["deep-extra",'{"type":"subscribe","topic":"res:logs","extra":'+"[".repeat(150)+'0'+"]".repeat(150)+'}',cookie],
+      ["overflow-extra",'{"type":"subscribe","topic":"res:logs","extra":1e999}',cookie],
       ["malformed","wat",cookie],
       ["no-source",JSON.stringify({type:"subscribe",topic:"stream:absent",id:"s"}),cookie],
       ["denied",JSON.stringify({type:"subscribe",topic:"res:settings"}),clientCookie],

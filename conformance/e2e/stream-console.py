@@ -77,7 +77,7 @@ def run(binary, root, kind):
         local.close()
         result['self-node-source']=True
         if kind=='file':
-            dated='2026-11-18 INFO date-only\n2026-11-18T01:02:03 INFO local-time\n2026-11-18T24:00:00.000Z WARN midnight\n'
+            dated='2026-11-18 INFO date-only\n2026-11-18T01:02:03 INFO local-time\n2026-11-18T24:00:00.000Z WARN midnight\n2026-11-18 INFO cr\r\n2026-11-18 INFO ls\u2028tail\n2026-11-18 INFO ps\u2029tail\n2026-11-18\t INFO bad-token\n'
             path.write_text('')
             time.sleep(.4)
             path.write_text(dated)
@@ -85,7 +85,8 @@ def run(binary, root, kind):
             assert len(result['date-filter'])==3,result['date-filter']
             # Drain this source delta before exercising append and replay.
             date_event=json.loads(wire.frame(s)[1])
-            assert [line['at'] for line in date_event['payload']['lines']]==[line['at'] for line in result['date-filter']],date_event
+            assert [line['at'] for line in date_event['payload']['lines'] if line['at'] is not None]==[line['at'] for line in result['date-filter']],date_event
+            assert sum(line['at'] is None for line in date_event['payload']['lines'])==4,date_event
             with path.open('a') as f:f.write('2026-11-18T00:00:00.001Z ERROR appended  reason=x\n')
             event=json.loads(wire.frame(s)[1]);result['append']=event
             assert event['payload']['lines'][0]['msg']=='appended',event
