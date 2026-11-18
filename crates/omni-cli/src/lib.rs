@@ -1,11 +1,13 @@
 #![forbid(unsafe_code)]
 mod args;
 mod context;
+mod credentials;
 mod database;
 mod date;
 mod limits;
 mod models;
 mod mutations;
+mod oauth;
 mod output;
 mod password;
 mod process;
@@ -67,6 +69,10 @@ pub fn run(argv: Vec<String>) -> ExitCode {
                     setup::run(&command, &flags).map_err(|e| (1, e))
                 } else if command.starts_with("models-") {
                     models::run(&command, &flags, &positional, &allow)
+                } else if command.starts_with("credentials-") {
+                    credentials::run(&command, &flags, &positional)
+                } else if command == "connect" {
+                    oauth::connect(&flags, &positional)
                 } else if command.starts_with("settings-") {
                     settings::run(&command, &flags, &positional)
                 } else {

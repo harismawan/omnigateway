@@ -131,9 +131,16 @@ pub fn cli_list(s: &SqliteStore) -> std::result::Result<String, String> {
     )])))
 }
 pub fn cli_rows(s: &SqliteStore) -> std::result::Result<Vec<JsValue>, String> {
+    cli_rows_for(s, None)
+}
+/// A show command must not parse metadata belonging to unrelated accounts.
+pub fn cli_rows_for(
+    s: &SqliteStore,
+    id: Option<&str>,
+) -> std::result::Result<Vec<JsValue>, String> {
     let rows = rows_with(
         s,
-        None,
+        id,
         |raw, _| crate::cli_cell::json(raw).map_err(Failure::internal),
         true,
     )
@@ -141,6 +148,13 @@ pub fn cli_rows(s: &SqliteStore) -> std::result::Result<Vec<JsValue>, String> {
     Ok(rows)
 }
 pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
+    Ok(stringify(&health_value(s, now, false)?))
+}
+/// CLI keeps non-finite numbers and BLOB identities until its final renderer.
+pub fn cli_health(s: &SqliteStore, now: i64) -> std::result::Result<JsValue, String> {
+    health_value(s, now, true).map_err(|e| e.message)
+}
+fn health_value(s: &SqliteStore, now: i64, cli: bool) -> Result<JsValue> {
     let mut statement = s
         .connection()
         .prepare("SELECT * FROM credential_health")
@@ -215,7 +229,11 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
     }
     let settings = s.get_settings()?;
     // list() parses every credential's metadata before the per-id seeks.
-    rows(s, None)?;
+    if cli {
+        cli_rows(s).map_err(Failure::internal)?;
+    } else {
+        rows(s, None)?;
+    }
     let mut ids = s
         .connection()
         .prepare("SELECT id FROM credentials ORDER BY tier,label")
@@ -361,12 +379,12 @@ pub fn health(s: &SqliteStore, now: i64) -> Result<String> {
             ])
         })
         .collect();
-    Ok(stringify(&obj(vec![
+    Ok(obj(vec![
         ("health", JsValue::Array(health)),
         ("quota", JsValue::Array(quota_json)),
         ("burn", JsValue::Array(burn)),
         ("lastUsed", JsValue::Object(last_used)),
-    ])))
+    ]))
 }
 /// Raw quota projection for CLI status, without health/burn/last-used reads.
 /// Like listQuota in frozen TS, unrelated request logs cannot affect this read.
@@ -416,6 +434,19 @@ pub fn remove(s: &SqliteStore, id: Option<&str>) -> Result<()> {
     Ok(())
 }
 pub fn patch(s: &SqliteStore, id: Option<&str>, body: &JsValue, now: i64) -> Result<()> {
+    patch_with(s, id, body, now, false)
+}
+/// CLI store errors retain JSON.parse's exception rather than HTTP's safe wrapper.
+pub fn cli_patch(s: &SqliteStore, id: &str, body: &JsValue, now: i64) -> Result<()> {
+    patch_with(s, Some(id), body, now, true)
+}
+fn patch_with(
+    s: &SqliteStore,
+    id: Option<&str>,
+    body: &JsValue,
+    now: i64,
+    cli: bool,
+) -> Result<()> {
     let opt = |z| Z::Opt(Box::new(z));
     let schema = Z::Obj {
         shape: vec![
@@ -455,7 +486,14 @@ pub fn patch(s: &SqliteStore, id: Option<&str>, body: &JsValue, now: i64) -> Res
         ))
     })?;
     let existing = if id.is_some() {
-        rows(s, id)?.into_iter().next()
+        if cli {
+            cli_rows_for(s, id)
+                .map_err(Failure::internal)?
+                .into_iter()
+                .next()
+        } else {
+            rows(s, id)?.into_iter().next()
+        }
     } else {
         None
     };
@@ -512,6 +550,23 @@ pub fn create(
     key: &omni_crypto::field::FieldKey,
     body: &JsValue,
     now: i64,
+) -> Result<String> {
+    create_with(s, key, body, now, false)
+}
+pub fn cli_create(
+    s: &SqliteStore,
+    key: &omni_crypto::field::FieldKey,
+    body: &JsValue,
+    now: i64,
+) -> Result<String> {
+    create_with(s, key, body, now, true)
+}
+fn create_with(
+    s: &SqliteStore,
+    key: &omni_crypto::field::FieldKey,
+    body: &JsValue,
+    now: i64,
+    cli: bool,
 ) -> Result<String> {
     if !matches!(body, JsValue::Object(_) | JsValue::Array(_)) {
         return Err(Failure::bad("credential body is required"));
@@ -578,14 +633,22 @@ pub fn create(
             ("basePath", text(url.path().trim_end_matches('/'))),
             ("protocol", protocol),
         ]);
-        for row in rows(s, None)? {
+        for row in if cli {
+            cli_rows(s).map_err(Failure::internal)?
+        } else {
+            rows(s, None)?
+        } {
             if get(&row, "provider") != Some(&text("custom")) {
                 continue;
             }
             let undefined = JsValue::Undefined;
             let old = get(&row, "providerData").unwrap_or(&undefined);
             if matches!(old, JsValue::Null) {
-                return Err(Failure::internal("null provider data"));
+                return Err(Failure::internal(if cli {
+                    "null is not an object (evaluating 'credential.providerData.endpointId')"
+                } else {
+                    "null provider data"
+                }));
             }
             if get(old, "endpointId") == get(&data, "endpointId")
                 && ["endpointLabel", "origin", "basePath", "protocol"]

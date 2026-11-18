@@ -1451,12 +1451,16 @@ version = "0.16.0"
 dependencies = [
  "chrono",
  "omni-control",
+ "omni-crypto",
  "omni-ir",
+ "omni-providers",
  "omni-router",
  "omni-store",
  "rusqlite",
  "rustix",
  "serde_json",
+ "tokio",
+ "url",
 ]
 
 [[package]]
