@@ -432,7 +432,16 @@ pub fn refresh(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
         .query_row(
             "SELECT token_version FROM credentials WHERE id=?",
             [id],
-            |r| r.get(0),
+            |r| {
+                use omni_control::cli_cell::Cell;
+                use rusqlite::types::Value;
+                Ok(match Cell::read(r.get_ref(0)?) {
+                    Cell::Null => Value::Null,
+                    Cell::Number(n) => Value::Real(n),
+                    Cell::String(s) => Value::Text(s),
+                    Cell::Bytes(b) => Value::Blob(b),
+                })
+            },
         )
         .map_err(error)?;
     read.commit().map_err(error)?;
@@ -443,8 +452,8 @@ pub fn refresh(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
         return refresh_output(flags, id, &s);
     }
     let c = fresh;
-    // Preserve the raw SQLite cell for the expected-version bind (including BLOB).
-    // This belongs to the same re-read, before any provider request is issued.
+    // Bind the operator-read version: JS-rounded numbers, replacement TEXT,
+    // distinct BLOB bytes. Same snapshot as fresh, released before provider HTTP.
     let provider = text(field(&c, "provider"));
     let token = secret(&s, &key, id)?
         .ok_or_else(|| (1, format!("AUTH: credential {id} has no refresh token")))?;
