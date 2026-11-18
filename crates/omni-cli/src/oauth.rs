@@ -179,17 +179,35 @@ pub fn connect(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
     let id = reconnect.map(str::to_owned).unwrap_or_else(|| {
         omni_crypto::codex::uuid_v4_from(&omni_providers::oauth::random_state())
     });
+    let empty = J::Object(Vec::new());
     if reconnect.is_none() {
         let label = flags
             .get("label")
             .map(|s| omni_ir::js::trim(s))
             .filter(|s| !s.is_empty())
             .unwrap_or(provider);
-        s.connection().execute("INSERT INTO credentials(id,provider,label,auth_type,enabled,tier,weight,created_at,updated_at) VALUES(?,?,?,'oauth',1,1,1,?,?)",rusqlite::params![id,provider,label,now(),now()]).map_err(error)?;
+        // Frozen create seals every secret and binds full metadata before its one INSERT.
+        let access =
+            omni_crypto::field::encrypt(&key, &String::from_utf16_lossy(&result.access_token));
+        let refresh = result
+            .refresh_token
+            .as_ref()
+            .map(|v| omni_crypto::field::encrypt(&key, &text(v)));
+        let id_token = result
+            .id_token
+            .as_ref()
+            .map(|v| omni_crypto::field::encrypt(&key, &String::from_utf16_lossy(v)));
+        let absent = J::Null;
+        let email = email_value(result.account_email.as_ref().unwrap_or(&absent))?;
+        let data = jsjson::to_string(&serde_json::Value::Object(omni_ir::deep::clone_map(
+            &result.provider_data,
+        )));
+        let at = now();
+        s.connection().execute("INSERT INTO credentials(id,provider,label,auth_type,enabled,tier,weight,access_token,refresh_token,api_key,id_token,expires_at,account_email,provider_data,disabled_reason,disabled_at,created_at,updated_at) VALUES(?,?,?,'oauth',1,1,1,?,?,NULL,?,?,?,?,NULL,NULL,?,?)",rusqlite::params![id,provider,label,access,refresh,id_token,result.expires_at,email,data,at,at]).map_err(error)?;
+    } else {
+        // Reconnect deliberately keeps the frozen secrets-write / metadata-write boundary.
+        persist(&s, &key, &id, &empty, &result, None)?;
     }
-    let empty = J::Object(Vec::new());
-    persist(&s, &key, &id, &empty, &result)?;
-    s.connection().execute("UPDATE credentials SET enabled=1,disabled_reason=NULL,disabled_at=NULL,token_version=CASE WHEN ? THEN token_version ELSE 0 END WHERE id=?",rusqlite::params![reconnect.is_some(),id]).map_err(error)?;
     Ok(if flags.contains_key("json") {
         serde_json::to_string_pretty(&serde_json::json!({"id":id,"provider":provider}))
             .map_err(error)?
@@ -283,6 +301,7 @@ fn persist(
     id: &str,
     c: &J,
     result: &FlowResult,
+    expected: Option<&J>,
 ) -> Result<()> {
     let seal = |v: Option<String>| v.map(|v| omni_crypto::field::encrypt(key, &v));
     let access = seal(Some(String::from_utf16_lossy(&result.access_token)));
@@ -293,7 +312,22 @@ fn persist(
             .as_ref()
             .map(|s| String::from_utf16_lossy(s)),
     );
-    s.connection().execute("UPDATE credentials SET access_token=?,refresh_token=?,api_key=NULL,id_token=?,expires_at=?,updated_at=?,token_version=token_version+1 WHERE id=?",rusqlite::params![access,refresh,id_token,result.expires_at,now(),id]).map_err(error)?;
+    let version = expected.map(|v| match v {
+        J::Number(n) => rusqlite::types::Value::Real(*n),
+        J::Null => rusqlite::types::Value::Null,
+        _ => rusqlite::types::Value::Text(text(v)),
+    });
+    let written = if let Some(version) = version {
+        s.connection().execute("UPDATE credentials SET access_token=?,refresh_token=?,api_key=NULL,id_token=?,expires_at=?,updated_at=?,token_version=token_version+1 WHERE id=? AND token_version=?",rusqlite::params![access,refresh,id_token,result.expires_at,now(),id,version])
+    } else {
+        s.connection().execute("UPDATE credentials SET access_token=?,refresh_token=?,api_key=NULL,id_token=?,expires_at=?,updated_at=?,token_version=token_version+1 WHERE id=?",rusqlite::params![access,refresh,id_token,result.expires_at,now(),id])
+    }.map_err(error)?;
+    if expected.is_some() && written == 0 {
+        // CAS loser opens the winning row's secrets, never writes stale metadata.
+        row(s, id).map_err(|_| (1, format!("AUTH: credential {id} is gone")))?;
+        open_secrets(s, key, id)?;
+        return Ok(());
+    }
     let prior = field(c, "providerData");
     let mut data = match prior {
         J::Object(v) => v.clone(),
@@ -312,7 +346,42 @@ fn persist(
         .account_email
         .as_ref()
         .unwrap_or(field(c, "accountEmail"));
-    let email = match email {
+    let email = email_value(email)?;
+    let sql = if expected.is_none() {
+        "UPDATE credentials SET enabled=1,disabled_reason=NULL,disabled_at=NULL,account_email=?,provider_data=?,updated_at=? WHERE id=?"
+    } else {
+        "UPDATE credentials SET account_email=?,provider_data=?,updated_at=? WHERE id=?"
+    };
+    s.connection()
+        .execute(
+            sql,
+            rusqlite::params![email, jsjson::stringify(&J::Object(data)), now(), id],
+        )
+        .map_err(error)?;
+    Ok(())
+}
+fn open_secrets(
+    s: &omni_store::SqliteStore,
+    key: &omni_crypto::field::FieldKey,
+    id: &str,
+) -> Result<()> {
+    for column in ["access_token", "refresh_token", "api_key", "id_token"] {
+        let raw: Option<String> = s
+            .connection()
+            .query_row(
+                &format!("SELECT {column} FROM credentials WHERE id=?"),
+                [id],
+                |r| r.get(0),
+            )
+            .map_err(error)?;
+        if let Some(raw) = raw {
+            omni_crypto::field::decrypt(key, &raw).map_err(error)?;
+        }
+    }
+    Ok(())
+}
+fn email_value(email: &J) -> Result<Option<String>> {
+    Ok(match email {
         J::Null | J::Undefined => None,
         J::Object(_) | J::Array(_) => {
             return Err(error(
@@ -320,14 +389,7 @@ fn persist(
             ));
         }
         v => Some(text(v)),
-    };
-    s.connection()
-        .execute(
-            "UPDATE credentials SET account_email=?,provider_data=?,updated_at=? WHERE id=?",
-            rusqlite::params![email, jsjson::stringify(&J::Object(data)), now(), id],
-        )
-        .map_err(error)?;
-    Ok(())
+    })
 }
 pub fn refresh(flags: &HashMap<String, String>, args: &[String]) -> Result<String> {
     let id = args
@@ -348,6 +410,17 @@ pub fn refresh(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
             format!("BAD_REQUEST: credential \"{id}\" is an api key and has nothing to refresh"),
         ));
     }
+    // The CLI's default coordinator is process-local. Re-read under that lock,
+    // then CAS the version actually supplied to the provider; no cross-process lock.
+    let fresh = row(&s, id)?;
+    if omni_control::cli_cell::scalar_number(field(&fresh, "tokenVersion"))
+        > omni_control::cli_cell::scalar_number(field(&c, "tokenVersion"))
+    {
+        open_secrets(&s, &key, id)?;
+        return refresh_output(flags, id, &s);
+    }
+    let c = fresh;
+    let provider = text(field(&c, "provider"));
     let token = secret(&s, &key, id)?
         .ok_or_else(|| (1, format!("AUTH: credential {id} has no refresh token")))?;
     let request = match provider.as_str() {
@@ -381,8 +454,15 @@ pub fn refresh(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
             return Err(e);
         }
     };
-    persist(&s, &key, id, &c, &result)?;
-    let expires = field(&row(&s, id)?, "expiresAt").clone();
+    persist(&s, &key, id, &c, &result, Some(field(&c, "tokenVersion")))?;
+    refresh_output(flags, id, &s)
+}
+fn refresh_output(
+    flags: &HashMap<String, String>,
+    id: &str,
+    s: &omni_store::SqliteStore,
+) -> Result<String> {
+    let expires = field(&row(s, id)?, "expiresAt").clone();
     Ok(if flags.contains_key("json") {
         jsjson::stringify_pretty(&J::Object(vec![
             (

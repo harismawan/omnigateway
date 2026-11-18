@@ -10,6 +10,12 @@ exec unshare -Urnm env -i PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/home/home
 set -euo pipefail
 ip link set lo up
 mount --bind "$2/hosts" /etc/hosts
-bun --no-env-file conformance/cli/credentials-network.ts "$1" "$2"
-python3 conformance/cli/credentials-tty.py "$1" "$2"
-' bash "$(realpath "$1")" "$work"
+if [ "${3:-}" = focused ]; then
+  mkdir -p "$2/seed"
+  OMNI_ENCRYPTION_KEY=review-secret-long-enough bun --no-env-file apps/cli/src/index.ts --root "$2/seed" credentials list >/dev/null
+else
+  bun --no-env-file conformance/cli/credentials-network.ts "$1" "$2"
+  python3 conformance/cli/credentials-tty.py "$1" "$2"
+fi
+bun --no-env-file conformance/cli/credentials-races.ts "$1" "$2"
+' bash "$(realpath "$1")" "$work" "${3:-}"
