@@ -48,7 +48,13 @@ def run(binary,label):
     sock.sendall(encoded(json.dumps({'type':kind,'topic':topic})));op,data=w.frame(sock);records.append(data.hex())
   for topic in ['res:'+chr(0xd800)*124,'res:'+chr(0xd800)*125,'stream:'+chr(0xd800)]:
    sock.sendall(encoded(json.dumps({'type':'subscribe','topic':topic})));op,data=w.frame(sock);records.append(data.hex())
+  for topic in identities:
+   sock.sendall(encoded(json.dumps({'type':'send','topic':topic})));op,data=w.frame(sock);records.append(data.hex())
   sock.close();result['identities']=records
+  key=api('/api/keys',{'label':'utf16-client'})[1]['key']
+  admin_cookie=cookie;cookie=api('/api/client/login',{'key':key})[2]
+  result['client-surrogate']=ask(encoded(json.dumps({'type':'subscribe','topic':identities[0]})))
+  cookie=admin_cookie
   sock=opened();raw=encoded(normal,64)
   for byte in raw:sock.sendall(bytes([byte]));time.sleep(.001)
   result['incremental64']=w.frame(sock)[1].hex();sock.close()
