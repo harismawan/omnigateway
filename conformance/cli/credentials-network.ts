@@ -60,7 +60,9 @@ async function snapshot(file: string, started: number, ended: number, connectedI
         if (table === 'credentials' && (row.id === connectedId || (row.id === 'c' && row.token_version === 1)) && c === 'provider_data' && row.provider === 'openai') {
           const data = JSON.parse(row[c]);
           if (!/^[0-9a-f-]{36}$/.test(data.installationId) || !/^[0-9a-f]{64}$/.test(data.idSalt)) throw Error('invalid generated identity');
-          data.installationId='<uuid>'; data.idSalt='<salt>'; row[c]=JSON.stringify(data);
+          if (data.installationId !== '11111111-1111-4111-8111-111111111111') data.installationId='<uuid>';
+          if (data.idSalt !== 'a'.repeat(64)) data.idSalt='<salt>';
+          row[c]=JSON.stringify(data);
         }
       }
       if (row.id === connectedId) row.id = '<uuid>';
