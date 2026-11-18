@@ -191,6 +191,7 @@ pub enum Admin {
     ExportLogs,
     RequestBody(Option<String>),
     Nodes,
+    Console,
     ListCredentials,
     CreateCredential,
     PatchCredential(Option<String>),
@@ -249,6 +250,7 @@ pub fn route(method: &hyper::Method, path: &str) -> Option<Admin> {
         "/api/logs" if get => return Some(Admin::Logs),
         "/api/logs/export" if get => return Some(Admin::ExportLogs),
         "/api/nodes" if get => return Some(Admin::Nodes),
+        "/api/console" if get => return Some(Admin::Console),
         "/api/credentials" if get => return Some(Admin::ListCredentials),
         "/api/credentials" if *method == M::POST => return Some(Admin::CreateCredential),
         "/api/credentials/health" if get => return Some(Admin::CredentialHealth),
@@ -330,6 +332,15 @@ async fn serve_inner(
     let control = app.control.clone();
     let now = crate::clock::now_ms();
     match route {
+        Admin::Console => {
+            require_reader(req.headers(), &app.admin).await?;
+            let source = app.stream.console.clone();
+            let query = crate::console::Query::from_query(req.uri().query().unwrap_or(""));
+            let read = tokio::task::spawn_blocking(move || source.read(&query))
+                .await
+                .map_err(|_| ApiError::internal())?;
+            Ok(json_ok(read.to_string()))
+        }
         Admin::RequestBody(id) => {
             require_admin(req.headers(), &app.admin).await?;
             // Frozen GET does not apply the writer's safe-id predicate. An

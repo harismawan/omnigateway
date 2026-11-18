@@ -20,6 +20,7 @@ use tokio::{
 };
 
 pub struct Hub {
+    pub console: crate::console::Source,
     subscribers: [AtomicUsize; RESOURCE_TOPICS.len()],
     state: Arc<Mutex<State>>,
     shutdown: watch::Sender<bool>,
@@ -48,6 +49,7 @@ impl omni_store::writer::LogObserver for Hub {
 impl Default for Hub {
     fn default() -> Self {
         Self {
+            console: crate::console::Source::resolve(),
             subscribers: std::array::from_fn(|_| AtomicUsize::new(0)),
             state: Arc::default(),
             shutdown: watch::channel(false).0,

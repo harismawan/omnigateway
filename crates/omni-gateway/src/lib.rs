@@ -13,6 +13,7 @@ pub mod body_capture;
 pub mod client_routes;
 pub mod clock;
 pub mod connect;
+pub mod console;
 pub mod dispatch;
 pub mod finish;
 mod http;
@@ -464,6 +465,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         clock::now_ms,
     ));
     let oauth_scheduler = oauth_refresher.start_scheduler(holder.clone(), stream.clone());
+    let console_stream = console::start(stream.clone(), &node_id);
     let mut maintenance = maintenance::start(
         path.clone(),
         offset,
@@ -565,6 +567,8 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         }
         drop(listener);
         app.stream.stop();
+        console_stream.abort();
+        drop(console_stream.await);
         let shutdown_until = tokio::time::Instant::now() + deadline;
         drop(tokio::time::timeout_at(shutdown_until, maintenance.stop()).await);
         oauth_scheduler.abort();

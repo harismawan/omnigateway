@@ -61,7 +61,7 @@ mimalloc = { version = "0.1", default-features = false, features = ["v2"] }
 # arenas fault in 2 MiB pages, which took idle RSS from 7 to 17.5 MiB. Linux
 # only: `nix::sys::prctl` does not exist elsewhere, and neither does THP.
 [target.'cfg(target_os = "linux")'.dependencies]
-nix = { version = "0.31", default-features = false, features = ["process"] }
+nix = { version = "0.31", default-features = false, features = ["process", "inotify"] }
 
 [dev-dependencies]
 nix = { version = "0.31", default-features = false, features = ["fs"] }
