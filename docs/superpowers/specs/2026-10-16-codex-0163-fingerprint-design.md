@@ -2,7 +2,40 @@
 
 Status: implemented, 2026-10-16. Builder's calls recorded under "Left to the builder".
 
-## Current fingerprint — 2026-10-28
+## Current fingerprint — 2026-11-18
+
+The current profile and bundled catalog are **Codex 0.170.0** (`rust-v0.170.0`).
+The sanitized fixture is `packages/providers/test/fixtures/codex-0.170.0.json`.
+The real Linux binary was captured locally with synthetic login credentials for
+`gpt-6.2-sol`, in the interactive TUI and an exec tool-history loop. Header order,
+body order, metadata, lite provenance and effort updates match 0.165.0; only the
+version changes. The gateway retains its Windows UA and credential-salted ids.
+Captured reasoning replay also includes `content: null`; the fixture omits that
+optional member under the existing native-replay exception, not a new translation.
+
+Added GPT-6.2 Sol and Astra to the TypeScript catalog and fingerprint; the Rust
+port is deferred. Official short-context prices per million tokens:
+
+| Model | Input | Output | Cache read | Standard write | API input cap | Codex default input cap |
+|---|---:|---:|---:|---:|---:|---:|
+| GPT-6.2 Sol | $2 | $10 | $0.10 | $2.50 | 922,000 | 500,000 |
+| GPT-6.2 Astra | $8 | $40 | $0.40 | $10 | 922,000 | 272,000 |
+
+Both have a 1,050,000 API total window and 128,000 output cap. The bundled
+Codex catalog also lists a configurable maximum of 872,000, not the default
+advertised here. Sol's 500K default can enter the >272K long tier: input and
+cache rates double and output is 1.5x for the whole request. Standard cache writes
+retain 30 minutes (mapped to the existing `cacheWrite5m` billing class); the
+12-hour tier is not represented. Existing model/default choices remain unchanged.
+Both new models are lite, low verbosity/default/lowest effort, node REPL review
+required, node REPL enabled, and support reasoning effort updates. No prompt or
+tool inventory from upstream is copied. No live-account acceptance probe was run.
+
+Sources: [Sol](https://developers.openai.com/api/docs/models/gpt-6.2-sol),
+[Astra](https://developers.openai.com/api/docs/models/gpt-6.2-astra),
+[release catalog](https://raw.githubusercontent.com/openai/codex/rust-v0.170.0/codex-rs/models-manager/models.json).
+
+## Previous fingerprint — 2026-10-28
 
 The current profile and bundled catalog are **Codex 0.165.0** (`rust-v0.165.0`,
 released 2026-10-27). The sections below retain the original 0.163.0 design/history.
