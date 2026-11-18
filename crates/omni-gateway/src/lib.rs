@@ -187,8 +187,14 @@ impl Running {
     }
 
     /// Waits for the server to finish draining and the writer to flush.
-    pub async fn wait(self) -> Result<(), String> {
-        self.task
+    pub async fn wait(mut self) -> Result<(), String> {
+        self.wait_for_stop().await
+    }
+
+    /// Observe HTTP-initiated completion while retaining the signal stop handle.
+    /// Cancellation safe; do not call again after it returns.
+    pub async fn wait_for_stop(&mut self) -> Result<(), String> {
+        (&mut self.task)
             .await
             .map_err(|e| format!("gateway task failed: {e}"))?
     }

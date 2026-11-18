@@ -73,7 +73,7 @@ async fn run() -> std::process::ExitCode {
         root: env.get("OMNI_ROOT").cloned(),
         ..Options::default()
     };
-    let running = match start(config, options).await {
+    let mut running = match start(config, options).await {
         Ok(r) => r,
         Err(e) => {
             tracing::error!(reason = %e, "gateway boot failed");
@@ -89,6 +89,10 @@ async fn run() -> std::process::ExitCode {
         }
     };
     tokio::select! {
+        result = running.wait_for_stop() => return match result {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(_) => std::process::ExitCode::FAILURE,
+        },
         _ = term.recv() => {}
         _ = tokio::signal::ctrl_c() => {}
     }
