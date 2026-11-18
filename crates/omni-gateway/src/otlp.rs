@@ -156,23 +156,44 @@ impl Trace {
         n
     }
 
-    pub fn route(&mut self, start: i64, end: i64, attrs: Attrs) {
-        self.add("dispatch.route", Some(0), start, end, attrs);
+    /// Frozen dispatch offsets are relative to dispatch's own startedAt,
+    /// then encoded against the outer request trace, unlike HTTP wall time.
+    fn dispatch_time(&self, at: i64, origin: i64) -> i64 {
+        self.started_at + (at - origin)
     }
 
-    pub fn attempt(trace: &SharedTrace, at: i64, attrs: Attrs, now: fn() -> i64) -> Attempt {
+    pub fn route(&mut self, origin: i64, start: i64, end: i64, attrs: Attrs) {
+        self.add(
+            "dispatch.route",
+            Some(0),
+            self.dispatch_time(start, origin),
+            self.dispatch_time(end, origin),
+            attrs,
+        );
+    }
+
+    pub fn attempt(
+        trace: &SharedTrace,
+        origin: i64,
+        at: i64,
+        attrs: Attrs,
+        now: fn() -> i64,
+    ) -> Attempt {
         let mut t = lock(trace);
+        let at = t.dispatch_time(at, origin);
         let n = t.add("dispatch.attempt", Some(0), at, at, attrs);
         t.active = Some(n);
         Attempt {
             trace: trace.clone(),
             n,
             now,
+            origin,
         }
     }
 
-    pub fn commit(&mut self, at: i64, provider: &str, model: &str) {
+    pub fn commit(&mut self, origin: i64, at: i64, provider: &str, model: &str) {
         if let Some(parent) = self.active {
+            let at = self.dispatch_time(at, origin);
             self.add(
                 "stream.commit",
                 Some(parent),
@@ -208,6 +229,7 @@ pub struct Attempt {
     trace: SharedTrace,
     n: usize,
     now: fn() -> i64,
+    origin: i64,
 }
 impl Attempt {
     pub fn code(&self, code: &str) {
@@ -217,7 +239,7 @@ impl Attempt {
 impl Drop for Attempt {
     fn drop(&mut self) {
         let mut t = lock(&self.trace);
-        t.spans[self.n].end = (self.now)();
+        t.spans[self.n].end = t.dispatch_time((self.now)(), self.origin);
         t.active = None;
     }
 }
@@ -506,8 +528,9 @@ mod tests {
         assert!(t.get("inbound-off").is_none());
         let trace = t.get("sampled").unwrap();
         lock(&trace).route(
-            1001,
-            1002,
+            1250,
+            1251,
+            1252,
             Attrs {
                 candidates: Some(1),
                 ..Attrs::default()
@@ -515,14 +538,15 @@ mod tests {
         );
         let attempt = Trace::attempt(
             &trace,
-            1002,
+            1250,
+            1252,
             Attrs {
                 attempt: Some(1),
                 ..Attrs::default()
             },
-            || 1010,
+            || 1260,
         );
-        lock(&trace).commit(1005, "anthropic", "fixture");
+        lock(&trace).commit(1250, 1255, "anthropic", "fixture");
         attempt.code("NETWORK");
         drop(attempt);
         let mut log = omni_store::writer::RequestLog::new("sampled", 1000, 200);
@@ -542,6 +566,11 @@ mod tests {
         assert_eq!(spans[2]["status"]["code"], 2);
         assert_eq!(spans[0]["startTimeUnixNano"], "1000000000");
         assert_eq!(spans[0]["endTimeUnixNano"], "1010000000");
+        assert_eq!(spans[1]["startTimeUnixNano"], "1001000000");
+        assert_eq!(spans[1]["endTimeUnixNano"], "1002000000");
+        assert_eq!(spans[2]["startTimeUnixNano"], "1002000000");
+        assert_eq!(spans[2]["endTimeUnixNano"], "1010000000");
+        assert_eq!(spans[3]["startTimeUnixNano"], "1005000000");
         assert_eq!(spans[0]["traceId"], "4bf92f3577b34da6a3ce929d0e0e4736");
         assert_eq!(t.endpoint, "http://127.0.0.1:1/v1/traces");
         assert!(t.headers.contains(&("x-test".into(), "a=b".into())));

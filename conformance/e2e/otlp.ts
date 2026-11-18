@@ -4,6 +4,16 @@ import { Database } from "bun:sqlite";
 import { mkdirSync, copyFileSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { parseArgs, isDeepStrictEqual } from "node:util";
+import { request as nodeRequest } from "node:http";
+// Normal body-upload latency separates the frozen dispatch clock from HTTP.
+async function delayedRequest(url:string, headers:Record<string,string>, body:string):Promise<Response> {
+ return await new Promise((resolve,reject)=>{
+  const req=nodeRequest(url,{method:"POST",headers:{...headers,"content-length":String(Buffer.byteLength(body))}},res=>{
+   const chunks:Buffer[]=[];res.on("data",x=>chunks.push(x));res.on("end",()=>resolve(new Response(Buffer.concat(chunks),{status:res.statusCode!})));
+  });
+  req.on("error",reject);req.flushHeaders();setTimeout(()=>req.end(body),250);
+ });
+}
 const { values: f } = parseArgs({ options: Object.fromEntries(["ts", "rust", "out", "cert", "key"].map(k => [k, {type:"string" as const}])) });
 for (const k of ["ts","rust","out","cert","key"]) if (!f[k]) throw Error(`missing ${k}`);
 const out=resolve(f.out!); mkdirSync(out,{recursive:true});
@@ -34,7 +44,7 @@ async function run(binary:string,label:string) {
  await until(async()=>{try{return(await fetch("http://127.0.0.1:8800/health")).ok}catch{return false}},"boot");
  for(const [surface,stream] of [["messages",false],["chat/completions",true],["responses",false]] as const) {
  const body={model:"fixture",stream,max_tokens:64,...(surface==="responses"?{input:"private prompt"}:{messages:[{role:"user",content:"private prompt"}]})};
- const r=await fetch(`http://127.0.0.1:8800/v1/${surface}`,{method:"POST",headers:{authorization:`Bearer ${key}`,"content-type":"application/json",traceparent:inbound},body:JSON.stringify(body)});await r.text();if(r.status!==200)throw Error(`response ${r.status}`);
+ const r=await delayedRequest(`http://127.0.0.1:8800/v1/${surface}`,{authorization:`Bearer ${key}`,"content-type":"application/json",traceparent:inbound},JSON.stringify(body));await r.text();if(r.status!==200)throw Error(`response ${r.status}`);
  }
  // Representative precommit failover, then an authentication error root.
  failNext=true;
@@ -46,11 +56,25 @@ async function run(binary:string,label:string) {
  }
  await until(()=>received.flatMap(x=>x.body.resourceSpans).length>=5,"collector export missing (base-red expected)");
  const resources=received.flatMap(x=>x.body.resourceSpans);if(resources.length!==5)throw Error("sampling count");
+ await Bun.write(join(root,"raw.json"),JSON.stringify(received,null,2));
  for(const r of received)if(r.path!=="/v1/traces"||r.content!=="application/json"||r.auth!=="fixture")throw Error("collector HTTP contract");
  const normalized=resources.map((r:any,index:number)=>{
  const spans=r.scopeSpans[0].spans;const ids=spans.map((s:any)=>s.spanId);const start=BigInt(spans[0].startTimeUnixNano);
  const expected=index===3?7:index===4?1:5;
  if(spans.length!==expected)throw Error(`span count ${spans.length} expected ${expected}`);
+ if(index<3) {
+ // Frozen dispatch times exclude upload/auth; HTTP keeps actual wall time.
+ // Bound the stub dispatch to <125ms, distinctly below the 250ms upload.
+ const offset=(s:any,key:string)=>Number(BigInt(s[key])-start)/1e6;
+ for(const s of spans.filter((s:any)=>s.name!=="provider.http")) {
+  if(offset(s,"endTimeUnixNano")>=125)throw Error(`${label} ${s.name}: dispatch/root clock includes upload delay`);
+ }
+ const http=spans.find((s:any)=>s.name==="provider.http");
+ if(offset(http,"startTimeUnixNano")<200)throw Error(`${label}: HTTP clock lost upload delay`);
+ const attempt=spans.find((s:any)=>s.name==="dispatch.attempt");
+ const commit=spans.find((s:any)=>s.name==="stream.commit");
+ if(offset(commit,"startTimeUnixNano")<offset(attempt,"startTimeUnixNano")||offset(commit,"endTimeUnixNano")>offset(attempt,"endTimeUnixNano"))throw Error("dispatch clock ordering");
+ }
  for(const s of spans) {
  if(!/^[0-9a-f]{16}$/.test(s.spanId)||s.traceId!==inbound.split('-')[1])throw Error("ids");
  const a=BigInt(s.startTimeUnixNano),b=BigInt(s.endTimeUnixNano);if(b<a||a<start||b-start>10_000_000_000n)throw Error("duration boundary");

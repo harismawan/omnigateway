@@ -578,6 +578,7 @@ pub fn dispatch_with_options(
     if let Some(trace) = deps.telemetry.trace(&request_id) {
         lock(&trace).route(
             started_at,
+            started_at,
             (deps.now)(),
             crate::otlp::Attrs {
                 candidates: Some(candidates.len()),
@@ -716,7 +717,7 @@ fn run(mut s: RunState) -> EventsStream {
             let i = attempts;
             attempts += 1;
             let trace = deps.telemetry.trace(&rid);
-            let attempt_span = trace.as_ref().map(|t| crate::otlp::Trace::attempt(t, now(), crate::otlp::Attrs {
+            let attempt_span = trace.as_ref().map(|t| crate::otlp::Trace::attempt(t, s.started_at, now(), crate::otlp::Attrs {
                 attempt: Some(i + 1), provider: Some(c.target.provider.clone()),
                 model: Some(c.target.model.clone()), credential_id: Some(c.credential.id.clone()),
                 ..crate::otlp::Attrs::default()
@@ -844,7 +845,7 @@ fn run(mut s: RunState) -> EventsStream {
                             let ttft = now() - s.started_at;
                             lock(&log).ttft_ms = Some(ttft);
                             if matches!(event, StreamEvent::BlockDelta { .. }) && let Some(t) = &trace {
-                                lock(t).commit(now(), &c.target.provider, &c.target.model);
+                                lock(t).commit(s.started_at, now(), &c.target.provider, &c.target.model);
                             }
                             slot.observed(ttft);
                             tracing::debug!(requestId = %rid, provider = %c.target.provider,
