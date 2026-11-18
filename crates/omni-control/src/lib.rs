@@ -23,6 +23,7 @@ mod model_schema;
 pub mod models;
 pub mod operator_json;
 pub mod plugins;
+pub mod quota_ops;
 pub mod reports;
 pub mod settings;
 pub mod settings_value;

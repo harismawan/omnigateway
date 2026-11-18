@@ -15,6 +15,7 @@ mod output;
 mod password;
 mod process;
 mod quota;
+mod quota_operations;
 mod registry;
 mod settings;
 mod setup;

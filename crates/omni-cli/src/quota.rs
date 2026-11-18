@@ -168,35 +168,7 @@ pub fn run(command: &str, flags: &Flags, positional: &[String]) -> Result<(), Er
     let raw = omni_control::credentials::cli_rows(&store).map_err(fail)?;
     let accounts = raw.iter().map(omni_control::api::lossy).collect::<Vec<_>>();
     if command != "quota" {
-        let account = if let Some(id) = positional.first() {
-            Some(
-                accounts
-                    .iter()
-                    .find(|a| a["id"].as_str() == Some(id))
-                    .ok_or_else(|| {
-                        fail(if command == "quota-reset" {
-                            "no such credential"
-                        } else {
-                            "BAD_REQUEST: no such credential"
-                        })
-                    })?,
-            )
-        } else {
-            None
-        };
-        if matches!(command, "quota-reset" | "quota-resets")
-            && account
-                .is_some_and(|a| !matches!(a["provider"].as_str(), Some("openai" | "anthropic")))
-        {
-            return Err(fail(if command == "quota-reset" {
-                "this account's provider has no quota resets"
-            } else {
-                "BAD_REQUEST: this account's provider has no quota resets"
-            }));
-        }
-        return Err(fail(
-            "provider quota operations are not yet migrated (usage probe/reset API dependency)",
-        ));
+        return crate::quota_operations::run(command, flags, positional);
     }
     let now = chrono::Utc::now().timestamp_millis() as f64;
     let poll = store.get_settings().map_err(fail)?.quota_poll_interval_ms;
