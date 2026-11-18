@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 omni-ir = { path = "../omni-ir" }
+omni-router = { path = "../omni-router" }
 omni-crypto = { path = "../omni-crypto" }
 omni-store = { path = "../omni-store" }
 omni-ratelimit = { path = "../omni-ratelimit" }

@@ -119,6 +119,13 @@ fn table(headers: &[&str], right: &[usize], rows: Vec<Vec<String>>) -> String {
 
 /// Number.toFixed(2): round the exact binary significand, ties away from zero.
 fn fixed(n: f64) -> String {
+    fixed_digits(n, 2)
+}
+
+fn fixed_digits(n: f64, digits: u32) -> String {
+    if n.is_nan() {
+        return "NaN".into();
+    }
     if !n.is_finite() || n.abs() >= 1e21 {
         return text(&JsValue::Number(n)).expect("number");
     }
@@ -126,7 +133,8 @@ fn fixed(n: f64) -> String {
     let exp = ((bits >> 52) & 2047) as i32;
     let mantissa = (bits & ((1_u64 << 52) - 1)) | if exp == 0 { 0 } else { 1_u64 << 52 };
     let shift = if exp == 0 { -1074 } else { exp - 1023 - 52 };
-    let scaled = u128::from(mantissa) * 100;
+    let scale = 10_u128.pow(digits);
+    let scaled = u128::from(mantissa) * scale;
     let rounded = if shift >= 0 {
         scaled << shift
     } else if -shift >= 128 {
@@ -137,10 +145,11 @@ fn fixed(n: f64) -> String {
             + u128::from((scaled & ((1_u128 << shift) - 1)) >= (1_u128 << (shift - 1)))
     };
     format!(
-        "{}{}.{:02}",
+        "{}{}.{:0width$}",
         if n < 0.0 { "-" } else { "" },
-        rounded / 100,
-        rounded % 100
+        rounded / scale,
+        rounded % scale,
+        width = digits as usize
     )
 }
 fn price(v: &JsValue) -> Result<String, String> {
@@ -553,6 +562,33 @@ pub fn run(
     let color = !flags.contains_key("no-color")
         && std::env::var("NO_COLOR").unwrap_or_default().is_empty()
         && std::io::stdout().is_terminal();
+    if command == "models-dry-run" {
+        let id = args
+            .first()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| (2, "model id is required".into()))?;
+        refuse_plugins(&ctx.root).map_err(|e| (1, e))?;
+        let secret = ctx.encryption_key().map_err(|e| (1, e))?;
+        let store = ctx.open().map_err(|e| (1, e))?;
+        let input = JsValue::from(
+            &serde_json::json!({"tools":flags.contains_key("tools"),"images":flags.contains_key("images"),"reasoning":flags.contains_key("reasoning")}),
+        );
+        #[allow(clippy::cast_precision_loss)]
+        let now = chrono::Utc::now().timestamp_millis() as f64;
+        let mut result =
+            omni_control::dry_run::cli(&store, &secret, id, &input, now).map_err(|e| (1, e))?;
+        if let JsValue::Object(fields) = &mut result {
+            fields.push((
+                "pluginFailures".encode_utf16().collect(),
+                JsValue::Array(vec![]),
+            ));
+        }
+        if flags.contains_key("json") {
+            return Ok(jsjson::stringify_pretty(&result).expect("result"));
+        }
+        omni_control::dry_run::cli_table_cells(&store, &result).map_err(|e| (1, e))?;
+        return dry_run_human(&result, color).map_err(|e| (1, e));
+    }
     if command == "models-catalog" {
         refuse_plugins(&ctx.root).map_err(|e| (1, e))?;
         return catalog(
@@ -723,6 +759,78 @@ pub fn run(
         ))
     };
     run().map_err(|e| (1, e))
+}
+
+fn dry_run_human(result: &JsValue, color: bool) -> Result<String, String> {
+    let header = format!(
+        "model          {}\nstrategy       {}\ndeterministic  {}",
+        text(prop(result, "modelId"))?,
+        text(prop(result, "strategy"))?,
+        if truthy(prop(result, "deterministic")) {
+            "yes"
+        } else {
+            "no (weighted draw)"
+        }
+    );
+    let JsValue::Array(candidates) = prop(result, "candidates") else {
+        return Err("invalid candidates".into());
+    };
+    let candidates = if candidates.is_empty() {
+        if color {
+            "\x1b[31mno candidate can serve this request\x1b[0m".into()
+        } else {
+            "no candidate can serve this request".into()
+        }
+    } else {
+        let rows = candidates
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                Ok(vec![
+                    (i + 1).to_string(),
+                    text(prop(c, "credentialLabel"))?,
+                    provider(prop(c, "provider"), color)?,
+                    text(prop(c, "model"))?,
+                    text(prop(c, "tier"))?,
+                    match prop(c, "score") {
+                        JsValue::Number(n) => fixed_digits(*n, 3),
+                        _ => "NaN".into(),
+                    },
+                ])
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        table(
+            &["#", "CREDENTIAL", "PROVIDER", "MODEL", "TIER", "SCORE"],
+            &[0, 4, 5],
+            rows,
+        )
+    };
+    let JsValue::Array(excluded) = prop(result, "excluded") else {
+        return Err("invalid excluded".into());
+    };
+    let excluded = if excluded.is_empty() {
+        String::new()
+    } else {
+        let rows = excluded
+            .iter()
+            .map(|e| {
+                ["credentialId", "model", "reason"]
+                    .iter()
+                    .map(|k| text(prop(e, k)))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        format!(
+            "\n\n{}\n{}",
+            if color {
+                "\x1b[2mexcluded\x1b[0m"
+            } else {
+                "excluded"
+            },
+            table(&["CREDENTIAL", "MODEL", "REASON"], &[], rows)
+        )
+    };
+    Ok(format!("{header}\n\n{candidates}{excluded}"))
 }
 
 #[cfg(test)]

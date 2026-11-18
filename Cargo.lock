@@ -1488,6 +1488,7 @@ dependencies = [
  "omni-crypto",
  "omni-ir",
  "omni-ratelimit",
+ "omni-router",
  "omni-store",
  "rusqlite",
  "rustix",
