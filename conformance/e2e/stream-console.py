@@ -12,6 +12,7 @@ import sys
 import time
 
 spec = importlib.util.spec_from_file_location('wire', Path(__file__).with_name('stream-slow-reader.py'))
+sys.dont_write_bytecode=True
 wire = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(wire)
 

@@ -16,6 +16,7 @@ import sys
 import time
 
 spec=importlib.util.spec_from_file_location('wire',Path(__file__).with_name('stream-slow-reader.py'))
+sys.dont_write_bytecode=True
 w=importlib.util.module_from_spec(spec);spec.loader.exec_module(w)
 
 def run(binary, root):
@@ -61,6 +62,10 @@ def run(binary, root):
             seq.append(value['seq']);indices.extend(int(line['raw'].split(' ',1)[0].split('-')[1]) for line in value['payload']['lines'])
         assert not notices and close is None,(notices,close)
         assert seq==list(range(1,33)) and indices==list(range(32)),(seq,indices)
+        drained=api('/metrics')[0].decode()
+        (root/'drained.metrics').write_text(drained)
+        assert 'omni_stream_queued 0\n' in drained,drained
+        assert 'omni_stream_dropped_total 0\n' in drained,drained
         result={'seq':seq,'line_indices':indices,'notices':notices,'close':close,'blocked_seconds':blocked,'before':before,'after':after,'metrics':metrics,'limits':'32 frames: transport pressure/drain observed, queue1000 saturation/drop-oldest not established; memory includes source and process work.'}
         (root/'result.json').write_text(json.dumps(result,indent=2));return result
     finally:
