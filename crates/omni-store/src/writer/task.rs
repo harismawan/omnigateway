@@ -11,7 +11,7 @@ use super::batch;
 use super::epoch::{Entered, Epochs, Produced};
 use super::events::{Committed, SeedQuery, SeedRows, WriteEvent};
 use crate::error::StoreError;
-use rusqlite::{Connection, ErrorCode};
+use rusqlite::ErrorCode;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -539,7 +539,11 @@ impl Checkpointer {
     /// a reader, copying only what no reader still needs, so it cannot stall
     /// a batch; the writer's commits only append to the WAL meanwhile.
     fn spawn(path: &Path, every: Duration) -> Result<Self, StoreError> {
-        let conn = crate::open_connection(path)?;
+        let conn = crate::lifecycle::shared(crate::SqliteStore::from_connection(
+            crate::open_connection(path)?,
+            path.to_path_buf(),
+            0,
+        ));
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = Arc::clone(&stop);
         let thread = std::thread::Builder::new()
@@ -548,7 +552,12 @@ impl Checkpointer {
                 let mut failing = false;
                 while !flag.load(Ordering::Relaxed) {
                     std::thread::park_timeout(every);
-                    match conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(())) {
+                    match conn
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .connection()
+                        .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()))
+                    {
                         Ok(()) => failing = false,
                         // Busy is the normal answer while another checkpoint
                         // runs; anything else is reported once per streak,
@@ -588,7 +597,13 @@ impl Writer {
         let (shutdown, stop) = oneshot::channel();
         let counters = Arc::new(Counters::new());
         let task = tokio::spawn(run(
-            Backend::Sqlite(Some(conn)),
+            Backend::Sqlite(crate::lifecycle::shared(
+                crate::SqliteStore::from_connection(
+                    conn,
+                    path.as_ref().to_path_buf(),
+                    config.day_offset_minutes,
+                ),
+            )),
             rx,
             stop,
             config,
@@ -726,7 +741,7 @@ pub(crate) fn transient_sqlstate(c: &tokio_postgres::error::SqlState) -> bool {
 /// Where a batch goes: the SQLite connection the writer owns (`None` only
 /// while a batch is in flight on the blocking pool), or a Postgres pool.
 enum Backend {
-    Sqlite(Option<Connection>),
+    Sqlite(Arc<std::sync::Mutex<crate::SqliteStore>>),
     Postgres(crate::pg::PgStore),
 }
 
@@ -780,27 +795,25 @@ impl Sink {
         let delay = self.seed_delay;
         let result = match &mut self.backend {
             Backend::Sqlite(slot) => {
-                let conn = slot
-                    .take()
-                    .ok_or_else(|| StoreError::Writer("writer connection lost".into()))?;
-                let (conn, result) = tokio::task::spawn_blocking(move || {
+                let store = slot.clone();
+                tokio::task::spawn_blocking(move || {
+                    let store = store
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     if !delay.is_zero() {
                         std::thread::sleep(delay);
                     }
-                    let r = crate::usage::seed_rows(
-                        &conn,
+                    crate::usage::seed_rows(
+                        store.connection(),
                         &q.api_key_id,
                         q.since_ms,
                         q.grain_ms,
                         q.requested_model.as_deref(),
                         q.stamp_cap,
-                    );
-                    (conn, r)
+                    )
                 })
                 .await
-                .map_err(|e| StoreError::Writer(format!("seed read panicked: {e}")))?;
-                *slot = Some(conn);
-                result
+                .map_err(|e| StoreError::Writer(format!("seed read panicked: {e}")))?
             }
             Backend::Postgres(store) => {
                 if !delay.is_zero() {
@@ -905,12 +918,14 @@ impl Sink {
             let offset = self.day_offset_minutes;
             let result = match &mut self.backend {
                 Backend::Sqlite(slot) => {
-                    let mut conn = slot
-                        .take()
-                        .ok_or_else(|| StoreError::Writer("writer connection lost".into()))?;
-                    let (conn, back, result) = tokio::task::spawn_blocking(move || {
+                    let store = slot.clone();
+                    let (back, result) = tokio::task::spawn_blocking(move || {
+                        let mut store = store
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
                         let phase = Instant::now();
-                        let result = batch::write(&mut conn, &events, &node_id, offset);
+                        let result =
+                            batch::write(store.connection_mut(), &events, &node_id, offset);
                         if std::env::var_os("OMNI_WRITER_PHASES").is_some() {
                             eprintln!(
                                 "writer_phase sql_us={} events={}",
@@ -918,11 +933,10 @@ impl Sink {
                                 events.len()
                             );
                         }
-                        (conn, events, result)
+                        (events, result)
                     })
                     .await
                     .map_err(|e| StoreError::Writer(format!("batch write panicked: {e}")))?;
-                    *slot = Some(conn);
                     events = back;
                     result
                 }

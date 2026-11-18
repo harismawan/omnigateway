@@ -11,6 +11,7 @@ pub mod credentials;
 mod error;
 mod js;
 pub mod keys;
+pub mod lifecycle;
 pub mod logs;
 pub mod maintenance;
 pub mod operator_cell;
@@ -67,6 +68,7 @@ pub struct SnapshotData {
 /// [`open_connection`], so it gets the same pragmas without a second migrate.
 pub struct SqliteStore {
     conn: Connection,
+    suspended_pragmas: Option<(bool, i64, i64)>,
     path: PathBuf,
     day_offset_minutes: i64,
 }
@@ -89,6 +91,46 @@ impl std::fmt::Debug for SqliteStore {
 }
 
 impl SqliteStore {
+    pub fn from_connection(conn: Connection, path: PathBuf, day_offset_minutes: i64) -> Self {
+        Self {
+            conn,
+            suspended_pragmas: None,
+            path,
+            day_offset_minutes,
+        }
+    }
+    pub fn connection_mut(&mut self) -> &mut Connection {
+        &mut self.conn
+    }
+
+    /// Called only while the runtime registry holds every owner mutex.
+    pub fn suspend(&mut self) -> Result<(), StoreError> {
+        if self.suspended_pragmas.is_none() {
+            self.suspended_pragmas = Some((
+                self.conn.is_readonly("main")?,
+                self.conn
+                    .query_row("PRAGMA busy_timeout", [], |r| r.get(0))?,
+                self.conn
+                    .query_row("PRAGMA wal_autocheckpoint", [], |r| r.get(0))?,
+            ));
+        }
+        self.conn = Connection::open_in_memory()?;
+        Ok(())
+    }
+
+    pub fn resume(&mut self) -> Result<(), StoreError> {
+        let pragmas = self.suspended_pragmas.unwrap_or((false, 5000, 1000));
+        let conn = if pragmas.0 {
+            Connection::open_with_flags(&self.path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?
+        } else {
+            open_connection(&self.path)?
+        };
+        conn.pragma_update(None, "busy_timeout", pragmas.1)?;
+        conn.pragma_update(None, "wal_autocheckpoint", pragmas.2)?;
+        self.conn = conn;
+        self.suspended_pragmas = None;
+        Ok(())
+    }
     /// Independent read-only report handle. No migration or persistent transaction.
     pub fn open_reader(
         path: impl AsRef<Path>,
@@ -99,6 +141,7 @@ impl SqliteStore {
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         Ok(Self {
             conn,
+            suspended_pragmas: None,
             path,
             day_offset_minutes,
         })
@@ -112,6 +155,7 @@ impl SqliteStore {
         migrate::migrate(&mut conn, day_offset_minutes)?;
         Ok(Self {
             conn,
+            suspended_pragmas: None,
             path,
             day_offset_minutes,
         })

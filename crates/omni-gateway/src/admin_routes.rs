@@ -53,7 +53,8 @@ impl Drop for ExportLease {
             self.pool
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(store);
+                .clear();
+            drop(store);
         }
     }
 }
@@ -69,7 +70,7 @@ impl ControlStore {
         let path = store.path().to_owned();
         let offset = store.day_offset_minutes();
         Self(
-            Arc::new(Mutex::new(store)),
+            omni_store::lifecycle::shared(store),
             Arc::new(tokio::sync::Semaphore::new(4)),
             path,
             offset,
@@ -96,6 +97,7 @@ impl ControlStore {
         let path = self.2.clone();
         let offset = self.3;
         tokio::task::spawn_blocking(move || {
+            let _runtime_access = omni_store::lifecycle::access();
             let cached = pool
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -132,12 +134,13 @@ impl ControlStore {
         let path = self.2.clone();
         let offset = self.3;
         let (store, permit) = tokio::task::spawn_blocking(move || {
-            SqliteStore::open_reader(path, offset).map(|store| (store, permit))
+            let _runtime_access = omni_store::lifecycle::access();
+            SqliteStore::open_reader(path, offset).map(|store| (Self::new(store), permit))
         })
         .await
         .map_err(|_| ApiError::internal())?
         .map_err(|_| ApiError::internal())?;
-        let mut reader = Self::new(store);
+        let mut reader = store;
         reader.5 = Some(Arc::new(permit));
         Ok(reader)
     }
@@ -152,6 +155,7 @@ impl ControlStore {
         let store = self.0.clone();
         let permit = self.5.clone();
         let joined = tokio::task::spawn_blocking(move || {
+            let _runtime_access = omni_store::lifecycle::access();
             let _permit = permit;
             let guard = store
                 .lock()
@@ -762,6 +766,7 @@ mod tests {
             let (tx, rx) = std::sync::mpsc::channel();
             let (entered, ready) = tokio::sync::oneshot::channel();
             let blocker = tokio::task::spawn_blocking(move || {
+                let _runtime_access = omni_store::lifecycle::access();
                 entered.send(()).expect("observer");
                 rx.recv().expect("release");
             });

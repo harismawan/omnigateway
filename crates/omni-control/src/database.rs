@@ -471,7 +471,38 @@ pub fn restore_snapshot(
         return Err("BAD_REQUEST: no such snapshot".to_string().into());
     }
     let _guard = EXCLUSIVE.enter("a restore")?;
-    let counts = store.inspect(&candidate)?;
+    swap_candidate(store, files, live, &candidate, &dir, now, false)
+}
+
+pub fn import_snapshot(
+    store: &mut dyn RestoreStore,
+    files: &mut dyn RestoreFiles,
+    live: &Path,
+    candidate: &Path,
+    now: &dyn Fn() -> i64,
+) -> Result<Value, RestoreError> {
+    let _guard = EXCLUSIVE.enter("an import")?;
+    let dir = live
+        .parent()
+        .ok_or_else(|| "database has no parent".to_string())?
+        .join("snapshots");
+    let result = swap_candidate(store, files, live, candidate, &dir, now, true);
+    if result.is_err() {
+        files.unlink(candidate)?;
+    }
+    result
+}
+
+fn swap_candidate(
+    store: &mut dyn RestoreStore,
+    files: &mut dyn RestoreFiles,
+    live: &Path,
+    candidate: &Path,
+    dir: &Path,
+    now: &dyn Fn() -> i64,
+    consume: bool,
+) -> Result<Value, RestoreError> {
+    let counts = store.inspect(candidate)?;
     let at = now();
     let stamp = chrono::DateTime::from_timestamp_millis(at)
         .ok_or_else(|| "invalid snapshot time".to_string())?
@@ -479,13 +510,13 @@ pub fn restore_snapshot(
         .replace([':', '.'], "-");
     let name = format!("db_{stamp}_preRestore.sqlite");
     let target = dir.join(&name);
-    files.mkdir(&dir)?;
+    files.mkdir(dir)?;
     if files.stat(&target).is_some() {
         return Err("CONFLICT: a snapshot for this instant already exists"
             .to_string()
             .into());
     }
-    let free = files.free_bytes(&dir);
+    let free = files.free_bytes(dir);
     let needed = (files.stat(live).unwrap_or(0) as f64 * 1.1).ceil();
     if free.is_some_and(|free| (free as f64) < needed) {
         return Err("CONFLICT: not enough free disk space to write a snapshot"
@@ -504,7 +535,12 @@ pub fn restore_snapshot(
         "{}.incoming",
         live.file_name().unwrap_or_default().to_string_lossy()
     ));
-    if let Err(error) = files.copy_file(&candidate, &staged) {
+    let staged_result = if consume {
+        files.rename(candidate, &staged)
+    } else {
+        files.copy_file(candidate, &staged)
+    };
+    if let Err(error) = staged_result {
         files.unlink(&staged)?;
         return Err(error.into());
     }

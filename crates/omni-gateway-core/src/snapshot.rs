@@ -323,6 +323,7 @@ impl SnapshotHolder {
         let runtime = tokio::runtime::Handle::current();
         let job = self.publication_job();
         tokio::task::spawn_blocking(move || {
+            let _runtime_access = omni_store::lifecycle::access();
             let _job = job;
             holder.rebuild_read(|| match store.as_ref() {
                 omni_store::Store::Sqlite { store, .. } => {
@@ -426,6 +427,7 @@ impl SnapshotHolder {
         let runtime = tokio::runtime::Handle::current();
         let job = self.publication_job();
         tokio::task::spawn_blocking(move || {
+            let _runtime_access = omni_store::lifecycle::access();
             let _job = job;
             holder.patch_credential(&id, || match store.as_ref() {
                 omni_store::Store::Sqlite { store, .. } => {
@@ -502,7 +504,7 @@ impl SnapshotHolder {
         interval: Duration,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
-            let store = Arc::new(std::sync::Mutex::new(store));
+            let store = omni_store::lifecycle::shared(store);
             let mut version = self.boot_version;
             let mut ticker = tokio::time::interval(interval);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -513,6 +515,7 @@ impl SnapshotHolder {
                 let seen = version;
                 let job = self.publication_job();
                 let polled = tokio::task::spawn_blocking(move || {
+                    let _runtime_access = omni_store::lifecycle::access();
                     let _job = job;
                     let store = store
                         .lock()
@@ -787,6 +790,7 @@ mod publication_tests {
         let job = holder.publication_job();
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
         let task = tokio::task::spawn_blocking(move || {
+            let _runtime_access = omni_store::lifecycle::access();
             let _job = job;
             release_rx.recv().unwrap();
         });

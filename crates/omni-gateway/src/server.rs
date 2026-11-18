@@ -358,6 +358,7 @@ mod deadline_ownership {
 
 /// Everything a request handler reads. One per process.
 pub struct App {
+    pub database_swap: tokio::sync::Mutex<()>,
     pub quiesce: Arc<crate::quiesce::Quiesce>,
     pub lifecycle: crate::lifecycle::Lifecycle,
     pub version: String,

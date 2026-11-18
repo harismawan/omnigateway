@@ -127,6 +127,12 @@ pub async fn serve(
     req: Request<Incoming>,
 ) -> Result<Response<Body>, ApiError> {
     require_admin(req.headers(), &app.admin).await?;
+    if app.cluster && matches!(route, Route::Vacuum | Route::Create) {
+        return Err(ApiError::gateway(
+            omni_ir::error::ErrorCode::BadRequest,
+            "not available on a Postgres store; use pg_dump",
+        ));
+    }
     let retention = if route == Route::Retention {
         Some(read_json(req, app.idle_timeout).await?)
     } else {

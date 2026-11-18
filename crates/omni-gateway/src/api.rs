@@ -55,6 +55,7 @@ pub enum Route {
     Lifecycle,
     Restart,
     Shutdown,
+    Swap(Option<String>),
     Database(crate::database_routes::Route),
 }
 
@@ -62,6 +63,16 @@ pub enum Route {
 /// `HEAD` reaches every `GET` route, as Elysia's does.
 pub fn route(method: &Method, path: &str) -> Option<Route> {
     match (method, path) {
+        (&Method::POST, "/api/database/import") => Some(Route::Swap(None)),
+        (&Method::POST, p)
+            if p.starts_with("/api/database/snapshots/") && p.ends_with("/restore") =>
+        {
+            Some(Route::Swap(Some(
+                p.trim_start_matches("/api/database/snapshots/")
+                    .trim_end_matches("/restore")
+                    .into(),
+            )))
+        }
         (&Method::GET | &Method::HEAD, "/api/lifecycle") => Some(Route::Lifecycle),
         (&Method::POST, "/api/lifecycle/restart") => Some(Route::Restart),
         (&Method::POST, "/api/lifecycle/shutdown") => Some(Route::Shutdown),
@@ -98,6 +109,11 @@ pub async fn serve(app: Arc<App>, route: Route, req: Request<Incoming>) -> Respo
         Route::Admin(admin) => crate::admin_routes::serve(&app, admin, req).await,
         Route::Lifecycle | Route::Restart | Route::Shutdown => lifecycle(&app, route, &req).await,
         Route::Database(database) => crate::database_routes::serve(&app, database, req).await,
+        Route::Swap(id) => {
+            tokio::spawn(async move { crate::database_swap::serve(&app, req, id).await })
+                .await
+                .unwrap_or_else(|_| Err(ApiError::internal()))
+        }
     };
     result.unwrap_or_else(|e| e.into_response())
 }

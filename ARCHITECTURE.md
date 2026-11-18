@@ -1,5 +1,15 @@
 # Architecture
 
+Rust database replacement registers the gateway's persistent SQLite owners in
+`omni_store::lifecycle`: writer/checkpointer, routing refresher/miss resolver,
+auth/control and OAuth. The swap takes the transient-access barrier and owner
+locks, closes every old connection, runs the shared control restore/import
+protocol, then reopens owners before rebuilding routing and publishing `res:*`.
+Export pages and maintenance operations hold transient-access leases; export
+connections do not survive a page. `/v1/*` admission is response-owned and drains
+before replacement; `/health` does not need a database connection. A typed swap
+failure keeps client admission closed until a successful recovery restore.
+
 How OmniGateway put together, for contributors and design auditors. [How it is built](#how-it-is-built) below has package map and layering rules; rest of this doc detail behind them.
 
 Conventions governing changes — architectural boundaries, testing expectations, traps — see [CLAUDE.md](CLAUDE.md). Approved designs live in `docs/superpowers/specs/`.

@@ -293,7 +293,7 @@ impl AdminAuth {
     pub fn new(store: SqliteStore, kv: Arc<dyn SessionKv>, now: Clock, ttl_ms: i64) -> Self {
         let cpus = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
         Self {
-            store: Arc::new(Mutex::new(store)),
+            store: omni_store::lifecycle::shared(store),
             kv,
             now,
             ttl_ms,
@@ -325,6 +325,7 @@ impl AdminAuth {
     ) -> Result<T, AuthError> {
         let store = self.store.clone();
         tokio::task::spawn_blocking(move || {
+            let _runtime_access = omni_store::lifecycle::access();
             let guard = store
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -350,6 +351,7 @@ impl AdminAuth {
             .await
             .map_err(|e| AuthError::Internal(e.to_string()))?;
         tokio::task::spawn_blocking(move || {
+            let _runtime_access = omni_store::lifecycle::access();
             let _permit = permit;
             f()
         })

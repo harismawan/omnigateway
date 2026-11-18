@@ -35,6 +35,7 @@ async fn frozen_body_route_matrix() {
         .unwrap();
     }
     let app = Arc::new(server::App {
+        database_swap: tokio::sync::Mutex::new(()),
         quiesce: Arc::new(omni_gateway::quiesce::Quiesce::default()),
         lifecycle: omni_gateway::lifecycle::Lifecycle::default(),
         version: "0.0.0-dev".into(),

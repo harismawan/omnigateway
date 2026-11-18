@@ -15,6 +15,7 @@ pub mod clock;
 pub mod connect;
 pub mod console;
 pub mod database_routes;
+pub mod database_swap;
 pub mod dispatch;
 pub mod finish;
 mod http;
@@ -37,7 +38,7 @@ pub mod stream_codec;
 pub mod stream_transport;
 pub mod telemetry;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use hyper_util::rt::TokioIo;
@@ -390,7 +391,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
     .map_err(|e| e.to_string())??;
     let miss = MissResolver::new(
         holder.clone(),
-        Arc::new(Mutex::new(miss_store)),
+        omni_store::lifecycle::shared(miss_store),
         MissConfig::default(),
     );
     // The admin surface's own connection: password rows and client-session
@@ -512,6 +513,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
     });
     let (stop, mut stopped) = tokio::sync::watch::channel(false);
     let app = Arc::new(server::App {
+        database_swap: tokio::sync::Mutex::new(()),
         quiesce: Arc::new(quiesce::Quiesce::default()),
         lifecycle: options.lifecycle,
         version: options.version.clone(),
