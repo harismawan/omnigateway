@@ -69,11 +69,12 @@ async function snapshot(file: string, started: number, ended: number, connectedI
       rows.push({table,row});
     }
   }
+  rows.push({exactVersion:d.query("SELECT quote(token_version) value,typeof(token_version) type,hex(token_version) bytes FROM credentials WHERE id='c'").get()});
   d.close(); return rows;
 }
 const results: any[] = [];
 try {
-  for (const provider of ['openai','anthropic','antigravity']) for (const scenario of ['success','auth','upstream','invalid','close','truncated','no-token','missing', 'data-string','data-array','data-units','data-null','data-number','data-bool','data-order','version-blob','version-empty-blob','version-text','version-null','version-real','version-integer']) for (const json of [false,true]) {
+  for (const provider of ['openai','anthropic','antigravity']) for (const scenario of ['success','auth','upstream','invalid','close','truncated','no-token','missing', 'data-string','data-array','data-units','data-null','data-number','data-bool','data-order','version-blob','version-empty-blob','version-text','version-null','version-real','version-integer','version-large','version-negative','version-safe','version-safe-negative','version-max','version-min','version-safe-below','version-rounded-even','version-text80','version-text-truncated','version-text-overlong','version-text-mixed','version-text-surrogate']) for (const json of [false,true]) {
     const pair: any[] = [];
     for (const [index, command] of [ts,[binary!]].entries()) {
       mode = scenario.startsWith('data-') || scenario.startsWith('version-') ? 'success' : scenario; requests = [];
@@ -89,7 +90,9 @@ try {
           x.run('ALTER TABLE credentials RENAME TO old_credentials');
           x.run('CREATE TABLE credentials('+cols.map(c=>'"'+c+'"').join(',')+')');
           x.run('INSERT INTO credentials SELECT * FROM old_credentials');x.run('DROP TABLE old_credentials');
-          const value:Record<string,string>={'version-blob':"X'0102ff'",'version-empty-blob':"X''",'version-text':"'abc'",'version-null':'NULL','version-real':'1.5','version-integer':'7'};
+          const value:Record<string,string>={'version-blob':"X'0102ff'",'version-empty-blob':"X''",'version-text':"'abc'",'version-null':'NULL','version-real':'1.5','version-integer':'7',
+            'version-large':'9007199254740993','version-negative':'-9007199254740993','version-safe':'9007199254740992','version-safe-negative':'-9007199254740992','version-max':'9223372036854775807','version-min':'-9223372036854775808','version-safe-below':'9007199254740991','version-rounded-even':'9007199254740994',
+            'version-text80':"CAST(X'80' AS TEXT)",'version-text-truncated':"CAST(X'e282' AS TEXT)",'version-text-overlong':"CAST(X'c0af' AS TEXT)",'version-text-mixed':"CAST(X'61ff62' AS TEXT)",'version-text-surrogate':"CAST(X'eda080' AS TEXT)"};
           x.run('UPDATE credentials SET token_version='+value[scenario]+" WHERE id='c'");
         }
         x.close(); }
