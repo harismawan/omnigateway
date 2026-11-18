@@ -57,7 +57,7 @@ async function snapshot(file: string, started: number, ended: number, connectedI
           if (!(row[c] >= started && row[c] <= ended)) throw Error('clock outside execution'); row[c] = '<clock>';
         }
         if (table === 'credentials' && (row.id === 'c' || row.id === connectedId) && ['access_token','refresh_token','api_key','id_token'].includes(c) && row[c] !== null) row[c] = await decrypt(key,row[c]);
-        if (table === 'credentials' && row.id === connectedId && c === 'provider_data' && row.provider === 'openai') {
+        if (table === 'credentials' && (row.id === connectedId || (row.id === 'c' && row.token_version === 1)) && c === 'provider_data' && row.provider === 'openai') {
           const data = JSON.parse(row[c]);
           if (!/^[0-9a-f-]{36}$/.test(data.installationId) || !/^[0-9a-f]{64}$/.test(data.idSalt)) throw Error('invalid generated identity');
           data.installationId='<uuid>'; data.idSalt='<salt>'; row[c]=JSON.stringify(data);

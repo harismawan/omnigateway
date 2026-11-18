@@ -77,7 +77,7 @@ pub fn connect(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
     let key = omni_crypto::field::derive_key(&ctx.encryption_key().map_err(error)?);
     let s = ctx.open().map_err(error)?;
     let reconnect = flags.get("credential").map(|s| omni_ir::js::trim(s));
-    let prior = if let Some(id) = reconnect {
+    if let Some(id) = reconnect {
         let c =
             row(&s, id).map_err(|_| (1, "BAD_REQUEST: invalid credential for reconnect".into()))?;
         if id.is_empty()
@@ -86,10 +86,7 @@ pub fn connect(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
         {
             return Err((1, "BAD_REQUEST: invalid credential for reconnect".into()));
         }
-        Some(c)
-    } else {
-        None
-    };
+    }
     let (verifier, challenge) = omni_providers::oauth::pkce();
     let state = omni_providers::oauth::random_state();
     let start = match provider.as_str() {
@@ -116,6 +113,17 @@ pub fn connect(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
         String::from_utf8_lossy(&bytes).into_owned()
     };
     let code = normalize(provider, &start.pending, omni_ir::js::trim(&code))?;
+    let prior = reconnect
+        .map(|id| {
+            row(&s, id).map_err(|e| {
+                if e.1 == "BAD_REQUEST: no such credential" {
+                    (1, "BAD_REQUEST: credential not found".into())
+                } else {
+                    e
+                }
+            })
+        })
+        .transpose()?;
     let request = match provider.as_str() {
         "openai" => omni_providers::openai::oauth::exchange_request(&code, &start.pending),
         "antigravity" => {
@@ -126,6 +134,7 @@ pub fn connect(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
     .map_err(gateway)?;
     let data = prior
         .as_ref()
+        .filter(|c| text(field(c, "provider")) == *provider)
         .and_then(|c| jsjson::stringify(field(c, "providerData")))
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(serde_json::Value::Null);
@@ -301,7 +310,7 @@ fn persist(
     id: &str,
     c: &J,
     result: &FlowResult,
-    expected: Option<&J>,
+    expected: Option<&rusqlite::types::Value>,
 ) -> Result<()> {
     let seal = |v: Option<String>| v.map(|v| omni_crypto::field::encrypt(key, &v));
     let access = seal(Some(String::from_utf16_lossy(&result.access_token)));
@@ -312,12 +321,7 @@ fn persist(
             .as_ref()
             .map(|s| String::from_utf16_lossy(s)),
     );
-    let version = expected.map(|v| match v {
-        J::Number(n) => rusqlite::types::Value::Real(*n),
-        J::Null => rusqlite::types::Value::Null,
-        _ => rusqlite::types::Value::Text(text(v)),
-    });
-    let written = if let Some(version) = version {
+    let written = if let Some(version) = expected {
         s.connection().execute("UPDATE credentials SET access_token=?,refresh_token=?,api_key=NULL,id_token=?,expires_at=?,updated_at=?,token_version=token_version+1 WHERE id=? AND token_version=?",rusqlite::params![access,refresh,id_token,result.expires_at,now(),id,version])
     } else {
         s.connection().execute("UPDATE credentials SET access_token=?,refresh_token=?,api_key=NULL,id_token=?,expires_at=?,updated_at=?,token_version=token_version+1 WHERE id=?",rusqlite::params![access,refresh,id_token,result.expires_at,now(),id])
@@ -331,6 +335,16 @@ fn persist(
     let prior = field(c, "providerData");
     let mut data = match prior {
         J::Object(v) => v.clone(),
+        J::Array(values) => values
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (i.to_string().encode_utf16().collect(), v.clone()))
+            .collect(),
+        J::String(units) => units
+            .iter()
+            .enumerate()
+            .map(|(i, u)| (i.to_string().encode_utf16().collect(), J::String(vec![*u])))
+            .collect(),
         _ => Vec::new(),
     };
     for (k, v) in &result.provider_data {
@@ -412,7 +426,16 @@ pub fn refresh(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
     }
     // The CLI's default coordinator is process-local. Re-read under that lock,
     // then CAS the version actually supplied to the provider; no cross-process lock.
+    let read = s.connection().unchecked_transaction().map_err(error)?;
     let fresh = row(&s, id)?;
+    let version: rusqlite::types::Value = read
+        .query_row(
+            "SELECT token_version FROM credentials WHERE id=?",
+            [id],
+            |r| r.get(0),
+        )
+        .map_err(error)?;
+    read.commit().map_err(error)?;
     if omni_control::cli_cell::scalar_number(field(&fresh, "tokenVersion"))
         > omni_control::cli_cell::scalar_number(field(&c, "tokenVersion"))
     {
@@ -420,6 +443,8 @@ pub fn refresh(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
         return refresh_output(flags, id, &s);
     }
     let c = fresh;
+    // Preserve the raw SQLite cell for the expected-version bind (including BLOB).
+    // This belongs to the same re-read, before any provider request is issued.
     let provider = text(field(&c, "provider"));
     let token = secret(&s, &key, id)?
         .ok_or_else(|| (1, format!("AUTH: credential {id} has no refresh token")))?;
@@ -443,7 +468,20 @@ pub fn refresh(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
         .map_err(error)?;
     let result = rt.block_on(async {
         let response = send(&Client::new(), &provider, request, "refresh").await?;
-        token_result(&provider, &response, Some(&token), &prior)
+        let result = token_result(&provider, &response, Some(&token), &prior)?;
+        // Frozen builtin step results still pass through the host's shape guard.
+        if provider == "openai" && matches!(field(&c, "providerData"), J::Null) {
+            return Err((1, "UPSTREAM: openai oauth refresh threw".into()));
+        }
+        if provider == "antigravity"
+            && !matches!(field(&c, "providerData"), J::Object(_) | J::Array(_))
+        {
+            return Err((
+                1,
+                "UPSTREAM: antigravity oauth refresh returned something the host cannot use".into(),
+            ));
+        }
+        Ok(result)
     });
     let result = match result {
         Ok(v) => v,
@@ -454,7 +492,7 @@ pub fn refresh(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
             return Err(e);
         }
     };
-    persist(&s, &key, id, &c, &result, Some(field(&c, "tokenVersion")))?;
+    persist(&s, &key, id, &c, &result, Some(&version))?;
     refresh_output(flags, id, &s)
 }
 fn refresh_output(
