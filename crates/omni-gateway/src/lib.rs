@@ -591,6 +591,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         // files the 499 row into the writer, which is closed only after.
         conns.abort_all();
         while conns.join_next().await.is_some() {}
+        drop(tokio::time::timeout_at(shutdown_until, app.stream.drain_connections()).await);
         // Abort only requests cancellation. Join the body pumps as well so
         // their source/Finisher destructors finish before the writer closes.
         app.deadline_workers.shutdown().await;

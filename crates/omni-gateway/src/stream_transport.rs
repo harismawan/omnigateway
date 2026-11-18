@@ -20,6 +20,7 @@ use tokio::{
 };
 
 pub struct Hub {
+    tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     pub console: crate::console::Source,
     subscribers: [AtomicUsize; RESOURCE_TOPICS.len()],
     state: Arc<Mutex<State>>,
@@ -49,6 +50,7 @@ impl omni_store::writer::LogObserver for Hub {
 impl Default for Hub {
     fn default() -> Self {
         Self {
+            tasks: Mutex::default(),
             console: crate::console::Source::resolve(),
             subscribers: std::array::from_fn(|_| AtomicUsize::new(0)),
             state: Arc::default(),
@@ -90,6 +92,14 @@ struct Entry {
 }
 
 impl Hub {
+    #[cfg(test)]
+    pub(crate) fn replay_for_test(&self, topic: &str, since: f64) -> Value {
+        self.state
+            .lock()
+            .expect("stream state")
+            .ring
+            .since(topic, since)
+    }
     fn register(&self, notify: Arc<Notify>) -> u64 {
         let mut state = self.state.lock().expect("stream state");
         state.next += 1;
@@ -193,6 +203,14 @@ impl Hub {
     }
     pub fn stop(&self) {
         self.shutdown.send_replace(true);
+    }
+    pub async fn drain_connections(&self) {
+        // Accepted upgrades outlive hyper's HTTP connection future. Keep them
+        // owned until their close frames and writers have actually drained.
+        let tasks = std::mem::take(&mut *self.tasks.lock().expect("stream tasks"));
+        for task in tasks {
+            drop(task.await);
+        }
     }
     fn message(&self, id: u64, kind: &str, raw: Value) -> Vec<String> {
         let frame = stream::parse_client_frame(&raw);
@@ -411,7 +429,8 @@ pub async fn route(app: Arc<App>, mut req: Request<Incoming>) -> Response<Body> 
         .filter(|v| !v.is_empty())
         .map(str::to_owned);
     let upgrade = hyper::upgrade::on(&mut req);
-    tokio::spawn(async move {
+    let hub = app.stream.clone();
+    let task = tokio::spawn(async move {
         if let Ok(io) = upgrade.await {
             let auth = app.clone();
             let verify: Revalidate = Arc::new(move |token| {
@@ -428,6 +447,9 @@ pub async fn route(app: Arc<App>, mut req: Request<Incoming>) -> Response<Body> 
             .await;
         }
     });
+    let mut tasks = hub.tasks.lock().expect("stream tasks");
+    tasks.retain(|task| !task.is_finished());
+    tasks.push(task);
     let mut response = Response::builder()
         .status(101)
         .header("upgrade", "websocket")
@@ -479,6 +501,12 @@ async fn run(
     let mut validation_started = Instant::now();
     let mut close = None;
     'connection: loop {
+        // subscribe() considers the current watch value seen. An upgrade may
+        // finish after shutdown was signalled, so changed() alone misses it.
+        if *stop.borrow() {
+            close = Some((1001, "restart"));
+            break;
+        }
         tokio::select! {
             result=async { match validation.as_mut() { Some(v)=>v.await, None=>std::future::pending().await } }=>{
                 validation=None;
