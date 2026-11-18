@@ -590,6 +590,55 @@ mod tests {
         assert!(!*lock(&t.reporting));
     }
 
+    #[tokio::test]
+    async fn collector_failure_suppression_resets_on_success() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for status in [503, 503, 200] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                loop {
+                    let mut buf = [0; 4096];
+                    let n = socket.read(&mut buf).await.unwrap();
+                    assert!(n > 0);
+                    bytes.extend_from_slice(&buf[..n]);
+                    if let Some(at) = bytes.windows(4).position(|b| b == b"\r\n\r\n") {
+                        let head = String::from_utf8_lossy(&bytes[..at]);
+                        let length: usize = head
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse().unwrap())
+                            })
+                            .unwrap();
+                        if bytes.len() >= at + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                socket.write_all(format!("HTTP/1.1 {status} Fixture\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+            }
+        });
+        let t = Tracing::new(
+            &endpoint,
+            None,
+            1.0,
+            "fixture",
+            Arc::new(Registry::new(20.0)),
+        );
+        t.stop();
+        for failed in [true, true, false] {
+            t.enqueue(json!({"resourceSpans":[]}));
+            t.flush().await;
+            assert_eq!(*lock(&t.reporting), failed);
+            assert!(lock(&t.queue).is_empty());
+        }
+        server.await.unwrap();
+    }
+
     #[test]
     fn standard_traceparent_and_disabled_fast_path() {
         assert!(parse_traceparent("garbage").is_none());
