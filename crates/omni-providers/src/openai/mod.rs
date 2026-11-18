@@ -9,7 +9,7 @@ mod lite_tests;
 pub mod oauth;
 mod oauth_lifecycle;
 mod oauth_start;
-mod profile;
+pub(crate) mod profile;
 mod wire;
 /// Credential-selected OpenAI Responses codec.
 pub struct OpenAiCodec;
