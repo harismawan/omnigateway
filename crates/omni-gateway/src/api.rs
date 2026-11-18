@@ -52,12 +52,19 @@ pub enum Route {
     ClientHistory,
     /// Keys, models, catalog, settings and passwords (A5).
     Admin(crate::admin_routes::Admin),
+    Lifecycle,
+    Restart,
+    Shutdown,
+    Database(crate::database_routes::Route),
 }
 
 /// The `/api` route for a method and normalized path, if one is ported.
 /// `HEAD` reaches every `GET` route, as Elysia's does.
 pub fn route(method: &Method, path: &str) -> Option<Route> {
     match (method, path) {
+        (&Method::GET | &Method::HEAD, "/api/lifecycle") => Some(Route::Lifecycle),
+        (&Method::POST, "/api/lifecycle/restart") => Some(Route::Restart),
+        (&Method::POST, "/api/lifecycle/shutdown") => Some(Route::Shutdown),
         (&Method::GET | &Method::HEAD, "/api/status") => Some(Route::Status),
         (&Method::POST, "/api/setup") => Some(Route::Setup),
         (&Method::POST, "/api/login") => Some(Route::Login),
@@ -69,7 +76,9 @@ pub fn route(method: &Method, path: &str) -> Option<Route> {
         (&Method::GET | &Method::HEAD, "/api/client/usage") => Some(Route::ClientUsage),
         (&Method::GET | &Method::HEAD, "/api/client/quota") => Some(Route::ClientQuota),
         (&Method::GET | &Method::HEAD, "/api/client/quota/history") => Some(Route::ClientHistory),
-        _ => crate::admin_routes::route(method, path).map(Route::Admin),
+        _ => crate::database_routes::route(method, path)
+            .map(Route::Database)
+            .or_else(|| crate::admin_routes::route(method, path).map(Route::Admin)),
     }
 }
 
@@ -87,8 +96,36 @@ pub async fn serve(app: Arc<App>, route: Route, req: Request<Incoming>) -> Respo
         Route::ClientQuota => crate::client_routes::quota(&app, req).await,
         Route::ClientHistory => crate::client_routes::history(&app, req).await,
         Route::Admin(admin) => crate::admin_routes::serve(&app, admin, req).await,
+        Route::Lifecycle | Route::Restart | Route::Shutdown => lifecycle(&app, route, &req).await,
+        Route::Database(database) => crate::database_routes::serve(&app, database, req).await,
     };
     result.unwrap_or_else(|e| e.into_response())
+}
+
+async fn lifecycle(
+    app: &App,
+    route: Route,
+    req: &Request<Incoming>,
+) -> Result<Response<Body>, ApiError> {
+    require_admin(req.headers(), &app.admin).await?;
+    if route == Route::Lifecycle {
+        let mut capability = app.lifecycle.describe();
+        capability["version"] = serde_json::Value::String(app.version.clone());
+        return Ok(json_ok(capability.to_string()));
+    }
+    let stop = if route == Route::Restart {
+        app.lifecycle.restart(app.cluster).await?
+    } else {
+        true
+    };
+    if stop {
+        let stop = app.stop.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            stop.send_replace(true);
+        });
+    }
+    Ok(json_ok("{\"ok\":true}".into()))
 }
 
 /// Whether a request declares a body over [`API_BODY_LIMIT`]: Bun refuses

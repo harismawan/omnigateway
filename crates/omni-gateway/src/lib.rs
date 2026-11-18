@@ -14,10 +14,12 @@ pub mod client_routes;
 pub mod clock;
 pub mod connect;
 pub mod console;
+pub mod database_routes;
 pub mod dispatch;
 pub mod finish;
 mod http;
 pub mod jsc_json;
+pub mod lifecycle;
 pub mod load;
 pub mod logging;
 pub mod maintenance;
@@ -26,6 +28,7 @@ pub mod otlp;
 mod output_budget;
 pub mod overlay;
 pub mod price;
+pub mod quiesce;
 pub mod screening;
 pub mod server;
 pub mod static_files;
@@ -219,6 +222,8 @@ pub struct Options {
     pub version: String,
     /// `OMNI_ROOT`, where `plugins/` lives (else the database's directory).
     pub root: Option<String>,
+    /// Injectable environment/probe/command effects for lifecycle routes.
+    pub lifecycle: lifecycle::Lifecycle,
 }
 
 /// `idleTimeout: 255`.
@@ -237,6 +242,7 @@ impl Default for Options {
             seed_delay: Duration::ZERO,
             version: "0.0.0-dev".to_owned(),
             root: None,
+            lifecycle: lifecycle::Lifecycle::default(),
         }
     }
 }
@@ -504,7 +510,13 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         now: clock::now_ms,
         rand: clock::random,
     });
+    let (stop, mut stopped) = tokio::sync::watch::channel(false);
     let app = Arc::new(server::App {
+        quiesce: Arc::new(quiesce::Quiesce::default()),
+        lifecycle: options.lifecycle,
+        version: options.version.clone(),
+        cluster: config.cluster_mode,
+        stop: stop.clone(),
         deadline_workers: server::DeadlineWorkers::new(),
         deps,
         limiter,
@@ -529,7 +541,6 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
 
     tracing::info!(host = %config.host, port = addr.port(), "omnigateway listening");
 
-    let (stop, mut stopped) = tokio::sync::watch::channel(false);
     let deadline = options.stop_deadline;
     let idle = options.idle_timeout;
     #[cfg(test)]

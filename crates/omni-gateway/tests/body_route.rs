@@ -35,6 +35,11 @@ async fn frozen_body_route_matrix() {
         .unwrap();
     }
     let app = Arc::new(server::App {
+        quiesce: Arc::new(omni_gateway::quiesce::Quiesce::default()),
+        lifecycle: omni_gateway::lifecycle::Lifecycle::default(),
+        version: "0.0.0-dev".into(),
+        cluster: false,
+        stop: tokio::sync::watch::channel(false).0,
         deadline_workers: server::DeadlineWorkers::new(),
         miss: MissResolver::new(
             h.deps.holder.clone(),

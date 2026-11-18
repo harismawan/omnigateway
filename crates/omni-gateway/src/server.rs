@@ -358,6 +358,11 @@ mod deadline_ownership {
 
 /// Everything a request handler reads. One per process.
 pub struct App {
+    pub quiesce: Arc<crate::quiesce::Quiesce>,
+    pub lifecycle: crate::lifecycle::Lifecycle,
+    pub version: String,
+    pub cluster: bool,
+    pub stop: tokio::sync::watch::Sender<bool>,
     pub connect: Arc<crate::connect::ConnectFlows>,
     pub deadline_workers: DeadlineWorkers,
     pub deps: Arc<Deps>,
@@ -500,6 +505,73 @@ pub(crate) fn route_path(raw: &str) -> std::borrow::Cow<'_, str> {
 }
 
 pub async fn handle(app: Arc<App>, req: Request<Incoming>) -> Result<Response<Body>, Infallible> {
+    let admission = if route_path(req.uri().path()).starts_with("/v1/") {
+        match app.quiesce.enter() {
+            Some(admission) => Some(admission),
+            None => {
+                let dialect = match route_path(req.uri().path()).as_ref() {
+                    "/v1/chat/completions" => Dialect::OpenAi,
+                    "/v1/responses" => Dialect::Responses,
+                    _ => Dialect::Anthropic,
+                };
+                let mut response = error_response(
+                    dialect,
+                    &GatewayError::new(
+                        ErrorCode::Overloaded,
+                        "the gateway is briefly quiesced for database maintenance",
+                    ),
+                    &[("retry-after".into(), "5".into())],
+                );
+                stamp_date(&mut response);
+                return Ok(response);
+            }
+        }
+    } else {
+        None
+    };
+    let mut response = handle_admitted(app, req).await?;
+    if let Some(admission) = admission {
+        let body = std::mem::replace(response.body_mut(), full(Bytes::new()));
+        *response.body_mut() = AdmittedBody {
+            body,
+            admission: Some(admission),
+        }
+        .boxed_unsync();
+    }
+    Ok(response)
+}
+
+/// Preserve the wrapped body's length hint and EOF semantics (notably models).
+struct AdmittedBody {
+    body: Body,
+    admission: Option<crate::quiesce::Admission>,
+}
+
+impl http_body::Body for AdmittedBody {
+    type Data = Bytes;
+    type Error = std::io::Error;
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
+        let result = std::pin::Pin::new(&mut self.body).poll_frame(cx);
+        if matches!(result, std::task::Poll::Ready(None | Some(Err(_)))) {
+            self.admission.take();
+        }
+        result
+    }
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.body.size_hint()
+    }
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+}
+
+async fn handle_admitted(
+    app: Arc<App>,
+    req: Request<Incoming>,
+) -> Result<Response<Body>, Infallible> {
     let path = crate::static_files::pathname(req.uri().path()).into_owned();
     let route = route_path(req.uri().path());
     let method = req.method().clone();
