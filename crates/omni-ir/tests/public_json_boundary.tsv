@@ -252,3 +252,7 @@ omni-providers/src/antigravity/schema.rs :: fn try_prune(node: &Value) -> Result
 omni-providers/src/openai/oauth_start.rs :: fn start(redirect: &str, verifier: &str, challenge: &str, state: &str) -> AuthorizeStart	string-only authorization URL construction; no client JSON crosses this function
 omni-providers/src/http/body.rs :: fn observe(&mut self, observer: Arc<dyn BodyObserver>)	Opt-in raw-byte observer; no JSON assembly crosses this seam.
 omni-providers/src/http/body.rs :: fn start_stream(&mut self)	Select streaming view and start independent capture drain; no JSON assembly.
+omni-providers/src/quota.rs :: fn request( provider: &str, operation: &str, token: &str, data: &Value, body: Value, ) -> Option<QuotaRequest>	Operator quota request builder; borrows credential metadata, consumes host-authored body; returns serialized transport strings, no retained JSON.
+omni-providers/src/quota.rs :: fn usage(provider: &str, v: &Value, now: f64) -> Vec<Value>	Borrows provider quota reply; returns newly assembled fixed-shape scalar window observations, not arbitrary reply subtrees.
+omni-providers/src/quota.rs :: fn credits(provider: &str, v: &Value) -> Option<Value>	Borrows provider quota reply; returns normalized fixed-shape credit scalars, no arbitrary reply subtree retention.
+omni-providers/src/quota.rs :: fn redeemed(provider: &str, result: &Value) -> Result<Option<f64>, String>	Borrows provider redemption reply; returns scalar timestamp or error string, retains no JSON.
