@@ -82,7 +82,7 @@ fn malformed() {
         (frame(8, true, b"x"), 1002),
         (frame(8, true, b"\x03\xed"), 1002),
         (frame(8, true, b"\x03\xe8\xff"), 1007),
-        (vec![0x81, 0xff, 0x80, 0, 0, 0, 0, 0, 0, 0], 1002),
+        (vec![0x81, 0xff, 0x80, 0, 0, 0, 0, 0, 0, 0], 1009),
         (vec![0x81, 0xfe, 0, 1], 1002),
     ];
     for (wire, code) in cases {
