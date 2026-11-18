@@ -107,7 +107,7 @@ def run(binary, root, kind):
             from datetime import datetime,timezone
             instant=datetime.fromtimestamp(stamp/1000,timezone.utc).isoformat(timespec='milliseconds').replace('+00:00','Z')
             raw=instant+' ERROR journal-new'
-            path.write_text(raw+'\n')
+            path.write_text(raw+'\r\n'+raw+'\u2028bad\n'+raw+'\u2029bad\n'+raw+'\n')
             event=json.loads(wire.frame(s)[1]);assert event['payload']['lines'][0]['raw']==raw,event
             # Same cursor timestamp, distinct raw line survives next poll.
             path.write_text(raw+'\n'+instant+' ERROR journal-second\n')
