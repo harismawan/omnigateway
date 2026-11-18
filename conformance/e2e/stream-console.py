@@ -72,6 +72,10 @@ def run(binary, root, kind):
         if kind in ('none','missing'):
             assert ack['type']=='error',ack;s.close();return result
         assert ack['type']=='ack',ack
+        local,local_ack=ws('stream:console:'+api('/health')[1]['nodeId'])
+        assert local_ack['type']=='ack',local_ack
+        local.close()
+        result['self-node-source']=True
         if kind=='file':
             with path.open('a') as f:f.write('2026-11-18T00:00:00.001Z ERROR appended  reason=x\n')
             event=json.loads(wire.frame(s)[1]);result['append']=event
