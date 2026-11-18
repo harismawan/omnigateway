@@ -133,7 +133,7 @@ fn parse_line(raw: &str) -> Value {
     if !matches!(label, "DEBUG" | "INFO" | "WARN" | "ERROR") {
         return absent();
     }
-    let Ok(at) = chrono::DateTime::parse_from_rfc3339(instant) else {
+    let Some(at) = omni_control::date::parse(instant) else {
         return absent();
     };
     let tail = tail.strip_prefix(' ').unwrap_or(tail);
@@ -146,7 +146,7 @@ fn parse_line(raw: &str) -> Value {
             break;
         }
     }
-    json!({"raw":raw,"at":at.timestamp_millis(),"level":label.to_lowercase(),"msg":msg})
+    json!({"raw":raw,"at":at,"level":label.to_lowercase(),"msg":msg})
 }
 fn parse(text: &str, q: &Query) -> Vec<Value> {
     let mut lines: Vec<_> = text
@@ -365,11 +365,126 @@ async fn file_stream(hub: Arc<crate::stream_transport::Hub>, topics: Vec<String>
     }
 }
 #[cfg(not(target_os = "linux"))]
-async fn file_stream(_: Arc<crate::stream_transport::Hub>, _: Vec<String>, _: String) {}
+async fn file_stream(hub: Arc<crate::stream_transport::Hub>, topics: Vec<String>, path: String) {
+    portable_file_stream(hub, topics, path).await;
+}
+
+// Safe fallback for macOS release targets. Metadata polling costs one stat per
+// floor when quiet; unlike a no-op it preserves declaration, deltas and replay.
+#[cfg(any(not(target_os = "linux"), test))]
+async fn portable_file_stream(
+    hub: Arc<crate::stream_transport::Hub>,
+    topics: Vec<String>,
+    path: String,
+) {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(mut previous) = std::fs::metadata(&path) else {
+        return;
+    };
+    let mut offset = previous.len();
+    let mut rotated = false;
+    let mut failures = 0;
+    for topic in &topics {
+        hub.declare(topic);
+    }
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let current = match std::fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                offset = 0;
+                rotated = true;
+                failures += 1;
+                if failures > 5 {
+                    tracing::warn!("console stream ended");
+                    return;
+                }
+                continue;
+            }
+        };
+        failures = 0;
+        if current.ino() != previous.ino() || current.dev() != previous.dev() {
+            offset = 0;
+            rotated = true;
+        }
+        let changed = rotated
+            || current.len() != previous.len()
+            || current.mtime() != previous.mtime()
+            || current.mtime_nsec() != previous.mtime_nsec();
+        previous = current;
+        if !changed {
+            continue;
+        }
+        let target = path.clone();
+        let read = tokio::task::spawn_blocking(move || -> Option<_> {
+            let mut file = std::fs::File::open(target).ok()?;
+            let size = file.metadata().ok()?.len();
+            let shrank = size < offset;
+            let from = if shrank { 0 } else { offset };
+            let start = from.max(size.saturating_sub(MAX_BYTES));
+            file.seek(SeekFrom::Start(start)).ok()?;
+            let mut bytes = vec![0; (size - start) as usize];
+            let n = file.read(&mut bytes).ok()?;
+            bytes.truncate(n);
+            Some((
+                String::from_utf8_lossy(&bytes).into_owned(),
+                start + n as u64,
+                shrank || start > from,
+            ))
+        })
+        .await;
+        if let Ok(Some((text, end, gap))) = read {
+            offset = end;
+            publish(
+                &hub,
+                &topics,
+                parse(
+                    &text,
+                    &Query {
+                        lines: 500,
+                        level: None,
+                        since: None,
+                    },
+                ),
+                gap || rotated,
+            );
+            rotated = false;
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn portable_source_append_rotation_truncation() {
+        let dir = tempfile::tempdir().expect("scratch");
+        let path = dir.path().join("console");
+        std::fs::write(&path, "boot\n").expect("seed");
+        let hub = Arc::new(crate::stream_transport::Hub::default());
+        let topic = "stream:console".to_owned();
+        let task = tokio::spawn(portable_file_stream(
+            hub.clone(),
+            vec![topic.clone()],
+            path.to_string_lossy().into_owned(),
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        std::fs::write(&path, "boot\nappended\n").expect("append");
+        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+        assert_eq!(
+            hub.replay_for_test(&topic, 0.)["frames"][0]["payload"]["lines"][0]["raw"],
+            "appended"
+        );
+        std::fs::rename(&path, dir.path().join("old")).expect("rotate");
+        std::fs::write(&path, "replacement\n").expect("replace");
+        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+        assert_eq!(hub.replay_for_test(&topic, 0.)["kind"], "gap");
+        std::fs::write(&path, "x\n").expect("truncate");
+        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+        assert_eq!(hub.replay_for_test(&topic, 0.)["kind"], "gap");
+        task.abort();
+        drop(task.await);
+    }
     #[test]
     fn console_query_parse_and_tail() {
         let q = Query::from_query("lines=1.9&level=error&since=1");

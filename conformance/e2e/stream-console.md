@@ -8,10 +8,12 @@ The work directory must be new; failed evidence is never removed or reused.
 normalizing only private file paths. Journal tests install a private executable
 stub; they never invoke the host journal. REST object key order is not asserted.
 ConsoleFleet remote and `node=all` merging remain D4, not local-console parity.
-RFC3339 parsed timestamps are covered; the full JavaScript Date.parse language
-is not. Non-Linux file watching is not implemented. The source task is eager:
+Timestamp parsing reuses the shared Date.parse compatibility implementation;
+the corpus includes date-only, timezone-free and 24:00 forms as well as RFC3339.
+Darwin release targets use a safe 250ms metadata/inode polling fallback (tested
+on Linux; native Darwin execution remains unverified here). The source task is eager:
 file inotify has no idle timer; journal preserves boot cursor/replay by polling
-even without subscribers. Linux inotify remains armed without subscribers so
+even without subscribers. Darwin spends one stat per quiet floor; Linux inotify remains armed without subscribers so
 replay records the same source deltas. Logging format itself predates A9.
 
 `stream-pressure.py` stops actual TCP reads after acknowledgment, appends 32

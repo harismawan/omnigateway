@@ -77,6 +77,15 @@ def run(binary, root, kind):
         local.close()
         result['self-node-source']=True
         if kind=='file':
+            dated='2026-11-18 INFO date-only\n2026-11-18T01:02:03 INFO local-time\n2026-11-18T24:00:00.000Z WARN midnight\n'
+            path.write_text('')
+            time.sleep(.4)
+            path.write_text(dated)
+            result['date-filter']=api('/api/console?since=1')[1]['lines']
+            assert len(result['date-filter'])==3,result['date-filter']
+            # Drain this source delta before exercising append and replay.
+            date_event=json.loads(wire.frame(s)[1])
+            assert [line['at'] for line in date_event['payload']['lines']]==[line['at'] for line in result['date-filter']],date_event
             with path.open('a') as f:f.write('2026-11-18T00:00:00.001Z ERROR appended  reason=x\n')
             event=json.loads(wire.frame(s)[1]);result['append']=event
             assert event['payload']['lines'][0]['msg']=='appended',event
