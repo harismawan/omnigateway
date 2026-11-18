@@ -900,7 +900,18 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
         sname,
         now,
     );
-    if app.deps.telemetry.enabled() {
+    if let Some(t) = &app.deps.telemetry.tracing {
+        t.start(
+            &request_id,
+            started_at,
+            req.headers()
+                .get("traceparent")
+                .and_then(|v| v.to_str().ok()),
+            sname,
+            (app.deps.rand)(),
+        );
+    }
+    if app.deps.telemetry.enabled() || app.deps.telemetry.tracing.is_some() {
         fin = fin.with_telemetry(app.deps.telemetry.clone());
     }
     let mut headroom = HeadroomByDimension::default();
