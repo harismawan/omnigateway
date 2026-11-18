@@ -52,6 +52,7 @@ try {
     ["invalid-close",upgrade+`Cookie: ${cookie}\r\n`,mask(0x88,[3,237])],
     ["fragmented-control",upgrade+`Cookie: ${cookie}\r\n`,mask(0x09,[])],
     ...[["rsv1",0xc1],["rsv2",0xa1],["rsv3",0x91],["orphan-continuation",0x80]].map(([n,op])=>[n,upgrade+`Cookie: ${cookie}\r\n`,mask(op as number,[])] as const),
+    ["length-high",upgrade+`Cookie: ${cookie}\r\n`,Buffer.from([0x81,0xff,0x80,0,0,0,0,0,0,0,1,2,3,4])],
     ["short-close",upgrade+`Cookie: ${cookie}\r\n`,mask(0x88,[1])],
     ["nested-fragment",upgrade+`Cookie: ${cookie}\r\n`,Buffer.concat([mask(1,[]),mask(0x81,[])])],
     ["close-invalid-utf8",upgrade+`Cookie: ${cookie}\r\n`,mask(0x88,[3,232,255])],

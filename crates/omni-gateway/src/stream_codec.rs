@@ -83,6 +83,11 @@ impl Codec {
             let op = b[0] & 15;
             let control = op >= 8;
             if b[0] & 112 != 0 {
+                self.error_reason = if b[0] & 48 != 0 {
+                    "Received unexpected RSV2 or RSV3 bit"
+                } else {
+                    "Received unexpected RSV1 bit"
+                };
                 return Err(1002);
             }
             if b[1] & 128 == 0 {
@@ -118,7 +123,10 @@ impl Codec {
                         return Ok(None);
                     }
                     let n = u64::from_be_bytes(b[2..10].try_into().expect("eight bytes"));
-                    if n < 65536 || n >> 63 != 0 {
+                    if n >> 63 != 0 {
+                        return Err(1009);
+                    }
+                    if n < 65536 {
                         return Err(1002);
                     }
                     (n, 10)
@@ -127,6 +135,11 @@ impl Codec {
             };
             if !control {
                 if (op == 0) != self.fragment.is_some() {
+                    self.error_reason = if op == 0 {
+                        "Received continuation frame outside a fragmented message"
+                    } else {
+                        "Received new message inside a fragmented message"
+                    };
                     return Err(1002);
                 }
                 let held = self.fragment.as_ref().map_or(0, |(_, data)| data.len());
@@ -149,6 +162,7 @@ impl Codec {
             match op {
                 8 => {
                     if payload.len() == 1 {
+                        self.error_reason = "Received invalid close payload";
                         return Err(1002);
                     }
                     if payload.len() >= 2 {

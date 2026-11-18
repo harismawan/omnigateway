@@ -148,5 +148,32 @@ fn frozen_close_reasons() {
     codec.next_event().unwrap();
     codec.feed(&frame(0, true, b"")).unwrap();
     assert_eq!(codec.next_event().unwrap_err(), 1002);
-    assert_eq!(codec.error_reason, "");
+    assert_eq!(
+        codec.error_reason,
+        "Received continuation frame outside a fragmented message"
+    );
+}
+
+#[test]
+fn additional_frozen_reason_bytes() {
+    for (raw, reason) in [
+        (vec![0xc1, 128, 1, 2, 3, 4], "Received unexpected RSV1 bit"),
+        (
+            vec![0xa1, 128, 1, 2, 3, 4],
+            "Received unexpected RSV2 or RSV3 bit",
+        ),
+        (
+            vec![0x80, 128, 1, 2, 3, 4],
+            "Received continuation frame outside a fragmented message",
+        ),
+        (
+            vec![0x88, 129, 1, 2, 3, 4, 0],
+            "Received invalid close payload",
+        ),
+    ] {
+        let mut codec = omni_gateway::stream_codec::Codec::new(1024);
+        codec.feed(&raw).expect("bounded feed");
+        assert_eq!(codec.next_event(), Err(1002));
+        assert_eq!(codec.error_reason, reason);
+    }
 }

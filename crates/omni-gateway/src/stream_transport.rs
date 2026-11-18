@@ -329,11 +329,67 @@ fn drain(
 
 // Elysia only JSON-parses a text message whose first character is one of
 // these prefixes. Leading whitespace is not stripped by its ws adapter.
-fn parse_text(text: &str) -> Value {
-    if matches!(text.as_bytes().first(), Some(b'"' | b'/' | b'[' | b'{')) {
-        serde_json::from_str(text).unwrap_or(Value::Null)
-    } else {
-        Value::Null
+pub fn parse_text(text: &str) -> Value {
+    parse_text_parts(text).0
+}
+fn parse_text_parts(text: &str) -> (Value, Option<Vec<u16>>) {
+    use omni_ir::jsjson::{JsValue, parse_js, stringify};
+    if !matches!(text.as_bytes().first(), Some(b'"' | b'/' | b'[' | b'{')) {
+        return (Value::Null, None);
+    }
+    let Ok(parsed) = parse_js(text) else {
+        return (Value::Null, None);
+    };
+    let JsValue::Object(entries) = &parsed else {
+        return (Value::Null, None);
+    };
+    let mut object = serde_json::Map::new();
+    let mut id = None;
+    for (key, value) in entries {
+        let Ok(key) = String::from_utf16(key) else {
+            continue;
+        };
+        if !matches!(key.as_str(), "type" | "topic" | "id" | "sinceSeq") {
+            continue;
+        }
+        if key == "id" {
+            id = if let JsValue::String(units) = value {
+                Some(units.clone())
+            } else {
+                None
+            };
+            if id.is_some() {
+                object.insert(key, json!(""));
+                continue;
+            }
+        }
+        // Only scalar protocol fields matter. Never serialize discarded deep
+        // extras or recursively convert them through serde.
+        let scalar = match value {
+            JsValue::String(_) | JsValue::Number(_) | JsValue::Bool(_) | JsValue::Null => {
+                stringify(value)
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or(Value::Null)
+            }
+            _ => Value::Null,
+        };
+        object.insert(key, scalar);
+    }
+    (Value::Object(object), id)
+}
+impl Hub {
+    fn text_message(&self, socket: u64, kind: &str, text: &str) -> Vec<String> {
+        let (raw, id) = parse_text_parts(text);
+        let mut frames = self.message(socket, kind, raw);
+        if let Some(id) = id
+            && let Some(first) = frames.first_mut()
+            && first.starts_with("{\"id\":\"\",")
+        {
+            let mut encoded = String::new();
+            omni_ir::jsjson::write_utf16(&id, &mut encoded);
+            first.replace_range(6..8, &encoded);
+        }
+        frames
     }
 }
 
@@ -537,7 +593,7 @@ async fn run(
                         // pong is recorded, even for a compliant client.
                         Event::Pong(_)=>None,
                         Event::Close(p)=>{drop(tx.send((stream_codec::encode(8,&p),0)).await);break 'connection;},
-                        Event::Text(text)=>{for wire in hub.message(id,kind,parse_text(&text)){if tx.send((stream_codec::encode(1,wire.as_bytes()),0)).await.is_err(){break 'connection;}} None},
+                        Event::Text(text)=>{for wire in hub.text_message(id,kind,&text){if tx.send((stream_codec::encode(1,wire.as_bytes()),0)).await.is_err(){break 'connection;}} None},
                         Event::Binary(_)=>Some(stream_codec::encode(1,b"{\"type\":\"error\",\"message\":\"malformed frame\"}")),
                     };
                     if let Some(wire)=wire && tx.send((wire,0)).await.is_err(){break 'connection;}
@@ -567,6 +623,18 @@ async fn run(
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
+    #[test]
+    fn text_id_utf16_roundtrip() {
+        let hub = hub();
+        assert_eq!(
+            hub.text_message(
+                1,
+                "admin",
+                r#"{"type":"subscribe","topic":"res:logs","id":"\ud800"}"#
+            ),
+            vec![r#"{"id":"\ud800","type":"ack","topic":"res:logs"}"#]
+        );
+    }
     #[test]
     fn empty_resource_publish_never_locks_even_with_other_subscribers() {
         let hub = hub();

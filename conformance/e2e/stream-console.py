@@ -87,6 +87,7 @@ def run(binary, root, kind):
             date_event=json.loads(wire.frame(s)[1])
             assert [line['at'] for line in date_event['payload']['lines'] if line['at'] is not None]==[line['at'] for line in result['date-filter']],date_event
             assert sum(line['at'] is None for line in date_event['payload']['lines'])==4,date_event
+            time.sleep(.35)
             with path.open('a') as f:f.write('2026-11-18T00:00:00.001Z ERROR appended  reason=x\n')
             event=json.loads(wire.frame(s)[1]);result['append']=event
             assert event['payload']['lines'][0]['msg']=='appended',event

@@ -188,3 +188,17 @@ fn check(input: Value) {
     }
     eprintln!("{} exact-byte oracle rows", actual.len());
 }
+
+#[test]
+fn transport_text_keeps_valid_discarded_json() {
+    for extra in [
+        "1e999".to_owned(),
+        format!("{}0{}", "[".repeat(150), "]".repeat(150)),
+    ] {
+        let text = format!(r#"{{"type":"subscribe","topic":"res:logs","extra":{extra}}}"#);
+        assert_eq!(
+            omni_gateway::stream_transport::parse_text(&text)["topic"],
+            "res:logs"
+        );
+    }
+}

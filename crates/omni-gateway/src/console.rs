@@ -124,9 +124,19 @@ fn parse_line(raw: &str) -> Value {
         rest = suffix;
     }
     clean.push_str(rest);
+    if clean.contains(['\r', '\n', '\u{2028}', '\u{2029}']) {
+        return absent();
+    }
     let Some((instant, tail)) = clean.split_once(' ') else {
         return absent();
     };
+    if instant.is_empty()
+        || instant
+            .chars()
+            .any(|c| omni_ir::js::trim(&c.to_string()).is_empty())
+    {
+        return absent();
+    }
     let Some((label, tail)) = tail.split_once(' ') else {
         return absent();
     };
