@@ -14,6 +14,9 @@ name = "omni"
 path = "src/main.rs"
 
 [dependencies]
+omni-providers = { path = "../omni-providers" }
+tokio = { version = "1", features = ["rt", "time", "net"] }
+url = "2.5"
 omni-crypto = { path = "../omni-crypto" }
 rustix = { version = "1.1.6", features = ["termios", "fs", "process"] }
 omni-control = { path = "../omni-control" }

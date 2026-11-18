@@ -108,6 +108,7 @@ pub fn parse_command(args: &[String], command: &str) -> Result<ParsedCommand, St
         match name {
             name if (command == "credentials-set"
                 && matches!(name, "label" | "tier" | "weight"))
+                || (command == "connect" && matches!(name, "label" | "credential"))
                 || (command == "credentials-add-key"
                     && matches!(
                         name,

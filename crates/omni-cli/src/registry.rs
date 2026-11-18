@@ -356,7 +356,9 @@ pub fn implemented(name: &str) -> Option<String> {
     }
     if matches!(
         name,
-        "credentials list"
+        "connect"
+            | "credentials list"
+            | "credentials refresh"
             | "credentials show"
             | "credentials health"
             | "credentials enable"

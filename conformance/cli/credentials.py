@@ -104,6 +104,17 @@ for sql in ["", "INSERT INTO virtual_models(id,targets,strategy,is_alias) VALUES
 for targets in ['null','{}','1','true','"x"','[null]','[1,true,"x"]','[{"credentialId":"c"},null]','invalid']:
     cases.append(('pinned malformed',seed,"INSERT INTO virtual_models(id,targets,strategy,is_alias) VALUES('pin','"+targets+"','score',0)",['credentials','rm','c','--yes']))
 
+# Refresh preflight is local; malformed unrelated cells must remain unread.
+for args in [['credentials','refresh'],['credentials','refresh','missing'],['credentials','refresh','c']]:
+    cases.append(('refresh preflight',seed,'',args))
+for col in columns + ['api_key','access_token','id_token']:
+    for value in values:
+        cases.append((f'refresh neighbor:{col}={value}',seed,
+            "INSERT INTO credentials SELECT * FROM credentials; UPDATE credentials SET id='neighbor' WHERE rowid=(SELECT max(rowid) FROM credentials); "
+            f'UPDATE credentials SET "{col}"={value} WHERE id=\'neighbor\'',['credentials','refresh','c']))
+for auth in ["'apiKey'","'unknown'",'NULL']:
+    cases.append(('refresh auth',seed,f'UPDATE credentials SET auth_type={auth}',['credentials','refresh','c']))
+
 def normalize(result, args, started, ended, expected_key):
     # Only successful target clocks and new-row UUID/ciphertext (including nonce/tag)
     # vary. Validate clocks, decrypt secret, and retain each cell's SQLite type.

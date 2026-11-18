@@ -343,6 +343,9 @@ pub fn run(
     flags: &HashMap<String, String>,
     positional: &[String],
 ) -> Result<String, (u8, String)> {
+    if command == "credentials-refresh" {
+        return crate::oauth::refresh(flags, positional);
+    }
     if matches!(
         command,
         "credentials-enable"
