@@ -119,6 +119,16 @@ for (const [index, binary] of [ts!, rust!].entries()) {
   await call("/api/setup", { password: "b10-private-password" });
   const login = await call("/api/login", { password: "b10-private-password" });
   const cookie = login.cookie!;
+  const pushed: { type: string; topic?: string }[] = [];
+  const socket = new WebSocket("ws://127.0.0.1:18510/api/stream", { headers: { cookie } });
+  socket.onmessage = (e) => pushed.push(JSON.parse(String(e.data)));
+  await new Promise<void>((ok, no) => {
+    socket.onopen = () => ok();
+    socket.onerror = no;
+  });
+  socket.send(JSON.stringify({ type: "subscribe", topic: "res:quota" }));
+  for (let n = 0; n < 100 && !pushed.some((p) => p.type === "ack"); n++) await Bun.sleep(10);
+  assert.ok(pushed.some((p) => p.type === "ack"));
   const db = new Database(join(root, "db"));
   db.run(
     "INSERT INTO settings(key,value) VALUES('settings','{\"quotaPollIntervalMs\":0}') ON CONFLICT(key) DO UPDATE SET value=json_set(value,'$.quotaPollIntervalMs',0)",
@@ -177,6 +187,18 @@ for (const [index, binary] of [ts!, rust!].entries()) {
   }
   mode = "ok";
   const history = await call("/api/credentials/quota/history", undefined, cookie);
+  for (
+    let n = 0;
+    n < 700 && !pushed.some((p) => p.type === "event" && p.topic === "res:quota");
+    n++
+  )
+    await Bun.sleep(10);
+  results.push({
+    label: "invalidation",
+    pushed: pushed.some((p) => p.type === "event" && p.topic === "res:quota"),
+  });
+  if (index === 0) assert.ok(pushed.some((p) => p.type === "event" && p.topic === "res:quota"));
+  socket.close();
   if (index === 0) {
     assert.equal(history.status, 200);
     assert.equal(history.body.samples.length, 3);
