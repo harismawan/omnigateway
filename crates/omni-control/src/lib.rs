@@ -29,3 +29,4 @@ pub mod quota_runtime;
 pub mod reports;
 pub mod settings;
 pub mod settings_value;
+pub mod setup;

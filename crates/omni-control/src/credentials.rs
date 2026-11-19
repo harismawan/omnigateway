@@ -68,6 +68,33 @@ pub(crate) fn rows(s: &SqliteStore, id: Option<&str>) -> Result<Vec<JsValue>> {
         true,
     )
 }
+
+/// Only the serving facts needed by agent setup. Do not select secret columns.
+pub(crate) fn setup_rows(s: &SqliteStore) -> Result<Vec<JsValue>> {
+    let mut stmt = s
+        .connection()
+        .prepare("SELECT id,provider,auth_type,enabled,provider_data FROM credentials ORDER BY tier,label")
+        .map_err(Failure::internal)?;
+    let mut rs = stmt.query([]).map_err(Failure::internal)?;
+    let mut out = Vec::new();
+    while let Some(row) = rs.next().map_err(Failure::internal)? {
+        let cell = |i| row.get_ref(i).map_err(Failure::internal);
+        let id = cell(0)?;
+        out.push(obj(vec![
+            ("id", sql_value(id)),
+            ("provider", sql_value(cell(1)?)),
+            ("authType", sql_value(cell(2)?)),
+            ("enabled", enabled(cell(3)?)),
+            ("providerData", provider_data(cell(4)?, id)?),
+        ]));
+    }
+    Ok(out)
+}
+
+fn enabled(raw: ValueRef<'_>) -> JsValue {
+    JsValue::Bool(matches!(raw, ValueRef::Integer(1)) || matches!(raw,ValueRef::Real(n) if n==1.0))
+}
+
 fn rows_with(
     s: &SqliteStore,
     id: Option<&str>,
@@ -102,10 +129,7 @@ fn rows_with(
         ] {
             let raw = r.get_ref(col).map_err(Failure::internal)?;
             let v = match k {
-                "enabled" => JsValue::Bool(
-                    matches!(raw, ValueRef::Integer(1))
-                        || matches!(raw,ValueRef::Real(n) if n==1.0),
-                ),
+                "enabled" => enabled(raw),
                 "hasRefreshToken" => JsValue::Bool(!matches!(raw, ValueRef::Null)),
                 "providerData" => parse(raw, r.get_ref("id").map_err(Failure::internal)?)?,
                 _ if terminal => crate::cli_cell::Cell::read(raw).json(),
