@@ -3,6 +3,7 @@ import { request as httpsRequest } from "node:https";
 import { Readable } from "node:stream";
 import { type Logger, noopLogger } from "@omni/ir";
 import type { HttpClient, HttpRequest, HttpResponse } from "./types.ts";
+import { upstreamRequestIdOf } from "./upstreamRequestId.ts";
 
 /**
  * How long one address family gets before Happy Eyeballs abandons it.
@@ -37,6 +38,8 @@ export type HttpClientOptions = {
     status?: number;
     durationMs: number;
     requestId?: string;
+    /** The provider's own id for this response, when its head named one. */
+    upstreamRequestId?: string;
   }) => void;
 };
 
@@ -63,7 +66,11 @@ export function nodeHttpClient(options: HttpClientOptions = {}): HttpClient {
           const url = new URL(req.url);
           const startedAt = now();
           let traced = false;
-          const trace = (status: number | undefined, failed = false): void => {
+          const trace = (
+            status: number | undefined,
+            failed = false,
+            upstreamRequestId: string | null = null,
+          ): void => {
             if (traced) return;
             traced = true;
             const durationMs = now() - startedAt;
@@ -75,6 +82,7 @@ export function nodeHttpClient(options: HttpClientOptions = {}): HttpClient {
                 ...(status === undefined ? {} : { status }),
                 durationMs,
                 ...(req.requestId === undefined ? {} : { requestId: req.requestId }),
+                ...(upstreamRequestId === null ? {} : { upstreamRequestId }),
               });
             } catch {
               // Observability cannot change a provider request's outcome.
@@ -123,7 +131,7 @@ export function nodeHttpClient(options: HttpClientOptions = {}): HttpClient {
               if (Array.isArray(v)) for (const one of v) responseHeaders.append(k, one);
               else if (typeof v === "string") responseHeaders.set(k, v);
             }
-            trace(incoming.statusCode);
+            trace(incoming.statusCode, false, upstreamRequestIdOf(responseHeaders));
             resolve({
               status: incoming.statusCode ?? 0,
               headers: responseHeaders,

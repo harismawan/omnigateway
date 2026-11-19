@@ -56,6 +56,53 @@ render on neither dialect, because no vendor defines a header for them. A
 refusal is `429` with `Retry-After` in seconds, computed from the oldest request
 still inside the window that refused you.
 
+## Request ids and traceability
+
+Every response from `/v1/messages`, `/v1/chat/completions`, `/v1/responses` and
+`/v1/messages/count_tokens` carries the gateway's id for the request — success
+or failure, streaming (in the head, before the first event) or not, and even a
+`401`:
+
+```http
+x-omni-request-id: req_1f0c…
+```
+
+It is the id the operator sees on the log row and in the gateway's stdout, so
+quote it when asking what happened. `count_tokens` writes no log row, so there
+its id joins only to stdout.
+
+You can label your own requests so the operator can group and filter them. All
+of these are optional, bounded, and **never** refuse a request — an invalid
+value is dropped and the row is marked `trace:invalid`:
+
+| Header | Meaning | Bound |
+| --- | --- | --- |
+| `x-omni-session-id` | your session or job id, stored verbatim | 256 printable ASCII characters |
+| `x-omni-turn-id` | one step inside that session | 256 |
+| `x-omni-tags` | comma-separated labels, `team-a,exp-b` | 16 tags, each 1–64 of `A-Z a-z 0-9 . _ : / -` |
+| `x-omni-metadata` | comma-separated `key:value`, percent-encode commas: `owner:ops,note:a%2Cb` | 16 entries; key 1–64 of `A-Z a-z 0-9 . _ -`, value ≤ 256 |
+| `x-request-id` | your own request id, stored beside the gateway's | 256 |
+
+Coding agents need no configuration: the gateway recognises their own
+correlation headers and stores `<agent>:<id>`, so ids from different agents
+never collide. Your explicit `x-omni-session-id` / `x-omni-turn-id` win over
+what is inferred.
+
+| Agent | Recognised by | Session | Turn |
+| --- | --- | --- | --- |
+| Claude Code | `x-claude-code-session-id` | that header | — |
+| OpenCode | `x-opencode-session-id` / `x-opencode-session`, or a `opencode/…` user agent | that header, else `x-session-id` / `x-session-affinity` | `x-opencode-request` |
+| Codex | its turn snapshot in `client_metadata` (or the `x-codex-turn-metadata` header) | `thread_id` | `turn_id` |
+| Pi | a `pi/…` or `pi` user agent, or `x-opencode-client: pi` | `x-opencode-session`, else `x-session-id` / `session_id` / `x-session-affinity` | — |
+
+Generic session headers (`x-session-id`, `x-session-affinity`) from a client the
+gateway does not recognise still feed cache affinity but are **not** stored.
+Anthropic's `metadata.user_id` is never parsed or stored. The provider's own
+request id is recorded for the operator and never returned to you.
+
+If your key can sign in to the client dashboard, you see your own sessions,
+tags and request ids there, and can filter your log by them.
+
 ## Confidential routing
 
 If your key has confidential routing on (the client dashboard shows

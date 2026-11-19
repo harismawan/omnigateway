@@ -7,6 +7,7 @@ import {
   queryUsage,
   readOwnKey,
   scopeOf,
+  sessionSummary,
   toClientLog,
 } from "@omni/control";
 import { GatewayError, type Logger, noopLogger } from "@omni/ir";
@@ -160,6 +161,11 @@ export function clientRoutes(deps: ClientDeps) {
             requestedModel: query.requestedModel,
             resolvedModel: query.resolvedModel,
             errorCode: query.errorCode,
+            // The trace the client's own requests carried.
+            session: query.session,
+            turn: query.turn,
+            agent: query.agent,
+            tag: query.tag,
           },
           scopeOf({ kind: "client", apiKeyId }),
         );
@@ -168,6 +174,22 @@ export function clientRoutes(deps: ClientDeps) {
         // less obviously, inside the `excluded:<credentialId>:<reason>` strings
         // in `degradations`. Both are the operator's infrastructure.
         return { logs: page.logs.map(toClientLog), nextCursor: page.nextCursor };
+      })
+
+      /**
+       * The caller's own sessions, scoped by the verified session and never by
+       * a parameter — `apiKeyId` is not forwarded. Session rows carry only the
+       * caller's key and their own totals, nothing about accounts.
+       */
+      .get("/api/client/sessions", async ({ request, query }) => {
+        const apiKeyId = await requireClient(request, deps.admin);
+        return {
+          sessions: await sessionSummary(
+            deps.store,
+            { since: query.since, until: query.until, agent: query.agent },
+            scopeOf({ kind: "client", apiKeyId }),
+          ),
+        };
       })
 
       /**

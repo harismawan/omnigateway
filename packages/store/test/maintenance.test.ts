@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deriveKey } from "../src/encryption.ts";
 import { createStore } from "../src/sqlite/store.ts";
-import type { RequestLog, Store } from "../src/types.ts";
+import { EMPTY_TRACE, type RequestLog, type Store } from "../src/types.ts";
 
 /**
  * A store on disk, because `VACUUM INTO` writes a file and an in-memory
@@ -66,6 +66,7 @@ function log(id: string): RequestLog {
     rtkCompressedCodeUnits: 0,
     rtkEstimatedTokensSaved: 0,
     rtkFilters: [],
+    ...EMPTY_TRACE,
   };
 }
 

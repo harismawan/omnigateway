@@ -7,6 +7,7 @@ import logFilterIndexes005 from "./migrations/005_log_filter_indexes.sql" with {
 import modelWindowIndex006 from "./migrations/006_model_window_index.sql" with { type: "text" };
 import keyGuardrail007 from "./migrations/007_key_guardrail.sql" with { type: "text" };
 import keySmartRouting008 from "./migrations/008_key_smart_routing.sql" with { type: "text" };
+import requestTrace009 from "./migrations/009_request_trace.sql" with { type: "text" };
 
 /**
  * Anything that can run a statement: the pool, a reserved connection, or the
@@ -46,6 +47,7 @@ const MIGRATIONS: ReadonlyArray<{ id: number; sql: string }> = [
   { id: 6, sql: modelWindowIndex006 },
   { id: 7, sql: keyGuardrail007 },
   { id: 8, sql: keySmartRouting008 },
+  { id: 9, sql: requestTrace009 },
 ];
 
 /**

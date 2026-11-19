@@ -22,6 +22,16 @@ export type SpanAttrs = {
   credential_id?: string | undefined;
   host?: string | undefined;
   path?: string | undefined;
+  /**
+   * Request traceability on the root span, so a trace joins its log row. Ids
+   * only: tags and metadata are unbounded cardinality for a trace store and
+   * reach external systems through log export instead.
+   */
+  "omni.request.id"?: string | undefined;
+  "omni.session.id"?: string | undefined;
+  "omni.turn.id"?: string | undefined;
+  "omni.agent"?: string | undefined;
+  "omni.upstream.request_id"?: string | undefined;
 };
 
 export type OnlySpanAttrs<T> = T & Record<Exclude<keyof T, keyof SpanAttrs>, never>;

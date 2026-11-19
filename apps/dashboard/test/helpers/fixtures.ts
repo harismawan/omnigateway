@@ -251,6 +251,13 @@ export function log(patch: Partial<RequestLog> = {}): RequestLog {
     rtkCompressedCodeUnits: 0,
     rtkEstimatedTokensSaved: 0,
     rtkFilters: [],
+    sessionId: null,
+    turnId: null,
+    agent: null,
+    tags: [],
+    traceMetadata: {},
+    clientRequestId: null,
+    upstreamRequestId: null,
     ...patch,
   };
 }
@@ -292,6 +299,12 @@ export function clientLog(patch: Partial<ClientRequestLog> = {}): ClientRequestL
     degradations: row.degradations,
     rtkApplied: row.rtkApplied,
     rtkEstimatedTokensSaved: row.rtkEstimatedTokensSaved,
+    sessionId: row.sessionId,
+    turnId: row.turnId,
+    agent: row.agent,
+    tags: row.tags,
+    traceMetadata: row.traceMetadata,
+    clientRequestId: row.clientRequestId,
     ...patch,
   };
 }

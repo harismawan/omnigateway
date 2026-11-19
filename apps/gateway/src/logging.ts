@@ -1,6 +1,6 @@
 import type { GatewayError, LogFields } from "@omni/ir";
 import { describeError, type Logger, noopLogger, type ProviderId } from "@omni/ir";
-import type { RequestLog, Store } from "@omni/store";
+import { EMPTY_TRACE, type RequestLog, type Store } from "@omni/store";
 import type { RequestCompleted } from "@omnigateway/plugin-api";
 import type { Invalidator } from "./stream/broadcaster.ts";
 import type { Telemetry } from "./telemetry/index.ts";
@@ -41,6 +41,7 @@ function requestLogDefaults(id: string, at: number): RequestLog {
     rtkCompressedCodeUnits: 0,
     rtkEstimatedTokensSaved: 0,
     rtkFilters: [],
+    ...EMPTY_TRACE,
   };
 }
 

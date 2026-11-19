@@ -92,6 +92,12 @@ test("the client shape is an allowlist, so a new store column does not ship by d
       "state",
       "status",
       "ttftMs",
+      "sessionId",
+      "turnId",
+      "agent",
+      "tags",
+      "traceMetadata",
+      "clientRequestId",
     ].sort(),
   );
 });
@@ -106,4 +112,33 @@ test("what the client is entitled to is still there", () => {
   expect(projected.requestedModel).toBe("fast");
   // The provider, yes; the account, no.
   expect(projected.resolvedProvider).toBe("anthropic");
+});
+
+/**
+ * The caller supplied its trace, so it reads it back. The provider's request id
+ * names a request on the operator's account and stays operator-only.
+ */
+test("trace fields the caller sent are kept; the upstream request id is not", () => {
+  const UPSTREAM = "req_upstream_secret_42";
+  const projected = toClientLog(
+    requestLog({
+      id: "r1",
+      sessionId: "claude-code:s1",
+      turnId: "t1",
+      agent: "claude-code",
+      tags: ["team-a"],
+      traceMetadata: { owner: "ops" },
+      clientRequestId: "cli-1",
+      upstreamRequestId: UPSTREAM,
+    }),
+  );
+  expect(projected).toMatchObject({
+    sessionId: "claude-code:s1",
+    turnId: "t1",
+    agent: "claude-code",
+    tags: ["team-a"],
+    traceMetadata: { owner: "ops" },
+    clientRequestId: "cli-1",
+  });
+  expect(JSON.stringify(projected)).not.toContain(UPSTREAM);
 });

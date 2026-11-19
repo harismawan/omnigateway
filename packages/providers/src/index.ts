@@ -46,3 +46,4 @@ export type { ProviderRegistryEntry } from "./registry.ts";
 export { ADAPTERS, PROVIDERS, registerProvider } from "./registry.ts";
 export * from "./sse.ts";
 export * from "./types.ts";
+export { upstreamRequestIdOf } from "./upstreamRequestId.ts";

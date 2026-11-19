@@ -34,7 +34,7 @@ import { adminRoutes } from "./routes/admin.ts";
 import { clientRoutes } from "./routes/client.ts";
 import { connectRoutes } from "./routes/connect.ts";
 import { databaseRoutes } from "./routes/database.ts";
-import { proxyRoutes } from "./routes/proxy.ts";
+import { proxyRoutes, REQUEST_ID_HEADER } from "./routes/proxy.ts";
 import { streamRoutes } from "./routes/stream.ts";
 import { type Broadcaster, createBroadcaster } from "./stream/broadcaster.ts";
 import { type ChannelRegistry, createChannelRegistry } from "./stream/channels.ts";
@@ -197,7 +197,7 @@ const QUIESCE_BODY: Readonly<Record<string, (message: string) => unknown>> = {
   "/v1/responses": (m) => responsesErrorBody("OVERLOADED", m),
 };
 
-function quiesceResponse(path: string): Response {
+function quiesceResponse(path: string, requestId: string): Response {
   const render = QUIESCE_BODY[path];
   const body =
     render === undefined
@@ -205,7 +205,12 @@ function quiesceResponse(path: string): Response {
       : render(QUIESCE_MESSAGE);
   return new Response(JSON.stringify(body), {
     status: HTTP_STATUS.OVERLOADED,
-    headers: { "content-type": "application/json", "retry-after": "5" },
+    headers: {
+      "content-type": "application/json",
+      "retry-after": "5",
+      // Every client response names its request, this refusal included.
+      [REQUEST_ID_HEADER]: requestId,
+    },
   });
 }
 
@@ -264,7 +269,21 @@ export function createApp(deps: AppDeps) {
   // passed through here. The guard belongs at the read site in
   // `dispatch/index.ts`, which is on the path however the map was built.
   const adapters = deps.adapters ?? ADAPTERS;
-  const requestId = deps.requestId ?? (() => `req_${crypto.randomUUID()}`);
+  const mintRequestId = deps.requestId ?? (() => `req_${crypto.randomUUID()}`);
+  /**
+   * Client traffic gets its id at the gate, before any route runs, so a
+   * quiesce refusal can name it too; the proxy route then answers under the
+   * same id rather than minting a second one. Keyed on the `Request` object,
+   * which is what both hooks see, and weakly, so nothing outlives the request.
+   */
+  const gatedIds = new WeakMap<Request, string>();
+  const requestIdFor = (request: Request): string => {
+    const known = gatedIds.get(request);
+    if (known !== undefined) return known;
+    const fresh = mintRequestId();
+    gatedIds.set(request, fresh);
+    return fresh;
+  };
   const loadRegistry = deps.loadRegistry ?? createLoadRegistry(coord);
   const telemetry = deps.telemetry;
   const rateLimiter =
@@ -368,8 +387,9 @@ export function createApp(deps: AppDeps) {
       .onRequest(({ request }) => {
         const path = new URL(request.url).pathname;
         if (!isClientTraffic(path)) return;
+        const id = requestIdFor(request);
         const release = latch.enter();
-        if (release === null) return quiesceResponse(path);
+        if (release === null) return quiesceResponse(path, id);
         admitted.set(request, release);
       })
       .onAfterResponse(({ request }) => {
@@ -425,7 +445,8 @@ export function createApp(deps: AppDeps) {
           now,
           rand,
           refresh,
-          requestId,
+          requestId: mintRequestId,
+          requestIdFor,
           rateLimiter,
           logger,
           coord,

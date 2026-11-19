@@ -180,6 +180,8 @@ export async function createStore(opts: {
       page: (query) => handle.usage.page(query),
       lastUsedByCredential: (credentialId) => handle.usage.lastUsedByCredential(credentialId),
       scan: (cursor, limit) => handle.usage.scan(cursor, limit),
+      sessions: (q) => handle.usage.sessions(q),
+      get: (id) => handle.usage.get(id),
       aggregate: (q) => handle.usage.aggregate(q),
       // Every argument, the optional model included: dropped here, a model
       // override's window would silently read the whole key's traffic.

@@ -4,7 +4,7 @@ import { deriveKey } from "../src/encryption.ts";
 import { openDb } from "../src/sqlite/db.ts";
 import { createKeyRepo, generateApiKey, hashApiKey } from "../src/sqlite/keys.ts";
 import { createStore } from "../src/sqlite/store.ts";
-import type { LimitConfig, Settings, Store } from "../src/types.ts";
+import { EMPTY_TRACE, type LimitConfig, type Settings, type Store } from "../src/types.ts";
 
 async function store(): Promise<Store> {
   return createStore({
@@ -342,6 +342,7 @@ test("usage appends, lists recent, and aggregates by model", async () => {
     rtkCompressedCodeUnits: 0,
     rtkEstimatedTokensSaved: 0,
     rtkFilters: [],
+    ...EMPTY_TRACE,
   };
   await s.usage.append(log);
   await s.usage.append({ ...log, id: "r2", at: 2000, status: 429, errorCode: "RATE_LIMIT" });
@@ -385,6 +386,7 @@ test("prune removes logs older than the cutoff", async () => {
     rtkCompressedCodeUnits: 0,
     rtkEstimatedTokensSaved: 0,
     rtkFilters: [],
+    ...EMPTY_TRACE,
   };
   await s.usage.append({ ...base, id: "old", at: 100 });
   await s.usage.append({ ...base, id: "new", at: 9000 });

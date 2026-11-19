@@ -23,6 +23,7 @@ import {
 } from "../logging.ts";
 import type { Invalidator } from "../stream/broadcaster.ts";
 import type { Telemetry } from "../telemetry/index.ts";
+import { type TraceContext, withTrace } from "../trace/extract.ts";
 import { type VerdictCache, verdictKey } from "./cache.ts";
 import { classifierRequest, parseVerdict, type Verdict } from "./classifier.ts";
 import { judgedText } from "./extract.ts";
@@ -104,6 +105,7 @@ async function callClassifier(
     timeoutMs: number;
     debit: UsageDebit;
     localOnly: boolean;
+    trace: TraceContext | null;
   },
 ): Promise<ClassifierResult> {
   const id = deps.requestId();
@@ -133,14 +135,17 @@ async function callClassifier(
           began = true;
           await beginLog(
             deps.store,
-            newPendingRequestLog({
-              id,
-              at,
-              requestedModel: input.request.model,
-              resolvedProvider: target.provider,
-              resolvedModel: target.model,
-              credentialId: target.credentialId,
-            }),
+            withTrace(
+              newPendingRequestLog({
+                id,
+                at,
+                requestedModel: input.request.model,
+                resolvedProvider: target.provider,
+                resolvedModel: target.model,
+                credentialId: target.credentialId,
+              }),
+              input.trace,
+            ),
             input.apiKeyId,
             deps.logger,
             deps.broadcaster,
@@ -168,6 +173,7 @@ async function callClassifier(
     outcome?.log() ??
     newCompletedRequestLog(id, at, { requestedModel: input.request.model, status: 0 });
   if (!log.degradations.includes(CLASSIFIER_NOTE)) log.degradations.push(CLASSIFIER_NOTE);
+  withTrace(log, input.trace);
   // Dispatch reads the composed signal, so it files the timeout as a client
   // abort. The row says what happened instead: this gateway's own deadline.
   const assign = (status: number, errorCode: string): void => {
@@ -230,6 +236,8 @@ export async function judge(
     signal: AbortSignal;
     debit: UsageDebit;
     parentRequestId: string;
+    /** The parent's trace, inherited by the classifier row. */
+    trace?: TraceContext | null;
     /**
      * The classifier model, overriding `settings.guardrailModel` when present.
      * Smart routing passes its local classifier for a request going local, so
@@ -286,6 +294,7 @@ export async function judge(
     timeoutMs: settings.guardrailTimeoutMs,
     debit: input.debit,
     localOnly: input.localOnly === true,
+    trace: input.trace ?? null,
   });
   if (result.kind === "cancelled") return result;
   if (result.kind === "failed") {

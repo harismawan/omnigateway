@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import styled from "styled-components";
 import type { RequestRow } from "../../api/types.ts";
+import { CopyInline } from "../../components/CopyInline.tsx";
 import {
   formatClock,
   formatCount,
@@ -71,7 +72,32 @@ export type RequestTableProps = {
   now: number;
   names?: RequestNames;
   onOpen: (log: RequestRow) => void;
+  /**
+   * Narrows the log to one session. When present, the Session column renders
+   * each id as a button that filters rather than opening the row.
+   */
+  onSession?: (sessionId: string) => void;
 };
+
+/** A session id in a cell: the tail is what tells sessions apart, so keep it visible. */
+const SessionButton = styled.button`
+  all: unset;
+  cursor: pointer;
+  display: block;
+  max-width: 18ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+  font-family: ${({ theme }) => theme.font.mono};
+  color: ${({ theme }) => theme.color.inkDim};
+  &:hover,
+  &:focus-visible {
+    color: ${({ theme }) => theme.color.accent};
+    text-decoration: underline;
+  }
+`;
 
 /**
  * One row per request, most recent first.
@@ -81,7 +107,7 @@ export type RequestTableProps = {
  * provider tag, the token breakdown, the outcome chip — describes the request
  * rather than the installation that served it.
  */
-export function RequestTable({ rows, now, names, onOpen }: RequestTableProps) {
+export function RequestTable({ rows, now, names, onOpen, onSession }: RequestTableProps) {
   return (
     <Table>
       <thead>
@@ -90,6 +116,7 @@ export function RequestTable({ rows, now, names, onOpen }: RequestTableProps) {
           <Th $align="right">Time</Th>
           <Th>Requested</Th>
           <Th>Routed to</Th>
+          <Th>Session</Th>
           {names === undefined ? null : (
             <>
               <Th>Account</Th>
@@ -132,6 +159,30 @@ export function RequestTable({ rows, now, names, onOpen }: RequestTableProps) {
                   <ProviderTag provider={log.resolvedProvider} />
                   <Mono $dim>{log.resolvedModel ?? "—"}</Mono>
                 </Row>
+              )}
+            </Td>
+            <Td>
+              {log.sessionId === null ? (
+                <Legend>—</Legend>
+              ) : onSession === undefined ? (
+                <Truncate style={{ display: "block", maxWidth: "18ch" }} title={log.sessionId}>
+                  {log.sessionId}
+                </Truncate>
+              ) : (
+                <SessionButton
+                  type="button"
+                  title={log.sessionId}
+                  aria-label={`Filter by session ${log.sessionId}`}
+                  onClick={(event) => {
+                    // The row opens on click; this cell filters instead.
+                    event.stopPropagation();
+                    onSession(log.sessionId ?? "");
+                  }}
+                >
+                  {/* `rtl` keeps the distinguishing tail visible; the bidi
+                      isolate stops it reordering the id's own characters. */}
+                  <bdi>{log.sessionId}</bdi>
+                </SessionButton>
               )}
             </Td>
             {names === undefined ? null : (
@@ -223,7 +274,9 @@ export function RequestDetail({ log, names, children }: RequestDetailProps) {
     <Stack $gap={3}>
       <Detail>
         <Legend as="dt">Request id</Legend>
-        <Value>{log.id}</Value>
+        <Value>
+          <CopyInline value={log.id} label="Copy request id" />
+        </Value>
         <Legend as="dt">At</Legend>
         <Value>{formatDateTime(log.at)}</Value>
         <Legend as="dt">Requested model</Legend>
@@ -308,7 +361,71 @@ export function RequestDetail({ log, names, children }: RequestDetailProps) {
             <Value>{log.rtkFilters.length === 0 ? "—" : log.rtkFilters.join(", ")}</Value>
           </>
         )}
+        {/* What the caller said this request belongs to. Every field is
+            caller-supplied grouping, so it is shown exactly as sent. */}
+        <Legend as="dt">Session</Legend>
+        <Value>
+          {log.sessionId === null ? "—" : <CopyInline value={log.sessionId} label="Copy session" />}
+        </Value>
+        <Legend as="dt">Turn</Legend>
+        <Value>
+          {log.turnId === null ? "—" : <CopyInline value={log.turnId} label="Copy turn" />}
+        </Value>
+        <Legend as="dt">Agent</Legend>
+        <Value>{log.agent ?? "—"}</Value>
+        <Legend as="dt">Client request id</Legend>
+        <Value>
+          {log.clientRequestId === null ? (
+            "—"
+          ) : (
+            <CopyInline value={log.clientRequestId} label="Copy client request id" />
+          )}
+        </Value>
+        {/* The provider's id names a request on the operator's account. It is
+            on the operator's row only; guarded on the field, like RTK filters. */}
+        {log.upstreamRequestId === undefined ? null : (
+          <>
+            <Legend as="dt">Provider request id</Legend>
+            <Value>
+              {log.upstreamRequestId === null ? (
+                "—"
+              ) : (
+                <CopyInline value={log.upstreamRequestId} label="Copy provider request id" />
+              )}
+            </Value>
+          </>
+        )}
       </Detail>
+
+      {log.tags.length === 0 && Object.keys(log.traceMetadata).length === 0 ? null : (
+        <Stack $gap={1}>
+          <Row $gap={2} $wrap>
+            <Legend>Tags and metadata</Legend>
+            {/* Copied in the header syntax the caller sends, so a value can be
+                pasted straight back into `x-omni-tags` / `x-omni-metadata`. */}
+            {log.tags.length === 0 ? null : (
+              <CopyInline value={log.tags.join(",")} label="Copy tags" showValue={false} />
+            )}
+            {Object.keys(log.traceMetadata).length === 0 ? null : (
+              <CopyInline
+                value={Object.entries(log.traceMetadata)
+                  .map(([key, value]) => `${encodeURIComponent(key)}:${encodeURIComponent(value)}`)
+                  .join(",")}
+                label="Copy metadata"
+                showValue={false}
+              />
+            )}
+          </Row>
+          <Row $gap={1} $wrap>
+            {log.tags.map((tag) => (
+              <Chip key={`tag:${tag}`}>{tag}</Chip>
+            ))}
+            {Object.entries(log.traceMetadata).map(([key, value]) => (
+              <Chip key={`meta:${key}`} $tone="accent">{`${key}: ${value}`}</Chip>
+            ))}
+          </Row>
+        </Stack>
+      )}
 
       {log.degradations.length === 0 ? null : (
         <Stack $gap={1}>

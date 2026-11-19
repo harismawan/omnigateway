@@ -346,9 +346,14 @@ Ask for one of your virtual models by name. A bare provider model
 that accept a custom base URL work unchanged: set it to `http://127.0.0.1:9000`
 and use a gateway key where the provider key goes.
 
-Rate-limit headers, the `/v1/models` listing shape, and why an Anthropic-defined
-tool pins a request to an Anthropic account are in
-[docs/client-api.md](docs/client-api.md).
+Every response carries `x-omni-request-id`. Claude Code, OpenCode, Codex and Pi
+sessions are recognised from their own headers and grouped in the console's
+Sessions tab; any client can label requests with `x-omni-session-id`,
+`x-omni-tags` and `x-omni-metadata`.
+
+Rate-limit headers, request ids and traceability headers, the `/v1/models`
+listing shape, and why an Anthropic-defined tool pins a request to an Anthropic
+account are in [docs/client-api.md](docs/client-api.md).
 
 ## The CLI
 
@@ -367,6 +372,8 @@ Use `--db <path>` to point one command somewhere else.
 | `omni doctor` | which installation it resolved, and whether it can act on it |
 | `omni logs` | recent requests as the gateway recorded them; filter and page with `--failed`, `--key`, `--since`, `--cursor` |
 | `omni logs export` | matching request metadata as CSV or JSONL on stdout; `--since` and `--until` required |
+| `omni logs sessions` | per-session requests, turns, tokens and cost, highest cost first; filter the log with `--session`, `--agent`, `--tag` |
+| `omni logs show <request-id>` | everything recorded about one request: routing, cost, session, tags, client and provider request ids |
 | `omni bodies <request-id>` | captured bodies for one request; withheld unless you pass `--full` |
 | `omni console` | the gateway process's own output: boot, refreshes, quota, errors |
 | `omni usage` | spend and tokens, by provider, model, key, or day; `--account <id>` and `--key <id>` narrow to one account or gateway key |

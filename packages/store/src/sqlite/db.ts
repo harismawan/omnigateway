@@ -19,6 +19,7 @@ import logTextSearch017 from "./migrations/017_log_text_search.sql" with { type:
 import modelWindowIndex018 from "./migrations/018_model_window_index.sql" with { type: "text" };
 import keyGuardrail019 from "./migrations/019_key_guardrail.sql" with { type: "text" };
 import keySmartRouting020 from "./migrations/020_key_smart_routing.sql" with { type: "text" };
+import requestTrace021 from "./migrations/021_request_trace.sql" with { type: "text" };
 import { backfillDaily, backfillRtkUsage, hostDayOffsetMinutes, rebuildRollup } from "./rollup.ts";
 
 /**
@@ -70,6 +71,9 @@ const MIGRATIONS: ReadonlyArray<{
   // No `after`, for the same reason: a key minted before the column existed was
   // never routed, and switching it on would rewrite its client's requests.
   { id: 20, sql: keySmartRouting020 },
+  // No `after`: rows written before the columns existed carry no trace, and
+  // inventing one would attribute old traffic to sessions it never had.
+  { id: 21, sql: requestTrace021 },
 ];
 
 /**

@@ -4,9 +4,20 @@ import type { SQL } from "bun";
 import { logPageClauses, splitPage } from "../logPage.ts";
 import { HOUR_MS, hourOf, startOfDay } from "../sqlite/rollup.ts";
 import {
+  readSession,
+  readTrace,
+  type SessionRow,
+  sessionsSql,
+  TRACE_COLUMN_NAMES,
+  type TraceRow,
+  traceCompleteSet,
+  traceValues,
+} from "../traceColumns.ts";
+import {
   NODE_GRACE_MS,
   type RequestLog,
   type RequestState,
+  SESSIONS_LIMIT,
   type UsageBucket,
   type UsageDimension,
   type UsageGrain,
@@ -42,7 +53,7 @@ type Row = {
   rtk_compressed_code_units: string;
   rtk_estimated_tokens_saved: string;
   rtk_filters: string;
-};
+} & TraceRow;
 
 function parseRtkFilters(raw: string): import("@omni/rtk/catalog").RtkFilterId[] {
   try {
@@ -79,6 +90,7 @@ const toLog = (r: Row): RequestLog => ({
   rtkCompressedCodeUnits: num(r.rtk_compressed_code_units),
   rtkEstimatedTokensSaved: num(r.rtk_estimated_tokens_saved),
   rtkFilters: parseRtkFilters(r.rtk_filters),
+  ...readTrace(r),
 });
 
 /**
@@ -159,9 +171,10 @@ const COLUMNS = `(id, state, node_id, at, api_key_id, requested_model, resolved_
                   resolved_model, credential_id, attempts, status, error_code, input_tokens,
                   output_tokens, cache_read_tokens, cache_write_tokens, ttft_ms, duration_ms,
                   cost_usd, degradations, rtk_applied, rtk_filter_hits, rtk_original_code_units,
-                  rtk_compressed_code_units, rtk_estimated_tokens_saved, rtk_filters)`;
+                  rtk_compressed_code_units, rtk_estimated_tokens_saved, rtk_filters,
+                  ${TRACE_COLUMN_NAMES.join(", ")})`;
 
-const PLACEHOLDERS = `(${Array.from({ length: 26 }, (_, i) => `$${i + 1}`).join(",")})`;
+const PLACEHOLDERS = `(${Array.from({ length: 26 + TRACE_COLUMN_NAMES.length }, (_, i) => `$${i + 1}`).join(",")})`;
 
 function values(log: RequestLog, state: RequestState, nodeId: string): unknown[] {
   return [
@@ -191,6 +204,7 @@ function values(log: RequestLog, state: RequestState, nodeId: string): unknown[]
     log.rtkCompressedCodeUnits ?? 0,
     log.rtkEstimatedTokensSaved ?? 0,
     JSON.stringify(log.rtkFilters ?? []),
+    ...traceValues(log),
   ];
 }
 
@@ -229,7 +243,8 @@ const COMPLETE = `INSERT INTO request_logs ${COLUMNS} VALUES ${PLACEHOLDERS}
     rtk_original_code_units = EXCLUDED.rtk_original_code_units,
     rtk_compressed_code_units = EXCLUDED.rtk_compressed_code_units,
     rtk_estimated_tokens_saved = EXCLUDED.rtk_estimated_tokens_saved,
-    rtk_filters = EXCLUDED.rtk_filters
+    rtk_filters = EXCLUDED.rtk_filters,
+    ${traceCompleteSet("EXCLUDED")}
   WHERE request_logs.state = 'pending'`;
 
 const sum = (row: SumRow | undefined) => ({
@@ -359,8 +374,25 @@ export function createUsageRepo(sql: SQL, nodeId: string, dayOffsetMinutes: numb
       return rows.map(toLog);
     },
 
+    async get(id) {
+      const rows = await sql.unsafe<Rows<Row>>("SELECT * FROM request_logs WHERE id = $1", [id]);
+      const row = rows[0];
+      return row === undefined ? null : toLog(row);
+    },
+
+    async sessions(q) {
+      const { sql: text, extra } = sessionsSql((n) => `$${n}`, q);
+      const rows = await sql.unsafe<Rows<SessionRow>>(text, [
+        q.since,
+        q.until,
+        ...extra,
+        SESSIONS_LIMIT,
+      ]);
+      return rows.map(readSession);
+    },
+
     async page(query) {
-      const { where, bindings } = logPageClauses(query, (n) => `$${n}`, "ILIKE");
+      const { where, bindings } = logPageClauses(query, (n) => `$${n}`, "ILIKE", "strpos");
       const rows = (
         await sql.unsafe<Rows<Row>>(
           `SELECT * FROM request_logs ${where}
