@@ -6,6 +6,7 @@ mod context;
 mod credentials;
 mod database;
 mod date;
+mod doctor;
 mod limits;
 mod models;
 mod mutations;
@@ -17,6 +18,7 @@ mod process;
 mod quota;
 mod quota_operations;
 mod registry;
+mod service;
 mod settings;
 mod setup;
 mod status;
@@ -68,6 +70,8 @@ pub fn run(argv: Vec<String>) -> ExitCode {
                     database::run(&command, &flags, &positional).map_err(|e| (1, e))
                 } else if command == "status" {
                     status::run(&flags).map_err(|e| (1, e))
+                } else if service::owns(&command) {
+                    service::run(&command, &flags)
                 } else if command == "admin-set-password" {
                     password::run(&flags).map_err(|e| (1, e))
                 } else if command.starts_with("setup-") {
@@ -88,7 +92,7 @@ pub fn run(argv: Vec<String>) -> ExitCode {
             });
         return match result {
             Ok(out) => {
-                if !observability::owns(&command) {
+                if !observability::owns(&command) && !service::owns(&command) {
                     println!("{out}");
                 }
                 if command.starts_with("setup-")
