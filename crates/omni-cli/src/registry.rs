@@ -332,6 +332,12 @@ pub fn command_help(name: &str) -> String {
 pub fn implemented(name: &str) -> Option<String> {
     if matches!(
         name,
+        "start" | "stop" | "restart" | "doctor" | "service install" | "service uninstall"
+    ) {
+        return Some(name.replace(' ', "-"));
+    }
+    if matches!(
+        name,
         "logs"
             | "logs export"
             | "usage"

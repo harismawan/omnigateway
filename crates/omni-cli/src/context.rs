@@ -23,10 +23,12 @@ fn absolute(base: &Path, value: &str) -> PathBuf {
 /// Resolving prints the ambient-database warning, as TS does before a command
 /// runs; opening the store is a separate, later step.
 pub struct Context {
+    pub root_source: &'static str,
+    pub warnings: Vec<String>,
     pub env: HashMap<String, String>,
     pub root: PathBuf,
     pub path: PathBuf,
-    config: Result<Config, omni_control::config::ConfigError>,
+    pub(crate) config: Result<Config, omni_control::config::ConfigError>,
 }
 
 pub fn open(flags: &HashMap<String, String>) -> Result<omni_store::SqliteStore, String> {
@@ -37,6 +39,18 @@ pub fn resolve(flags: &HashMap<String, String>) -> Result<Context, String> {
     let mut env = process_env();
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let flag_root = flags.get("root").filter(|s| !s.is_empty());
+    let root_source = if flag_root.is_some() {
+        "flag"
+    } else if env.get("OMNI_ROOT").is_some_and(|s| !s.is_empty()) {
+        "env"
+    } else if [".env", "omnigateway.db", "apps/gateway/src/index.ts"]
+        .iter()
+        .any(|p| cwd.join(p).exists())
+    {
+        "cwd"
+    } else {
+        "default"
+    };
     let root = if let Some(r) = flag_root.or_else(|| env.get("OMNI_ROOT").filter(|s| !s.is_empty()))
     {
         absolute(&cwd, r)
@@ -98,13 +112,18 @@ pub fn resolve(flags: &HashMap<String, String>) -> Result<Context, String> {
             .or_else(|| config.as_ref().ok().map(|c| c.database_path.as_str()))
             .unwrap_or("omnigateway.db"),
     );
+    let mut warnings = Vec::new();
     if let Some(old) = suppressed {
-        eprintln!(
+        let warning = format!(
             "ignoring OMNI_DB_PATH={old} from the environment because --root was given; using {}",
             path.display()
         );
+        eprintln!("{warning}");
+        warnings.push(warning);
     }
     Ok(Context {
+        root_source,
+        warnings,
         root,
         path,
         config,

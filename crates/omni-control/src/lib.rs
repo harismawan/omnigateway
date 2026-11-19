@@ -13,6 +13,7 @@ pub mod credentials;
 pub mod database;
 pub mod database_fs;
 pub mod date;
+pub mod diagnostics;
 pub mod dry_run;
 pub mod fs_error;
 #[cfg(test)]

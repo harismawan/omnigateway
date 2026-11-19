@@ -216,6 +216,12 @@ pub fn parse_command(args: &[String], command: &str) -> Result<ParsedCommand, St
                 || crate::observability::bool_option(command, name)
                 || (command == "credentials-health" && name == "all")
                 || (command == "status" && name == "system")
+                || (matches!(
+                    command,
+                    "start" | "doctor" | "service-install" | "service-uninstall"
+                ) && name == "system")
+                || (command == "start" && name == "foreground")
+                || (command == "service-install" && matches!(name, "enable" | "force"))
                 || ((command.starts_with("setup-") || command == "db-restore")
                     && name == "dry-run")
                 || (command == "models-put" && name == "alias")

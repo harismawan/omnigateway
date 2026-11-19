@@ -235,6 +235,33 @@ pub fn provider_plugins(root: &Path) -> Vec<String> {
         .collect()
 }
 
+/// Metadata only; `loadable` is deliberately false because this runtime does
+/// not execute plugins, even when their manifest passes the metadata checks.
+pub fn doctor_metadata(root: &Path) -> Option<serde_json::Value> {
+    let dir = root.join("plugins");
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(serde_json::json!([])),
+        Err(_) => return None,
+    };
+    let mut paths = entries
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?
+        .into_iter()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect::<Vec<_>>();
+    paths.sort();
+    Some(serde_json::Value::Array(paths.into_iter().map(|path| {
+        let id=path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let manifest=std::fs::read_to_string(path.join("omni-plugin.json")).ok().and_then(|s|crate::operator_json::parse(&s).ok());
+        let valid=manifest.as_ref().is_some_and(|m| manifest_capabilities(m).is_some());
+        let manifest=manifest.as_ref().and_then(omni_ir::jsjson::stringify).and_then(|s|serde_json::from_str::<serde_json::Value>(&s).ok()).unwrap_or(serde_json::Value::Null);
+        let field=|key:&str|manifest.get(key).cloned().unwrap_or(serde_json::Value::Null);
+        serde_json::json!({"id":id,"path":path,"name":field("name"),"version":field("version"),"api":field("api"),"sdk":field("sdk"),"capabilities":manifest.get("capabilities").cloned().unwrap_or(serde_json::json!([])),"origins":manifest.get("origins").cloned().unwrap_or(serde_json::json!([])),"manifest":manifest,"loadable":false,"problems":[{"check":if valid{"entry"}else{"manifest"},"reason":if valid{"plugins are not supported in this release; metadata only, code not checked or executed"}else{"manifest unavailable or invalid; plugins are not supported in this release"},"fatal":true}]})
+    }).collect()))
+}
+
 #[cfg(test)]
 mod tests {
     fn caps(raw: &str) -> Option<Vec<String>> {
