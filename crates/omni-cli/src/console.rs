@@ -6,20 +6,14 @@ use std::{
     path::PathBuf,
     process::Command,
 };
-enum Source {
+pub(crate) enum Source {
     File(PathBuf),
     Journal(bool),
     None,
 }
-fn source(ctx: &crate::context::Context, flags: &Flags) -> Source {
-    let home = std::env::home_dir().unwrap_or_default();
+pub(crate) fn source(ctx: &crate::context::Context, flags: &Flags) -> Source {
     let system = flags.contains_key("system");
-    let installed = if system {
-        PathBuf::from("/etc/systemd/system/omnigateway.service")
-    } else {
-        home.join(".config/systemd/user/omnigateway.service")
-    }
-    .exists();
+    let installed = crate::service::unit(flags).exists();
     if let Some(file) = ctx
         .env
         .get("OMNI_LOG_FILE")
@@ -31,19 +25,14 @@ fn source(ctx: &crate::context::Context, flags: &Flags) -> Source {
     if installed {
         return Source::Journal(system);
     }
-    let file = ctx
-        .env
-        .get("XDG_STATE_HOME")
-        .filter(|s| !s.is_empty())
-        .map_or_else(|| home.join(".local/state"), PathBuf::from)
-        .join("omnigateway/gateway.log");
+    let file = crate::service::state(ctx).join("gateway.log");
     if file.exists() {
         Source::File(file)
     } else {
         Source::None
     }
 }
-fn hint(source: &Source) -> String {
+pub(crate) fn hint(source: &Source) -> String {
     match source {
         Source::File(p) => format!("{} (named by OMNI_LOG_FILE)", p.display()),
         Source::Journal(_) => "systemd journal for omnigateway.service".into(),

@@ -4,12 +4,7 @@ pub(crate) fn service_status(
     ctx: &crate::context::Context,
     flags: &HashMap<String, String>,
 ) -> Result<Value, String> {
-    let home = std::env::home_dir().unwrap_or_default();
-    let unit = if flags.contains_key("system") {
-        std::path::PathBuf::from("/etc/systemd/system/omnigateway.service")
-    } else {
-        home.join(".config/systemd/user/omnigateway.service")
-    };
+    let unit = crate::service::unit(flags);
     let process = if unit.exists() {
         let run = |args: &[&str]| -> Result<std::process::Output, String> {
             let mut c = Command::new("systemctl");
@@ -43,13 +38,7 @@ pub(crate) fn service_status(
         let pid = pid(&String::from_utf8_lossy(&shown.stdout));
         json!({"supervisor":"systemd","running":state=="active","pid":pid,"state":state,"unitPath":unit,"logFile":null})
     } else {
-        let state = ctx
-            .env
-            .get("XDG_STATE_HOME")
-            .filter(|v| !v.is_empty())
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| home.join(".local/state"))
-            .join("omnigateway");
+        let state = crate::service::state(ctx);
         let file = state.join("gateway.pid");
         let mut p = if !file.exists() {
             None

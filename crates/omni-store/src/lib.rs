@@ -8,6 +8,7 @@
 mod backend;
 pub mod bodies;
 pub mod credentials;
+pub mod diagnostics;
 mod error;
 mod js;
 pub mod keys;

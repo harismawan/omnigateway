@@ -1,5 +1,8 @@
 # OmniGateway
 
+Rust local service commands and diagnostic migration limits are documented in
+[Rust CLI service boundary](docs/rust-cli-service.md).
+
 One endpoint in front of the AI accounts you already pay for.
 
 OmniGateway is a self-hosted gateway that speaks the Anthropic and OpenAI APIs

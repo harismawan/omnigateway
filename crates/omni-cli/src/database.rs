@@ -384,7 +384,7 @@ fn time(at: Option<i64>) -> String {
         .map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string())
         .unwrap_or("—".into())
 }
-fn confirm(question: &str) -> Result<(), String> {
+pub(crate) fn confirm(question: &str) -> Result<(), String> {
     use std::io::{BufRead, IsTerminal, Write};
     if !std::io::stdin().is_terminal() {
         return Err(format!("{question} — refusing without --yes"));
