@@ -4,6 +4,7 @@ use omni_ir::error::{ErrorCode, GatewayError};
 use serde_json::Value;
 use std::sync::Arc;
 pub struct GatewayHost {
+    pub completed: Option<Arc<dyn Fn() + Send + Sync>>,
     pub refresh: Arc<crate::refresh::Refresher>,
     pub control: crate::admin_routes::ControlStore,
     pub holder: Option<Arc<omni_gateway_core::snapshot::SnapshotHolder>>,
@@ -12,6 +13,11 @@ fn internal() -> GatewayError {
     GatewayError::new(ErrorCode::Internal, "quota persistence failed").gateway_authored()
 }
 impl Host for GatewayHost {
+    fn completed(&self) {
+        if let Some(callback) = &self.completed {
+            callback();
+        }
+    }
     fn credentials(&self) -> Task<'_, Vec<omni_store::Credential>> {
         Box::pin(async {
             self.refresh
@@ -121,7 +127,7 @@ pub fn start(
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             ticks.tick().await;
-            drop(quota.refresh(None).await);
+            drop(quota.poll().await);
             hub.invalidate("res:quota", None);
         }
     }))
@@ -228,14 +234,6 @@ pub async fn serve(
         }
     }
     .map_err(|e| ApiError::gateway(e.code, e.message))?;
-    if operation == "redeem"
-        || result["outcomes"].as_array().is_some_and(|a| {
-            a.iter()
-                .any(|o| o["kind"] == "refreshed" || o["kind"] == "coalesced")
-        })
-    {
-        app.stream.invalidate("res:quota", None);
-    }
     Ok(json_ok(result.to_string()))
 }
 
@@ -255,6 +253,7 @@ mod tests {
                 .await
                 .expect("backend");
         let host = GatewayHost {
+            completed: None,
             control,
             holder: None,
             refresh: Arc::new(crate::refresh::Refresher::new(

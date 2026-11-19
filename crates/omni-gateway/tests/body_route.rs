@@ -37,6 +37,7 @@ async fn frozen_body_route_matrix() {
     let app = Arc::new(server::App {
         quota: omni_control::quota_runtime::Quota::new(Arc::new(
             omni_gateway::quota::GatewayHost {
+                completed: None,
                 holder: None,
                 refresh: h.deps.refresher.clone(),
                 control: admin_routes::ControlStore::new(store()),

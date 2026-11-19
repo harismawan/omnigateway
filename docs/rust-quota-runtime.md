@@ -11,6 +11,14 @@ and the timer. Per-account probes coalesce; 429 puts only usage probing into a
 three-minute cooldown. Empty/failed probes retain the old snapshot. They do not
 disable the credential. OAuth refresh uses the existing versioned CAS refresher.
 
+Worker capacity counts active attempts, not completed out-of-order results; final
+outcomes are reordered by account index. Admitted refresh/list/reset operations
+have completion owners independent of HTTP waiters. Reset ownership retains the
+account lock across list/spend/reread, without adding retries. Shutdown drains
+these operations within the existing grace. Gateway-injected completion notification
+runs after persistence/publication, even if a manual caller disconnects; scheduled
+passes keep their existing single unconditional notification.
+
 Provider quotas remain observations, not gateway counters. Snapshot and deduplicated
 history writes use the existing control transaction. Every persistence operation
 enters the A10 registered owner/access barrier; no SQLite connection or owner guard
@@ -23,6 +31,8 @@ within the shared shutdown grace. Quota invalidation is emitted after writes/pas
   reads/token retrieval/transport/save/clock. `Quota::new`, `refresh`, `credits`,
   `redeem`, `drain` are the caller-independent orchestration boundary. JSON results
   contain only quota outcomes/credits, never secrets or upstream error text.
+  `poll` suppresses manual notification because its scheduler owns that event;
+  `Host::completed` is an injected completion callback, with no transport in control.
 - `omni_control::quota_ops::history`: bounded operator history plus gateway rates,
   retained-span clamp and optional account filter applied before the sample cap.
 - `omni_gateway::quota::{GatewayHost,start,route,serve}`: runtime adapter, timer,

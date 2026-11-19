@@ -9,13 +9,18 @@ const [ts, rust, out] = process.argv.slice(2).map((p) => resolve(p));
 const key = await deriveKey("b10-private-secret");
 let requests: string[] = [];
 let mode = "ok";
+let releaseUsage: (() => void) | undefined;
 const server = Bun.serve({
   hostname: "127.0.0.1",
   port: 443,
   tls: { cert: Bun.file(join(out!, "cert.pem")), key: Bun.file(join(out!, "key.pem")) },
-  fetch(req) {
+  async fetch(req) {
     const u = new URL(req.url);
     requests.push(u.pathname);
+    if (mode === "held" && u.pathname.endsWith("/wham/usage"))
+      await new Promise<void>((ok) => {
+        releaseUsage = ok;
+      });
     if (mode === "limited") return Response.json({}, { status: 429 });
     if (mode === "empty") return Response.json({}, { status: 401 });
     const data = u.pathname.includes("/oauth/token")
@@ -117,6 +122,14 @@ for (const [index, binary] of [ts!, rust!].entries()) {
     };
   };
   await call("/api/setup", { password: "b10-private-password" });
+  const db = new Database(join(root, "db"));
+  db.run(
+    "INSERT INTO settings(key,value) VALUES('settings','{\"quotaPollIntervalMs\":0}') ON CONFLICT(key) DO UPDATE SET value=json_set(value,'$.quotaPollIntervalMs',0)",
+  );
+  child.kill("SIGTERM");
+  await child.exited;
+  child = launch();
+  await wait();
   const login = await call("/api/login", { password: "b10-private-password" });
   const cookie = login.cookie!;
   const pushed: { type: string; topic?: string }[] = [];
@@ -129,10 +142,6 @@ for (const [index, binary] of [ts!, rust!].entries()) {
   socket.send(JSON.stringify({ type: "subscribe", topic: "res:quota" }));
   for (let n = 0; n < 100 && !pushed.some((p) => p.type === "ack"); n++) await Bun.sleep(10);
   assert.ok(pushed.some((p) => p.type === "ack"));
-  const db = new Database(join(root, "db"));
-  db.run(
-    "INSERT INTO settings(key,value) VALUES('settings','{\"quotaPollIntervalMs\":0}') ON CONFLICT(key) DO UPDATE SET value=json_set(value,'$.quotaPollIntervalMs',0)",
-  );
   for (const p of ["openai", "anthropic", "antigravity"]) {
     db.run(
       "INSERT INTO credentials(id,provider,label,auth_type,access_token,expires_at,provider_data,created_at,updated_at) VALUES(?,?,?,'oauth',?,1893456000000,?,1,1)",
@@ -198,6 +207,59 @@ for (const [index, binary] of [ts!, rust!].entries()) {
     pushed: pushed.some((p) => p.type === "event" && p.topic === "res:quota"),
   });
   if (index === 0) assert.ok(pushed.some((p) => p.type === "event" && p.topic === "res:quota"));
+  // Abort an actual HTTP caller after the provider receives the request. A second
+  // dashboard socket must observe completion. Unlike dropping a control future,
+  // Hyper may continue polling the HTTP handler after the transport disconnect.
+  db.run(
+    "INSERT INTO credentials(id,provider,label,auth_type,access_token,expires_at,provider_data,created_at,updated_at) SELECT 'cancel',provider,label,auth_type,access_token,expires_at,provider_data,1,1 FROM credentials WHERE id='openai'",
+  );
+  for (const operation of ["refresh", "redeem"]) {
+    await Bun.sleep(5200);
+    pushed.length = 0;
+    releaseUsage = undefined;
+    mode = "held";
+    db.run("UPDATE quota_windows SET used=100 WHERE credential_id='cancel'");
+    const cancel = new AbortController();
+    const pending = fetch(
+      `http://127.0.0.1:18510/api/credentials/${operation === "refresh" ? "quota/refresh" : "cancel/resets/redeem"}`,
+      {
+        method: "POST",
+        headers: { Cookie: cookie, "Content-Type": "application/json" },
+        body: JSON.stringify(
+          operation === "refresh"
+            ? { kind: "one", credentialId: "cancel" }
+            : { creditId: "credit" },
+        ),
+        signal: cancel.signal,
+      },
+    ).catch(() => null);
+    for (let n = 0; n < 300 && !releaseUsage; n++) await Bun.sleep(10);
+    assert.ok(releaseUsage, "provider reread admitted");
+    cancel.abort();
+    await pending;
+    await Bun.sleep(100);
+    releaseUsage!();
+    mode = "ok";
+    for (
+      let n = 0;
+      n < 700 &&
+      (!pushed.some((p) => p.type === "event" && p.topic === "res:quota") ||
+        db.query("SELECT used FROM quota_windows WHERE credential_id='cancel'").get()?.used !== 25);
+      n++
+    )
+      await Bun.sleep(10);
+    const evidence = {
+      label: `disconnect-${operation}`,
+      persisted:
+        db.query("SELECT used FROM quota_windows WHERE credential_id='cancel'").get()?.used === 25,
+      pushed: pushed.some((p) => p.type === "event" && p.topic === "res:quota"),
+    };
+    results.push(evidence);
+    if (index === 0) {
+      assert.ok(evidence.persisted);
+      assert.ok(evidence.pushed);
+    }
+  }
   socket.close();
   if (index === 0) {
     assert.equal(history.status, 200);

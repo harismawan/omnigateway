@@ -60,6 +60,7 @@ async fn client_request(
     let app = Arc::new(server::App {
         quota: omni_control::quota_runtime::Quota::new(Arc::new(
             omni_gateway::quota::GatewayHost {
+                completed: None,
                 holder: None,
                 refresh: deps.refresher.clone(),
                 control: admin_routes::ControlStore::new(store()),

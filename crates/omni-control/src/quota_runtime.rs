@@ -13,6 +13,9 @@ pub type Task<'a, T> = Pin<Box<dyn Future<Output = Result<T, GatewayError>> + Se
 /// Hosts must release database owners before returning a future that awaits I/O.
 /// `token` reuses the caller's OAuth refresher; `send` enforces QuotaRequest.timeout.
 pub trait Host: Send + Sync + 'static {
+    /// Manual successful mutation completion, after persistence/publication.
+    /// Hosts own notification transport; never called for a scheduled pass.
+    fn completed(&self) {}
     fn credentials(&self) -> Task<'_, Vec<Credential>>;
     fn token<'a>(&'a self, c: &'a Credential) -> Task<'a, Option<String>>;
     fn send(
@@ -26,6 +29,7 @@ pub trait Host: Send + Sync + 'static {
 type Flight = tokio::sync::watch::Sender<Option<Value>>;
 #[derive(Default)]
 struct State {
+    operations: Vec<tokio::sync::watch::Receiver<Option<Result<Value, GatewayError>>>>,
     flights: HashMap<String, Flight>,
     cooldown: HashMap<String, i64>,
     locks: HashMap<String, Arc<tokio::sync::Mutex<()>>>,
@@ -206,20 +210,84 @@ impl Quota {
             }
         }
     }
+    async fn owned(
+        self: &Arc<Self>,
+        notify: bool,
+        job: impl Future<Output = Result<Value, GatewayError>> + Send + 'static,
+    ) -> Result<Value, GatewayError> {
+        let (tx, mut rx) = tokio::sync::watch::channel(None);
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.operations.retain(|r| r.borrow().is_none());
+            state.operations.push(rx.clone());
+        }
+        let this = self.clone();
+        tokio::spawn(async move {
+            let result = job.await;
+            if notify
+                && result.as_ref().is_ok_and(|r| {
+                    r.get("quotaRefreshed").is_some()
+                        || r["outcomes"].as_array().is_some_and(|a| {
+                            a.iter()
+                                .any(|o| o["kind"] == "refreshed" || o["kind"] == "coalesced")
+                        })
+                })
+            {
+                this.host.completed();
+            }
+            tx.send_replace(Some(result));
+        });
+        loop {
+            if let Some(result) = rx.borrow().clone() {
+                return result;
+            }
+            rx.changed()
+                .await
+                .map_err(|_| err(ErrorCode::Internal, "quota operation stopped"))?;
+        }
+    }
     pub async fn refresh(self: &Arc<Self>, id: Option<&str>) -> Result<Value, GatewayError> {
+        let this = self.clone();
+        let id = id.map(str::to_owned);
+        self.owned(true, async move { this.refresh_inner(id.as_deref()).await })
+            .await
+    }
+    /// Scheduler owns its one unconditional pass notification.
+    pub async fn poll(self: &Arc<Self>) -> Result<Value, GatewayError> {
+        let this = self.clone();
+        self.owned(false, async move { this.refresh_inner(None).await })
+            .await
+    }
+    async fn refresh_inner(self: &Arc<Self>, id: Option<&str>) -> Result<Value, GatewayError> {
         let credentials = if let Some(id) = id {
             vec![self.account(id, false).await?]
         } else {
             self.host.credentials().await?
         };
-        let outcomes = stream::iter(credentials)
-            .map(|c| self.attempt(c))
-            .buffered(4)
+        let mut outcomes = stream::iter(credentials.into_iter().enumerate())
+            .map(|(i, c)| async move { (i, self.attempt(c).await) })
+            .buffer_unordered(4)
             .collect::<Vec<_>>()
             .await;
+        outcomes.sort_by_key(|(i, _)| *i);
+        let outcomes = outcomes.into_iter().map(|(_, o)| o).collect::<Vec<_>>();
         Ok(json!({"outcomes":outcomes}))
     }
     pub async fn drain(&self) {
+        let operations = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .operations
+            .clone();
+        for mut rx in operations {
+            if rx.borrow().is_none() {
+                drop(rx.changed().await);
+            }
+        }
         let receivers = self
             .state
             .lock()
@@ -245,12 +313,31 @@ impl Quota {
                 )
             })
     }
-    pub async fn credits(&self, id: &str) -> Result<Value, GatewayError> {
+    pub async fn credits(self: &Arc<Self>, id: &str) -> Result<Value, GatewayError> {
+        let this = self.clone();
+        let id = id.to_owned();
+        self.owned(false, async move { this.credits_inner(&id).await })
+            .await
+    }
+    async fn credits_inner(&self, id: &str) -> Result<Value, GatewayError> {
         let c = self.account(id, true).await?;
         let value = self.list_for(&c).await?;
         Ok(json!({"credentialId":c.id,"available":value["available"],"credits":value["credits"]}))
     }
-    pub async fn redeem(&self, id: &str, credit: Option<&str>) -> Result<Value, GatewayError> {
+    pub async fn redeem(
+        self: &Arc<Self>,
+        id: &str,
+        credit: Option<&str>,
+    ) -> Result<Value, GatewayError> {
+        let this = self.clone();
+        let id = id.to_owned();
+        let credit = credit.map(str::to_owned);
+        self.owned(true, async move {
+            this.redeem_inner(&id, credit.as_deref()).await
+        })
+        .await
+    }
+    async fn redeem_inner(&self, id: &str, credit: Option<&str>) -> Result<Value, GatewayError> {
         let c = self.account(id, true).await?;
         let lock = self.lock(&c.id);
         let _guard = lock.lock().await;
@@ -330,8 +417,15 @@ mod tests {
         writes: AtomicUsize,
         status: AtomicUsize,
         now: AtomicI64,
+        held: tokio::sync::Semaphore,
+        hold_first: bool,
+        completed: AtomicUsize,
+        hold_usage: bool,
     }
     impl Host for Fake {
+        fn completed(&self) {
+            self.completed.fetch_add(1, Ordering::SeqCst);
+        }
         fn credentials(&self) -> Task<'_, Vec<Credential>> {
             Box::pin(async { Ok(self.credentials.clone()) })
         }
@@ -341,12 +435,17 @@ mod tests {
         fn send(
             &self,
             _: String,
-            _: omni_providers::quota::QuotaRequest,
+            request: omni_providers::quota::QuotaRequest,
         ) -> Task<'_, (u16, String)> {
-            Box::pin(async {
-                self.calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                if (self.hold_first && call == 0)
+                    || (self.hold_usage && request.http.url.ends_with("/usage"))
+                {
+                    self.held.acquire().await.unwrap().forget();
+                }
                 tokio::task::yield_now().await;
-                Ok((self.status.load(Ordering::SeqCst) as u16,r#"{"credits":[],"rate_limit":{"primary_window":{"used_percent":25,"reset_at":1893456000,"limit_window_seconds":18000}}}"#.into()))
+                Ok((self.status.load(Ordering::SeqCst) as u16,r#"{"credits":[{"id":"credit","status":"available"}],"windows_reset":1,"rate_limit":{"primary_window":{"used_percent":25,"reset_at":1893456000,"limit_window_seconds":18000}}}"#.into()))
             })
         }
         fn save<'a>(&'a self, _: &'a str, _: &'a [Value]) -> Task<'a, ()> {
@@ -374,6 +473,10 @@ mod tests {
             writes: AtomicUsize::new(0),
             status: AtomicUsize::new(200),
             now: AtomicI64::new(1000),
+            held: tokio::sync::Semaphore::new(0),
+            hold_first: false,
+            hold_usage: false,
+            completed: AtomicUsize::new(0),
         });
         let quota = Quota::new(host.clone());
         (root, host, quota)
@@ -424,6 +527,7 @@ mod tests {
         drop(waiter.await);
         quota.drain().await;
         assert_eq!(host.writes.load(Ordering::SeqCst), 1);
+        assert_eq!(host.completed.load(Ordering::SeqCst), 1);
     }
     #[tokio::test]
     async fn reset_list_keeps_frozen_field_order() {
@@ -439,5 +543,69 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["credentialId", "available", "credits"]
         );
+    }
+    #[tokio::test]
+    async fn review_worker_slots_are_active_not_ordered_result_slots() {
+        let (_root, host, _) = fixture();
+        let mut fake = Arc::try_unwrap(host).ok().unwrap();
+        fake.hold_first = true;
+        fake.credentials = (0..5)
+            .map(|i| {
+                let mut c = fake.credentials[0].clone();
+                c.id = format!("c{i}");
+                c
+            })
+            .collect();
+        let host = Arc::new(fake);
+        let quota = Quota::new(host.clone());
+        let q = quota.clone();
+        let task = tokio::spawn(async move { q.refresh(None).await.unwrap() });
+        for _ in 0..1000 {
+            if host.calls.load(Ordering::SeqCst) >= 5 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let admitted = host.calls.load(Ordering::SeqCst);
+        host.held.add_permits(5);
+        let out = task.await.unwrap();
+        assert_eq!(admitted, 5, "account5 must start while account1 is held");
+        assert_eq!(
+            out["outcomes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|o| o["credentialId"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["c0", "c1", "c2", "c3", "c4"]
+        );
+    }
+    #[tokio::test]
+    async fn review_dropped_reset_waiter_keeps_lock_reread_and_drain() {
+        let (_root, host, _) = fixture();
+        let mut fake = Arc::try_unwrap(host).ok().unwrap();
+        fake.hold_usage = true;
+        let host = Arc::new(fake);
+        let quota = Quota::new(host.clone());
+        let q = quota.clone();
+        let waiter = tokio::spawn(async move { q.redeem("c", Some("credit")).await });
+        while host.calls.load(Ordering::SeqCst) < 3 {
+            tokio::task::yield_now().await;
+        }
+        waiter.abort();
+        drop(waiter.await);
+        let lock = quota.lock("c");
+        assert!(
+            lock.try_lock().is_err(),
+            "reset retains account lock after waiter cancellation"
+        );
+        let q = quota.clone();
+        let drain = tokio::spawn(async move { q.drain().await });
+        tokio::task::yield_now().await;
+        assert!(!drain.is_finished(), "shutdown tracks admitted reset");
+        host.held.add_permits(1);
+        drain.await.unwrap();
+        assert_eq!(host.writes.load(Ordering::SeqCst), 1);
+        assert_eq!(host.completed.load(Ordering::SeqCst), 1);
     }
 }

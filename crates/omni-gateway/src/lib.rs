@@ -511,6 +511,10 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         .quota_poll_interval_ms;
     let control = admin_routes::ControlStore::new(control_store);
     let quota = omni_control::quota_runtime::Quota::new(Arc::new(quota::GatewayHost {
+        completed: Some({
+            let hub = stream.clone();
+            Arc::new(move || hub.invalidate("res:quota", None))
+        }),
         holder: Some(holder.clone()),
         refresh: oauth_refresher.clone(),
         control: control.clone(),
