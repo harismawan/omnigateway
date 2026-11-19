@@ -157,6 +157,7 @@ pub struct Deps {
     /// they were made. Held under one lock, which also serializes the
     /// read-modify-write as TS's store transaction does. See [`HealthOverlay`].
     pub health: Arc<HealthOverlay>,
+    pub shared_health: Option<omni_store::writer::HealthHandle>,
     /// `/metrics` series (off unless `OMNI_METRICS_TOKEN` is set).
     pub telemetry: Arc<crate::telemetry::Telemetry>,
     pub now: fn() -> i64,
@@ -174,6 +175,7 @@ impl Deps {
             probes: self.probes.clone(),
             providers: self.providers.clone(),
             health: self.health.clone(),
+            shared_health: self.shared_health.clone(),
             telemetry: self.telemetry.clone(),
             now: self.now,
             rand: self.rand,
@@ -354,8 +356,25 @@ impl Deps {
     fn persist_health(
         &self,
         c: &Cand,
-        transition: impl FnOnce(&CredentialHealth) -> CredentialHealth,
-    ) -> CredentialHealth {
+        transition: impl Fn(&CredentialHealth) -> CredentialHealth + Send + Sync + 'static,
+    ) {
+        if let Some(writer) = &self.shared_health {
+            let id = c.credential.id.clone();
+            let model = c.target.model.clone();
+            let provider = c.target.provider.clone();
+            let telemetry = self.telemetry.clone();
+            writer.send(
+                &c.credential.id,
+                &c.target.model,
+                Arc::new(move |before| {
+                    let before = before.unwrap_or_else(|| blank_health(&id, &model));
+                    let after = transition(&before);
+                    telemetry.breaker(&provider, &before.breaker_state, &after.breaker_state);
+                    after
+                }),
+            );
+            return;
+        }
         let key = health_key(&c.credential.id, &c.target.model);
         let mut overlay = self.health.lock();
         let fresh = overlay.fresh(&key);
@@ -389,8 +408,30 @@ impl Deps {
             });
         }
         overlay.insert(key, after.clone());
-        self.holder.patch_health(after.clone());
-        after
+        self.holder.patch_health(after);
+    }
+
+    fn persist_failure(&self, c: &Cand, failure: Failure<'_>) {
+        let settings = failure.settings.clone();
+        let Failure {
+            now,
+            code,
+            retry_after_ms,
+            jitter,
+            ..
+        } = failure;
+        self.persist_health(c, move |cur| {
+            record_failure(
+                cur,
+                &Failure {
+                    settings: &settings,
+                    now,
+                    code,
+                    retry_after_ms,
+                    jitter,
+                },
+            )
+        });
     }
 
     /// Shared OAuth refresh service for preemptive and reactive retries.
@@ -695,7 +736,10 @@ fn run(mut s: RunState) -> EventsStream {
             let mut _probe_claim = None;
             if c.probe {
                 let key = format!("probe:{}", health_key(&c.credential.id, &c.target.model));
-                let (held, claim) = deps.probes.acquire(&key);
+                let (held, claim) = match within(s.deadline, Box::pin(deps.probes.claim(&key))).await {
+                    Ok(claim) => claim,
+                    Err(err) => { last_error = Some(err); break; }
+                };
                 _probe_claim = Some(claim);
                 if held > 0 {
                     note(&log, &[format!("excluded:{}:breaker:probing", c.credential.id)]);
@@ -705,13 +749,14 @@ fn run(mut s: RunState) -> EventsStream {
                     slot.release(ttft);
                     continue;
                 }
-                deps.persist_health(c, |cur| {
-                    if cur.breaker_state == BreakerState::Closed {
-                        return cur.clone();
-                    }
-                    probing = true;
-                    CredentialHealth { breaker_state: BreakerState::HalfOpen, ..cur.clone() }
-                });
+                probing = s.snapshot_health.routing.health_of(&c.credential.id, &c.target.model)
+                    .is_some_and(|row| row.breaker_state != BreakerState::Closed);
+                if probing {
+                    deps.persist_health(c, |cur| {
+                        if cur.breaker_state == BreakerState::Closed { return cur.clone(); }
+                        CredentialHealth { breaker_state: BreakerState::HalfOpen, ..cur.clone() }
+                    });
+                }
             }
 
             let i = attempts;
@@ -885,14 +930,14 @@ fn run(mut s: RunState) -> EventsStream {
                                     .with_provider(c.target.provider.clone()), None);
                             }
                             yield Ok(event);
-                            deps.persist_health(c, |cur| record_failure(cur, &Failure {
+                            deps.persist_failure(c, Failure {
                                 settings: &s.settings,
                                 #[allow(clippy::cast_precision_loss)]
                                 now: now() as f64,
                                 code,
                                 retry_after_ms: None,
                                 jitter: (deps.rand)(),
-                            }));
+                            });
                             let ttft = lock(&log).ttft_ms;
                             slot.release(ttft);
                             return;
@@ -982,14 +1027,14 @@ fn run(mut s: RunState) -> EventsStream {
                     }
                 }
 
-                deps.persist_health(c, |cur| record_failure(cur, &Failure {
+                deps.persist_failure(c, Failure {
                     settings: &s.settings,
                     #[allow(clippy::cast_precision_loss)]
                     now: now() as f64,
                     code: failure.code,
                     retry_after_ms: failure.retry_after_ms,
                     jitter: (deps.rand)(),
-                }));
+                });
 
                 if !committed && failure.code.retryable() && f64::from(attempts) < s.max_attempts {
                     tracing::warn!(requestId = %rid, provider = %c.target.provider,

@@ -364,6 +364,7 @@ pub struct App {
     pub lifecycle: crate::lifecycle::Lifecycle,
     pub version: String,
     pub cluster: bool,
+    pub redis: Option<Arc<omni_coord::redis::RedisCoord>>,
     pub stop: tokio::sync::watch::Sender<bool>,
     pub connect: Arc<crate::connect::ConnectFlows>,
     pub deadline_workers: DeadlineWorkers,
@@ -400,6 +401,9 @@ pub struct App {
 }
 
 impl App {
+    pub(crate) fn routing_committed(&self, change: crate::routing::RoutingChange) {
+        self.deps.refresher.routing_committed(change);
+    }
     /// `reportCatalogProblem`: `provider catalog repaired`, once per
     /// distinct `field provider` per process.
     pub fn report_catalog_problems(&self, problems: Vec<omni_control::api::CatalogProblem>) {
@@ -697,10 +701,11 @@ fn metrics(app: &App, req: &Request<Incoming>) -> Response<Body> {
         *res.status_mut() = StatusCode::UNAUTHORIZED;
         return res;
     }
-    let text = app
+    let mut text = app
         .deps
         .telemetry
         .scrape_with_streams(&app.deps.load.provider_counts(), app.stream.stats());
+    append_cluster_metrics(&mut text, app);
     let mut res = Response::new(full(text));
     res.headers_mut().insert(
         "content-type",
@@ -709,10 +714,67 @@ fn metrics(app: &App, req: &Request<Incoming>) -> Response<Body> {
     res
 }
 
+fn append_cluster_metrics(text: &mut String, app: &App) {
+    use std::fmt::Write as _;
+    use std::sync::atomic::Ordering::Relaxed;
+    macro_rules! counters {
+        ($prefix:literal, $m:ident, $($field:ident),+ $(,)?) => {
+            $(writeln!(text, concat!("# TYPE ", $prefix, stringify!($field),
+                "_total counter\n", $prefix, stringify!($field), "_total {}"), $m.$field.load(Relaxed))
+                .expect("writing to a String cannot fail");)+
+        };
+    }
+    if let Some(m) = app.limiter.cluster_metrics() {
+        counters!(
+            "omni_cluster_limiter_",
+            m,
+            redis_calls,
+            local_admissions,
+            refusals,
+            unseeded_admits,
+            seeds_queued,
+            seeds_installed,
+            seeds_already,
+            seed_failures,
+            seed_lock_unavailable,
+            debits_queued,
+            debit_buckets_applied,
+            debit_rows_applied,
+            debit_rows_covered,
+            debit_buckets_unseeded,
+            debit_buckets_waiting,
+            debit_buckets_lost,
+            debit_batches,
+            releases_refused,
+            verdict_mismatches
+        );
+    }
+    if let Some(m) = app.deps.load.fleet_metrics() {
+        counters!(
+            "omni_cluster_load_",
+            m,
+            publishes,
+            publish_faults,
+            refreshes,
+            refresh_faults,
+            truncated
+        );
+    }
+}
+
 fn health(app: &App) -> Response<Body> {
-    let mut body = String::from("{\"ok\":true,\"mode\":\"single\",\"nodeId\":");
+    let mode = if app.redis.is_some() {
+        "cluster"
+    } else {
+        "single"
+    };
+    let mut body = format!("{{\"ok\":true,\"mode\":\"{mode}\",\"nodeId\":");
     omni_ir::jsjson::write_str(&app.node_id, &mut body);
-    body.push_str(",\"coord\":\"ok\"}");
+    if app.redis.as_ref().is_some_and(|c| !c.healthy()) {
+        body.push_str(",\"coord\":\"fallback\"}");
+    } else {
+        body.push_str(",\"coord\":\"ok\"}");
+    }
     json_response(200, JSON_UTF8, body, &[])
 }
 
@@ -1049,7 +1111,8 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
         #[allow(clippy::cast_precision_loss)]
         match app
             .limiter
-            .admit(&key.id, &key.limits, &chat.model, started_at as f64)
+            .admit_selected(&key.id, &key.limits, &chat.model, started_at as f64)
+            .await
         {
             Ok(a) => {
                 headroom = a.headroom;
@@ -1449,7 +1512,8 @@ async fn count_tokens(app: Arc<App>, req: Request<Incoming>) -> Response<Body> {
         };
         #[allow(clippy::cast_precision_loss)]
         app.limiter
-            .consume(&key.id, limits, &chat.model, now as f64)
+            .consume_selected(&key.id, limits, &chat.model, now as f64)
+            .await
             .map_err(|r| {
                 app.deps.telemetry.rate_limit(
                     r.violation.dimension.as_str(),

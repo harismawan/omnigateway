@@ -984,6 +984,17 @@ design spec's History section.
 it, through a `valkey` service), and `test/cluster/sharedCoord.test.ts` runs the two-replica suite
 over two **separate** Redis coordinators — which is what two pods actually hold.
 
+**Rust gateway.** `crates/omni-gateway` selects one bounded Postgres primary pool
+per replica in cluster mode; there is no SQLite shadow. A warm request uses its
+in-memory routing snapshot. Committed key, credential, quota, and health changes
+publish row identities (never keys or secrets) on `routing`; the receiving
+worker reads current primary state and patches its snapshot. A 500 ms version
+poll repairs missed publications. Health mutations serialize against the stored
+row, while fleet load is published and read in the background every 100 ms.
+Long-window debit deduplication uses the completing transaction's top-level xid8;
+completion rows drain before the limiter and coordinator stop. See the
+[offline bucket sweep](docs/rust-cluster-cutover.md) for a lineage change.
+
 **The store.** `OMNI_CLUSTER_MODE=true` selects `packages/store/src/postgres/` at
 `OMNI_DATABASE_URL`, a second implementation of the same `Store` interface over `Bun.SQL`.
 Every replica must use the same fixed `OMNI_DAY_OFFSET_MINUTES` so one instant has one

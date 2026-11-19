@@ -30,7 +30,7 @@ use crate::server::{App, Body};
 /// touched on the blocking pool.
 #[derive(Clone)]
 pub struct ControlStore(
-    Arc<Mutex<SqliteStore>>,
+    ControlBackend,
     Arc<tokio::sync::Semaphore>,
     std::path::PathBuf,
     i64,
@@ -38,6 +38,12 @@ pub struct ControlStore(
     Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
     Arc<Mutex<Vec<SqliteStore>>>,
 );
+
+#[derive(Clone)]
+enum ControlBackend {
+    Sqlite(Arc<Mutex<SqliteStore>>),
+    Postgres(omni_store::pg::PgStore),
+}
 
 /// Returns the connection even on task cancellation/panic. A started blocking
 /// page owns this lease and its permit until encoding finishes.
@@ -70,7 +76,7 @@ impl ControlStore {
         let path = store.path().to_owned();
         let offset = store.day_offset_minutes();
         Self(
-            omni_store::lifecycle::shared(store),
+            ControlBackend::Sqlite(omni_store::lifecycle::shared(store)),
             Arc::new(tokio::sync::Semaphore::new(4)),
             path,
             offset,
@@ -78,6 +84,26 @@ impl ControlStore {
             None,
             Arc::new(Mutex::new(Vec::new())),
         )
+    }
+
+    pub(crate) fn from_postgres(pg: omni_store::pg::PgStore) -> Self {
+        let offset = pg.day_offset_minutes();
+        Self(
+            ControlBackend::Postgres(pg),
+            Arc::new(tokio::sync::Semaphore::new(4)),
+            std::path::PathBuf::new(),
+            offset,
+            Arc::new(tokio::sync::Semaphore::new(4)),
+            None,
+            Arc::new(Mutex::new(Vec::new())),
+        )
+    }
+
+    pub(crate) fn postgres(&self) -> Option<&omni_store::pg::PgStore> {
+        match &self.0 {
+            ControlBackend::Postgres(pg) => Some(pg),
+            ControlBackend::Sqlite(_) => None,
+        }
     }
 
     /// Pool at most four read-only connections across all exports. No lease
@@ -93,6 +119,13 @@ impl ControlStore {
             .acquire_owned()
             .await
             .map_err(|_| ApiError::internal())?;
+        if let Some(pg) = self.postgres() {
+            let result = omni_control::logs::export_page_postgres(pg, &query, jsonl)
+                .await
+                .map_err(failure);
+            drop(permit);
+            return result;
+        }
         let pool = self.6.clone();
         let path = self.2.clone();
         let offset = self.3;
@@ -131,6 +164,11 @@ impl ControlStore {
             .acquire_owned()
             .await
             .map_err(|_| ApiError::internal())?;
+        if self.postgres().is_some() {
+            let mut reader = self.clone();
+            reader.5 = Some(Arc::new(permit));
+            return Ok(reader);
+        }
         let path = self.2.clone();
         let offset = self.3;
         let (store, permit) = tokio::task::spawn_blocking(move || {
@@ -152,7 +190,10 @@ impl ControlStore {
         &self,
         f: impl FnOnce(&SqliteStore) -> Result<T, Failure> + Send + 'static,
     ) -> Result<T, ApiError> {
-        let store = self.0.clone();
+        let ControlBackend::Sqlite(store) = &self.0 else {
+            return Err(ApiError::internal());
+        };
+        let store = store.clone();
         let permit = self.5.clone();
         let joined = tokio::task::spawn_blocking(move || {
             let _runtime_access = omni_store::lifecycle::access();
@@ -174,7 +215,7 @@ impl ControlStore {
     }
 }
 
-fn failure(e: Failure) -> ApiError {
+pub(crate) fn failure(e: Failure) -> ApiError {
     match e.code.and_then(ErrorCode::parse) {
         Some(code) => ApiError::gateway(code, e.message),
         None => {
@@ -327,7 +368,23 @@ pub async fn serve(
     req: Request<Incoming>,
 ) -> Result<Response<Body>, ApiError> {
     let topic = route.resource_topic();
+    use crate::routing::RoutingChange;
+    let change = match &route {
+        Admin::PatchCredential(Some(id)) | Admin::RemoveCredential(Some(id)) => {
+            Some(RoutingChange::Credential { id: id.clone() })
+        }
+        Admin::EditKey(Some(id), _) | Admin::RevokeKey(Some(id)) => {
+            Some(RoutingChange::Key { id: id.clone() })
+        }
+        Admin::PutModel(_) | Admin::RemoveModel(_) | Admin::PutSettings => {
+            Some(RoutingChange::Config)
+        }
+        _ => None,
+    };
     let response = serve_inner(app, route, req).await?;
+    if let Some(change) = change {
+        app.routing_committed(change);
+    }
     if let Some(topic) = topic {
         app.stream.invalidate(topic, None);
     }
@@ -345,7 +402,32 @@ async fn serve_inner(
         Admin::Console => {
             require_reader(req.headers(), &app.admin).await?;
             let source = app.stream.console.clone();
-            let query = crate::console::Query::from_query(req.uri().query().unwrap_or(""));
+            let raw = req.uri().query().unwrap_or("");
+            let query = crate::console::Query::from_query(raw);
+            if let Some(fleet) = &app.stream.console_fleet {
+                let node = url::form_urlencoded::parse(raw.as_bytes())
+                    .filter(|(k, _)| k == "node")
+                    .last()
+                    .map(|(_, v)| v);
+                if let Some(node) = node.filter(|n| !n.is_empty() && n != app.node_id.as_str()) {
+                    let read = if node == "all" {
+                        let reader = control.reader().await?;
+                        let pg = reader.postgres().ok_or_else(ApiError::internal)?;
+                        let nodes = pg.live_nodes(now).await.map_err(|e| failure(e.into()))?;
+                        let ids: Vec<_> = nodes.into_iter().map(|(id, _)| id).collect();
+                        drop(reader);
+                        fleet
+                            .read_all_with_timeout(&ids, query, std::time::Duration::from_secs(3))
+                            .await
+                    } else {
+                        fleet.read(&node, query).await
+                    };
+                    return Ok(json_ok(
+                        read.map_err(|e| ApiError::gateway(e.code, e.message))?
+                            .to_string(),
+                    ));
+                }
+            }
             let read = tokio::task::spawn_blocking(move || source.read(&query))
                 .await
                 .map_err(|_| ApiError::internal())?;
@@ -361,6 +443,13 @@ async fn serve_inner(
                 )));
             };
             let key = app.credential_key.clone();
+            if let Some(pg) = control.postgres() {
+                return Ok(json_ok(
+                    omni_control::bodies::read_request_body_postgres(pg, &key, &id)
+                        .await
+                        .map_err(failure)?,
+                ));
+            }
             Ok(json_ok(
                 control
                     .run(move |s| omni_control::bodies::read_request_body(s, &key, &id))
@@ -422,6 +511,13 @@ async fn serve_inner(
             require_reader(req.headers(), &app.admin).await?;
             let control = control.reader().await?;
             let node_id = app.node_id.clone();
+            if let Some(pg) = control.postgres() {
+                let nodes = pg.live_nodes(now).await.map_err(|e| failure(e.into()))?;
+                let rows: Vec<_> = nodes.into_iter().map(|(id, at)| {
+                    serde_json::json!({"id": id, "seenAt": at, "self": id == node_id})
+                }).collect();
+                return Ok(json_ok(serde_json::json!({"nodes": rows}).to_string()));
+            }
             Ok(json_ok(
                 control
                     .run(move |s| omni_control::reports::nodes(s, now, &node_id))
@@ -432,6 +528,13 @@ async fn serve_inner(
             require_reader(req.headers(), &app.admin).await?;
             let control = control.reader().await?;
             let query = req.uri().query().unwrap_or("").to_owned();
+            if let Some(pg) = control.postgres() {
+                return Ok(json_ok(
+                    omni_control::logs::page_postgres(pg, &query)
+                        .await
+                        .map_err(failure)?,
+                ));
+            }
             Ok(json_ok(
                 control
                     .run(move |s| omni_control::logs::page(s, &query))
@@ -444,6 +547,13 @@ async fn serve_inner(
             let query = req.uri().query().unwrap_or("").to_owned();
             #[allow(clippy::cast_precision_loss)]
             let now = now as f64;
+            if let Some(pg) = control.postgres() {
+                return Ok(json_ok(
+                    omni_control::reports::usage_postgres(pg, &query, now, None)
+                        .await
+                        .map_err(failure)?,
+                ));
+            }
             Ok(json_ok(
                 control
                     .run(move |s| omni_control::reports::usage(s, &query, now))
@@ -452,6 +562,13 @@ async fn serve_inner(
         }
         Admin::ListCredentials => {
             require_reader(req.headers(), &app.admin).await?;
+            if let Some(pg) = control.postgres() {
+                return Ok(json_ok(
+                    omni_control::credentials::list_postgres(pg)
+                        .await
+                        .map_err(failure)?,
+                ));
+            }
             Ok(json_ok(control.run(omni_control::credentials::list).await?))
         }
         Admin::DryRun(id) => {
@@ -459,6 +576,23 @@ async fn serve_inner(
             let body = read_json(req, app.idle_timeout).await?;
             let key = app.credential_key.clone();
             let providers = app.deps.providers.clone();
+            if let Some(pg) = control.postgres() {
+                let _reader = control.reader().await?;
+                #[allow(clippy::cast_precision_loss)]
+                let result = omni_control::dry_run::run_postgres(
+                    pg,
+                    &key,
+                    id.as_deref().unwrap_or("null"),
+                    &body,
+                    now as f64,
+                    &providers,
+                )
+                .await
+                .map_err(failure)?;
+                return Ok(json_ok(
+                    omni_ir::jsjson::stringify(&result).unwrap_or_default(),
+                ));
+            }
             Ok(json_ok(
                 control
                     .run(move |s| {
@@ -478,6 +612,14 @@ async fn serve_inner(
         }
         Admin::CredentialHealth => {
             require_reader(req.headers(), &app.admin).await?;
+            if let Some(pg) = control.postgres() {
+                let _reader = control.reader().await?;
+                return Ok(json_ok(
+                    omni_control::credentials::health_postgres(pg, now)
+                        .await
+                        .map_err(failure)?,
+                ));
+            }
             Ok(json_ok(
                 control
                     .run(move |s| omni_control::credentials::health(s, now))
@@ -488,6 +630,14 @@ async fn serve_inner(
             require_admin(req.headers(), &app.admin).await?;
             let body = read_json(req, app.idle_timeout).await?;
             let key = app.credential_key.clone();
+            if let Some(pg) = control.postgres() {
+                let (id, response) =
+                    omni_control::credentials::create_postgres(pg, &key, &body, now)
+                        .await
+                        .map_err(failure)?;
+                app.routing_committed(crate::routing::RoutingChange::Credential { id });
+                return Ok(json_ok(response));
+            }
             Ok(json_ok(
                 control
                     .run(move |s| {
@@ -499,6 +649,12 @@ async fn serve_inner(
         Admin::PatchCredential(id) => {
             require_admin(req.headers(), &app.admin).await?;
             let body = read_json(req, app.idle_timeout).await?;
+            if let Some(pg) = control.postgres() {
+                omni_control::credentials::patch_postgres(pg, id.as_deref(), &body, now)
+                    .await
+                    .map_err(failure)?;
+                return Ok(json_ok(crate::api::OK.into()));
+            }
             control
                 .run(move |s| {
                     omni_control::credentials::patch(
@@ -513,6 +669,12 @@ async fn serve_inner(
         }
         Admin::RemoveCredential(id) => {
             require_admin(req.headers(), &app.admin).await?;
+            if let Some(pg) = control.postgres() {
+                pg.remove_credential(id.as_deref())
+                    .await
+                    .map_err(|e| failure(e.into()))?;
+                return Ok(json_ok(crate::api::OK.into()));
+            }
             control
                 .run(move |s| omni_control::credentials::remove(s, id.as_deref()))
                 .await?;
@@ -520,10 +682,22 @@ async fn serve_inner(
         }
         Admin::ListModels => {
             require_reader(req.headers(), &app.admin).await?;
+            if let Some(pg) = control.postgres() {
+                return Ok(json_ok(
+                    ops::list_models_postgres(pg).await.map_err(failure)?,
+                ));
+            }
             Ok(json_ok(control.run(ops::list_models).await?))
         }
         Admin::Catalog => {
             require_reader(req.headers(), &app.admin).await?;
+            if let Some(pg) = control.postgres() {
+                let accounts = ops::accounts_postgres(pg).await.map_err(failure)?;
+                let mut problems = Vec::new();
+                let body = ops::catalog(&accounts, &mut |p| problems.push(p)).map_err(failure)?;
+                app.report_catalog_problems(problems);
+                return Ok(json_ok(body));
+            }
             let (body, problems) = control
                 .run(|s| {
                     let accounts = ops::accounts(s)?;
@@ -538,6 +712,12 @@ async fn serve_inner(
         Admin::PutModel(id) => {
             require_admin(req.headers(), &app.admin).await?;
             let body = read_json(req, app.idle_timeout).await?;
+            if let Some(pg) = control.postgres() {
+                ops::put_model_postgres(pg, id.as_deref(), &body)
+                    .await
+                    .map_err(failure)?;
+                return Ok(json_ok(crate::api::OK.to_owned()));
+            }
             control
                 .run(move |s| ops::put_model(s, id.as_deref(), &body))
                 .await?;
@@ -545,6 +725,12 @@ async fn serve_inner(
         }
         Admin::RemoveModel(id) => {
             require_admin(req.headers(), &app.admin).await?;
+            if let Some(pg) = control.postgres() {
+                if let Some(id) = id {
+                    pg.remove_model(&id).await.map_err(|e| failure(e.into()))?;
+                }
+                return Ok(json_ok(crate::api::OK.to_owned()));
+            }
             control
                 .run(move |s| ops::remove_model(s, id.as_deref()))
                 .await?;
@@ -552,12 +738,25 @@ async fn serve_inner(
         }
         Admin::ListKeys => {
             require_reader(req.headers(), &app.admin).await?;
+            if let Some(pg) = control.postgres() {
+                let _reader = control.reader().await?;
+                return Ok(json_ok(
+                    ops::list_keys_postgres(pg, now).await.map_err(failure)?,
+                ));
+            }
             Ok(json_ok(control.run(move |s| ops::list_keys(s, now)).await?))
         }
         Admin::CreateKey => {
             require_admin(req.headers(), &app.admin).await?;
             let body = read_json(req, app.idle_timeout).await?;
             let now = crate::clock::now_ms();
+            if let Some(pg) = control.postgres() {
+                let (id, response) = ops::create_key_postgres(pg, &body, now)
+                    .await
+                    .map_err(failure)?;
+                app.routing_committed(crate::routing::RoutingChange::Key { id });
+                return Ok(json_ok(response));
+            }
             Ok(json_ok(
                 control.run(move |s| ops::create_key(s, &body, now)).await?,
             ))
@@ -566,6 +765,13 @@ async fn serve_inner(
             require_admin(req.headers(), &app.admin).await?;
             let body = read_json(req, app.idle_timeout).await?;
             let now = crate::clock::now_ms();
+            if let Some(pg) = control.postgres() {
+                return Ok(json_ok(
+                    ops::edit_key_postgres(pg, id.as_deref(), edit, &body, now)
+                        .await
+                        .map_err(failure)?,
+                ));
+            }
             Ok(json_ok(
                 control
                     .run(move |s| ops::edit_key(s, id.as_deref(), edit, &body, now))
@@ -575,6 +781,14 @@ async fn serve_inner(
         Admin::RevokeKey(id) => {
             require_admin(req.headers(), &app.admin).await?;
             let now = crate::clock::now_ms();
+            if let Some(pg) = control.postgres() {
+                if let Some(id) = id {
+                    pg.edit_key(&id, omni_store::keys::KeyEdit::Revoke(now))
+                        .await
+                        .map_err(|e| failure(e.into()))?;
+                }
+                return Ok(json_ok(crate::api::OK.to_owned()));
+            }
             control
                 .run(move |s| ops::revoke_key(s, id.as_deref(), now))
                 .await?;
@@ -582,6 +796,20 @@ async fn serve_inner(
         }
         Admin::GetSettings => {
             require_reader(req.headers(), &app.admin).await?;
+            if let Some(pg) = control.postgres() {
+                let settings = ops::settings_postgres(pg).await.map_err(failure)?;
+                let viewer = app.admin.is_viewer_configured().await?;
+                let models = ops::smart_router_models_postgres(pg, &settings)
+                    .await
+                    .map_err(failure)?;
+                return Ok(json_ok(ops::settings_body(
+                    settings,
+                    app.body_logging_allowed,
+                    app.day_offset_minutes,
+                    viewer,
+                    models,
+                )));
+            }
             let settings = control.run(ops::settings).await?;
             let viewer = app.admin.is_viewer_configured().await?;
             let models = {
@@ -601,6 +829,12 @@ async fn serve_inner(
         Admin::PutSettings => {
             require_admin(req.headers(), &app.admin).await?;
             let body = read_json(req, app.idle_timeout).await?;
+            if let Some(pg) = control.postgres() {
+                ops::put_settings_postgres(pg, &body)
+                    .await
+                    .map_err(failure)?;
+                return Ok(json_ok(crate::api::OK.to_owned()));
+            }
             control.run(move |s| ops::put_settings(s, &body)).await?;
             Ok(json_ok(crate::api::OK.to_owned()))
         }

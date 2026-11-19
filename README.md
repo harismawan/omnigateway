@@ -1,5 +1,8 @@
 # OmniGateway
 
+For an offline Rust cluster cutover or Postgres lineage replacement, see
+[the bucket sweep procedure](docs/rust-cluster-cutover.md) before starting any replica.
+
 Rust local service commands and diagnostic migration limits are documented in
 [Rust CLI service boundary](docs/rust-cli-service.md).
 

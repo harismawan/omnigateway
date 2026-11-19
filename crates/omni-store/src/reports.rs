@@ -34,6 +34,33 @@ pub struct UsageQuery<'a> {
     pub credential: Option<String>,
 }
 
+pub(crate) fn dimension(column: &str, daily: bool) -> bool {
+    matches!(
+        column,
+        "credential_id" | "resolved_model" | "requested_model" | "api_key_id"
+    ) || if daily {
+        matches!(column, "provider" | "day")
+    } else {
+        matches!(
+            column,
+            "resolved_provider" | "CAST(at / 3600000 AS INTEGER)"
+        )
+    }
+}
+
+pub(crate) const MEASURES: [(&str, usize); 10] = [
+    ("requests", 2),
+    ("inputTokens", 5),
+    ("outputTokens", 6),
+    ("cacheReadTokens", 7),
+    ("cacheWriteTokens", 8),
+    ("rtkSavedTokens", 9),
+    ("rtkAppliedRequests", 10),
+    ("costUsd", 11),
+    ("errors", 3),
+    ("durationMsSum", 4),
+];
+
 fn label(cell: ValueRef<'_>) -> String {
     let text = match cell {
         ValueRef::Null => String::new(),
@@ -84,17 +111,7 @@ pub fn usage_json(
     } = q;
     // Public reader never interpolates a caller-supplied SQL expression.
     for column in std::iter::once(key).chain(split) {
-        if !matches!(
-            column,
-            "credential_id"
-                | "resolved_model"
-                | "requested_model"
-                | "api_key_id"
-                | "resolved_provider"
-                | "provider"
-                | "CAST(at / 3600000 AS INTEGER)"
-                | "day"
-        ) {
+        if !dimension(column, daily) {
             return Err(rusqlite::Error::InvalidParameterName(column.into()).into());
         }
     }
@@ -148,18 +165,7 @@ pub fn usage_json(
         // A label is well-formed UTF-8 (lossily decoded), so this is what
         // `JSON.stringify` writes for the same string.
         write_str(&label(r.get_ref(0)?), out);
-        for (name, col) in [
-            ("requests", 2),
-            ("inputTokens", 5),
-            ("outputTokens", 6),
-            ("cacheReadTokens", 7),
-            ("cacheWriteTokens", 8),
-            ("rtkSavedTokens", 9),
-            ("rtkAppliedRequests", 10),
-            ("costUsd", 11),
-            ("errors", 3),
-            ("durationMsSum", 4),
-        ] {
+        for (name, col) in MEASURES {
             out.push_str(",\"");
             out.push_str(name);
             out.push_str("\":");

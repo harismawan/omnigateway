@@ -43,7 +43,11 @@ pub fn client_usage(
     now: f64,
     id: &str,
 ) -> Result<String, Failure> {
-    let query = url::form_urlencoded::Serializer::new(String::new())
+    scoped_usage(store, &client_filters(query), now, Some(id))
+}
+
+fn client_filters(query: &str) -> String {
+    url::form_urlencoded::Serializer::new(String::new())
         .extend_pairs(
             url::form_urlencoded::parse(query.as_bytes()).filter(|(k, _)| {
                 matches!(
@@ -52,8 +56,7 @@ pub fn client_usage(
                 )
             }),
         )
-        .finish();
-    scoped_usage(store, &query, now, Some(id))
+        .finish()
 }
 
 fn scoped_usage(
@@ -62,6 +65,46 @@ fn scoped_usage(
     now: f64,
     scope: Option<&str>,
 ) -> Result<String, Failure> {
+    let q = parse_usage(query, now, scope)?;
+    let mut out = usage_prefix(scope);
+    omni_store::reports::usage_json(store, q, &mut out)?;
+    if scope.is_none() {
+        out.push('}');
+    }
+    Ok(out)
+}
+
+pub async fn usage_postgres(
+    pg: &omni_store::pg::PgStore,
+    query: &str,
+    now: f64,
+    scope: Option<&str>,
+) -> Result<String, Failure> {
+    let filtered;
+    let query = if scope.is_some() {
+        filtered = client_filters(query);
+        &filtered
+    } else {
+        query
+    };
+    let q = parse_usage(query, now, scope)?;
+    let mut out = usage_prefix(scope);
+    pg.usage_json(q, &mut out).await?;
+    if scope.is_none() {
+        out.push('}');
+    }
+    Ok(out)
+}
+
+fn usage_prefix(scope: Option<&str>) -> String {
+    if scope.is_some() {
+        String::new()
+    } else {
+        String::from("{\"rows\":")
+    }
+}
+
+fn parse_usage(query: &str, now: f64, scope: Option<&str>) -> Result<UsageQuery<'static>, Failure> {
     let pairs = url::form_urlencoded::parse(query.as_bytes()).collect::<Vec<_>>();
     let get = |name: &str| {
         pairs
@@ -111,28 +154,15 @@ fn scoped_usage(
             .filter(|n| n.is_finite())
             .unwrap_or(default)
     };
-    let mut out = if scope.is_some() {
-        String::new()
-    } else {
-        String::from("{\"rows\":")
-    };
-    omni_store::reports::usage_json(
-        store,
-        UsageQuery {
-            daily: grain == "daily",
-            key,
-            split,
-            since: number("since", 0.0),
-            until: number("until", now),
-            api_key,
-            credential,
-        },
-        &mut out,
-    )?;
-    if scope.is_none() {
-        out.push('}');
-    }
-    Ok(out)
+    Ok(UsageQuery {
+        daily: grain == "daily",
+        key,
+        split,
+        since: number("since", 0.0),
+        until: number("until", now),
+        api_key,
+        credential,
+    })
 }
 pub fn nodes(store: &omni_store::SqliteStore, now: i64, node_id: &str) -> Result<String, Failure> {
     use omni_ir::jsjson::{JsValue, stringify};

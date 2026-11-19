@@ -2,12 +2,25 @@
 use crate::StoreError;
 
 impl super::PgStore {
+    pub async fn live_nodes(&self, now: i64) -> Result<Vec<(String, i64)>, StoreError> {
+        self.client()
+            .await?
+            .query(
+                "SELECT id, seen_at FROM nodes WHERE seen_at > $1 ORDER BY seen_at DESC",
+                &[&now.saturating_sub(60_000)],
+            )
+            .await?
+            .iter()
+            .map(|row| Ok((row.try_get(0)?, row.try_get(1)?)))
+            .collect()
+    }
+
     pub async fn pending_interruptions(
         &self,
-        node: &str,
+        boot_node: Option<&str>,
         now: i64,
     ) -> Result<Vec<crate::writer::RequestLog>, StoreError> {
-        super::usage::pending_interruptions(&self.client().await?, node, now).await
+        super::usage::pending_interruptions(&self.client().await?, boot_node, now).await
     }
     pub async fn heartbeat(&self, node: &str, now: i64) -> Result<(), StoreError> {
         let c = self.client().await?;

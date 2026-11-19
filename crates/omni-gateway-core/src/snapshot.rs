@@ -28,6 +28,18 @@ use std::time::Duration;
 /// which is refused at auth with that error and nothing else.
 pub type KeyEntry = Result<Arc<ApiKey>, Arc<KeyRowError>>;
 
+/// Cluster notifications carry identities, never secret-bearing rows. Re-read
+/// current committed state under the same writer lock as full replacements.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum RoutingChange {
+    Key { id: String },
+    Credential { id: String },
+    Health { id: String, model: String },
+    Quota { id: String },
+    Config,
+}
+
 /// One consistent view: keys and routing read in one transaction.
 #[derive(Debug, Clone)]
 pub struct GatewaySnapshot {
@@ -405,6 +417,103 @@ impl SnapshotHolder {
         self.current.store(Arc::new(next));
         self.generation.fetch_add(1, Ordering::AcqRel);
         Ok(())
+    }
+
+    pub async fn apply_postgres_change(
+        self: &Arc<Self>,
+        store: Arc<omni_store::Store>,
+        change: RoutingChange,
+    ) -> Result<(), StoreError> {
+        if matches!(change, RoutingChange::Config) {
+            return self.rebuild_from(store).await;
+        }
+        let holder = self.clone();
+        let runtime = tokio::runtime::Handle::current();
+        let job = self.publication_job();
+        tokio::task::spawn_blocking(move || {
+            let _job = job;
+            let omni_store::Store::Postgres(pg) = store.as_ref() else {
+                return Err(StoreError::Refused(
+                    "cluster routing patch requires Postgres".into(),
+                ));
+            };
+            let _writer = holder
+                .writers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let key_changed = matches!(change, RoutingChange::Key { .. });
+            let patch: Box<dyn FnOnce(&mut GatewaySnapshot)> = match change {
+                RoutingChange::Key { id } => {
+                    let row = runtime.block_on(pg.key_entry_by_id(&id))?;
+                    Box::new(move |next| {
+                        next.keys_by_hash.retain(|_, entry| match entry {
+                            Ok(k) => k.id != id,
+                            Err(e) => e.id != id,
+                        });
+                        if let Some(row) = row {
+                            let (hash, entry) = match row {
+                                Ok(row) => (row.hash.clone(), Ok(Arc::new(row))),
+                                Err(err) => (err.hash.clone(), Err(Arc::new(err))),
+                            };
+                            next.keys_by_hash.insert(hash, entry);
+                        }
+                    })
+                }
+                RoutingChange::Credential { id } => {
+                    let row = runtime.block_on(store.credential(&holder.key, &id))?;
+                    Box::new(move |next| {
+                        next.routing.credentials.retain(|c| c.id != id);
+                        if let Some(row) = row {
+                            next.routing.credentials.push(row);
+                            next.routing.credentials.sort_by(|a, b| {
+                                a.tier
+                                    .total_cmp(&b.tier)
+                                    .then_with(|| a.label.cmp(&b.label))
+                                    .then_with(|| a.id.cmp(&b.id))
+                            });
+                        } else {
+                            next.routing.health.retain(|_, row| row.credential_id != id);
+                            next.routing.quota.remove(&id);
+                        }
+                    })
+                }
+                RoutingChange::Health { id, model } => {
+                    let row = runtime.block_on(pg.health_for(&id, &model))?;
+                    Box::new(move |next| {
+                        let key = omni_router::health_key(&id, &model);
+                        if let Some(row) = row {
+                            next.routing.health.insert(key, row);
+                        } else {
+                            next.routing.health.remove(&key);
+                        }
+                    })
+                }
+                RoutingChange::Quota { id } => {
+                    let rows = runtime.block_on(pg.quota_for(&id))?;
+                    Box::new(move |next| {
+                        if rows.is_empty() {
+                            next.routing.quota.remove(&id);
+                        } else {
+                            next.routing.quota.insert(id, rows);
+                        }
+                    })
+                }
+                RoutingChange::Config => unreachable!("handled before patch"),
+            };
+            let _publication = holder
+                .publication
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut next = GatewaySnapshot::clone(&holder.current.load());
+            patch(&mut next);
+            holder.current.store(Arc::new(next));
+            if key_changed {
+                holder.generation.fetch_add(1, Ordering::AcqRel);
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| StoreError::Writer(format!("snapshot patch task: {e}")))?
     }
 
     /// `healthSaved`: this process's own health write, patched into the

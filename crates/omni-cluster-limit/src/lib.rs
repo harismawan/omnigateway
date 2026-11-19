@@ -846,15 +846,34 @@ impl ClusterLimiter {
         row_at: f64,
         commit: &str,
     ) {
+        self.debit_selected(
+            key_id,
+            Some(requested_model),
+            tokens,
+            cost_usd,
+            row_at,
+            commit,
+        );
+    }
+
+    /// A completion whose model cannot be encoded charges the key only.
+    /// Never substitute its lossy stored spelling as an override subject.
+    pub fn debit_selected(
+        &self,
+        key_id: &str,
+        requested_model: Option<&str>,
+        tokens: f64,
+        cost_usd: f64,
+        row_at: f64,
+        commit: &str,
+    ) {
         let delta = Counts {
             requests: 1.0,
             tokens,
             cost_usd,
         };
-        let subjects = [
-            key_id.to_owned(),
-            subject::model_subject_id(key_id, requested_model),
-        ];
+        let subjects = std::iter::once(key_id.to_owned())
+            .chain(requested_model.map(|model| subject::model_subject_id(key_id, model)));
         let mut wanted = Vec::with_capacity(2);
         {
             let known = self
@@ -901,11 +920,32 @@ impl ClusterLimiter {
         }
     }
 
+    /// A recovered request may have been admitted by a different process.
+    /// Register its configured scopes without making an admission or seeding.
+    pub fn record_recovered_limits(&self, key_id: &str, limits: &LimitConfig, model: Option<&str>) {
+        let mut known = self
+            .inner
+            .limits
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for subject in subject::subjects_of(key_id, limits, model.unwrap_or_default()) {
+            if (model.is_some() || subject.model.is_none()) && any_long_limit(&subject.limits) {
+                known.insert(subject.id, subject.limits);
+            }
+        }
+    }
+
     /// Applies every pending debit now (and waits for it). Cancel-safe:
     /// dropped mid-way, it puts back what it had not sent and counts what
     /// was in flight as lost (reseed armed).
     pub async fn flush_debits(&self) {
         debit::flush(&self.inner).await;
+    }
+
+    /// Delivery loss before the debit queue needs the same recovery sweep as
+    /// loss inside it; a later seed must not trust incomplete counts.
+    pub fn note_completion_gap(&self) {
+        self.inner.remote.note_lost_debit();
     }
 
     /// Queues seeds for every subject of this key with a long window (the

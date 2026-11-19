@@ -85,17 +85,42 @@ fn put_with(
     render: fn(omni_store::StoreError) -> String,
     terminal: bool,
 ) -> Result<(), String> {
-    use crate::settings_value::get;
-    let model = crate::model_schema::parse(input)?;
-    let text = |s: &str| JsValue::String(s.encode_utf16().collect());
-    if get(&model, "id") != Some(&text(id)) {
-        return Err("BAD_REQUEST: model id in the path and body must match".into());
-    }
+    let model = parse_matching(Some(id), input)?;
     let credential_rows = if terminal {
         crate::credentials::cli_rows(store)?
     } else {
         crate::credentials::rows(store, None).map_err(|e| e.message)?
     };
+    let (targets, strategy, alias) = model_columns(id, &model, credential_rows, || {
+        if terminal {
+            cli_list(store)
+        } else {
+            list_with(store, render)
+        }
+    })?;
+    omni_store::models::put(store.connection(), id, &targets, &strategy, alias)
+        .map_err(|e| e.to_string())
+}
+
+fn parse_matching(id: Option<&str>, input: &JsValue) -> Result<JsValue, String> {
+    let model = crate::model_schema::parse(input)?;
+    if !id.is_some_and(|id| {
+        crate::settings_value::get(&model, "id")
+            == Some(&JsValue::String(id.encode_utf16().collect()))
+    }) {
+        return Err("BAD_REQUEST: model id in the path and body must match".into());
+    }
+    Ok(model)
+}
+
+fn model_columns(
+    id: &str,
+    model: &JsValue,
+    credential_rows: Vec<JsValue>,
+    existing: impl FnOnce() -> Result<Vec<JsValue>, String>,
+) -> Result<(String, String, bool), String> {
+    use crate::settings_value::get;
+    let text = |s: &str| JsValue::String(s.encode_utf16().collect());
     let credentials = credential_rows
         .into_iter()
         .map(|c| {
@@ -109,7 +134,7 @@ fn put_with(
             )
         })
         .collect::<Vec<_>>();
-    let Some(JsValue::Array(targets)) = get(&model, "targets") else {
+    let Some(JsValue::Array(targets)) = get(model, "targets") else {
         unreachable!()
     };
     if credentials
@@ -132,11 +157,7 @@ fn put_with(
             ));
         }
     }
-    let existing = if terminal {
-        cli_list(store)?
-    } else {
-        list_with(store, render)?
-    };
+    let existing = existing()?;
     let stored = existing.iter().find(|m| get(m, "id") == Some(&text(id)));
     let old = stored.and_then(|m| get(m, "targets"));
     let pairs=match old {
@@ -247,15 +268,53 @@ fn put_with(
             )
         ));
     }
-    let strategy = crate::operator_json::string(get(&model, "strategy").expect("schema"))?;
-    let targets = omni_ir::jsjson::stringify(get(&model, "targets").expect("schema"))
-        .expect("validated JSON");
-    omni_store::models::put(
-        store.connection(),
-        id,
-        &targets,
-        &strategy,
-        get(&model, "isAlias") == Some(&JsValue::Bool(true)),
-    )
-    .map_err(|e| e.to_string())
+    let strategy = crate::operator_json::string(get(model, "strategy").expect("schema"))?;
+    let targets =
+        omni_ir::jsjson::stringify(get(model, "targets").expect("schema")).expect("validated JSON");
+    Ok((
+        targets,
+        strategy,
+        get(model, "isAlias") == Some(&JsValue::Bool(true)),
+    ))
+}
+
+pub(crate) async fn pg_rows(pg: &omni_store::pg::PgStore) -> Result<Vec<JsValue>, String> {
+    pg.operator_models()
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|(id, targets, strategy, alias)| {
+            let targets = omni_ir::jsjson::parse_js(&targets)
+                .map_err(|_| "invalid virtual_models operator row")?;
+            let text = |s: String| JsValue::String(s.encode_utf16().collect());
+            Ok(JsValue::Object(
+                [
+                    ("id", id.map_or(JsValue::Null, text)),
+                    ("targets", targets),
+                    ("strategy", text(strategy)),
+                    ("isAlias", JsValue::Bool(alias)),
+                ]
+                .into_iter()
+                .map(|(k, v)| (k.encode_utf16().collect(), v))
+                .collect(),
+            ))
+        })
+        .collect()
+}
+
+pub(crate) async fn put_postgres(
+    pg: &omni_store::pg::PgStore,
+    id: Option<&str>,
+    input: &JsValue,
+) -> Result<(), String> {
+    let model = parse_matching(id, input)?;
+    let id = id.expect("path matched body");
+    let creds = crate::credentials::pg_rows(pg, None)
+        .await
+        .map_err(|e| e.message)?;
+    let existing = pg_rows(pg).await;
+    let (targets, strategy, alias) = model_columns(id, &model, creds, || existing)?;
+    pg.put_model(id, &targets, &strategy, alias)
+        .await
+        .map_err(|e| e.to_string())
 }

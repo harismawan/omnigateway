@@ -32,6 +32,7 @@ pub mod overlay;
 pub mod price;
 pub mod quiesce;
 pub mod quota;
+mod routing;
 pub mod screening;
 pub mod server;
 pub mod static_files;
@@ -48,7 +49,7 @@ use omni_gateway_core::config::Config;
 use omni_gateway_core::ratelimit::RateLimiter;
 use omni_gateway_core::snapshot::{MissConfig, MissResolver, SnapshotHolder};
 use omni_store::SqliteStore;
-use omni_store::writer::{Writer, WriterConfig};
+use omni_store::writer::WriterConfig;
 use tokio::net::TcpListener;
 
 /// `STOP_DEADLINE_MS`.
@@ -272,6 +273,13 @@ pub fn http1_builder(_idle: Duration) -> hyper::server::conn::http1::Builder {
     builder
 }
 
+async fn open_sqlite(path: &std::path::Path, offset: i64) -> Result<SqliteStore, String> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || SqliteStore::open(path, offset).map_err(|e| e.to_string()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Boots the gateway inside the current runtime and starts serving.
 #[allow(clippy::too_many_lines)]
 pub async fn start(config: Config, options: Options) -> Result<Running, String> {
@@ -291,7 +299,19 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
     let path = std::path::PathBuf::from(&config.database_path);
     let offset = config.day_offset_minutes;
 
-    let (store, swept) = {
+    let (store, swept) = if config.cluster_mode {
+        let url = config
+            .database_url
+            .as_deref()
+            .ok_or("cluster primary URL missing")?;
+        let pg = omni_store::pg::PgStore::open(omni_store::pg::PgConfig::new(url), offset)
+            .await
+            .map_err(|e| e.to_string())?;
+        pg.heartbeat(&node_id, now)
+            .await
+            .map_err(|e| e.to_string())?;
+        (Arc::new(omni_store::Store::Postgres(pg)), 0)
+    } else {
         let path = path.clone();
         let node_id = node_id.clone();
         tokio::task::spawn_blocking(move || {
@@ -301,32 +321,114 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
             let mut recovery = omni_store::open_connection(&path).map_err(|e| e.to_string())?;
             let swept = omni_store::writer::recover_pending(&mut recovery, &node_id, now, offset)
                 .map_err(|e| e.to_string())?;
-            Ok::<_, String>((store, swept))
+            let store = omni_store::Store::Sqlite {
+                store: omni_store::lifecycle::shared(store),
+                path,
+                day_offset_minutes: offset,
+            };
+            Ok::<_, String>((Arc::new(store), swept))
         })
         .await
         .map_err(|e| e.to_string())??
     };
-    tracing::debug!(path = %path.display(), "store opened");
     let key = kdf.await.map_err(|e| e.to_string())?;
-
-    let holder = {
-        let key = key.clone();
-        tokio::task::spawn_blocking(move || {
-            #[allow(clippy::cast_precision_loss)]
-            SnapshotHolder::build(&store, key, now as f64)
-                .map(|h| (Arc::new(h), store))
-                .map_err(|e| e.to_string())
+    #[allow(clippy::cast_precision_loss)]
+    let holder = Arc::new(
+        SnapshotHolder::build_from(store.clone(), key.clone(), now as f64)
+            .await
+            .map_err(|e| e.to_string())?,
+    );
+    let (redis, cluster_limiter) = if let omni_store::Store::Postgres(pg) = store.as_ref() {
+        let url = config
+            .redis_url
+            .as_deref()
+            .ok_or("cluster coordinator URL missing")?;
+        let coord = Arc::new(
+            omni_coord::redis::RedisCoord::connect(url, Default::default())
+                .await
+                .map_err(|e| e.to_string())?,
+        );
+        // Preseed below, before the listener, against the same pool the writer uses.
+        let limiter = omni_cluster_limit::ClusterLimiter::new(
+            coord.clone(),
+            Arc::new(cluster::PgUsage::new(pg.clone())),
+            Default::default(),
+        );
+        (Some(coord), Some(limiter))
+    } else {
+        (None, None)
+    };
+    let swept = if let (omni_store::Store::Postgres(pg), Some(cluster)) =
+        (store.as_ref(), &cluster_limiter)
+    {
+        let snapshot = holder.load();
+        let swept = omni_store::writer::recover_pending_postgres(pg, &node_id, now, |rows| {
+            cluster::debit_recovered(cluster, &snapshot, &rows);
         })
         .await
-        .map_err(|e| e.to_string())??
+        .map_err(|e| e.to_string())?;
+        // Existing fleet pictures need the committed debit. Missing pictures
+        // will read the same row from the primary when the seed starts below.
+        cluster.flush_debits().await;
+        swept
+    } else {
+        swept
     };
-    let (holder, store) = holder;
+
+    let (miss, admin, control, refresh_store) =
+        if let omni_store::Store::Postgres(pg) = store.as_ref() {
+            let coord = redis.as_ref().ok_or("cluster coordinator missing")?;
+            (
+                MissResolver::from_backend(holder.clone(), store.clone(), MissConfig::default()),
+                admin_auth::AdminAuth::from_backend(
+                    store.clone(),
+                    Arc::new(admin_auth::CoordKv::new(coord.clone())),
+                    Arc::new(clock::now_ms),
+                    admin_auth::SESSION_TTL_MS,
+                ),
+                admin_routes::ControlStore::from_postgres(pg.clone()),
+                store.clone(),
+            )
+        } else {
+            let now: admin_auth::Clock = Arc::new(clock::now_ms);
+            let miss = open_sqlite(&path, offset).await?;
+            let admin = open_sqlite(&path, offset).await?;
+            let control = open_sqlite(&path, offset).await?;
+            let refresh = omni_store::Store::open(
+                omni_store::StoreConfig::Sqlite { path: path.clone() },
+                offset,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            (
+                MissResolver::new(
+                    holder.clone(),
+                    omni_store::lifecycle::shared(miss),
+                    MissConfig::default(),
+                ),
+                admin_auth::AdminAuth::new(
+                    admin,
+                    Arc::new(admin_auth::MemoryKv::new(now.clone())),
+                    now,
+                    admin_auth::SESSION_TTL_MS,
+                ),
+                admin_routes::ControlStore::new(control),
+                Arc::new(refresh),
+            )
+        };
+    let quota_interval = store
+        .get_settings()
+        .await
+        .map_err(|e| e.to_string())?
+        .quota_poll_interval_ms;
 
     let (commit_tx, mut commit_rx) = tokio::sync::mpsc::channel(4096);
-    let stream = Arc::new(stream_transport::Hub::default());
-    let writer = Writer::spawn(
-        &path,
-        WriterConfig {
+    let stream = redis.as_ref().map_or_else(
+        || Arc::new(stream_transport::Hub::default()),
+        |coord| stream_transport::Hub::with_console_fleet(coord.clone(), &node_id),
+    );
+    let writer = store
+        .spawn_writer(WriterConfig {
             log_observer: Some(stream.clone()),
             node_id: node_id.clone(),
             day_offset_minutes: offset,
@@ -336,15 +438,18 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
                 .writer_capacity
                 .unwrap_or(WriterConfig::default().capacity),
             ..WriterConfig::default()
-        },
-    )
-    .map_err(|e| e.to_string())?;
+        })
+        .map_err(|e| e.to_string())?;
     let handle = writer.handle();
     if swept > 0 {
         tracing::info!(count = swept, "retired interrupted requests");
     }
 
-    let limiter = RateLimiter::new();
+    let limiter = cluster_limiter
+        .as_ref()
+        .map_or_else(RateLimiter::new, |cluster| {
+            RateLimiter::with_cluster(cluster.clone())
+        });
     // Before any listener/background consumer: serial ordered writer seeds,
     // receiving and installing each result rather than merely queueing work.
     // Per-key draining also keeps large boot snapshots within queue budgets.
@@ -354,7 +459,12 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
                 continue;
             };
             #[allow(clippy::cast_precision_loss)]
-            limiter.preseed(&key.id, limits, clock::now_ms() as f64);
+            let at = clock::now_ms() as f64;
+            if let Some(cluster) = &cluster_limiter {
+                cluster.preseed_now(&key.id, limits, at).await;
+                continue;
+            }
+            limiter.preseed(&key.id, limits, at);
             for job in limiter.take_seed_jobs() {
                 let query = RateLimiter::seed_query(&job);
                 if !handle.seed(query.clone()) {
@@ -391,39 +501,6 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
     })
     .await
     .map_err(|_| "boot seed installation timed out".to_string())??;
-    let miss_store = tokio::task::spawn_blocking({
-        let path = path.clone();
-        move || SqliteStore::open(&path, offset).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-    let miss = MissResolver::new(
-        holder.clone(),
-        omni_store::lifecycle::shared(miss_store),
-        MissConfig::default(),
-    );
-    // The admin surface's own connection: password rows and client-session
-    // key checks, never on the request path's.
-    let admin_store = tokio::task::spawn_blocking({
-        let path = path.clone();
-        move || SqliteStore::open(&path, offset).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-    // The admin routes' config connection: keys, models, settings.
-    let control_store = tokio::task::spawn_blocking({
-        let path = path.clone();
-        move || SqliteStore::open(&path, offset).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-    let admin = {
-        let now: admin_auth::Clock = Arc::new(clock::now_ms);
-        // Sessions live in this process: a restart ends every one (spec:
-        // in-process store for a single node; D2 plugs a shared one in).
-        let kv = Arc::new(admin_auth::MemoryKv::new(now.clone()));
-        admin_auth::AdminAuth::new(admin_store, kv, now, admin_auth::SESSION_TTL_MS)
-    };
 
     // `dashboardDir()`: `OMNI_STATIC_DIR` taken literally when set. Without
     // it TS tries `./public` and `../../dashboard/dist` beside its bundle;
@@ -447,10 +524,48 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
     let (asker, applier) = limiter.spawn_consumer(handle.clone(), commit_rx);
     let refresher = holder
         .clone()
-        .spawn_refresher(store, Duration::from_millis(500));
+        .spawn_backend_refresher(store.clone(), Duration::from_millis(500));
     let preseeder = spawn_preseeder(holder.clone(), limiter.clone(), Duration::from_millis(500));
+    let routing_bus = redis.as_ref().map(|coord| {
+        routing::Routing::start(
+            coord.clone(),
+            node_id.clone(),
+            store.clone(),
+            holder.clone(),
+        )
+    });
+    let routing = routing_bus.as_ref().map(|(tx, _, _)| tx.clone());
 
     let health = Arc::new(dispatch::HealthOverlay::default());
+    let shared_health = redis.as_ref().map(|_| {
+        use omni_store::writer::{HealthCommitted, HealthWriter, HealthWriterConfig, Observed};
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1024);
+        let writer = HealthWriter::spawn(
+            store.as_ref().clone(),
+            HealthWriterConfig {
+                commit_sink: Some(tx),
+                ..HealthWriterConfig::default()
+            },
+        );
+        let routing = routing.clone();
+        let task = tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                if let HealthCommitted::Written { row }
+                | HealthCommitted::Uncertain {
+                    observed: Observed::Row(row),
+                    ..
+                } = event
+                    && let Some(routing) = &routing
+                {
+                    routing.committed(routing::RoutingChange::Health {
+                        id: row.credential_id,
+                        model: row.model,
+                    });
+                }
+            }
+        });
+        (writer, task)
+    });
     let overlay_sweeper =
         dispatch::HealthOverlay::spawn_sweeper(health.clone(), overlay::OVERLAY_TTL);
     let telemetry = Arc::new(
@@ -485,33 +600,40 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
     } else {
         http
     };
-    let refresh_store = omni_store::Store::open(
-        omni_store::StoreConfig::Sqlite { path: path.clone() },
-        offset,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    let oauth_refresher = Arc::new(refresh::Refresher::new(
-        Arc::new(refresh_store),
-        key.clone(),
-        http.clone(),
-        clock::now_ms,
-    ));
-    let oauth_scheduler = oauth_refresher.start_scheduler(holder.clone(), stream.clone());
+    let mut oauth_refresher =
+        refresh::Refresher::new(refresh_store, key.clone(), http.clone(), clock::now_ms);
+    if let Some(coord) = &redis {
+        oauth_refresher.lock = Arc::new(refresh::CoordLock::new(coord.clone()));
+    }
+    oauth_refresher.routing = routing.clone();
+    let oauth_refresher = Arc::new(oauth_refresher);
+    let loop_lease = redis
+        .as_ref()
+        .map(|coord| (coord.clone() as Arc<dyn omni_coord::Coord>, node_id.clone()));
+    let oauth_scheduler =
+        oauth_refresher.start_scheduler(holder.clone(), stream.clone(), loop_lease.clone());
     let console_stream = console::start(stream.clone(), &node_id);
-    let mut maintenance = maintenance::start(
-        path.clone(),
-        offset,
-        node_id.clone(),
-        handle.clone(),
-        Arc::new(omni_coord::MemoryCoord::new(omni_coord::system_clock())),
-    );
-    let quota_interval = control_store
-        .get_settings()
-        .map_err(|e| e.to_string())?
-        .quota_poll_interval_ms;
-    let control = admin_routes::ControlStore::new(control_store);
-    let quota = omni_control::quota_runtime::Quota::new(Arc::new(quota::GatewayHost {
+    let mut maintenance = if let (Some(coord), Some(cluster), omni_store::Store::Postgres(pg)) =
+        (&redis, &cluster_limiter, store.as_ref())
+    {
+        let cluster = cluster.clone();
+        let holder = holder.clone();
+        let hub = stream.clone();
+        maintenance::start_postgres(pg.clone(), node_id.clone(), coord.clone(), move |rows| {
+            let count = rows.len();
+            cluster::debit_recovered(&cluster, &holder.load(), &rows);
+            omni_store::writer::LogObserver::committed(hub.as_ref(), count, count);
+        })
+    } else {
+        maintenance::start(
+            path.clone(),
+            offset,
+            node_id.clone(),
+            handle.clone(),
+            Arc::new(omni_coord::MemoryCoord::new(omni_coord::system_clock())),
+        )
+    };
+    let quota_host = Arc::new(quota::GatewayHost {
         completed: Some({
             let hub = stream.clone();
             Arc::new(move || hub.invalidate("res:quota", None))
@@ -519,18 +641,42 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         holder: Some(holder.clone()),
         refresh: oauth_refresher.clone(),
         control: control.clone(),
-    }));
-    let quota_scheduler = quota::start(quota.clone(), stream.clone(), quota_interval);
+    });
+    let quota = match &redis {
+        Some(coord) => omni_control::quota_runtime::Quota::coordinated(quota_host, coord.clone()),
+        None => omni_control::quota_runtime::Quota::new(quota_host),
+    };
+    let quota_scheduler = quota::start(quota.clone(), stream.clone(), quota_interval, loop_lease);
+    let (load, load_publisher) = redis.as_ref().map_or_else(
+        || (load::LoadRegistry::new(), None),
+        |coord| {
+            use omni_cluster_limit::load::{LoadOptions, LoadPublisher, LoadView};
+            let view = LoadView::new();
+            let publisher = LoadPublisher::spawn(
+                coord.remote().clone(),
+                view.clone(),
+                omni_coord::system_clock(),
+                LoadOptions {
+                    replica: node_id.clone(),
+                    ..LoadOptions::default()
+                },
+            );
+            (load::LoadRegistry::shared(view), Some(publisher))
+        },
+    );
     let deps = Arc::new(dispatch::Deps {
         refresher: oauth_refresher,
         http,
         telemetry,
         writer: handle.clone(),
         holder,
-        load: load::LoadRegistry::new(),
-        probes: load::Probes::new(),
+        load,
+        probes: redis.as_ref().map_or_else(load::Probes::new, |coord| {
+            load::Probes::shared(coord.remote().clone())
+        }),
         providers: omni_router::Providers::builtin(),
         health: health.clone(),
+        shared_health: shared_health.as_ref().map(|(writer, _)| writer.handle()),
         now: clock::now_ms,
         rand: clock::random,
     });
@@ -542,6 +688,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         lifecycle: options.lifecycle,
         version: options.version.clone(),
         cluster: config.cluster_mode,
+        redis: redis.clone(),
         stop: stop.clone(),
         deadline_workers: server::DeadlineWorkers::new(),
         deps,
@@ -558,7 +705,13 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         base_url_https: api::base_url_is_https(&config.base_url),
         control,
         credential_key: key.clone(),
-        connect: Arc::new(connect::ConnectFlows::default()),
+        connect: Arc::new(
+            redis
+                .as_ref()
+                .map_or_else(connect::ConnectFlows::default, |coord| {
+                    connect::ConnectFlows::new(coord.clone())
+                }),
+        ),
         body_logging_allowed: config.body_logging_allowed,
         day_offset_minutes: offset,
         reported_catalog_problems: std::sync::Mutex::default(),
@@ -633,6 +786,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
             drop(task.await);
         }
         drop(tokio::time::timeout_at(shutdown_until, maintenance.stop()).await);
+        drop(maintenance);
         oauth_scheduler.abort();
         drop(oauth_scheduler.await);
         tracing::info!(reason = "signal", "shutdown requested");
@@ -657,19 +811,37 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         // Abort only requests cancellation. Join the body pumps as well so
         // their source/Finisher destructors finish before the writer closes.
         app.deadline_workers.shutdown().await;
+        if let Some((health_writer, health_applier)) = shared_health {
+            if let Err(e) = health_writer.close().await {
+                tracing::warn!(reason = %e, "health writer close failed");
+            }
+            drop(health_applier.await);
+        }
         #[cfg(test)]
         app.deadline_workers.before_writer_close();
         drop(tokio::time::timeout_at(shutdown_until, app.quota.drain()).await);
         drop(tokio::time::timeout_at(shutdown_until, app.deps.refresher.drain()).await);
         refresher.abort();
         drop(refresher.await);
+        if let Some((tx, sub, task)) = routing_bus {
+            drop((tx, sub));
+            task.abort();
+            drop(task.await);
+        }
         drop(tokio::time::timeout_at(shutdown_until, app.deps.holder.drain_publications()).await);
         drop(app);
         preseeder.abort();
         overlay_sweeper.abort();
         asker.abort();
         let stats = writer.close().await;
-        applier.abort();
+        drop(applier.await);
+        if let Some(cluster) = cluster_limiter {
+            cluster.shutdown().await;
+        }
+        drop(load_publisher);
+        if let Some(redis) = redis {
+            redis.shutdown().await;
+        }
         match stats {
             Ok(s) => {
                 if s.dropped > 0 || s.failed > 0 {

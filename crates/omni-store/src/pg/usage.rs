@@ -321,12 +321,12 @@ pub(crate) async fn sweep_pending(
         &[&(now - 86_400_000)],
     )
     .await?;
-    pending_interruptions(c, node_id, now).await
+    pending_interruptions(c, Some(node_id), now).await
 }
 
 pub(crate) async fn pending_interruptions(
     c: &impl GenericClient,
-    node_id: &str,
+    boot_node_id: Option<&str>,
     now: i64,
 ) -> Result<Vec<RequestLog>, StoreError> {
     let rows = query_rows(
@@ -339,7 +339,7 @@ pub(crate) async fn pending_interruptions(
            FROM request_logs
           WHERE state = 'pending'
             AND (node_id = $1 OR node_id NOT IN (SELECT id FROM nodes WHERE seen_at > $2))",
-        &[&node_id, &(now - NODE_GRACE_MS)],
+        &[&boot_node_id, &(now - NODE_GRACE_MS)],
     )
     .await?;
     rows.iter()

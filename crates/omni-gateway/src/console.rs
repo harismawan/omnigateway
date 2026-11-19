@@ -191,20 +191,25 @@ impl Fleet {
         timeout: std::time::Duration,
     ) -> Result<Value, omni_ir::error::GatewayError> {
         use futures_util::{StreamExt as _, stream};
-        let reads = stream::iter(nodes.iter().map(|node| {
-            let query = query.clone();
-            async move { (node, self.read_with_timeout(node, query, timeout).await) }
-        }))
-        .buffer_unordered(16)
-        .collect::<Vec<_>>()
-        .await;
+        let requests = nodes
+            .iter()
+            .map(|node| (node.clone(), query.clone()))
+            .collect::<Vec<_>>();
+        let reads = stream::iter(requests)
+            .map(|(node, query)| async move {
+                let read = self.read_with_timeout(&node, query, timeout).await;
+                (node, read)
+            })
+            .buffer_unordered(16)
+            .collect::<Vec<_>>()
+            .await;
         let mut lines = Vec::new();
         let mut unreachable = Vec::new();
         let mut answered = 0;
         let mut captured = false;
         for (node, read) in reads {
             match read {
-                Err(_) => unreachable.push(node.clone()),
+                Err(_) => unreachable.push(node),
                 Ok(read) => {
                     answered += 1;
                     captured |= read["source"] != "none";

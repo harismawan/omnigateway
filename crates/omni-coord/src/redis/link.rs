@@ -1198,21 +1198,22 @@ pub(crate) fn server_fault(e: &RedisError) -> Fault {
 /// reseeds from the store. Boxed: it calls `call`, which spawns it.
 fn reseed_after_outage(link: Arc<Link>) -> BoxFuture<()> {
     Box::pin(async move {
-        let deadline = tokio::time::Instant::now() + link.opts.command_timeout * 10;
-        let pattern = format!("{}*", super::key("b", ""));
-        let outcome = async {
-            let keys = scan(&link, &pattern, deadline).await?;
-            for chunk in keys.chunks(512) {
-                let mut unlink = redis::cmd("UNLINK");
-                unlink.arg(chunk);
-                link.call_until(Request::One(unlink), deadline).await?;
-            }
-            Ok::<_, Fault>(())
-        };
-        if outcome.await.is_err() {
+        if sweep_buckets(&link).await.is_err() {
             link.note_lost_debit();
         }
     })
+}
+
+pub(crate) async fn sweep_buckets(link: &Arc<Link>) -> Result<(), Fault> {
+    let deadline = tokio::time::Instant::now() + link.opts.command_timeout * 10;
+    let pattern = format!("{}*", super::key("b", ""));
+    let keys = scan(link, &pattern, deadline).await?;
+    for chunk in keys.chunks(512) {
+        let mut unlink = redis::cmd("UNLINK");
+        unlink.arg(chunk);
+        link.call_until(Request::One(unlink), deadline).await?;
+    }
+    Ok(())
 }
 
 /// Every key matching `pattern`: `SCAN`, never `KEYS`, every page under the

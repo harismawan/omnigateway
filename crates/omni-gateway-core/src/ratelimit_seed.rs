@@ -78,6 +78,35 @@ impl RateLimiter {
     /// Applies one event from the writer's commit stream, in order.
     #[allow(clippy::cast_precision_loss)]
     pub fn apply(&self, event: Committed) {
+        if let Some(cluster) = &self.cluster {
+            match event {
+                Committed::Completions(rows) => {
+                    for row in rows {
+                        let Some(key) = row.api_key_id.as_deref() else {
+                            continue;
+                        };
+                        // Persistence fallback rows have no primary transaction
+                        // identity and must never become shared debits.
+                        let Some(commit) = row.commit_id.as_deref().filter(|id| !id.is_empty())
+                        else {
+                            continue;
+                        };
+                        cluster.debit_selected(
+                            key,
+                            row.debit_model.then_some(row.requested_model.as_str()),
+                            row.tokens,
+                            row.cost_usd,
+                            row.at,
+                            commit,
+                        );
+                    }
+                }
+                Committed::Gap => cluster.note_completion_gap(),
+                Committed::Seed { .. } => {}
+                Committed::Fence(fence) => fence.0.notify_one(),
+            }
+            return;
+        }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0.0, |d| d.as_millis() as f64);

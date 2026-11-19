@@ -69,15 +69,7 @@ pub fn run(
     now: f64,
     providers: &Providers,
 ) -> Result<JsValue, Failure> {
-    let schema = Z::Obj {
-        shape: ["tools", "images", "reasoning"]
-            .into_iter()
-            .map(|k| (k, Z::Default(Box::new(Z::Bool), || JsValue::Bool(false))))
-            .collect(),
-        strict: true,
-        refine: None,
-    };
-    let need = parse_or_throw(&schema, input).map_err(Failure::bad)?;
+    let need = parse_need(input)?;
     let models = models(store, id)?;
     let snapshot = Snapshot::new(
         credentials(store, now)?,
@@ -87,11 +79,63 @@ pub fn run(
         store.get_settings()?,
         now,
     );
+    rank_probe(Some(store), &snapshot, id, &need, now, providers)
+}
+
+pub async fn run_postgres(
+    pg: &omni_store::pg::PgStore,
+    key: &omni_crypto::field::FieldKey,
+    id: &str,
+    input: &JsValue,
+    now: f64,
+    providers: &Providers,
+) -> Result<JsValue, Failure> {
+    let need = parse_need(input)?;
+    let data = pg.snapshot_reads(key).await?;
+    let mut models = Vec::new();
+    for row in data.models {
+        match row {
+            Ok(model) if model.id == id => models.push(model),
+            Err(error) if error.id == id => return Err(Failure::internal(error)),
+            _ => {}
+        }
+    }
+    let snapshot = Snapshot::new(
+        data.credentials,
+        data.health,
+        data.quota,
+        models,
+        data.settings,
+        now,
+    );
+    rank_probe(None, &snapshot, id, &need, now, providers)
+}
+
+fn parse_need(input: &JsValue) -> Result<JsValue, Failure> {
+    let schema = Z::Obj {
+        shape: ["tools", "images", "reasoning"]
+            .into_iter()
+            .map(|k| (k, Z::Default(Box::new(Z::Bool), || JsValue::Bool(false))))
+            .collect(),
+        strict: true,
+        refine: None,
+    };
+    parse_or_throw(&schema, input).map_err(Failure::bad)
+}
+
+fn rank_probe(
+    store: Option<&SqliteStore>,
+    snapshot: &Snapshot,
+    id: &str,
+    need: &JsValue,
+    now: f64,
+    providers: &Providers,
+) -> Result<JsValue, Failure> {
     let model = snapshot.models.get(id).ok_or_else(|| Failure {
         code: Some("MODEL_UNAVAILABLE"),
         message: format!("no virtual model \"{id}\""),
     })?;
-    let enabled = |k| matches!(get(&need, k), Some(JsValue::Bool(true)));
+    let enabled = |k| matches!(get(need, k), Some(JsValue::Bool(true)));
     let mut probe = json!({"model":id,"messages":[{"role":"user","content": if enabled("images") {json!([{"type":"image","mediaType":"image/png","data":""}])} else {json!([{"type":"text","text":""}])}}],"stream":false});
     if enabled("tools") {
         probe["tools"] = json!([{"kind":"portable","name":"probe","description":"","inputSchema":{"type":"object"}}]);
@@ -103,7 +147,7 @@ pub fn run(
     let result = rank(&RankInput {
         request: &request,
         model,
-        snapshot: &snapshot,
+        snapshot,
         now,
         rand: 0.0,
         load: None,
@@ -119,6 +163,9 @@ pub fn run(
         .collect();
     let out = json!({"modelId":model.id,"strategy":strategy,"deterministic":strategy != "weighted","rankedAt":now,"candidates":candidates,"excluded":excluded});
     let mut out = JsValue::from(&out);
+    let Some(store) = store else {
+        return Ok(out);
+    };
     let raw_targets = store
         .connection()
         .query_row(

@@ -110,6 +110,7 @@ fn judge_deps(deps: &Arc<Deps>, escapes: Vec<(String, String)>) -> Arc<Deps> {
         probes: deps.probes.clone(),
         providers: deps.providers.clone(),
         health: deps.health.clone(),
+        shared_health: deps.shared_health.clone(),
         telemetry: deps.telemetry.clone(),
         now: deps.now,
         rand: deps.rand,

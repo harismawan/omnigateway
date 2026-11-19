@@ -33,6 +33,7 @@ foldhash = "0.2"
 httpdate = "1"
 subtle = "2.6"
 serde_json.workspace = true
+serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 url = "2.5"

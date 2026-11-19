@@ -26,6 +26,7 @@ tracing.workspace = true
 # bounded pool with wait/create timeouts. TLS uses the existing rustls stack.
 tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }
 deadpool-postgres = { version = "0.14", default-features = false, features = ["rt_tokio_1"] }
+futures-util = { version = "0.3", default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }

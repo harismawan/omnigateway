@@ -801,6 +801,13 @@ impl Remote {
         }
         Ok(())
     }
+
+    /// Discards the long-window namespace, including seed companions. Call
+    /// only with writers and seeders stopped, before cutover or a lineage
+    /// change, not at each normal replica startup.
+    pub async fn sweep_buckets_for_cutover(&self) -> Result<(), Fault> {
+        link::sweep_buckets(&self.link).await
+    }
 }
 
 // --- RedisCoord: the Coord, failing open ---------------------------------
@@ -1245,7 +1252,7 @@ struct Envelope {
 /// The pub/sub connection: subscribes to [`CHANNEL`], dispatches every frame
 /// locally, and on a drop reconnects and resubscribes — on a fresh
 /// connection, so a frame is never delivered twice. Each (re)subscribe
-/// dispatches [`RECONNECTED_TOPIC`] locally (TS `onconnect`).
+/// dispatches [`RECONNECTED_TOPIC`] once the command socket can send again.
 /// Runs [`listen`] and restarts it if it ever ends abnormally — a panic
 /// escaping a handler in an unwinding build (release builds abort on panic,
 /// per the workspace profile) — so the coordinator never stays deaf with
@@ -1310,13 +1317,40 @@ async fn listen(
                 delay = link.opts.reconnect_min;
                 listening.store(true, Ordering::SeqCst);
                 settled.send_replace(true);
-                subscribers.dispatch(RECONNECTED_TOPIC, "");
                 let (mut sink, mut stream) = pubsub.split();
+                // A successful SUBSCRIBE says nothing about the other socket.
+                // Probe it before inviting handlers to publish their hello;
+                // an idle command socket can still look up after losing TCP.
+                let command_ready = async {
+                    let mut connected = link.connected.subscribe();
+                    loop {
+                        // connect() uses the fault count to settle failed starts.
+                        // Don't count a fault against a link still opening.
+                        if connected.wait_for(|up| *up).await.is_err() {
+                            std::future::pending::<()>().await;
+                        }
+                        if link
+                            .call(link::Request::One(redis::cmd("PING")))
+                            .await
+                            .is_ok()
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(link.opts.reconnect_min).await;
+                    }
+                };
+                tokio::pin!(command_ready);
+                let mut announced = false;
                 let mut heartbeat = tokio::time::interval(link.opts.heartbeat);
                 heartbeat.tick().await;
                 loop {
                     let msg = tokio::select! {
                         msg = stream.next() => msg,
+                        () = &mut command_ready, if !announced => {
+                            announced = true;
+                            subscribers.dispatch(RECONNECTED_TOPIC, "");
+                            continue;
+                        }
                         _ = heartbeat.tick() => {
                             // A connection nothing answers on (blackholed,
                             // paused) never ends its stream; a PING that

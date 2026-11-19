@@ -9,25 +9,8 @@ pub fn history(store: &SqliteStore, query: &str, now: f64) -> Result<String, cra
     })
 }
 fn history_inner(store: &SqliteStore, query: &str, now: f64) -> Result<String, HistoryError> {
-    let settings = store.get_settings()?;
-    let oldest = now - settings.log_retention_days * 86400000.0;
-    let pairs = url::form_urlencoded::parse(query.as_bytes()).collect::<Vec<_>>();
-    let get = |key: &str| {
-        pairs
-            .iter()
-            .rev()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v.as_ref())
-    };
-    let number = |key: &str, default: f64| {
-        get(key)
-            .and_then(|v| v.parse::<f64>().ok())
-            .filter(|v| v.is_finite())
-            .unwrap_or(default)
-    };
-    let since = number("since", oldest).max(oldest);
-    let until = number("until", now).min(now);
-    let id = get("credentialId");
+    let (since, until, id) = operator_range(query, now, store.get_settings()?.log_retention_days);
+    let id = id.as_deref();
     let mut stmt=store.connection().prepare("SELECT credential_id,window_type,used,limit_value,resets_at,observed_at,window_ms FROM (SELECT * FROM quota_samples WHERE observed_at>=? AND observed_at<=? AND (? IS NULL OR credential_id=?) ORDER BY observed_at DESC LIMIT 50001) ORDER BY credential_id,window_type,observed_at")?;
     let mut rows = stmt.query(rusqlite::params![since, until, id, id])?;
     let mut samples = Vec::new();
@@ -86,6 +69,98 @@ fn history_inner(store: &SqliteStore, query: &str, now: f64) -> Result<String, H
             .to_string(),
     )
 }
+
+fn operator_range(query: &str, now: f64, retention: f64) -> (f64, f64, Option<String>) {
+    let oldest = now - retention * 86_400_000.0;
+    let pairs = url::form_urlencoded::parse(query.as_bytes()).collect::<Vec<_>>();
+    let get = |key: &str| {
+        pairs
+            .iter()
+            .rev()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_ref())
+    };
+    let number = |key, default| {
+        get(key)
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|v| v.is_finite())
+            .unwrap_or(default)
+    };
+    (
+        number("since", oldest).max(oldest),
+        number("until", now).min(now),
+        get("credentialId").map(str::to_owned),
+    )
+}
+
+pub async fn history_postgres(
+    pg: &omni_store::pg::PgStore,
+    query: &str,
+    now: f64,
+) -> Result<String, crate::api::Failure> {
+    let (since, until, id) =
+        operator_range(query, now, pg.get_settings().await?.log_retention_days);
+    let mut samples = pg.quota_samples(since, until, id.as_deref()).await?;
+    let truncated = samples.len() > 50_000;
+    samples.sort_by(|a, b| {
+        a.credential_id
+            .cmp(&b.credential_id)
+            .then_with(|| a.window_type.as_str().cmp(b.window_type.as_str()))
+            .then_with(|| a.observed_at.total_cmp(&b.observed_at))
+    });
+    samples.truncate(50_000);
+    let samples: Vec<_> = samples.into_iter().map(|w| serde_json::json!({"credentialId":w.credential_id,"windowType":w.window_type,"used":w.used,"limit":w.limit,"resetsAt":w.resets_at,"observedAt":w.observed_at,"windowMs":w.window_ms})).collect();
+    let mut rates = Vec::new();
+    for w in pg
+        .list_quota()
+        .await?
+        .into_iter()
+        .filter(|w| id.as_ref().is_none_or(|id| *id == w.credential_id))
+    {
+        let duration = w
+            .window_ms
+            .filter(|n| *n > 0.0)
+            .unwrap_or_else(|| w.window_type.nominal_ms());
+        let rate = if let Some(start) = w
+            .resets_at
+            .map(|r| r - duration)
+            .filter(|start| w.observed_at > *start)
+        {
+            let mut raw = String::new();
+            pg.usage_json(
+                omni_store::reports::UsageQuery {
+                    daily: false,
+                    key: "credential_id",
+                    split: None,
+                    since: start,
+                    until: w.observed_at,
+                    api_key: None,
+                    credential: Some(w.credential_id.clone()),
+                },
+                &mut raw,
+            )
+            .await?;
+            let data: Value = serde_json::from_str(&raw).map_err(crate::api::Failure::internal)?;
+            let tokens = [
+                "inputTokens",
+                "outputTokens",
+                "cacheReadTokens",
+                "cacheWriteTokens",
+            ]
+            .into_iter()
+            .map(|k| data[0][k].as_f64().unwrap_or_default())
+            .sum::<f64>();
+            Some(tokens / ((w.observed_at - start) / 3_600_000.0))
+        } else {
+            None
+        };
+        rates.push(serde_json::json!({"credentialId":w.credential_id,"windowType":w.window_type,"gatewayRatePerHour":rate}));
+    }
+    Ok(
+        serde_json::json!({"samples": samples,"gatewayRates": rates,"truncated": truncated})
+            .to_string(),
+    )
+}
 struct HistoryError;
 impl From<rusqlite::Error> for HistoryError {
     fn from(_: rusqlite::Error) -> Self {
@@ -128,6 +203,34 @@ pub fn save(store: &SqliteStore, id: &str, windows: &[Value], now: i64) -> Resul
     .map_err(|e| e.to_string())?;
     tx.execute("DELETE FROM quota_windows WHERE credential_id=? AND window_type NOT IN(SELECT value FROM json_each(?))",rusqlite::params![id,kinds]).map_err(|e|e.to_string())?;
     tx.commit().map_err(|e| e.to_string())
+}
+
+pub async fn save_postgres(
+    pg: &omni_store::pg::PgStore,
+    id: &str,
+    windows: &[Value],
+    now: i64,
+) -> Result<(), omni_store::StoreError> {
+    let windows = windows
+        .iter()
+        .map(|w| {
+            let invalid = || omni_store::StoreError::Refused("invalid quota window".into());
+            Ok(omni_store::QuotaWindow {
+                text_spent: None,
+                credential_id: id.to_owned(),
+                window_type: omni_store::quota::WindowType::parse(
+                    w["windowType"].as_str().ok_or_else(invalid)?,
+                ),
+                starts_at: 0.0,
+                observed_at: 0.0,
+                used: w["used"].as_f64().ok_or_else(invalid)?,
+                limit: w["limit"].as_f64(),
+                resets_at: w["resetsAt"].as_f64(),
+                window_ms: w["windowMs"].as_f64(),
+            })
+        })
+        .collect::<Result<Vec<_>, omni_store::StoreError>>()?;
+    pg.save_quota(id, &windows, now).await
 }
 
 #[cfg(test)]

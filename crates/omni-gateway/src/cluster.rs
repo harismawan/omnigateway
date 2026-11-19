@@ -1,6 +1,30 @@
 //! Production adapters between the primary store and reviewed cluster limiter.
 use omni_cluster_limit::{SeedRead, UsageSource};
 
+pub(crate) fn debit_recovered(
+    limiter: &omni_cluster_limit::ClusterLimiter,
+    snapshot: &omni_gateway_core::snapshot::GatewaySnapshot,
+    rows: &[omni_store::writer::Completion],
+) {
+    for row in rows.iter().filter_map(committed_debit) {
+        if let Some(limits) = snapshot
+            .keys()
+            .find(|key| key.id == row.key)
+            .and_then(|key| key.limits.as_ref())
+        {
+            limiter.record_recovered_limits(row.key, limits, row.model);
+        }
+        limiter.debit_selected(
+            row.key,
+            row.model,
+            row.tokens,
+            row.cost_usd,
+            row.at,
+            row.commit,
+        );
+    }
+}
+
 /// A successfully persisted completion with its original row association.
 pub struct CommittedDebit<'a> {
     pub key: &'a str,

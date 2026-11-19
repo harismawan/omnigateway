@@ -78,6 +78,7 @@ impl RefreshLock for MemoryLock {
     }
 }
 pub struct Refresher {
+    pub(crate) routing: Option<crate::routing::Routing>,
     pub store: Arc<Backend>,
     pub key: FieldKey,
     pub http: Arc<dyn HttpClient>,
@@ -89,6 +90,11 @@ fn storage(_: omni_store::StoreError) -> GatewayError {
     GatewayError::new(ErrorCode::Internal, "credential persistence failed")
 }
 impl Refresher {
+    pub(crate) fn routing_committed(&self, change: crate::routing::RoutingChange) {
+        if let Some(routing) = &self.routing {
+            routing.committed(change);
+        }
+    }
     /// After stopping request/sweep producers, let already shared rotations
     /// persist. The host bounds this wait by its remaining shutdown grace.
     pub async fn drain(&self) {
@@ -133,6 +139,9 @@ impl Refresher {
                         .disable_credential(&c.id, now, "expiredNoRefresh")
                         .await
                         .map_err(storage)?;
+                    self.routing_committed(crate::routing::RoutingChange::Credential {
+                        id: c.id.clone(),
+                    });
                     touched += 1;
                 }
             } else {
@@ -161,6 +170,7 @@ impl Refresher {
         self: &Arc<Self>,
         holder: Arc<omni_gateway_core::snapshot::SnapshotHolder>,
         hub: Arc<crate::stream_transport::Hub>,
+        lease: Option<(Arc<dyn omni_coord::Coord>, String)>,
     ) -> tokio::task::JoinHandle<()> {
         let this = self.clone();
         tokio::spawn(async move {
@@ -168,6 +178,12 @@ impl Refresher {
             let mut next = tokio::time::Instant::now() + period;
             loop {
                 tokio::time::sleep_until(next).await;
+                if let Some((coord, node)) = &lease
+                    && !coord.lease_acquire("refresh-sweep", node, 120_000).await
+                {
+                    next = next_sweep(next, tokio::time::Instant::now());
+                    continue;
+                }
                 match this.sweep(Some(&holder)).await {
                     Ok(outcome) if outcome.touched > 0 => hub.invalidate("res:credentials", None),
                     Ok(_) => {}
@@ -190,6 +206,7 @@ impl Refresher {
             key,
             http,
             lock: Arc::new(MemoryLock::default()),
+            routing: None,
             now,
             flights: Mutex::default(),
         }
@@ -327,6 +344,9 @@ impl Refresher {
                         .disable_rejected_token(&c.id, (self.now)())
                         .await
                         .map_err(storage)?;
+                    self.routing_committed(crate::routing::RoutingChange::Credential {
+                        id: c.id.clone(),
+                    });
                 }
                 return Err(error);
             }
@@ -375,6 +395,7 @@ impl Refresher {
                 )
                 .await
                 .map_err(storage)?;
+            self.routing_committed(crate::routing::RoutingChange::Credential { id: c.id.clone() });
         }
         self.store
             .credential(&self.key, &c.id)
