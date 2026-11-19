@@ -63,11 +63,194 @@ impl Source {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Query {
     lines: usize,
     level: Option<usize>,
     since: Option<f64>,
+}
+
+/// Addressed console reads over the shared coordinator. Inbound work is bounded;
+/// absent nodes time out instead of silently returning this process's source.
+pub struct Fleet {
+    coord: Arc<dyn omni_coord::Coord>,
+    node: String,
+    source: Source,
+    subscription: std::sync::Mutex<Option<omni_coord::Subscription>>,
+    worker: tokio::task::JoinHandle<()>,
+}
+
+impl Fleet {
+    pub fn new(coord: Arc<dyn omni_coord::Coord>, node: String, source: Source) -> Self {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, Query)>(32);
+        let target = node.clone();
+        let subscription = coord.subscribe(
+            "console:read",
+            Arc::new(move |_, raw| {
+                let Ok(ask) = serde_json::from_str::<Value>(raw) else {
+                    return;
+                };
+                if ask["nodeId"].as_str() != Some(target.as_str()) {
+                    return;
+                }
+                let Some(id) = ask["id"].as_str() else {
+                    return;
+                };
+                let query = &ask["query"];
+                let lines = query["lines"].as_u64().unwrap_or(200).clamp(1, 500) as usize;
+                let level = query["level"].as_str().and_then(level);
+                let since = query["since"]
+                    .as_f64()
+                    .filter(|v| v.is_finite() && *v > 0.0);
+                let _queued = tx.try_send((
+                    id.to_owned(),
+                    Query {
+                        lines,
+                        level,
+                        since,
+                    },
+                ));
+            }),
+        );
+        let worker_coord = coord.clone();
+        let worker_source = source.clone();
+        let worker = tokio::spawn(async move {
+            while let Some((id, query)) = rx.recv().await {
+                let source = worker_source.clone();
+                if let Ok(read) = tokio::task::spawn_blocking(move || source.read(&query)).await {
+                    worker_coord
+                        .publish(&format!("console:answer:{id}"), &read.to_string())
+                        .await;
+                }
+            }
+        });
+        Self {
+            coord,
+            node,
+            source,
+            subscription: std::sync::Mutex::new(Some(subscription)),
+            worker,
+        }
+    }
+
+    pub async fn read(
+        &self,
+        node: &str,
+        query: Query,
+    ) -> Result<Value, omni_ir::error::GatewayError> {
+        self.read_with_timeout(node, query, std::time::Duration::from_secs(3))
+            .await
+    }
+
+    pub async fn read_with_timeout(
+        &self,
+        node: &str,
+        query: Query,
+        timeout: std::time::Duration,
+    ) -> Result<Value, omni_ir::error::GatewayError> {
+        if node == self.node {
+            let source = self.source.clone();
+            return tokio::task::spawn_blocking(move || source.read(&query))
+                .await
+                .map_err(|_| {
+                    omni_ir::error::GatewayError::new(
+                        omni_ir::error::ErrorCode::Internal,
+                        "console read failed",
+                    )
+                });
+        }
+        let id = crate::clock::uuid_v4();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let _subscription = self.coord.subscribe(
+            &format!("console:answer:{id}"),
+            Arc::new(move |_, raw| {
+                if let Ok(value) = serde_json::from_str::<Value>(raw) {
+                    let _sent = tx.try_send(value);
+                }
+            }),
+        );
+        let level = query.level.map(|i| ["debug", "info", "warn", "error"][i]);
+        let ask = json!({"id":id,"nodeId":node,"query":{"lines":query.lines,"level":level,"since":query.since}});
+        self.coord.publish("console:read", &ask.to_string()).await;
+        tokio::time::timeout(timeout, rx.recv())
+            .await
+            .ok()
+            .flatten()
+            .ok_or_else(|| {
+                omni_ir::error::GatewayError::new(
+                    omni_ir::error::ErrorCode::Timeout,
+                    "that gateway process did not answer",
+                )
+            })
+    }
+
+    pub async fn read_all_with_timeout(
+        &self,
+        nodes: &[String],
+        query: Query,
+        timeout: std::time::Duration,
+    ) -> Result<Value, omni_ir::error::GatewayError> {
+        use futures_util::{StreamExt as _, stream};
+        let reads = stream::iter(nodes.iter().map(|node| {
+            let query = query.clone();
+            async move { (node, self.read_with_timeout(node, query, timeout).await) }
+        }))
+        .buffer_unordered(16)
+        .collect::<Vec<_>>()
+        .await;
+        let mut lines = Vec::new();
+        let mut unreachable = Vec::new();
+        let mut answered = 0;
+        let mut captured = false;
+        for (node, read) in reads {
+            match read {
+                Err(_) => unreachable.push(node.clone()),
+                Ok(read) => {
+                    answered += 1;
+                    captured |= read["source"] != "none";
+                    if let Some(rows) = read["lines"].as_array() {
+                        for line in rows {
+                            let mut line = line.clone();
+                            line["nodeId"] = json!(node);
+                            lines.push(line);
+                        }
+                    }
+                }
+            }
+        }
+        if answered == 0 {
+            return Err(omni_ir::error::GatewayError::new(
+                omni_ir::error::ErrorCode::Timeout,
+                "no process in the fleet answered a console read",
+            ));
+        }
+        lines.sort_by(|a, b| match (a["at"].as_f64(), b["at"].as_f64()) {
+            (Some(a), Some(b)) => a.total_cmp(&b),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        });
+        if lines.len() > query.lines {
+            lines.drain(..lines.len() - query.lines);
+        }
+        unreachable.sort();
+        Ok(
+            json!({"source":if captured { "fleet" } else { "none" },"lines":lines,"unreachable":unreachable}),
+        )
+    }
+
+    pub fn stop(&self) {
+        self.subscription
+            .lock()
+            .expect("console subscription")
+            .take();
+        self.worker.abort();
+    }
+}
+impl Drop for Fleet {
+    fn drop(&mut self) {
+        self.stop();
+    }
 }
 fn number(s: &str) -> Option<f64> {
     if s.trim().is_empty() {
