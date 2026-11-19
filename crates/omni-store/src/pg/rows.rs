@@ -99,6 +99,17 @@ pub(crate) async fn list_key_entries(
         .collect()
 }
 
+pub(crate) async fn find_key_entry(
+    c: &impl GenericClient,
+    hash: &str,
+) -> Result<Option<Result<ApiKey, keys::KeyRowError>>, StoreError> {
+    query_rows(c, "SELECT * FROM api_keys WHERE hash = $1", &[&hash])
+        .await?
+        .first()
+        .map(to_key_entry)
+        .transpose()
+}
+
 /// `one(where, arg)`: `where` is one of two fixed column names.
 pub(crate) async fn find_key(
     c: &impl GenericClient,
@@ -335,6 +346,23 @@ pub(crate) async fn list_credentials(
         .iter()
         .map(|r| to_credential(r, key))
         .collect()
+}
+
+/// Routing refresh must not freeze unrelated accounts because one row is
+/// unreadable. Operator list/get retain their existing explicit error surface.
+pub(crate) async fn snapshot_credentials(
+    c: &impl GenericClient,
+    key: &FieldKey,
+) -> Result<Vec<Credential>, StoreError> {
+    let rows = query_rows(c, "SELECT * FROM credentials ORDER BY tier, label", &[]).await?;
+    let mut credentials = Vec::with_capacity(rows.len());
+    for row in &rows {
+        match to_credential(row, key) {
+            Ok(credential) => credentials.push(credential),
+            Err(_) => tracing::warn!("unreadable credential omitted from routing snapshot"),
+        }
+    }
+    Ok(credentials)
 }
 
 pub(crate) async fn credential(

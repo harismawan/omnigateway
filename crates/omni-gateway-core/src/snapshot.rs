@@ -263,6 +263,53 @@ fn now_ms() -> f64 {
 }
 
 impl SnapshotHolder {
+    /// Backend-selected boot read. PG clones share the same bounded primary pool.
+    pub async fn build_from(
+        store: Arc<omni_store::Store>,
+        key: FieldKey,
+        now: f64,
+    ) -> Result<Self, StoreError> {
+        let boot_version = store.change_version().await?;
+        let first = snapshot_from(store.snapshot_reads(&key).await?, now);
+        Ok(Self {
+            writers: std::sync::Mutex::new(()),
+            publication: std::sync::Mutex::new(()),
+            jobs: AtomicU64::new(0),
+            jobs_done: tokio::sync::Notify::new(),
+            current: ArcSwap::from_pointee(first),
+            key,
+            boot_version,
+            generation: AtomicU64::new(0),
+        })
+    }
+
+    /// Async backend backstop. Rebuild work retains the publication drain guard.
+    pub fn spawn_backend_refresher(
+        self: Arc<Self>,
+        store: Arc<omni_store::Store>,
+        interval: Duration,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut version = self.boot_version;
+            let mut ticker = tokio::time::interval(interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                let polled = async {
+                    let next = store.change_version().await?;
+                    if next != version {
+                        self.rebuild_from(store.clone()).await?;
+                    }
+                    Ok::<_, StoreError>(next)
+                }
+                .await;
+                match polled {
+                    Ok(next) => version = next,
+                    Err(e) => tracing::warn!(reason = %e, "routing snapshot refresh failed"),
+                }
+            }
+        })
+    }
     /// The boot read. Fails boot if the store cannot be read at all.
     pub fn build(store: &SqliteStore, key: FieldKey, now: f64) -> Result<Self, StoreError> {
         let boot_version = store.data_version()?;
@@ -467,8 +514,20 @@ impl SnapshotHolder {
         hash: &str,
         after_read: impl FnOnce(),
     ) -> Result<Option<KeyEntry>, StoreError> {
+        self.lookup_miss_read(hash, || store.find_api_key_entry(hash), after_read)
+    }
+
+    pub(crate) fn lookup_miss_read(
+        &self,
+        hash: &str,
+        read: impl FnOnce() -> Result<
+            Option<Result<omni_store::keys::ApiKey, omni_store::keys::KeyRowError>>,
+            StoreError,
+        >,
+        after_read: impl FnOnce(),
+    ) -> Result<Option<KeyEntry>, StoreError> {
         let observed = self.current.load_full();
-        let Some(found) = store.find_api_key_entry(hash)? else {
+        let Some(found) = read()? else {
             return Ok(None);
         };
         after_read();

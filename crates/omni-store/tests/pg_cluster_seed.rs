@@ -6,6 +6,32 @@ use omni_store::pg::{PgConfig, PgStore};
 use omni_store::writer::{Committed, LogEvent, RequestLog, WriterConfig};
 
 #[tokio::test]
+async fn snapshot_isolates_existing_malformed_credential_regression() {
+    let Some(base) = base_url("snapshot_isolates_existing_malformed_credential_regression") else {
+        return;
+    };
+    let db = TestDb::create(&base, "credential_isolation").await;
+    let pg = PgStore::open(PgConfig::new(&db.url), 0)
+        .await
+        .expect("open");
+    pg.client().await.expect("client").batch_execute(
+        "INSERT INTO credentials(id,provider,label,auth_type,provider_data,created_at,updated_at)
+         VALUES('bad','custom','bad','apiKey','{',1,1),('good','custom','good','apiKey','{}',1,1)"
+    ).await.expect("seed");
+    let key = omni_crypto::field::derive_key("test-key");
+    assert!(
+        pg.list_credentials(&key).await.is_err(),
+        "operator list retains failure"
+    );
+    let snapshot = pg
+        .snapshot_reads(&key)
+        .await
+        .expect("isolated routing snapshot");
+    assert_eq!(snapshot.credentials.len(), 1);
+    assert_eq!(snapshot.credentials[0].id, "good");
+}
+
+#[tokio::test]
 async fn actual_writer_identity_and_exact_fractional_seed_set() {
     let Some(base) = base_url("actual_writer_identity_and_exact_fractional_seed_set") else {
         return;

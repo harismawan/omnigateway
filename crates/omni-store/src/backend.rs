@@ -158,6 +158,19 @@ impl Store {
         }
     }
 
+    pub async fn find_api_key_entry(
+        &self,
+        hash: &str,
+    ) -> Result<Option<Result<ApiKey, keys::KeyRowError>>, StoreError> {
+        match self {
+            Self::Sqlite { store, .. } => {
+                let hash = hash.to_owned();
+                on_sqlite!(store, |s| s.find_api_key_entry(&hash))
+            }
+            Self::Postgres(pg) => pg.find_api_key_entry(hash).await,
+        }
+    }
+
     pub async fn list_credentials(&self, key: &FieldKey) -> Result<Vec<Credential>, StoreError> {
         match self {
             Self::Sqlite { store, .. } => {

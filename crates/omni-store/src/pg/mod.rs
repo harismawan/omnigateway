@@ -269,7 +269,7 @@ impl PgStore {
             .await?;
         let data = SnapshotData {
             api_keys: rows::list_key_entries(&tx).await?,
-            credentials: rows::list_credentials(&tx, key).await?,
+            credentials: rows::snapshot_credentials(&tx, key).await?,
             health: rows::list_health(&tx).await?,
             models: rows::list_models(&tx).await?,
             quota: rows::list_quota(&tx).await?,
@@ -286,6 +286,13 @@ impl PgStore {
     /// The one read a snapshot miss (a brand-new key) falls back to.
     pub async fn find_api_key_by_hash(&self, hash: &str) -> Result<Option<ApiKey>, StoreError> {
         rows::find_key(&self.client().await?, "hash", hash).await
+    }
+
+    pub async fn find_api_key_entry(
+        &self,
+        hash: &str,
+    ) -> Result<Option<Result<ApiKey, crate::keys::KeyRowError>>, StoreError> {
+        rows::find_key_entry(&self.client().await?, hash).await
     }
 
     pub async fn list_credentials(&self, key: &FieldKey) -> Result<Vec<Credential>, StoreError> {
