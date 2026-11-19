@@ -26,6 +26,7 @@ omni start
 
 - [docs/client-api.md](docs/client-api.md) — endpoints, authentication, rate-limit headers, and how tools decide where a request can go
 - [docs/operations.md](docs/operations.md) — key limits, logs, recording bodies, snapshots and restore
+- [docs/rust-quota-runtime.md](docs/rust-quota-runtime.md) — Rust single-node quota support and limits
 - [docs/deploying.md](docs/deploying.md) — systemd, reverse proxies, cluster mode, Docker and Kubernetes
 - [docs/plugins.md](docs/plugins.md) — installing, verifying and removing plugins
 - [ARCHITECTURE.md](ARCHITECTURE.md) — how it is built

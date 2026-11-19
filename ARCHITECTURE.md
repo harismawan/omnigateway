@@ -1,5 +1,8 @@
 # Architecture
 
+Rust quota runtime ownership, supported provider boundary and public APIs are
+documented in [Rust quota runtime](docs/rust-quota-runtime.md).
+
 Rust CLI process supervision and metadata-only doctor diagnostics are described
 in [Rust CLI service boundary](docs/rust-cli-service.md); service launches use the
 canonical `omnigateway` executable, not the `omni` dispatch identity.

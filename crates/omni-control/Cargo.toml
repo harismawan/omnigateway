@@ -10,6 +10,9 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+omni-providers = { path = "../omni-providers" }
+tokio = { workspace = true, features = ["sync", "rt"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 omni-ir = { path = "../omni-ir" }
 omni-router = { path = "../omni-router" }
 omni-crypto = { path = "../omni-crypto" }

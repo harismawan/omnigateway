@@ -1,6 +1,107 @@
 //! Transactional provider snapshot/history writes, independent of scheduling.
 use omni_store::SqliteStore;
 use serde_json::Value;
+/// Operator retained history, including corroborating gateway rates.
+pub fn history(store: &SqliteStore, query: &str, now: f64) -> Result<String, crate::api::Failure> {
+    history_inner(store, query, now).map_err(|_| crate::api::Failure {
+        code: None,
+        message: "quota history read failed".into(),
+    })
+}
+fn history_inner(store: &SqliteStore, query: &str, now: f64) -> Result<String, HistoryError> {
+    let settings = store.get_settings()?;
+    let oldest = now - settings.log_retention_days * 86400000.0;
+    let pairs = url::form_urlencoded::parse(query.as_bytes()).collect::<Vec<_>>();
+    let get = |key: &str| {
+        pairs
+            .iter()
+            .rev()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_ref())
+    };
+    let number = |key: &str, default: f64| {
+        get(key)
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|v| v.is_finite())
+            .unwrap_or(default)
+    };
+    let since = number("since", oldest).max(oldest);
+    let until = number("until", now).min(now);
+    let id = get("credentialId");
+    let mut stmt=store.connection().prepare("SELECT credential_id,window_type,used,limit_value,resets_at,observed_at,window_ms FROM (SELECT * FROM quota_samples WHERE observed_at>=? AND observed_at<=? AND (? IS NULL OR credential_id=?) ORDER BY observed_at DESC LIMIT 50001) ORDER BY credential_id,window_type,observed_at")?;
+    let mut rows = stmt.query(rusqlite::params![since, until, id, id])?;
+    let mut samples = Vec::new();
+    while let Some(r) = rows.next()? {
+        samples.push(serde_json::json!({"credentialId":r.get::<_,String>(0)?,"windowType":r.get::<_,String>(1)?,"used":r.get::<_,f64>(2)?,"limit":r.get::<_,Option<f64>>(3)?,"resetsAt":r.get::<_,Option<f64>>(4)?,"observedAt":r.get::<_,f64>(5)?,"windowMs":r.get::<_,Option<f64>>(6)?}));
+    }
+    let truncated = samples.len() > 50000;
+    samples.truncate(50000);
+    let mut stmt=store.connection().prepare("SELECT credential_id,window_type,used,limit_value,resets_at,observed_at,window_ms FROM quota_windows WHERE ? IS NULL OR credential_id=?")?;
+    let mut rows = stmt.query(rusqlite::params![id, id])?;
+    let mut rates = Vec::new();
+    while let Some(r) = rows.next()? {
+        let id: String = r.get(0)?;
+        let kind: String = r.get(1)?;
+        let reset: Option<f64> = r.get(4)?;
+        let observed: f64 = r.get(5)?;
+        let duration =
+            r.get::<_, Option<f64>>(6)?
+                .filter(|v| *v > 0.0)
+                .unwrap_or(match kind.as_str() {
+                    "fiveHour" => 18000000.0,
+                    "daily" => 86400000.0,
+                    _ => 604800000.0,
+                });
+        let rate = if let Some(start) = reset.map(|r| r - duration).filter(|s| observed > *s) {
+            let raw = crate::reports::usage(
+                store,
+                &format!("grain=raw&groupBy=credential&since={start}&until={observed}"),
+                now,
+            )?;
+            let data: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+            let tokens = data["rows"]
+                .as_array()
+                .and_then(|a| a.iter().find(|r| r["key"] == id))
+                .map_or(0.0, |r| {
+                    [
+                        "inputTokens",
+                        "outputTokens",
+                        "cacheReadTokens",
+                        "cacheWriteTokens",
+                    ]
+                    .iter()
+                    .map(|k| r[k].as_f64().unwrap_or(0.0))
+                    .sum()
+                });
+            Some(tokens / ((observed - start) / 3600000.0))
+        } else {
+            None
+        };
+        rates.push(
+            serde_json::json!({"credentialId":id,"windowType":kind,"gatewayRatePerHour":rate}),
+        );
+    }
+    Ok(
+        serde_json::json!({"samples":samples,"gatewayRates":rates,"truncated":truncated})
+            .to_string(),
+    )
+}
+struct HistoryError;
+impl From<rusqlite::Error> for HistoryError {
+    fn from(_: rusqlite::Error) -> Self {
+        Self
+    }
+}
+impl From<omni_store::StoreError> for HistoryError {
+    fn from(_: omni_store::StoreError) -> Self {
+        Self
+    }
+}
+impl From<crate::api::Failure> for HistoryError {
+    fn from(_: crate::api::Failure) -> Self {
+        Self
+    }
+}
 pub fn save(store: &SqliteStore, id: &str, windows: &[Value], now: i64) -> Result<(), String> {
     let tx = store
         .connection()
