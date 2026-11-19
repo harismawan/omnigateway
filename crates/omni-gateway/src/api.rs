@@ -40,6 +40,7 @@ const JSON_UTF8: &str = "application/json;charset=utf-8";
 /// A matched `/api` route.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Route {
+    Quota(String, Option<String>),
     Status,
     Setup,
     Login,
@@ -89,6 +90,7 @@ pub fn route(method: &Method, path: &str) -> Option<Route> {
         (&Method::GET | &Method::HEAD, "/api/client/quota/history") => Some(Route::ClientHistory),
         _ => crate::database_routes::route(method, path)
             .map(Route::Database)
+            .or_else(|| crate::quota::route(method, path).map(|(op, id)| Route::Quota(op, id)))
             .or_else(|| crate::admin_routes::route(method, path).map(Route::Admin)),
     }
 }
@@ -96,6 +98,7 @@ pub fn route(method: &Method, path: &str) -> Option<Route> {
 /// Serves a matched route.
 pub async fn serve(app: Arc<App>, route: Route, req: Request<Incoming>) -> Response<Body> {
     let result = match route {
+        Route::Quota(op, id) => crate::quota::serve(&app, op, id, req).await,
         Route::Status => status(&app, &req).await,
         Route::Setup => setup(&app, req).await,
         Route::Login => login(&app, req).await,

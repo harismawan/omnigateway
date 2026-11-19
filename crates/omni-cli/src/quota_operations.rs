@@ -1,6 +1,118 @@
 use crate::observability::{Error, Flags, emit, fail, table, text};
 use serde_json::{Value, json};
 use std::io::{IsTerminal, Write};
+struct CliHost {
+    flags: Flags,
+}
+impl omni_control::quota_runtime::Host for CliHost {
+    fn credentials(&self) -> omni_control::quota_runtime::Task<'_, Vec<omni_store::Credential>> {
+        Box::pin(async {
+            let ctx = crate::context::resolve(&self.flags).map_err(|_| qerror())?;
+            let key = omni_crypto::field::derive_key(&ctx.encryption_key().map_err(|_| qerror())?);
+            let store = ctx.open().map_err(|_| qerror())?;
+            omni_store::credentials::list(store.connection(), &key).map_err(|_| qerror())
+        })
+    }
+    fn token<'a>(
+        &'a self,
+        c: &'a omni_store::Credential,
+    ) -> omni_control::quota_runtime::Task<'a, Option<String>> {
+        Box::pin(async move {
+            let flags = self.flags.clone();
+            let id = c.id.clone();
+            tokio::task::spawn_blocking(move || {
+                prepare(&flags, &id)
+                    .map(|(_, _, token)| token)
+                    .map_err(|(_, e)| {
+                        let (code, message) = e.split_once(": ").unwrap_or(("INTERNAL", &e));
+                        omni_ir::error::GatewayError::new(
+                            omni_ir::error::ErrorCode::parse(code)
+                                .unwrap_or(omni_ir::error::ErrorCode::Internal),
+                            message,
+                        )
+                        .gateway_authored()
+                    })
+            })
+            .await
+            .map_err(|_| qerror())?
+        })
+    }
+    fn send(
+        &self,
+        provider: String,
+        request: omni_providers::quota::QuotaRequest,
+    ) -> omni_control::quota_runtime::Task<'_, (u16, String)> {
+        Box::pin(async move {
+            let r = request.http;
+            tokio::time::timeout(request.timeout, async {
+                let response = omni_providers::http::Client::new()
+                    .send(omni_providers::http::HttpRequest {
+                        provider: provider.clone(),
+                        url: r.url,
+                        method: r.method,
+                        headers: r.headers,
+                        body: r.body,
+                        body_encoding: None,
+                        request_id: None,
+                    })
+                    .await?;
+                Ok::<_, omni_providers::http::HttpError>((
+                    response.status,
+                    response.body.text().await?,
+                ))
+            })
+            .await
+            .map_err(|_| {
+                omni_ir::error::GatewayError::new(
+                    omni_ir::error::ErrorCode::Upstream,
+                    "quota operation threw",
+                )
+            })?
+            .map_err(|_| {
+                omni_ir::error::GatewayError::new(
+                    omni_ir::error::ErrorCode::Upstream,
+                    "quota operation threw",
+                )
+            })
+        })
+    }
+    fn save<'a>(
+        &'a self,
+        id: &'a str,
+        windows: &'a [Value],
+    ) -> omni_control::quota_runtime::Task<'a, ()> {
+        Box::pin(async move {
+            let store = crate::context::open(&self.flags).map_err(|_| qerror())?;
+            omni_control::quota_ops::save(&store, id, windows, now()).map_err(|_| qerror())
+        })
+    }
+    fn now(&self) -> i64 {
+        now()
+    }
+}
+fn qerror() -> omni_ir::error::GatewayError {
+    omni_ir::error::GatewayError::new(
+        omni_ir::error::ErrorCode::Internal,
+        "quota persistence failed",
+    )
+}
+fn operate(flags: &Flags, operation: &str, id: &str, credit: Option<&str>) -> Result<Value, Error> {
+    let quota = omni_control::quota_runtime::Quota::new(std::sync::Arc::new(CliHost {
+        flags: flags.clone(),
+    }));
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(fail)?;
+    rt.block_on(async {
+        match operation {
+            "list" => quota.credits(id).await,
+            "redeem" => quota.redeem(id, credit).await,
+            _ => quota.refresh(Some(id)).await,
+        }
+    })
+    .map_err(|e| fail(format!("{}: {}", e.code.as_str(), e.message)))
+}
 fn now() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
@@ -48,121 +160,19 @@ fn prepare(
     let token = token(&store, &key, id)?;
     Ok((store, a, token))
 }
-fn wire(
-    provider: &str,
-    operation: &str,
-    token: Option<&str>,
-    data: &Value,
-    body: Value,
-) -> Result<Option<Value>, Error> {
-    if token.is_none() && matches!(operation, "redeem" | "profile") {
-        return Err(fail("AUTH: credential holds no access token"));
-    }
-    if token.is_none() && provider != "antigravity" {
-        return Ok(None);
-    }
-    let Some(r) =
-        omni_providers::quota::request(provider, operation, token.unwrap_or("null"), data, body)
-    else {
-        return Ok(None);
-    };
-    let timeout = r.timeout;
-    let r = r.http;
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(fail)?;
-    let response = rt.block_on(async {
-        tokio::time::timeout(timeout, async {
-            let r = omni_providers::http::Client::new()
-                .send(omni_providers::http::HttpRequest {
-                    provider: provider.into(),
-                    url: r.url,
-                    method: r.method,
-                    headers: r.headers,
-                    body: r.body,
-                    body_encoding: None,
-                    request_id: None,
-                })
-                .await?;
-            Ok::<_, omni_providers::http::HttpError>((r.status, r.body.text().await?))
-        })
-        .await
-    });
-    let (status, body) = response
-        .map_err(|_| fail(format!("UPSTREAM: {provider} oauth {operation} threw")))?
-        .map_err(|_| fail(format!("UPSTREAM: {provider} oauth {operation} threw")))?;
-    if status == 429 && !matches!(operation, "redeem" | "profile") {
+fn probe(flags: &Flags, id: &str) -> Result<usize, Error> {
+    let result = operate(flags, "refresh", id, None)?;
+    let outcome = &result["outcomes"][0];
+    if outcome["kind"] == "failed" {
         return Err(fail(format!(
-            "RATE_LIMIT: {provider} usage endpoint is rate limited"
+            "{}: quota probe failed",
+            text(&outcome["code"])
         )));
     }
-    if !(200..300).contains(&status) {
-        if operation == "redeem" || operation == "profile" {
-            let code = if status == 429 {
-                "RATE_LIMIT"
-            } else if status == 401 || status == 403 {
-                "AUTH"
-            } else if status < 500 {
-                "CONFLICT"
-            } else {
-                "UPSTREAM"
-            };
-            return Err(fail(format!(
-                "{code}: {} refused: http_{status}",
-                if operation == "profile" {
-                    "profile read"
-                } else if provider == "openai" {
-                    "reset credit redeem"
-                } else {
-                    "reset claim"
-                }
-            )));
-        }
-        return Ok(None);
-    }
-    Ok(serde_json::from_str(&body).ok())
-}
-fn probe(flags: &Flags, id: &str) -> Result<usize, Error> {
-    let (store, a, token) = prepare(flags, id)?;
-    let p = a["provider"].as_str().unwrap_or("");
-    let Some(v) = wire(
-        p,
-        "usage",
-        token.as_deref(),
-        &a["providerData"],
-        Value::Null,
-    )?
-    else {
-        return Ok(0);
-    };
-    let windows = omni_providers::quota::usage(p, &v, now() as f64);
-    if !windows.is_empty() {
-        omni_control::quota_ops::save(&store, id, &windows, now()).map_err(fail)?;
-    }
-    Ok(windows.len())
+    Ok(outcome["windows"].as_u64().unwrap_or(0) as usize)
 }
 fn list(flags: &Flags, id: &str) -> Result<Value, Error> {
-    let store = crate::context::open(flags).map_err(fail)?;
-    let before = account(&store, id)?;
-    if before["authType"] != "oauth"
-        || !matches!(before["provider"].as_str(), Some("openai" | "anthropic"))
-    {
-        return Err(fail(
-            "BAD_REQUEST: this account's provider has no quota resets",
-        ));
-    }
-    let (_, a, token) = prepare(flags, id)?;
-    let p = a["provider"].as_str().unwrap_or("");
-    if a["authType"] != "oauth" || !matches!(p, "openai" | "anthropic") {
-        return Err(fail(
-            "BAD_REQUEST: this account's provider has no quota resets",
-        ));
-    }
-    let result = wire(p, "list", token.as_deref(), &a["providerData"], Value::Null)?
-        .and_then(|v| omni_providers::quota::credits(p, &v))
-        .ok_or_else(|| fail("UPSTREAM: provider answered the reset list with nothing usable"))?;
-    Ok(json!({"credentialId":id,"available":result["available"],"credits":result["credits"]}))
+    operate(flags, "list", id, None)
 }
 pub fn run(command: &str, flags: &Flags, args: &[String]) -> Result<(), Error> {
     let store = crate::context::open(flags).map_err(fail)?;
@@ -305,75 +315,20 @@ pub fn run(command: &str, flags: &Flags, args: &[String]) -> Result<(), Error> {
             return Err(fail("cancelled"));
         }
     }
-    let listed = list(flags, id)?;
-    let mut available = listed["credits"]
-        .as_array()
-        .unwrap_or(&Vec::new())
-        .iter()
-        .filter(|c| c["status"] == "available")
-        .cloned()
-        .collect::<Vec<_>>();
-    available.sort_by(|a, b| {
-        a["expiresAt"]
-            .as_f64()
-            .unwrap_or(f64::INFINITY)
-            .total_cmp(&b["expiresAt"].as_f64().unwrap_or(f64::INFINITY))
-    });
-    let credit = available
-        .iter()
-        .find(|c| {
-            flags
-                .get("credit")
-                .is_none_or(|id| c["id"].as_str() == Some(id))
-        })
-        .ok_or_else(|| {
-            fail(if flags.contains_key("credit") {
-                "CONFLICT: that reset credit is not available"
-            } else {
-                "CONFLICT: no reset credit is available for this account"
-            })
-        })?;
-    let credit_id = text(&credit["id"]);
-    let (_, a, token) = prepare(flags, id)?;
-    let mut data = a["providerData"].clone();
-    let request_id = uuid();
-    let body = if p == "openai" {
-        json!({"credit_id":credit_id,"redeem_request_id":request_id})
-    } else {
-        let profile =
-            wire(p, "profile", token.as_deref(), &data, Value::Null)?.unwrap_or(Value::Null);
-        let org = profile["organization"]["uuid"]
-            .as_str()
-            .filter(|s| {
-                !s.is_empty()
-                    && s.len() <= 64
-                    && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-            })
-            .ok_or_else(|| fail("UPSTREAM: profile names no organization"))?;
-        data["organization"] = json!(org);
-        let grant = credit_id
-            .rsplit_once("-u")
-            .map(|x| x.0)
-            .ok_or_else(|| fail("CONFLICT: that reset credit is not available"))?;
-        json!({"program":"cedar_ember","grant_id":grant,"request_id":request_id})
-    };
-    let result = wire(p, "redeem", token.as_deref(), &data, body)?.unwrap_or(Value::Null);
-    let windows = omni_providers::quota::redeemed(p, &result).map_err(fail)?;
-    let refreshed = probe(flags, id).is_ok_and(|n| n > 0);
-    let result = json!({"credentialId":id,"creditId":credit_id,"windowsReset":windows,"quotaRefreshed":refreshed});
+    let result = operate(flags, "redeem", id, flags.get("credit").map(String::as_str))?;
     emit(flags, &result, || {
         Ok(format!(
-            "{}: reset {credit_id} redeemed{}; {}",
+            "{}: reset {} redeemed{}; {}",
             text(&a["label"]),
-            windows.map_or(String::new(), |n| format!(", {n} window(s) reset")),
-            if refreshed {
+            text(&result["creditId"]),
+            result["windowsReset"]
+                .as_f64()
+                .map_or(String::new(), |n| format!(", {n} window(s) reset")),
+            if result["quotaRefreshed"] == true {
                 "quota re-read"
             } else {
                 "quota re-read failed, next poll will update it"
             }
         ))
     })
-}
-fn uuid() -> String {
-    omni_crypto::codex::uuid_v4_from(&omni_crypto::apikey::generate())
 }

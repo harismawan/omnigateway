@@ -1,4 +1,4 @@
-//! CLI snapshot projection. Provider operations require the not-yet-migrated probe/reset seam.
+//! CLI snapshot projection; provider operations use the shared control quota host.
 use crate::observability::{Error, Flags, color, emit, fail, table, text, usage};
 use serde_json::{Value, json};
 pub fn provider(flags: &Flags, id: &str) -> String {

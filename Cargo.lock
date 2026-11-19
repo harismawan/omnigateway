@@ -1488,9 +1488,11 @@ version = "0.16.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
+ "futures-util",
  "icu_collator",
  "omni-crypto",
  "omni-ir",
+ "omni-providers",
  "omni-ratelimit",
  "omni-router",
  "omni-store",
@@ -1499,6 +1501,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "tokio",
  "tracing",
  "url",
 ]

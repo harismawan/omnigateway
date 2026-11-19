@@ -58,6 +58,13 @@ async fn client_request(
     let store = || omni_store::SqliteStore::open(&f.path, 0).expect("store");
     let now: admin_auth::Clock = Arc::new(|| 0);
     let app = Arc::new(server::App {
+        quota: omni_control::quota_runtime::Quota::new(Arc::new(
+            omni_gateway::quota::GatewayHost {
+                holder: None,
+                refresh: deps.refresher.clone(),
+                control: admin_routes::ControlStore::new(store()),
+            },
+        )),
         database_swap: tokio::sync::Mutex::new(()),
         quiesce: Arc::new(omni_gateway::quiesce::Quiesce::default()),
         lifecycle: omni_gateway::lifecycle::Lifecycle::default(),

@@ -30,6 +30,7 @@ mod output_budget;
 pub mod overlay;
 pub mod price;
 pub mod quiesce;
+pub mod quota;
 pub mod screening;
 pub mod server;
 pub mod static_files;
@@ -504,6 +505,17 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         handle.clone(),
         Arc::new(omni_coord::MemoryCoord::new(omni_coord::system_clock())),
     );
+    let quota_interval = control_store
+        .get_settings()
+        .map_err(|e| e.to_string())?
+        .quota_poll_interval_ms;
+    let control = admin_routes::ControlStore::new(control_store);
+    let quota = omni_control::quota_runtime::Quota::new(Arc::new(quota::GatewayHost {
+        holder: Some(holder.clone()),
+        refresh: oauth_refresher.clone(),
+        control: control.clone(),
+    }));
+    let quota_scheduler = quota::start(quota.clone(), stream.clone(), quota_interval);
     let deps = Arc::new(dispatch::Deps {
         refresher: oauth_refresher,
         http,
@@ -519,6 +531,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
     });
     let (stop, mut stopped) = tokio::sync::watch::channel(false);
     let app = Arc::new(server::App {
+        quota,
         database_swap: tokio::sync::Mutex::new(()),
         quiesce: Arc::new(quiesce::Quiesce::default()),
         lifecycle: options.lifecycle,
@@ -538,7 +551,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         static_root,
         admin,
         base_url_https: api::base_url_is_https(&config.base_url),
-        control: admin_routes::ControlStore::new(control_store),
+        control,
         credential_key: key.clone(),
         connect: Arc::new(connect::ConnectFlows::default()),
         body_logging_allowed: config.body_logging_allowed,
@@ -610,6 +623,10 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
             t.stop();
         }
         let shutdown_until = tokio::time::Instant::now() + deadline;
+        if let Some(task) = quota_scheduler {
+            task.abort();
+            drop(task.await);
+        }
         drop(tokio::time::timeout_at(shutdown_until, maintenance.stop()).await);
         oauth_scheduler.abort();
         drop(oauth_scheduler.await);
@@ -637,6 +654,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         app.deadline_workers.shutdown().await;
         #[cfg(test)]
         app.deadline_workers.before_writer_close();
+        drop(tokio::time::timeout_at(shutdown_until, app.quota.drain()).await);
         drop(tokio::time::timeout_at(shutdown_until, app.deps.refresher.drain()).await);
         refresher.abort();
         drop(refresher.await);

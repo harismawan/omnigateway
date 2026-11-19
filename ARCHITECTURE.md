@@ -1,5 +1,8 @@
 # Architecture
 
+Rust quota runtime ownership, supported provider boundary and public APIs are
+documented in [Rust quota runtime](docs/rust-quota-runtime.md).
+
 Rust database replacement registers the gateway's persistent SQLite owners in
 `omni_store::lifecycle`: writer/checkpointer, routing refresher/miss resolver,
 auth/control and OAuth. The swap takes the transient-access barrier and owner
