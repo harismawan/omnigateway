@@ -12,6 +12,7 @@ pub mod api;
 pub mod body_capture;
 pub mod client_routes;
 pub mod clock;
+pub mod cluster;
 pub mod connect;
 pub mod console;
 pub mod database_routes;

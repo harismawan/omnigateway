@@ -16,6 +16,8 @@ path = "src/main.rs"
 
 [dependencies]
 omni-coord = { path = "../omni-coord" }
+omni-cluster-limit = { path = "../omni-cluster-limit" }
+async-trait = "0.1"
 omni-cli = { path = "../omni-cli" }
 omni-control = { path = "../omni-control" }
 omni-crypto = { path = "../omni-crypto" }

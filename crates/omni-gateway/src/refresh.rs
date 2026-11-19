@@ -14,13 +14,48 @@ type FutureResult<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 type Result = std::result::Result<CredentialSecrets, GatewayError>;
 type Flight = tokio::sync::watch::Sender<Option<Result>>;
 
-/// An owned guard releases the replica lock on drop. Redis adapter is a later integration.
+/// An owned guard releases the replica lock on drop.
 pub trait RefreshGuard: Send {}
 impl RefreshGuard for tokio::sync::OwnedMutexGuard<()> {}
 /// Distributed adapters own lease TTL/renewal/expiry; the host only owns the
 /// returned guard. Expiry must not release a subsequent owner's lease.
 pub trait RefreshLock: Send + Sync {
     fn acquire(&self, key: String) -> FutureResult<'_, Option<Box<dyn RefreshGuard>>>;
+}
+
+/// Uses the same coordinator and `refresh:<id>` naming as other fleet state.
+pub struct CoordLock(Arc<dyn omni_coord::Coord>);
+impl CoordLock {
+    pub fn new(coord: Arc<dyn omni_coord::Coord>) -> Self {
+        Self(coord)
+    }
+}
+struct HeldCoordLock {
+    coord: Arc<dyn omni_coord::Coord>,
+    token: Option<omni_coord::LockToken>,
+}
+impl RefreshGuard for HeldCoordLock {}
+impl Drop for HeldCoordLock {
+    fn drop(&mut self) {
+        if let Some(token) = self.token.take() {
+            self.coord.unlock_detached(token);
+        }
+    }
+}
+impl RefreshLock for CoordLock {
+    fn acquire(&self, key: String) -> FutureResult<'_, Option<Box<dyn RefreshGuard>>> {
+        Box::pin(async move {
+            let token = self
+                .0
+                .lock(&key, 60_000, std::time::Duration::from_secs(30))
+                .await
+                .ok()?;
+            Some(Box::new(HeldCoordLock {
+                coord: self.0.clone(),
+                token: Some(token),
+            }) as Box<dyn RefreshGuard>)
+        })
+    }
 }
 #[derive(Default)]
 pub struct MemoryLock(Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>);

@@ -1564,6 +1564,7 @@ version = "0.16.0"
 dependencies = [
  "arc-swap",
  "async-stream",
+ "async-trait",
  "base64 0.22.1",
  "bytes",
  "chrono",
@@ -1578,6 +1579,7 @@ dependencies = [
  "mimalloc",
  "nix 0.31.3",
  "omni-cli",
+ "omni-cluster-limit",
  "omni-control",
  "omni-coord",
  "omni-crypto",
