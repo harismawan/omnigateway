@@ -68,6 +68,92 @@ macro_rules! on_sqlite {
 }
 
 impl Store {
+    /// Raw PHC settings rows shared by backend-aware console authentication.
+    pub async fn password_hash(&self, name: &str) -> Result<Option<String>, StoreError> {
+        match self {
+            Self::Sqlite { store, .. } => {
+                let name = name.to_owned();
+                on_sqlite!(store, |s| {
+                    use rusqlite::OptionalExtension as _;
+                    Ok(s.connection()
+                        .query_row("SELECT value FROM settings WHERE key=?", [&name], |r| {
+                            Ok(match r.get_ref(0)? {
+                                rusqlite::types::ValueRef::Text(t) => {
+                                    Some(String::from_utf8_lossy(t).into_owned())
+                                }
+                                _ => None,
+                            })
+                        })
+                        .optional()?
+                        .flatten())
+                })
+            }
+            Self::Postgres(pg) => Ok(pg
+                .client()
+                .await?
+                .query_opt("SELECT value FROM settings WHERE key=$1", &[&name])
+                .await?
+                .map(|r| r.try_get(0))
+                .transpose()?),
+        }
+    }
+
+    pub async fn password_hash_set_if_absent(
+        &self,
+        name: &str,
+        hash: &str,
+    ) -> Result<bool, StoreError> {
+        match self {
+            Self::Sqlite { store, .. } => {
+                let (name, hash) = (name.to_owned(), hash.to_owned());
+                on_sqlite!(store, |s| Ok(s.connection().execute(
+                    "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO NOTHING",
+                    [&name, &hash]
+                )? == 1))
+            }
+            Self::Postgres(pg) => Ok(pg
+                .client()
+                .await?
+                .execute(
+                    "INSERT INTO settings(key,value) VALUES($1,$2) ON CONFLICT(key) DO NOTHING",
+                    &[&name, &hash],
+                )
+                .await?
+                == 1),
+        }
+    }
+
+    pub async fn password_hash_set(
+        &self,
+        name: &str,
+        hash: Option<&str>,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite { store, .. } => {
+                let (name, hash) = (name.to_owned(), hash.map(str::to_owned));
+                on_sqlite!(store, |s| {
+                    if let Some(hash) = hash {
+                        s.connection().execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [&name, &hash])?;
+                    } else {
+                        s.connection()
+                            .execute("DELETE FROM settings WHERE key=?", [&name])?;
+                    }
+                    Ok(())
+                })
+            }
+            Self::Postgres(pg) => {
+                let client = pg.client().await?;
+                if let Some(hash) = hash {
+                    client.execute("INSERT INTO settings(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", &[&name, &hash]).await?;
+                } else {
+                    client
+                        .execute("DELETE FROM settings WHERE key=$1", &[&name])
+                        .await?;
+                }
+                Ok(())
+            }
+        }
+    }
     /// Opens (creating and migrating) the store `config` names.
     pub async fn open(config: StoreConfig, day_offset_minutes: i64) -> Result<Self, StoreError> {
         match config {

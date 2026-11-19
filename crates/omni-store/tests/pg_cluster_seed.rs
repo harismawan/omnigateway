@@ -6,6 +6,54 @@ use omni_store::pg::{PgConfig, PgStore};
 use omni_store::writer::{Committed, LogEvent, RequestLog, WriterConfig};
 
 #[tokio::test]
+async fn shared_password_rows_use_atomic_first_setup_and_backend_reads() {
+    let Some(base) = base_url("shared_password_rows_use_atomic_first_setup_and_backend_reads")
+    else {
+        return;
+    };
+    let db = TestDb::create(&base, "passwords").await;
+    let store =
+        omni_store::Store::open(omni_store::StoreConfig::Postgres(PgConfig::new(&db.url)), 0)
+            .await
+            .expect("store");
+    let other = store.clone();
+    let (a, b) = tokio::join!(
+        store.password_hash_set_if_absent("adminPasswordHash", "hash-a"),
+        other.password_hash_set_if_absent("adminPasswordHash", "hash-b")
+    );
+    assert_ne!(a.expect("first setup"), b.expect("second setup"));
+    let raw = store
+        .password_hash("adminPasswordHash")
+        .await
+        .expect("read")
+        .expect("set");
+    assert!(raw == "hash-a" || raw == "hash-b");
+    store
+        .password_hash_set("viewerPasswordHash", Some("viewer"))
+        .await
+        .expect("viewer");
+    assert_eq!(
+        other
+            .password_hash("viewerPasswordHash")
+            .await
+            .expect("crossread")
+            .as_deref(),
+        Some("viewer")
+    );
+    store
+        .password_hash_set("viewerPasswordHash", None)
+        .await
+        .expect("unset");
+    assert_eq!(
+        other
+            .password_hash("viewerPasswordHash")
+            .await
+            .expect("crossread"),
+        None
+    );
+}
+
+#[tokio::test]
 async fn snapshot_isolates_existing_malformed_credential_regression() {
     let Some(base) = base_url("snapshot_isolates_existing_malformed_credential_regression") else {
         return;
