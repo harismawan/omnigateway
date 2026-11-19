@@ -1004,6 +1004,7 @@ impl Sink {
                                 return None;
                             };
                             Some(super::events::Completion {
+                                commit_id: None,
                                 id: log.id.clone(),
                                 api_key_id: log.api_key_id.clone(),
                                 requested_model: log.requested_model.clone(),

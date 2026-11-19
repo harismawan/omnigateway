@@ -62,6 +62,7 @@ fn completion(row: &[SqlValue], debit_model: bool) -> Result<Completion, StoreEr
         })
     };
     Ok(Completion {
+        commit_id: None,
         id: text("id")?.unwrap_or_default(),
         api_key_id: text("api_key_id")?,
         requested_model: text("requested_model")?.unwrap_or_default(),

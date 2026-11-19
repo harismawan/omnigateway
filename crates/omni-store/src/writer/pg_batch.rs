@@ -869,6 +869,7 @@ fn completion(row: &Row, debit_model: bool) -> Completion {
     #[allow(clippy::cast_precision_loss)]
     let n = |v: i64| v as f64;
     Completion {
+        commit_id: None,
         id: row.id.clone(),
         api_key_id: row.api_key_id.clone(),
         requested_model: row.requested_model.clone(),
@@ -1088,6 +1089,15 @@ pub(crate) async fn write(
     write_hourly(&tx, &hourly, &hourly_before).await?;
 
     let health_refused = write_health(&tx, events).await?;
+    if !completions.is_empty() {
+        let commit_id: String = tx
+            .query_one("SELECT pg_current_xact_id()::text", &[])
+            .await?
+            .try_get(0)?;
+        for completion in &mut completions {
+            completion.commit_id = Some(commit_id.clone());
+        }
+    }
     tx.commit().await?;
     Ok(Outcome {
         log_notifications: notifications.log_notifications,
