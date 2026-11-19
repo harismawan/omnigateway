@@ -846,10 +846,14 @@ impl RedisCoord {
         if !matches!(
             client.get_connection_info().addr(),
             redis::ConnectionAddr::Tcp(..)
+                | redis::ConnectionAddr::TcpTls {
+                    insecure: false,
+                    ..
+                }
         ) {
             return Err(redis::RedisError::from((
                 redis::ErrorKind::InvalidClientConfig,
-                "only plain TCP redis:// URLs are supported (no TLS, no Unix sockets)",
+                "only TCP redis:// or verified rediss:// URLs are supported",
             )));
         }
         let mut scripts: Vec<CoordScript> =

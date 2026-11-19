@@ -28,6 +28,7 @@ pub mod health;
 mod maintenance;
 pub mod migrate;
 mod rows;
+mod tls;
 pub mod usage;
 
 use crate::error::StoreError;
@@ -38,7 +39,6 @@ use crate::{Credential, CredentialHealth, QuotaWindow, SnapshotData};
 use deadpool_postgres::{GenericClient, Manager, ManagerConfig, Pool, RecyclingMethod, Timeouts};
 use omni_crypto::field::FieldKey;
 use std::time::Duration;
-use tokio_postgres::NoTls;
 
 /// How the pool is sized and bounded. `Debug` redacts the URL's password.
 #[derive(Clone)]
@@ -183,8 +183,9 @@ impl PgStore {
     /// fixed offset every daily bucket uses.
     pub async fn open(config: PgConfig, day_offset_minutes: i64) -> Result<Self, StoreError> {
         let pg = config.pg_config()?;
+        let tls = tls::Connector::new();
         {
-            let (client, conn) = pg.connect(NoTls).await?;
+            let (client, conn) = pg.connect(tls.clone()).await?;
             let driver = tokio::spawn(async move {
                 if let Err(e) = conn.await {
                     tracing::debug!(reason = %e, "postgres migration connection ended");
@@ -210,7 +211,7 @@ impl PgStore {
         pooled.options(options);
         let manager = Manager::from_config(
             pooled,
-            NoTls,
+            tls,
             ManagerConfig {
                 recycling_method: RecyclingMethod::Fast,
             },

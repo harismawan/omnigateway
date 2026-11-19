@@ -1054,7 +1054,7 @@ impl Drop for Conn {
     }
 }
 
-/// Connects over plain TCP, wraps the socket in the reply guard, and runs
+/// Connects over TCP or verified TLS, wraps the stream in the reply guard, and runs
 /// the `redis` crate's handshake (AUTH, SELECT) on it. Our deadlines only:
 /// the crate's own response timeout is off. The send channel is sized above
 /// the queue's command capacity so the writer never finds it full.
@@ -1064,15 +1064,8 @@ async fn connect(
     send_queue: usize,
 ) -> Result<Conn, Fault> {
     let info = client.get_connection_info();
-    let (host, port) = match info.addr() {
-        redis::ConnectionAddr::Tcp(host, port) => (host.clone(), *port),
-        _ => return Err(Fault::Connection("unsupported address".to_owned())),
-    };
-    let stream = tokio::net::TcpStream::connect((host.as_str(), port))
+    let stream = verified_stream(info.addr())
         .await
-        .map_err(|e| Fault::Connection(format!("{:?}", e.kind())))?;
-    stream
-        .set_nodelay(true)
         .map_err(|e| Fault::Connection(format!("{:?}", e.kind())))?;
     let guarded = super::guard::Guarded::new(stream, limits);
     let config = AsyncConnectionConfig::new()
@@ -1274,7 +1267,7 @@ fn no_response(req: &Wire) -> bool {
     }
 }
 
-/// The pub/sub connection: plain TCP through the same reply guard as the
+/// The pub/sub connection: TCP or verified TLS through the same reply guard as the
 /// command connection, then the `redis` crate's RESP2 `PubSub` (AUTH, SELECT
 /// handshake included).
 pub(crate) async fn connect_pubsub(
@@ -1282,17 +1275,56 @@ pub(crate) async fn connect_pubsub(
     limits: super::guard::Limits,
 ) -> Result<redis::aio::PubSub, RedisError> {
     let info = client.get_connection_info();
-    let redis::ConnectionAddr::Tcp(host, port) = info.addr() else {
-        return Err(RedisError::from((
-            ErrorKind::InvalidClientConfig,
-            "only plain TCP is supported",
-        )));
-    };
-    let stream = tokio::net::TcpStream::connect((host.as_str(), *port)).await?;
-    stream.set_nodelay(true)?;
+    let stream = verified_stream(info.addr()).await?;
     redis::aio::PubSub::new(
         info.redis_settings(),
         super::guard::Guarded::new(stream, limits),
     )
     .await
+}
+
+trait Transport: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Transport for T {}
+
+/// Wrap TLS before the RESP reply guard, so plaintext limits apply identically
+/// on both command and pubsub connections. Never accept URL insecure bypass.
+async fn verified_stream(addr: &redis::ConnectionAddr) -> std::io::Result<Box<dyn Transport>> {
+    use std::io::{Error, ErrorKind};
+    let (host, port, tls) = match addr {
+        redis::ConnectionAddr::Tcp(host, port) => (host, *port, false),
+        redis::ConnectionAddr::TcpTls {
+            host,
+            port,
+            insecure: false,
+            ..
+        } => (host, *port, true),
+        _ => {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "unsupported Redis transport",
+            ));
+        }
+    };
+    let stream = tokio::net::TcpStream::connect((host.as_str(), port)).await?;
+    stream.set_nodelay(true)?;
+    if !tls {
+        return Ok(Box::new(stream));
+    }
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in rustls_native_certs::load_native_certs().certs {
+        let _result = roots.add(cert);
+    }
+    let config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(Error::other)?
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    let name = rustls::pki_types::ServerName::try_from(host.clone())
+        .map_err(|_| Error::new(ErrorKind::InvalidInput, "invalid Redis TLS hostname"))?;
+    let stream = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config))
+        .connect(name, stream)
+        .await?;
+    Ok(Box::new(stream))
 }
