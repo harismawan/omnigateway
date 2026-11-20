@@ -118,12 +118,9 @@ impl Finisher {
         self.phase = Phase::Streaming;
     }
 
-    /// The writer refused before admission; there is no completion row.
+    /// The writer closed after we reserved, but before we admitted work.
     pub fn abandon_before_admission(&mut self) {
         debug_assert!(self.admission.is_none() && self.outcome.is_none());
-        if let Some(trace) = self.telemetry.as_ref().and_then(|t| t.tracing.as_ref()) {
-            trace.abandon(&self.request_id);
-        }
         self.done = true;
     }
 

@@ -837,7 +837,6 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         }
         drop(tokio::time::timeout_at(shutdown_until, app.deps.holder.drain_publications()).await);
         let bench_accounting = app.bench_endpoints && app.cluster;
-        let route_telemetry = bench_accounting.then(|| app.deps.telemetry.clone());
         let writer_handle = writer.handle();
         drop(app);
         preseeder.abort();
@@ -850,14 +849,6 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
             if bench_accounting {
                 use std::sync::atomic::Ordering::Relaxed;
                 let writer = writer_handle.stats();
-                if let Some([waits, nanos, refused, cancelled]) = writer_handle.route_pacing() {
-                    let revalidated = route_telemetry
-                        .as_ref()
-                        .map_or(0, |t| t.route_revalidated());
-                    tracing::warn!(
-                        "benchmark writer pacing after drain routeWaits={waits} routeWaitNs={nanos} routeRefused={refused} routeCancelled={cancelled} routeRevalidated={revalidated}"
-                    );
-                }
                 let m = cluster.metrics();
                 // The harness captures warn and above. The formatter drops
                 // nonstandard fields, so put these fixed counters in the
