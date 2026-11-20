@@ -426,6 +426,15 @@ The cluster-only `omni_request_log_writer_queued` and `omni_request_log_writer_c
 gauges distinguish queued entries from the total budget in use, which also includes reservations.
 The gauges are sampled independently and exclude batches already dequeued for persistence.
 
+When incoming log events outpace the Postgres writer and half or less of its
+queue credit is free, Rust cluster mode may skip `Begin` and `Route` log events
+instead of waiting as the TypeScript gateway does. Authenticated `/metrics`
+reports these skips in `omni_request_log_writer_optional_dropped_total`;
+`omni_request_log_writer_terminal_dropped_total` tracks terminal queue loss
+separately. This policy never sheds `Finish` events and does not change completed
+rows, usage rollups, or rate-limit debits. The console may miss a request's
+in-flight row or a routing update under overload.
+
 ## Configuration
 
 Configuration is environment variables, read from the installation's `.env`:
