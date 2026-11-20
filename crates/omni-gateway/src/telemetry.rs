@@ -709,8 +709,41 @@ pub struct Telemetry {
     enabled: bool,
     registry: Arc<Registry>,
     pub tracing: Option<Arc<crate::otlp::Tracing>>,
+    writer_refusals: [std::sync::atomic::AtomicU64; WriterRefusal::ALL.len()],
     /// `openBreakers`: per provider, in first-seen order.
     open_breakers: Mutex<Vec<(String, f64)>>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum WriterRefusal {
+    Cap,
+    Deadline,
+    Closed,
+    Revalidation,
+}
+
+impl WriterRefusal {
+    const ALL: [Self; 4] = [Self::Cap, Self::Deadline, Self::Closed, Self::Revalidation];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Cap => "cap",
+            Self::Deadline => "deadline",
+            Self::Closed => "closed",
+            Self::Revalidation => "revalidation",
+        }
+    }
+}
+
+impl From<omni_store::writer::ReserveError> for WriterRefusal {
+    fn from(error: omni_store::writer::ReserveError) -> Self {
+        use omni_store::writer::ReserveError;
+        match error {
+            ReserveError::Full => Self::Cap,
+            ReserveError::Deadline => Self::Deadline,
+            ReserveError::Closed => Self::Closed,
+        }
+    }
 }
 
 /// The gateway's own version (`version.ts`): a build-time `OMNI_CLI_VERSION`
@@ -731,6 +764,7 @@ impl Telemetry {
             enabled,
             registry: Arc::new(Registry::new(max_series)),
             tracing: None,
+            writer_refusals: Default::default(),
             open_breakers: Mutex::new(Vec::new()),
         };
         if enabled {
@@ -747,6 +781,19 @@ impl Telemetry {
 
     pub fn enabled(&self) -> bool {
         self.enabled
+    }
+
+    pub(crate) fn record_writer_refusal(&self, reason: WriterRefusal) {
+        self.writer_refusals[reason as usize].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) fn writer_refusal_counts(&self) -> [(&'static str, u64); WriterRefusal::ALL.len()] {
+        WriterRefusal::ALL.map(|reason| {
+            (
+                reason.label(),
+                self.writer_refusals[reason as usize].load(std::sync::atomic::Ordering::Relaxed),
+            )
+        })
     }
 
     pub fn with_tracing(

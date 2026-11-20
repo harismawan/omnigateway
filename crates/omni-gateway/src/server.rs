@@ -30,6 +30,7 @@ use omni_ratelimit::{HeadroomByDimension, after_this_request};
 
 use crate::dispatch::{self, Deps};
 use crate::finish::Finisher;
+use crate::telemetry::WriterRefusal;
 
 /// The `/v1/*` request-body limit (spec: at least several MiB; TS has none).
 pub const BODY_LIMIT: usize = 32 * 1024 * 1024;
@@ -706,6 +707,7 @@ fn metrics(app: &App, req: &Request<Incoming>) -> Response<Body> {
         .telemetry
         .scrape_with_streams(&app.deps.load.provider_counts(), app.stream.stats());
     append_writer_metrics(&mut text, app.deps.writer.stats());
+    append_writer_refusals(&mut text, &app.deps.telemetry);
     append_cluster_metrics(&mut text, app);
     let mut res = Response::new(full(text));
     res.headers_mut().insert(
@@ -726,6 +728,16 @@ fn append_writer_metrics(text: &mut String, stats: omni_store::writer::WriterSta
     ] {
         let metric = format!("omni_request_log_writer_{kind}_total");
         writeln!(text, "# TYPE {metric} counter\n{metric} {count}")
+            .expect("writing to a String cannot fail");
+    }
+}
+
+fn append_writer_refusals(text: &mut String, telemetry: &crate::telemetry::Telemetry) {
+    use std::fmt::Write as _;
+    const METRIC: &str = "omni_request_log_writer_reservation_refused_total";
+    writeln!(text, "# TYPE {METRIC} counter").expect("writing to a String cannot fail");
+    for (reason, count) in telemetry.writer_refusal_counts() {
+        writeln!(text, "{METRIC}{{reason=\"{reason}\"}} {count}")
             .expect("writing to a String cannot fail");
     }
 }
@@ -1059,7 +1071,8 @@ fn floor_secs(ms: i64) -> i64 {
 type ProxyAuth = Result<(AuthenticatedKey, Arc<GatewaySnapshot>), GatewayError>;
 type FinishSlots = [Option<omni_store::writer::FinishSlot>; 3];
 
-fn writer_overload() -> GatewayError {
+fn writer_overload(app: &App, reason: WriterRefusal) -> GatewayError {
+    app.deps.telemetry.record_writer_refusal(reason);
     GatewayError::new(ErrorCode::Overloaded, crate::screening::WRITER_OVERLOAD).gateway_authored()
 }
 
@@ -1089,10 +1102,13 @@ async fn revalidate_waiter(
     let row = store
         .find_api_key_entry(&omni_crypto::apikey::hash(raw))
         .await
-        .map_err(|_| writer_overload())?;
+        .map_err(|_| writer_overload(app, WriterRefusal::Revalidation))?;
     // Read the small settings row instead of forcing a snapshot rebuild.
     // Neither a publication nor the poll need have caught up to this commit.
-    let settings = store.get_settings().await.map_err(|_| writer_overload())?;
+    let settings = store
+        .get_settings()
+        .await
+        .map_err(|_| writer_overload(app, WriterRefusal::Revalidation))?;
     let key = GatewaySnapshot::authenticate_read(row, (app.deps.now)())?;
     Ok((key, app.deps.holder.load(), settings))
 }
@@ -1117,7 +1133,11 @@ async fn reserve_proxy<'a, const N: usize>(
         Err(ReserveError::Full) => {
             drop(auth);
             if wait.turn.is_none() {
-                wait.turn = Some(writer.finish_waiter().map_err(|_| writer_overload())?);
+                wait.turn = Some(
+                    writer
+                        .finish_waiter()
+                        .map_err(|e| writer_overload(app, e.into()))?,
+                );
             }
             let reservation = wait
                 .turn
@@ -1125,19 +1145,22 @@ async fn reserve_proxy<'a, const N: usize>(
                 .expect("waiting turn")
                 .reserve::<N>(deadline)
                 .await
-                .map_err(|_| writer_overload())?;
+                .map_err(|e| writer_overload(app, e.into()))?;
             let (key, snapshot, settings) =
                 tokio::time::timeout_at(deadline, revalidate_waiter(app, req))
                     .await
-                    .map_err(|_| writer_overload())??;
-            if writer.postgres_closed() || tokio::time::Instant::now() >= deadline {
-                return Err(writer_overload());
+                    .map_err(|_| writer_overload(app, WriterRefusal::Deadline))??;
+            if writer.postgres_closed() {
+                return Err(writer_overload(app, WriterRefusal::Closed));
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(writer_overload(app, WriterRefusal::Deadline));
             }
             auth = Ok((key, snapshot));
             wait.settings = Some(Arc::new(settings));
             reservation
         }
-        Err(_) => return Err(writer_overload()),
+        Err(e) => return Err(writer_overload(app, e.into())),
     };
     Ok((auth, slots.into_slots()))
 }
@@ -1194,7 +1217,7 @@ async fn prepare_proxy(
         // for the whole set, without starting a new wait budget.
         drop(slots);
         if tokio::time::Instant::now() >= deadline {
-            return Err(writer_overload());
+            return Err(writer_overload(app, WriterRefusal::Deadline));
         }
         auth = next;
     }
@@ -1212,7 +1235,7 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
     // Reserve the maximum row set before creating any completion owner or
     // claiming admission. A disconnect while waiting has spent nothing.
     if app.deps.writer.postgres_closed() {
-        return error_response(dialect, &writer_overload(), &[]);
+        return error_response(dialect, &writer_overload(&app, WriterRefusal::Closed), &[]);
     }
     let mut missed = false;
     let auth = authenticate_for(&app, &req, started_at, &mut missed).await;
@@ -1290,7 +1313,7 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
         // reservation. No completion owner should file a row in that case.
         if app.deps.writer.postgres_closed() {
             fin.abandon_before_admission();
-            return Err(writer_overload());
+            return Err(writer_overload(&app, WriterRefusal::Closed));
         }
         if app.cluster && missed {
             #[allow(clippy::cast_precision_loss)]
@@ -1610,6 +1633,7 @@ mod reservation_tests {
         .collect();
         let mut cfg = omni_gateway_core::config::load_config(&env, || 0).unwrap();
         cfg.port = 0;
+        cfg.metrics_token = Some("reservation-test-metrics".into());
         Some((cfg, store))
     }
 
@@ -1675,6 +1699,32 @@ mod reservation_tests {
         );
     }
 
+    async fn assert_reservation_refusals(
+        addr: std::net::SocketAddr,
+        cap: u64,
+        deadline: u64,
+        closed: u64,
+    ) {
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        client.write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer reservation-test-metrics\r\nConnection: close\r\n\r\n").await.unwrap();
+        let mut response = String::new();
+        tokio::time::timeout(Duration::from_secs(1), client.read_to_string(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        for (reason, count) in [
+            ("cap", cap),
+            ("deadline", deadline),
+            ("closed", closed),
+            ("revalidation", 0),
+        ] {
+            assert!(response.lines().any(|line| line == format!(
+                "omni_request_log_writer_reservation_refused_total{{reason=\"{reason}\"}} {count}"
+            )), "missing {reason}={count} from scrape");
+        }
+    }
+
     #[tokio::test]
     async fn pg_reservation_overload_refuses_full_waiters_and_expired_waits() {
         let Some((server, store)) = fixture().await else {
@@ -1707,6 +1757,7 @@ mod reservation_tests {
         let (status, body) = reply(waiting, Duration::from_secs(5)).await;
         assert_eq!(status, 503, "{body}");
         no_work(&server.app, &store).await;
+        assert_reservation_refusals(server.addr, 3, 1, 0).await;
         drop(held);
         server.shutdown();
         server.wait().await.unwrap();
@@ -1725,14 +1776,17 @@ mod reservation_tests {
         let serving = tokio::spawn({
             let app = app.clone();
             async move {
-                let (sock, _) = listener.accept().await.unwrap();
-                hyper::server::conn::http1::Builder::new()
-                    .serve_connection(
-                        hyper_util::rt::TokioIo::new(sock),
-                        hyper::service::service_fn(move |req| handle(app.clone(), req)),
-                    )
-                    .await
-                    .unwrap();
+                for _ in 0..2 {
+                    let (sock, _) = listener.accept().await.unwrap();
+                    let app = app.clone();
+                    hyper::server::conn::http1::Builder::new()
+                        .serve_connection(
+                            hyper_util::rt::TokioIo::new(sock),
+                            hyper::service::service_fn(move |req| handle(app.clone(), req)),
+                        )
+                        .await
+                        .unwrap();
+                }
             }
         });
         let (status, body) = reply(request(addr, CHAT).await, Duration::from_secs(1)).await;
@@ -1741,6 +1795,7 @@ mod reservation_tests {
             body["error"]["message"],
             "request log writer is busy or unavailable"
         );
+        assert_reservation_refusals(addr, 0, 0, 1).await;
         serving.await.unwrap();
         no_work(&app, &store).await;
     }
