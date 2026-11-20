@@ -407,7 +407,11 @@ async fn send(inner: &Inner, keys: &[String], args: &[String], own: &mut Owned<'
                 m.debit_rows_covered.fetch_add(at(1), Ordering::Relaxed);
                 crate::bump(&m.debit_buckets_applied);
             }
-            _ => crate::bump(&m.debit_buckets_unseeded),
+            _ => {
+                crate::bump(&m.debit_buckets_unseeded);
+                let rows = e.runs.iter().map(|run| run.rows.len() as u64).sum::<u64>();
+                m.debit_rows_unseeded.fetch_add(rows, Ordering::Relaxed);
+            }
         }
     }
     lost(inner, expired, "debit waited past its bound on a seed");

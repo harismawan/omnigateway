@@ -36,14 +36,15 @@ const RETRY_BASE: Duration = Duration::from_millis(100);
 #[derive(Debug, Clone)]
 pub struct WriterConfig {
     /// Successful log calls, after the transaction commits; independent of the
-    /// lossy limiter sink. Called once per batch, with no per-row allocation.
+    /// limiter sink. Called once per batch, with no per-row allocation.
     pub log_observer: Option<Arc<dyn LogObserver>>,
     /// `request_logs.node_id` for every row this process files.
     pub node_id: String,
     /// The fixed offset `usage_daily` days are cut at.
     pub day_offset_minutes: i64,
     /// Channel capacity, in events: what may be pending while the database
-    /// stalls. A full channel drops, never waits. 131 072 events is ~1.2 s of
+    /// stalls. PG shares this budget with terminal reservations, which wait
+    /// before admission. SQLite retains its nonwaiting queue. 131 072 events is ~1.2 s of
     /// the gateway's ~55 k requests/s at full rate (two events each, so
     /// ~110 k events/s), enough to ride out the 0.5–1 s stalls of the disk
     /// under the WAL's fsync seen on the bench host (XFS log flushes); a
@@ -51,8 +52,8 @@ pub struct WriterConfig {
     /// so an idle writer holds little of it.
     ///
     /// **It bounds events, not bytes.** What a full queue holds:
-    /// - **slots**: 376 bytes each (a 344-byte [`WriteEvent`] plus its
-    ///   enqueue time and barrier epoch), ~47 MiB for 131 072;
+    /// - **slots**: see [`queue_slot_bytes`] (the [`WriteEvent`] plus its
+    ///   enqueue time, barrier epoch, and optional PG reservation);
     /// - **payload** each event owns on the heap, on top: its id and model
     ///   strings and, for a Finish, its `degradations` and `rtk_filters`
     ///   lists. A bench-shaped event's six short strings (a 40-byte id, the
@@ -94,7 +95,9 @@ pub struct WriterConfig {
     /// Where committed completions and seed reads go, in the order they
     /// happened (the rate limiter). `None` sends nothing.
     ///
-    /// The writer never waits on it: everything is `try_send`.
+    /// PG retains one committed batch while it waits for sink capacity. A
+    /// closed consumer is counted in `sink_dropped`. SQLite keeps its
+    /// nonwaiting delivery and reports a gap after a full sink drains.
     ///
     /// - A full sink drops a batch's debits (counted in `sink_dropped`).
     ///   Their rows are committed, so the next seed of those subjects reads
@@ -149,8 +152,12 @@ pub struct WriterStats {
     /// The full total: the rate-limited warning may not have reported the
     /// last of them (see [`Writer::close`]).
     pub dropped: u64,
+    pub terminal_dropped: u64,
+    pub optional_dropped: u64,
     /// Transactions committed.
     pub batches: u64,
+    /// Transactions abandoned after the database refused the batch or retries ran out.
+    pub failed_batches: u64,
     /// Events in committed batches.
     pub written: u64,
     /// Events accepted into the channel whose batch could not be persisted
@@ -163,7 +170,7 @@ pub struct WriterStats {
     /// cannot hold) while the rest of their batch committed. Not persisted:
     /// each is also counted in `failed`, never in `written`.
     pub refused: u64,
-    /// Committed completions the commit sink had no room for.
+    /// Completions lost to a full (SQLite) or closed (Postgres) debit sink.
     pub sink_dropped: u64,
     /// Seed results the commit sink had no room for.
     pub seeds_dropped: u64,
@@ -183,7 +190,10 @@ struct Counters {
     enqueued: AtomicU64,
     seeds_refused: AtomicU64,
     dropped: AtomicU64,
+    terminal_dropped: AtomicU64,
+    optional_dropped: AtomicU64,
     batches: AtomicU64,
+    failed_batches: AtomicU64,
     written: AtomicU64,
     failed: AtomicU64,
     health_refused: AtomicU64,
@@ -202,7 +212,10 @@ impl Counters {
             enqueued: AtomicU64::new(0),
             seeds_refused: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
+            terminal_dropped: AtomicU64::new(0),
+            optional_dropped: AtomicU64::new(0),
             batches: AtomicU64::new(0),
+            failed_batches: AtomicU64::new(0),
             written: AtomicU64::new(0),
             failed: AtomicU64::new(0),
             health_refused: AtomicU64::new(0),
@@ -217,7 +230,10 @@ impl Counters {
             enqueued: self.enqueued.load(Ordering::Relaxed),
             seeds_refused: self.seeds_refused.load(Ordering::Relaxed),
             dropped: self.dropped.load(Ordering::Relaxed),
+            terminal_dropped: self.terminal_dropped.load(Ordering::Relaxed),
+            optional_dropped: self.optional_dropped.load(Ordering::Relaxed),
             batches: self.batches.load(Ordering::Relaxed),
+            failed_batches: self.failed_batches.load(Ordering::Relaxed),
             written: self.written.load(Ordering::Relaxed),
             failed: self.failed.load(Ordering::Relaxed),
             health_refused: self.health_refused.load(Ordering::Relaxed),
@@ -286,6 +302,9 @@ struct Queued {
     /// The barrier epoch an event was published in; `None` for a seed or a
     /// barrier.
     epoch: Option<u64>,
+    // PG counts both enqueued entries and pre-admission reservations against
+    // one budget. Receiving the entry returns its credit.
+    _credit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 /// The bytes one queue slot takes (the [`WriterConfig::capacity`] docs).
@@ -360,9 +379,60 @@ pub enum BarrierError {
 pub struct WriterHandle {
     tx: mpsc::Sender<Queued>,
     counters: Arc<Counters>,
+    terminal: Option<Arc<tokio::sync::Semaphore>>,
 }
 
+/// A Postgres terminal slot acquired before starting work. Its send never
+/// waits, including from a cancelled request's destructor.
+pub struct FinishSlot(tokio::sync::OwnedSemaphorePermit);
+
 impl WriterHandle {
+    /// Reserve the entire request's terminal row set atomically, before
+    /// taking admission. Dropping a pending reservation or unused slots
+    /// returns the credits. SQLite needs no reservation.
+    pub async fn reserve_finishes<const N: usize>(&self) -> [Option<FinishSlot>; N] {
+        let mut slots = std::array::from_fn(|_| None);
+        let Some(credits) = &self.terminal else {
+            return slots;
+        };
+        assert!(N <= self.tx.max_capacity());
+        let Ok(mut reserved) = credits
+            .clone()
+            .acquire_many_owned(u32::try_from(N).expect("finish slot count"))
+            .await
+        else {
+            return slots;
+        };
+        for slot in &mut slots {
+            *slot = reserved.split(1).map(FinishSlot);
+        }
+        slots
+    }
+
+    pub fn finish(&self, slot: Option<FinishSlot>, log: super::events::RequestLog) -> bool {
+        let Some(FinishSlot(permit)) = slot else {
+            return self.send(super::events::LogEvent::Finish(log));
+        };
+        let c = &self.counters;
+        let entered = c.epochs.enter();
+        let ok = self
+            .tx
+            .try_send(Queued {
+                at: Instant::now(),
+                item: Item::Event(super::events::LogEvent::Finish(log).into()),
+                epoch: Some(entered.0),
+                _credit: Some(permit),
+            })
+            .is_ok();
+        if ok {
+            c.enqueued.fetch_add(1, Ordering::Relaxed);
+        } else {
+            c.dropped.fetch_add(1, Ordering::Relaxed);
+            c.terminal_dropped.fetch_add(1, Ordering::Relaxed);
+        }
+        c.epochs.leave(entered, !ok);
+        ok
+    }
     /// Completion callbacks are joined before writer shutdown. No work or
     /// allocation on the ordinary (body logging disabled) send path.
     pub fn completion_callback(
@@ -380,11 +450,20 @@ impl WriterHandle {
     /// Wait for the queued prefix and its debit consumer, without using the
     /// singleton diagnostic flush barrier. Only body-enabled requests use it.
     pub async fn after_completions(&self) {
+        let credit = if let Some(credits) = &self.terminal {
+            let Ok(credit) = credits.clone().acquire_owned().await else {
+                return;
+            };
+            Some(credit)
+        } else {
+            None
+        };
         let fence = super::events::CommitFence(Arc::new(tokio::sync::Notify::new()));
         let queued = Queued {
             at: Instant::now(),
             item: Item::Fence(fence.clone()),
             epoch: None,
+            _credit: credit,
         };
         if self.tx.send(queued).await.is_ok() {
             fence.0.notified().await;
@@ -395,38 +474,85 @@ impl WriterHandle {
     /// about it later, rate-limited. Nothing here but the `try_send` and an
     /// atomic add.
     ///
+    /// PG request producers must use [`Self::reserve_finishes`] and
+    /// [`Self::finish`] for terminal rows, not this best-effort path.
+    ///
     /// Takes no lock and never waits: its barrier bookkeeping is a few
     /// atomics (`epoch.rs`). A seed read is not an event: it takes no part in
     /// barrier accounting, and a refused one is counted in `seeds_refused`.
     pub fn send(&self, event: impl Into<WriteEvent>) -> bool {
         let event = event.into();
         let c = &self.counters;
+        let terminal = matches!(&event, WriteEvent::Log(super::events::LogEvent::Finish(_)));
+        let optional = matches!(
+            &event,
+            WriteEvent::Log(
+                super::events::LogEvent::Begin(_) | super::events::LogEvent::Route { .. }
+            )
+        );
+        let credit = self.try_credit(optional);
         if matches!(event, WriteEvent::Seed(_)) {
-            let queued = Queued {
-                at: Instant::now(),
-                item: Item::Event(event),
-                epoch: None,
-            };
-            let ok = self.tx.try_send(queued).is_ok();
+            let ok = credit.is_ok_and(|credit| {
+                self.tx
+                    .try_send(Queued {
+                        at: Instant::now(),
+                        item: Item::Event(event),
+                        epoch: None,
+                        _credit: credit,
+                    })
+                    .is_ok()
+            });
             if !ok {
                 c.seeds_refused.fetch_add(1, Ordering::Relaxed);
             }
             return ok;
         }
         let entered: Entered = c.epochs.enter();
-        let queued = Queued {
-            at: Instant::now(),
-            item: Item::Event(event),
-            epoch: Some(entered.0),
-        };
-        let ok = self.tx.try_send(queued).is_ok();
+        let ok = credit.is_ok_and(|credit| {
+            self.tx
+                .try_send(Queued {
+                    at: Instant::now(),
+                    item: Item::Event(event),
+                    epoch: Some(entered.0),
+                    _credit: credit,
+                })
+                .is_ok()
+        });
         if ok {
             c.enqueued.fetch_add(1, Ordering::Relaxed);
         } else {
             c.dropped.fetch_add(1, Ordering::Relaxed);
+            if terminal {
+                c.terminal_dropped.fetch_add(1, Ordering::Relaxed);
+            }
+            if optional {
+                c.optional_dropped.fetch_add(1, Ordering::Relaxed);
+            }
         }
         c.epochs.leave(entered, !ok);
         ok
+    }
+
+    fn try_credit(
+        &self,
+        optional: bool,
+    ) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, BarrierError> {
+        let Some(credits) = &self.terminal else {
+            return Ok(None);
+        };
+        // Preserve room for terminal reservations rather than another
+        // pending-row write when the primary falls behind.
+        if optional && credits.available_permits() <= self.tx.max_capacity() / 2 {
+            return Err(BarrierError::Full);
+        }
+        credits
+            .clone()
+            .try_acquire_owned()
+            .map(Some)
+            .map_err(|e| match e {
+                tokio::sync::TryAcquireError::Closed => BarrierError::Closed,
+                tokio::sync::TryAcquireError::NoPermits => BarrierError::Full,
+            })
     }
 
     /// A barrier: the outcome of every event of its prefix, once all of them
@@ -482,6 +608,7 @@ impl WriterHandle {
                 _busy: Some(busy),
             }),
             epoch: None,
+            _credit: self.try_credit(false)?,
         };
         match self.tx.try_send(queued) {
             Ok(()) => {}
@@ -610,7 +737,11 @@ impl Writer {
             Arc::clone(&counters),
         ));
         Ok(Self {
-            handle: WriterHandle { tx, counters },
+            handle: WriterHandle {
+                tx,
+                counters,
+                terminal: None,
+            },
             shutdown: Some(shutdown),
             task,
             checkpointer,
@@ -618,9 +749,8 @@ impl Writer {
     }
 
     /// The same writer over a (migrated) Postgres store: each batch takes a
-    /// pooled connection for its one transaction (`pg_batch.rs`). Batching,
-    /// barriers, seeds, the commit sink and the drop and failure accounting
-    /// are the SQLite writer's, unchanged. `busy_timeout`,
+    /// pooled connection for its transaction (`pg_batch.rs`). Terminal rows
+    /// reserve queue capacity and the commit sink retains its debits. `busy_timeout`,
     /// `checkpoint_every` and `wal_autocheckpoint` are SQLite's and ignored;
     /// the pool's statement and wait timeouts bound a stalled server instead,
     /// and a timed-out batch is retried like a busy one.
@@ -628,18 +758,26 @@ impl Writer {
         store: crate::pg::PgStore,
         config: WriterConfig,
     ) -> Result<Self, StoreError> {
-        let (tx, rx) = mpsc::channel(config.capacity.max(1));
+        let capacity = config.capacity.max(3);
+        let (tx, rx) = mpsc::channel(capacity);
         let (shutdown, stop) = oneshot::channel();
         let counters = Arc::new(Counters::new());
-        let task = tokio::spawn(run(
-            Backend::Postgres(store),
-            rx,
-            stop,
-            config,
-            Arc::clone(&counters),
-        ));
+        let terminal = Arc::new(tokio::sync::Semaphore::new(capacity));
+        let task = tokio::spawn({
+            let terminal = terminal.clone();
+            let counters = counters.clone();
+            async move {
+                let result = run(Backend::Postgres(store), rx, stop, config, counters).await;
+                terminal.close();
+                result
+            }
+        });
         Ok(Self {
-            handle: WriterHandle { tx, counters },
+            handle: WriterHandle {
+                tx,
+                counters,
+                terminal: Some(terminal),
+            },
             shutdown: Some(shutdown),
             task,
             checkpointer: None,
@@ -675,6 +813,9 @@ impl Writer {
             // An Err means the task already ended; the join below reports why.
             s.send(()).ok();
         }
+        if let Some(credits) = &self.handle.terminal {
+            credits.close();
+        }
         let task = &mut self.task;
         let ended = task.await;
         if let Some(c) = self.checkpointer.take() {
@@ -691,6 +832,9 @@ impl Writer {
 /// (without waiting for it), so no thread outlives it.
 impl Drop for Writer {
     fn drop(&mut self) {
+        if let Some(credits) = &self.handle.terminal {
+            credits.close();
+        }
         if let Some(c) = self.checkpointer.take() {
             c.stop.store(true, Ordering::Relaxed);
             c.thread.thread().unpark();
@@ -866,7 +1010,25 @@ impl Sink {
         );
     }
 
-    fn deliver(&mut self, completions: Vec<super::events::Completion>) {
+    async fn deliver(&mut self, completions: Vec<super::events::Completion>) {
+        if matches!(self.backend, Backend::Postgres(_)) {
+            if let Some(sink) = &self.commit_sink
+                && !completions.is_empty()
+            {
+                let n = completions.len() as u64;
+                // One retained batch. Backpressure is bounded by the writer
+                // FIFO, and close joins the consumer before the coordinator.
+                if sink
+                    .send(Committed::Completions(completions))
+                    .await
+                    .is_err()
+                {
+                    self.counters.sink_dropped.fetch_add(n, Ordering::Relaxed);
+                    tracing::error!(count = n, "request log completion consumer stopped");
+                }
+            }
+            return;
+        }
         self.recover_gap();
         if self.delivery_gap {
             self.counters
@@ -944,6 +1106,13 @@ impl Sink {
                     let phase = Instant::now();
                     let result = async {
                         let mut client = store.client().await?;
+                        if std::env::var_os("OMNI_WRITER_PHASES").is_some() {
+                            eprintln!(
+                                "pg_pool_phase events={} pool_us={}",
+                                events.len(),
+                                phase.elapsed().as_micros()
+                            );
+                        }
                         super::pg_batch::write(&mut client, &events, &node_id, offset).await
                     }
                     .await;
@@ -963,8 +1132,18 @@ impl Sink {
                     if let Some(observer) = &self.log_observer {
                         observer.committed(outcome.log_notifications, outcome.finish_notifications);
                     }
-                    self.deliver(outcome.completions);
+                    self.deliver(outcome.completions).await;
                     let refused = outcome.refused.len() as u64;
+                    if refused != 0 {
+                        self.deliver(
+                            outcome
+                                .refused
+                                .iter()
+                                .filter_map(|&i| failure_debit(&events[i]))
+                                .collect(),
+                        )
+                        .await;
+                    }
                     c.batches.fetch_add(1, Ordering::Relaxed);
                     c.written.fetch_add(n - refused, Ordering::Relaxed);
                     c.failed.fetch_add(refused, Ordering::Relaxed);
@@ -996,29 +1175,9 @@ impl Sink {
                 Err(e) => {
                     // Spending is independent of persistence, just as frozen
                     // finishLog debits even when usage.append throws.
-                    let debits = events
-                        .iter()
-                        .filter_map(|event| {
-                            let WriteEvent::Log(super::events::LogEvent::Finish(log)) = event
-                            else {
-                                return None;
-                            };
-                            Some(super::events::Completion {
-                                commit_id: None,
-                                id: log.id.clone(),
-                                api_key_id: log.api_key_id.clone(),
-                                requested_model: log.requested_model.clone(),
-                                tokens: (log.input_tokens as f64)
-                                    + (log.output_tokens as f64)
-                                    + (log.cache_read_tokens as f64)
-                                    + (log.cache_write_tokens as f64),
-                                cost_usd: log.cost_usd,
-                                at: log.at as f64,
-                                debit_model: !log.model_unencodable,
-                            })
-                        })
-                        .collect();
-                    self.deliver(debits);
+                    let debits = events.iter().filter_map(failure_debit).collect();
+                    self.deliver(debits).await;
+                    c.failed_batches.fetch_add(1, Ordering::Relaxed);
                     c.failed.fetch_add(n, Ordering::Relaxed);
                     tracing::error!(
                         count = n,
@@ -1031,6 +1190,26 @@ impl Sink {
             }
         }
     }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn failure_debit(event: &WriteEvent) -> Option<super::events::Completion> {
+    let WriteEvent::Log(super::events::LogEvent::Finish(log)) = event else {
+        return None;
+    };
+    Some(super::events::Completion {
+        commit_id: None,
+        id: log.id.clone(),
+        api_key_id: log.api_key_id.clone(),
+        requested_model: log.requested_model.clone(),
+        tokens: log.input_tokens as f64
+            + log.output_tokens as f64
+            + log.cache_read_tokens as f64
+            + log.cache_write_tokens as f64,
+        cost_usd: log.cost_usd,
+        at: log.at as f64,
+        debit_model: !log.model_unencodable,
+    })
 }
 
 /// `sink.flush`, still looking at the drop counter on the tick meanwhile: a
@@ -1292,10 +1471,11 @@ async fn run(
             }
         }
         let lost = flush_watching(&mut sink, batch, &mut warner, &mut warn_tick, &counters).await?;
+        let closing = stopping || stop_arrived(&mut stop);
         answer(barriers, &counters, &sink.commit_sink).await;
         // A stop that arrived while this batch was being written (or retried)
         // waited on its outcome, so its loss is the close's to report.
-        if stopping || stop_arrived(&mut stop) {
+        if closing {
             lost_on_close += lost;
             break 'running;
         }

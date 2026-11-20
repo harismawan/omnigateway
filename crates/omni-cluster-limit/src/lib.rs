@@ -216,6 +216,8 @@ pub struct Metrics {
     pub debit_rows_covered: AtomicU64,
     /// Bucket entries ignored by an incomplete picture (the seed reads the row).
     pub debit_buckets_unseeded: AtomicU64,
+    /// Rows in those entries. Unlike bucket counts, this reconciles with queued rows.
+    pub debit_rows_unseeded: AtomicU64,
     /// Bucket entries kept for another flush: a seed is installing.
     pub debit_buckets_waiting: AtomicU64,
     /// Bucket entries lost to a fault or a full queue (reseed armed).

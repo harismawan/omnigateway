@@ -25,6 +25,125 @@ const TABLES: [&str; 4] = [
 /// 2026-11-06T23:30:00Z, half an hour before midnight UTC.
 const T0: i64 = 1_794_007_800_000;
 
+#[tokio::test]
+async fn healthy_postgres_retains_finish_when_optional_queue_is_full() {
+    let Some(base) = base_url("healthy_postgres_retains_finish_when_optional_queue_is_full") else {
+        return;
+    };
+    let db = TestDb::create(&base, "terminal_capacity").await;
+    let store = prepare(&db, 0).await;
+    let mut c = db.client().await;
+    let locked = c.transaction().await.expect("lock transaction");
+    locked
+        .batch_execute("LOCK TABLE request_logs IN ACCESS EXCLUSIVE MODE")
+        .await
+        .expect("hold writer");
+    let writer = Writer::spawn_postgres(
+        store,
+        WriterConfig {
+            capacity: 8,
+            interval: Duration::from_secs(60),
+            ..config(0, 1)
+        },
+    )
+    .expect("writer");
+    let h = writer.handle();
+    let [slot] = h.reserve_finishes::<1>().await;
+    assert!(h.finish(slot, done("blocker", T0, Some("key-1"), "m", 1)));
+    let holder_pid: i32 = locked
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await
+        .expect("lock holder")
+        .get(0);
+    wait_for_blocked(&db, holder_pid, "WITH changed AS (INSERT INTO request_logs").await;
+    // The writer is in healthy SQL lock wait, so its FIFO cannot drain.
+    for i in 0..4 {
+        assert!(h.send(pending(&format!("pending-{i}"), T0, Some("key-1"), "m")));
+    }
+    assert!(!h.send(route("pending-0", "openai", "m", "cred-1")));
+    let slots = h.reserve_finishes::<4>().await;
+    for (i, slot) in slots.into_iter().enumerate() {
+        assert!(h.finish(
+            slot,
+            done(&format!("unrelated-{i}"), T0, Some("key-1"), "m", 1)
+        ));
+    }
+    let mut reserve = Box::pin(h.reserve_finishes::<1>());
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(reserve.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    drop(reserve);
+    locked.commit().await.expect("release writer");
+    let [slot] = tokio::time::timeout(Duration::from_secs(3), h.reserve_finishes::<1>())
+        .await
+        .expect("cancelled waiter did not take the next slot");
+    let accepted = h.finish(slot, done("pending-0", T0, Some("key-1"), "m", 9));
+    let slots = h.reserve_finishes::<3>().await;
+    for (i, slot) in slots.into_iter().enumerate() {
+        assert!(h.finish(
+            slot,
+            done(&format!("pending-{}", i + 1), T0, Some("key-1"), "m", 1)
+        ));
+    }
+    writer.close().await.expect("drain");
+    assert_eq!(
+        (h.stats().terminal_dropped, h.stats().optional_dropped),
+        (0, 1)
+    );
+    let counts = c
+        .query_one(
+            "SELECT count(*) FILTER (WHERE state='done' AND status=200), count(*) FILTER (WHERE state='pending') FROM request_logs",
+            &[],
+        )
+        .await
+        .expect("completion query");
+    assert_eq!(
+        (accepted, counts.get::<_, i64>(0), counts.get::<_, i64>(1)),
+        (true, 9, 0),
+        "healthy terminal was lost"
+    );
+}
+
+#[tokio::test]
+async fn last_postgres_batch_reaches_a_full_commit_sink_before_close() {
+    let Some(base) = base_url("last_postgres_batch_reaches_a_full_commit_sink_before_close") else {
+        return;
+    };
+    let db = TestDb::create(&base, "final_commit_sink").await;
+    let store = prepare(&db, 0).await;
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let writer = Writer::spawn_postgres(
+        store,
+        WriterConfig {
+            commit_sink: Some(tx),
+            ..config(0, 1)
+        },
+    )
+    .expect("writer");
+    let h = writer.handle();
+    for id in ["first", "last"] {
+        assert!(h.send(LogEvent::Finish(done(id, T0, Some("key-1"), "m", 1))));
+    }
+    let mut closing = tokio::spawn(writer.close());
+    let early = tokio::time::timeout(Duration::from_secs(1), &mut closing).await;
+    let Some(Committed::Completions(first)) = rx.recv().await else {
+        panic!("first debit")
+    };
+    assert_eq!(first[0].id, "first");
+    let last = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+        .await
+        .expect("last debit timeout");
+    let Some(Committed::Completions(last)) = last else {
+        panic!("last debit lost: {last:?}")
+    };
+    assert_eq!(last[0].id, "last");
+    assert!(last[0].commit_id.is_some());
+    assert!(early.is_err(), "closed before terminal debit handoff");
+    assert_eq!(closing.await.expect("join").expect("close").sink_dropped, 0);
+}
+
 fn pending(id: &str, at: i64, key: Option<&str>, model: &str) -> LogEvent {
     LogEvent::Begin(PendingLog {
         id: id.into(),
@@ -511,7 +630,15 @@ async fn a_failed_batch_is_counted_rolled_back_and_fails_close() {
     c.batch_execute("DROP TABLE usage_rollup")
         .await
         .expect("drop");
-    let writer = Writer::spawn_postgres(store, config(0, 512)).expect("spawn");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let writer = Writer::spawn_postgres(
+        store,
+        WriterConfig {
+            commit_sink: Some(tx),
+            ..config(0, 512)
+        },
+    )
+    .expect("spawn");
     let handle = writer.handle();
     for n in 0..3 {
         assert!(handle.send(LogEvent::Finish(done(
@@ -529,6 +656,12 @@ async fn a_failed_batch_is_counted_rolled_back_and_fails_close() {
     );
     let stats = handle.stats();
     assert_eq!((stats.failed, stats.dropped, stats.batches), (3, 0, 0));
+    assert_eq!(stats.failed_batches, 1);
+    let Some(Committed::Completions(rows)) = rx.recv().await else {
+        panic!("failed batch debit missing")
+    };
+    assert_eq!(rows.len(), 3);
+    assert!(rows.iter().all(|r| r.commit_id.is_none()));
     let n: i64 = c
         .query_one("SELECT COUNT(*) FROM request_logs", &[])
         .await
@@ -675,7 +808,7 @@ async fn a_row_another_writer_inserted_after_the_read_is_added_to_not_overwritte
     assert!(h.send(pending("z", T0, Some("key-race"), "ours")));
     assert!(h.send(LogEvent::Finish(done("y", T0, Some("key-race"), "m", 1))));
     // The batch read `z` as absent and its log upsert now waits on it.
-    wait_for_blocked(&db, other_pid, "INSERT INTO request_logs").await;
+    wait_for_blocked(&db, other_pid, "WITH changed AS (INSERT INTO request_logs").await;
     tx.commit().await.expect("commit");
     let stats = writer.close().await.expect("close");
     assert_eq!(stats.failed, 0);

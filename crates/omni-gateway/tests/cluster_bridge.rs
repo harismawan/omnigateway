@@ -234,8 +234,103 @@ async fn actual_writer_seed_and_ignored_before_seed_recover_without_double_debit
         .expect("read")
         .expect("seeded");
     assert_eq!(key_count.tokens, 14.0);
+    // Postgres refuses the terminal value. It must still charge the seeded
+    // key, not the lossy model override, and must not claim an xid8.
+    let mut log = omni_store::writer::RequestLog::new(
+        format!("{key}-refused"),
+        1_800_000_000_000,
+        i64::from(i32::MAX) + 1,
+    );
+    log.api_key_id = Some(key.clone());
+    log.requested_model = "model".into();
+    log.model_unencodable = true;
+    log.input_tokens = 11;
+    let [slot] = h.reserve_finishes::<1>().await;
+    assert!(h.finish(slot, log));
+    assert_eq!(h.flush().await.expect("failure barrier").failed, 1);
+    let omni_store::writer::Committed::Completions(fallback) =
+        rx.recv().await.expect("fallback debit")
+    else {
+        panic!("unexpected message instead of fallback debit");
+    };
+    assert_eq!(fallback.len(), 1);
+    assert!(fallback[0].commit_id.is_none());
+    runtime.apply(omni_store::writer::Committed::Completions(fallback));
+    limiter.flush_debits().await;
+    let remote = coord.remote();
+    let key_bucket = format!("lim:{key}:5h");
+    for (bucket, expected) in [(&key_bucket, 25.0), (&bucket, 7.0)] {
+        assert_eq!(
+            remote
+                .buckets_sum(bucket, 60_000.0, 18_000_000.0, now)
+                .await
+                .expect("read")
+                .expect("seeded")
+                .tokens,
+            expected
+        );
+    }
     writer.close().await.expect("writer drain before limiter");
+
+    // Hold the last commit behind one already-buffered debit. Drain in the
+    // same writer -> applier -> limiter order as the gateway and inspect the
+    // actual seeded Valkey bucket after shutdown, not just the channel.
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let writer = omni_store::writer::Writer::spawn_postgres(
+        pg.clone(),
+        omni_store::writer::WriterConfig {
+            commit_sink: Some(tx),
+            max_batch: 1,
+            ..Default::default()
+        },
+    )
+    .expect("one-slot commit bridge");
+    let h = writer.handle();
+    for i in 0..2 {
+        let mut log =
+            omni_store::writer::RequestLog::new(format!("{key}-last-{i}"), 1_800_000_000_000, 200);
+        log.api_key_id = Some(key.clone());
+        log.requested_model = "model".into();
+        log.input_tokens = 3;
+        let [slot] = h.reserve_finishes::<1>().await;
+        assert!(h.finish(slot, log));
+    }
+    let c = pg.client().await.expect("primary reader");
+    let last = format!("{key}-last-1");
+    let closing = tokio::spawn(writer.close());
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let present: bool = c
+                .query_one(
+                    "SELECT EXISTS (SELECT 1 FROM request_logs WHERE id=$1)",
+                    &[&last],
+                )
+                .await
+                .expect("last primary row")
+                .get(0);
+            if present {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(rx.len(), 1, "first debit still occupies the sink");
+        while let Some(event) = rx.recv().await {
+            runtime.apply(event);
+        }
+    })
+    .await
+    .expect("commit drain");
+    assert_eq!(closing.await.expect("join").expect("close").sink_dropped, 0);
     limiter.shutdown().await;
+    assert_eq!(
+        remote
+            .buckets_sum(&key_bucket, 60_000.0, 18_000_000.0, now)
+            .await
+            .expect("read")
+            .expect("seeded")
+            .tokens,
+        31.0
+    );
     coord.close();
 }
 

@@ -829,6 +829,8 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
             drop(task.await);
         }
         drop(tokio::time::timeout_at(shutdown_until, app.deps.holder.drain_publications()).await);
+        let bench_accounting = app.bench_endpoints && app.cluster;
+        let writer_handle = writer.handle();
         drop(app);
         preseeder.abort();
         overlay_sweeper.abort();
@@ -837,6 +839,30 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         drop(applier.await);
         if let Some(cluster) = cluster_limiter {
             cluster.shutdown().await;
+            if bench_accounting {
+                use std::sync::atomic::Ordering::Relaxed;
+                let writer = writer_handle.stats();
+                let m = cluster.metrics();
+                // The harness captures warn and above. The formatter drops
+                // nonstandard fields, so put these fixed counters in the
+                // bench-only message; none can contain external data.
+                tracing::warn!(
+                    "benchmark completion accounting after drain \
+                     terminalDropped={} optionalDropped={} failedEvents={} sinkDropped={} \
+                     debitsQueued={} debitRowsApplied={} debitRowsCovered={} \
+                     debitRowsUnseeded={} debitBucketsLost={} pendingDebitEntries={}",
+                    writer.terminal_dropped,
+                    writer.optional_dropped,
+                    writer.failed,
+                    writer.sink_dropped,
+                    m.debits_queued.load(Relaxed),
+                    m.debit_rows_applied.load(Relaxed),
+                    m.debit_rows_covered.load(Relaxed),
+                    m.debit_rows_unseeded.load(Relaxed),
+                    m.debit_buckets_lost.load(Relaxed),
+                    cluster.debits_pending().0,
+                );
+            }
         }
         drop(load_publisher);
         if let Some(redis) = redis {

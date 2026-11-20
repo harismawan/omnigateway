@@ -188,6 +188,16 @@ struct Logs {
 }
 
 impl Logs {
+    fn empty() -> Self {
+        Self {
+            rows: HashMap::new(),
+            existed: HashSet::new(),
+            dirty: IndexMap::new(),
+            completed: Vec::new(),
+            model_unencodable: HashSet::new(),
+        }
+    }
+
     fn apply_notified(&mut self, event: &LogEvent, node_id: &str, outcome: &mut Outcome) -> bool {
         let publishes = !matches!(event, LogEvent::Begin(p) if self.rows.get(&p.id).is_some_and(Option::is_some));
         if !self.apply_logged(event, node_id) {
@@ -228,9 +238,7 @@ impl Logs {
         Ok(Self {
             rows,
             existed,
-            dirty: IndexMap::new(),
-            completed: Vec::new(),
-            model_unencodable: HashSet::new(),
+            ..Self::empty()
         })
     }
 
@@ -306,14 +314,14 @@ impl Logs {
         Ok(())
     }
 
-    async fn write(&self, c: &impl GenericClient) -> Result<(), StoreError> {
+    async fn write(&self, c: &impl GenericClient) -> Result<Option<String>, StoreError> {
         let mut rows: Vec<&Row> = self
             .dirty
             .keys()
             .filter_map(|id| self.rows.get(id).and_then(Option::as_ref))
             .collect();
         if rows.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         // Inserted in id order, as they were locked.
         rows.sort_unstable_by(|a, b| a.id.cmp(&b.id));
@@ -385,16 +393,25 @@ impl Logs {
             &rtk_filters,
             &existed,
         ];
-        let stmt = c.prepare_cached(UPSERT_LOGS).await?;
-        let written = c.execute(&stmt, &params).await?;
-        if written != rows.len() as u64 {
+        let result = if existed.is_empty() {
+            // The common all-new batch need not plan or execute the enormous
+            // conflict UPDATE. A raced insert still forces a whole-batch retry.
+            let stmt = c.prepare_cached(INSERT_LOGS).await?;
+            c.query_one(&stmt, &params[..26]).await?
+        } else {
+            let stmt = c.prepare_cached(UPSERT_LOGS).await?;
+            c.query_one(&stmt, &params).await?
+        };
+        let written = result.try_get::<_, i64>(0)?;
+        let expected = i64::try_from(rows.len()).expect("bounded batch length");
+        if written != expected {
             return Err(StoreError::Conflict(format!(
                 "request_logs: {} of {} rows were inserted by another writer since the batch read them",
-                rows.len() as u64 - written,
-                rows.len()
+                expected - written,
+                expected
             )));
         }
-        Ok(())
+        Ok(Some(result.try_get(1)?))
     }
 
     fn completed_rows(&self) -> impl Iterator<Item = &Row> {
@@ -404,8 +421,9 @@ impl Logs {
     }
 }
 
-/// The single `INSERT … SELECT FROM unnest(...)` for every changed row.
-const UPSERT_LOGS: &str = "INSERT INTO request_logs (id, state, node_id, at, api_key_id,
+macro_rules! insert_logs {
+    () => {
+        "WITH changed AS (INSERT INTO request_logs (id, state, node_id, at, api_key_id,
     requested_model, resolved_provider, resolved_model, credential_id, attempts, status,
     error_code, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, ttft_ms,
     duration_ms, cost_usd, degradations, rtk_applied, rtk_filter_hits, rtk_original_code_units,
@@ -414,7 +432,28 @@ const UPSERT_LOGS: &str = "INSERT INTO request_logs (id, state, node_id, at, api
     $6::text[], $7::text[], $8::text[], $9::text[], $10::int4[], $11::int4[], $12::text[],
     $13::bigint[], $14::bigint[], $15::bigint[], $16::bigint[], $17::bigint[], $18::bigint[],
     $19::float8[], $20::text[], $21::bool[], $22::bigint[], $23::bigint[], $24::bigint[],
-    $25::bigint[], $26::text[])
+    $25::bigint[], $26::text[])"
+    };
+}
+
+// Return the current top-level xid8 once, with the write count the guard
+// already needs. It only leaves the writer after this transaction commits.
+macro_rules! summarize_logs {
+    () => {
+        " RETURNING 1) SELECT count(*), pg_current_xact_id()::text FROM changed"
+    };
+}
+
+const INSERT_LOGS: &str = concat!(
+    insert_logs!(),
+    " ON CONFLICT (id) DO NOTHING",
+    summarize_logs!()
+);
+
+/// The single `INSERT … SELECT FROM unnest(...)` for every changed row.
+const UPSERT_LOGS: &str = concat!(
+    insert_logs!(),
+    "
   ON CONFLICT (id) DO UPDATE SET
     state = EXCLUDED.state, node_id = EXCLUDED.node_id, at = EXCLUDED.at,
     api_key_id = EXCLUDED.api_key_id, requested_model = EXCLUDED.requested_model,
@@ -431,7 +470,9 @@ const UPSERT_LOGS: &str = "INSERT INTO request_logs (id, state, node_id, at, api
     rtk_compressed_code_units = EXCLUDED.rtk_compressed_code_units,
     rtk_estimated_tokens_saved = EXCLUDED.rtk_estimated_tokens_saved,
     rtk_filters = EXCLUDED.rtk_filters
-  WHERE request_logs.id = ANY($27::text[])";
+  WHERE request_logs.id = ANY($27::text[])",
+    summarize_logs!()
+);
 
 // --- rollups ----------------------------------------------------------------
 
@@ -1027,8 +1068,37 @@ pub(crate) async fn write(
     node_id: &str,
     day_offset_minutes: i64,
 ) -> Result<Outcome, StoreError> {
+    // A completion-only batch can try inserting first: the measured log
+    // read/lock round trip doesn't help for new IDs. An existing row causes
+    // the guarded INSERT to reject the batch before any rollup changes.
+    let fresh = events
+        .iter()
+        .all(|e| matches!(e, WriteEvent::Log(LogEvent::Finish(_))));
+    let result = write_once(client, events, node_id, day_offset_minutes, fresh).await;
+    if fresh
+        && matches!(result, Err(StoreError::Conflict(ref reason)) if reason.starts_with("request_logs:"))
+    {
+        return write_once(client, events, node_id, day_offset_minutes, false).await;
+    }
+    result
+}
+
+async fn write_once(
+    client: &mut crate::pg::PgClient,
+    events: &[WriteEvent],
+    node_id: &str,
+    day_offset_minutes: i64,
+    fresh: bool,
+) -> Result<Outcome, StoreError> {
+    let measure = std::env::var_os("OMNI_WRITER_PHASES").is_some();
+    let start = std::time::Instant::now();
     let tx = client.transaction().await?;
-    let mut logs = Logs::load(&tx, events).await?;
+    let mut logs = if fresh {
+        Logs::empty()
+    } else {
+        Logs::load(&tx, events).await?
+    };
+    let locked = start.elapsed();
     let mut refused = Vec::new();
     let mut notifications = Outcome::default();
     for (i, e) in events.iter().enumerate() {
@@ -1038,7 +1108,9 @@ pub(crate) async fn write(
             refused.push(i);
         }
     }
-    logs.write(&tx).await?;
+    let folded = start.elapsed();
+    let log_xid = logs.write(&tx).await?;
+    let logs_elapsed = start.elapsed();
 
     let mut rolled = Vec::new();
     let mut completions = Vec::new();
@@ -1070,6 +1142,7 @@ pub(crate) async fn write(
     }
     daily.rows.sort_unstable_keys();
     write_daily(&tx, &daily, &daily_before).await?;
+    let daily_elapsed = start.elapsed();
 
     let hourly_before = if hourly_keys.is_empty() {
         HashMap::new()
@@ -1087,18 +1160,27 @@ pub(crate) async fn write(
     }
     hourly.rows.sort_unstable_keys();
     write_hourly(&tx, &hourly, &hourly_before).await?;
+    let hourly_elapsed = start.elapsed();
 
     let health_refused = write_health(&tx, events).await?;
-    if !completions.is_empty() {
-        let commit_id: String = tx
-            .query_one("SELECT pg_current_xact_id()::text", &[])
-            .await?
-            .try_get(0)?;
-        for completion in &mut completions {
-            completion.commit_id = Some(commit_id.clone());
-        }
+    for completion in &mut completions {
+        completion.commit_id.clone_from(&log_xid);
     }
-    tx.commit().await?;
+    let before_commit = start.elapsed();
+    tx.commit().await.map_err(crate::pg::health::commit_error)?;
+    if measure {
+        eprintln!(
+            "pg_batch_phase events={} log_lock_us={} log_fold_us={} log_write_us={} daily_us={} hourly_us={} tail_us={} commit_us={}",
+            events.len(),
+            locked.as_micros(),
+            (folded - locked).as_micros(),
+            (logs_elapsed - folded).as_micros(),
+            (daily_elapsed - logs_elapsed).as_micros(),
+            (hourly_elapsed - daily_elapsed).as_micros(),
+            (before_commit - hourly_elapsed).as_micros(),
+            (start.elapsed() - before_commit).as_micros(),
+        );
+    }
     Ok(Outcome {
         log_notifications: notifications.log_notifications,
         finish_notifications: notifications.finish_notifications,

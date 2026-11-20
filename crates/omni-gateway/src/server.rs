@@ -705,6 +705,7 @@ fn metrics(app: &App, req: &Request<Incoming>) -> Response<Body> {
         .deps
         .telemetry
         .scrape_with_streams(&app.deps.load.provider_counts(), app.stream.stats());
+    append_writer_metrics(&mut text, app.deps.writer.stats());
     append_cluster_metrics(&mut text, app);
     let mut res = Response::new(full(text));
     res.headers_mut().insert(
@@ -712,6 +713,21 @@ fn metrics(app: &App, req: &Request<Incoming>) -> Response<Body> {
         HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
     );
     res
+}
+
+fn append_writer_metrics(text: &mut String, stats: omni_store::writer::WriterStats) {
+    use std::fmt::Write as _;
+    for (kind, count) in [
+        ("terminal_dropped", stats.terminal_dropped),
+        ("optional_dropped", stats.optional_dropped),
+        ("failed_batches", stats.failed_batches),
+        ("failed_events", stats.failed),
+        ("sink_dropped", stats.sink_dropped),
+    ] {
+        let metric = format!("omni_request_log_writer_{kind}_total");
+        writeln!(text, "# TYPE {metric} counter\n{metric} {count}")
+            .expect("writing to a String cannot fail");
+    }
 }
 
 fn append_cluster_metrics(text: &mut String, app: &App) {
@@ -742,6 +758,7 @@ fn append_cluster_metrics(text: &mut String, app: &App) {
             debit_rows_applied,
             debit_rows_covered,
             debit_buckets_unseeded,
+            debit_rows_unseeded,
             debit_buckets_waiting,
             debit_buckets_lost,
             debit_batches,
@@ -1029,6 +1046,30 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
     let started_at = now();
     let dialect = dialect_of(surface);
     let sname = surface_name(surface);
+    // Reserve the maximum row set before creating any completion owner or
+    // claiming admission. A disconnect while waiting has spent nothing.
+    let auth = authenticate(&app, &req, started_at).await;
+    let smart = auth.as_ref().is_ok_and(|(key, _)| {
+        key.smart_routing && app.deps.holder.load().routing.settings.smart_router_enabled
+    });
+    let judge = auth
+        .as_ref()
+        .is_ok_and(|(key, _)| key.guardrail_policy.is_some());
+    let [slot, judge_slot, check_slot] = match (judge, smart) {
+        (true, true) => app.deps.writer.reserve_finishes::<3>().await,
+        (false, false) => {
+            let [slot] = app.deps.writer.reserve_finishes::<1>().await;
+            [slot, None, None]
+        }
+        (judge, _) => {
+            let [slot, screen] = app.deps.writer.reserve_finishes::<2>().await;
+            if judge {
+                [slot, screen, None]
+            } else {
+                [slot, None, screen]
+            }
+        }
+    };
     let mut fin = Finisher::new(
         app.deps.writer.clone(),
         request_id.clone(),
@@ -1036,6 +1077,7 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
         sname,
         now,
     );
+    fin.slot = slot;
     if let Some(t) = &app.deps.telemetry.tracing {
         t.start(
             &request_id,
@@ -1063,14 +1105,12 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
     };
 
     let outcome: Result<Response<Body>, GatewayError> = async {
-        let (key, snapshot) = authenticate(&app, &req, started_at)
-            .await
-            .inspect_err(|e| {
-                if e.code == ErrorCode::Auth {
-                    tracing::warn!(requestId = %request_id, surface = sname,
+        let (key, snapshot) = auth.inspect_err(|e| {
+            if e.code == ErrorCode::Auth {
+                tracing::warn!(requestId = %request_id, surface = sname,
                     reason = "invalid credentials", "authentication rejected");
-                }
-            })?;
+            }
+        })?;
         fin.key_id = Some(key.id.clone());
         if app.body_logging_allowed
             && !key.body_logging_opt_out
@@ -1140,8 +1180,6 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
             route_started_at: started_at,
         };
         // After admission: a refused screen still counts as one request.
-        let smart =
-            key.smart_routing && app.deps.holder.load().routing.settings.smart_router_enabled;
         let request_deps = fin.capture.as_ref().map_or_else(
             || app.deps.clone(),
             |capture| {
@@ -1174,6 +1212,7 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
                 key.guardrail_policy.clone(),
                 smart,
                 sname,
+                [judge_slot, check_slot],
             )
         } else {
             dispatch::dispatch(request_deps, dreq)

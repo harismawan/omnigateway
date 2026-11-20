@@ -121,5 +121,6 @@ pub use health::{
 #[cfg(test)]
 pub(crate) use task::transient_sqlstate;
 pub use task::{
-    Barrier, BarrierError, Writer, WriterConfig, WriterHandle, WriterStats, queue_slot_bytes,
+    Barrier, BarrierError, FinishSlot, Writer, WriterConfig, WriterHandle, WriterStats,
+    queue_slot_bytes,
 };

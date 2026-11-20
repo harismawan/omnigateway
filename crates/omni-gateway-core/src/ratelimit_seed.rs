@@ -85,12 +85,10 @@ impl RateLimiter {
                         let Some(key) = row.api_key_id.as_deref() else {
                             continue;
                         };
-                        // Persistence fallback rows have no primary transaction
-                        // identity and must never become shared debits.
-                        let Some(commit) = row.commit_id.as_deref().filter(|id| !id.is_empty())
-                        else {
-                            continue;
-                        };
+                        // A failed write still consumed usage. No xid is
+                        // fabricated: it is a temporary debit on a seeded
+                        // window, never covered by a primary snapshot.
+                        let commit = row.commit_id.as_deref().unwrap_or_default();
                         cluster.debit_selected(
                             key,
                             row.debit_model.then_some(row.requested_model.as_str()),

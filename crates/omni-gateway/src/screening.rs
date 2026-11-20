@@ -9,7 +9,7 @@ pub const VERDICT_CACHE_MAX: usize = 10_000;
 use crate::dispatch::{self, Deps, DispatchOptions, Refusal, Request};
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use omni_ir::{error::ErrorCode, stream::StreamEvent};
-use omni_store::writer::{LogEvent, RequestLog};
+use omni_store::writer::RequestLog;
 use std::sync::{Arc, Mutex, OnceLock};
 
 fn locked<T>(value: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -119,6 +119,7 @@ fn judge_deps(deps: &Arc<Deps>, escapes: Vec<(String, String)>) -> Arc<Deps> {
 
 struct JudgeRow {
     deps: Arc<Deps>,
+    slot: Option<omni_store::writer::FinishSlot>,
     log: Arc<Mutex<RequestLog>>,
     api_key_id: Option<String>,
     result: Option<(i64, Option<String>)>,
@@ -138,7 +139,7 @@ impl Drop for JudgeRow {
         }
         row.duration_ms = (self.deps.now)() - row.at;
         self.deps.telemetry.record(&row);
-        self.deps.writer.send(LogEvent::Finish(row));
+        self.deps.writer.finish(self.slot.take(), row);
     }
 }
 
@@ -149,7 +150,8 @@ pub async fn judge(
     policy: &str,
     local_classifier: Option<String>,
 ) -> (Option<Refusal>, Vec<String>) {
-    judge_with_model(deps, req, policy, local_classifier, None).await
+    let [slot] = deps.writer.reserve_finishes::<1>().await;
+    judge_with_model(deps, req, policy, local_classifier, None, slot).await
 }
 
 async fn judge_with_model(
@@ -158,6 +160,7 @@ async fn judge_with_model(
     policy: &str,
     local_classifier: Option<String>,
     model_override: Option<Option<String>>,
+    slot: Option<omni_store::writer::FinishSlot>,
 ) -> (Option<Refusal>, Vec<String>) {
     let snapshot = deps.holder.load();
     let settings = &snapshot.routing.settings;
@@ -230,6 +233,7 @@ async fn judge_with_model(
         );
         let mut row = JudgeRow {
             deps: deps.clone(),
+            slot,
             log: dispatched.log.clone(),
             api_key_id: req.api_key_id.clone(),
             result: None,
@@ -294,6 +298,7 @@ pub fn screen_first(
     policy: Option<String>,
     smart: bool,
     surface: &'static str,
+    [judge_slot, check_slot]: [Option<omni_store::writer::FinishSlot>; 2],
 ) -> dispatch::Dispatched {
     let guardrail_model = deps.holder.load().routing.settings.guardrail_model.clone();
     let own = Arc::new(Mutex::new(RequestLog::new(
@@ -304,7 +309,7 @@ pub fn screen_first(
     locked(&own).requested_model = req.request.model.clone();
     let log = own.clone();
     let events = Box::pin(async_stream::stream! {
-        let decision = if smart { check_confidentiality(deps.clone(), &req).await } else {
+        let decision = if smart { check_with_slot(deps.clone(), &req, check_slot).await } else {
             SmartDecision::Proceed { local_model: None, classifier: None, notes: Vec::new() }
         };
         let (local_model, classifier, mut notes) = match decision {
@@ -317,7 +322,7 @@ pub fn screen_first(
             SmartDecision::Proceed { local_model, classifier, notes } => (local_model, classifier, notes),
         };
         if let Some(policy) = policy {
-            let (refusal, judge_notes) = judge_with_model(deps.clone(), &req, &policy, classifier, smart.then_some(guardrail_model)).await;
+            let (refusal, judge_notes) = judge_with_model(deps.clone(), &req, &policy, classifier, smart.then_some(guardrail_model), judge_slot).await;
             notes.extend(judge_notes);
             if let Some(refusal) = refusal {
             let mut refused = dispatch::refused(&deps, &req, &refusal, surface);
@@ -360,6 +365,7 @@ pub fn screen_first(
 /// Owns all started calls, including calls interrupted by a sibling or disconnect.
 struct CheckRow {
     deps: Arc<Deps>,
+    slot: Option<omni_store::writer::FinishSlot>,
     row: RequestLog,
     calls: Vec<Arc<Mutex<RequestLog>>>,
     completed: bool,
@@ -389,13 +395,22 @@ impl Drop for CheckRow {
         self.row.attempts = i64::try_from(self.calls.len()).unwrap_or(i64::MAX);
         self.row.duration_ms = (self.deps.now)() - self.row.at;
         self.deps.telemetry.record(&self.row);
-        self.deps.writer.send(LogEvent::Finish(self.row.clone()));
+        self.deps.writer.finish(self.slot.take(), self.row.clone());
     }
 }
 
 /// Validate both configured models before the already-local bypass. No provider
 /// call, pending row, or cache entry exists until these checks have succeeded.
 pub async fn check_confidentiality(deps: Arc<Deps>, req: &Request) -> SmartDecision {
+    let [slot] = deps.writer.reserve_finishes::<1>().await;
+    check_with_slot(deps, req, slot).await
+}
+
+async fn check_with_slot(
+    deps: Arc<Deps>,
+    req: &Request,
+    slot: Option<omni_store::writer::FinishSlot>,
+) -> SmartDecision {
     let snapshot = deps.holder.load();
     let settings = &snapshot.routing.settings;
     let (Some(classifier), Some(local)) = (
@@ -454,6 +469,7 @@ pub async fn check_confidentiality(deps: Arc<Deps>, req: &Request) -> SmartDecis
     row.degradations = vec!["smart-router:classifier".into()];
     let mut aggregate = CheckRow {
         deps: deps.clone(),
+        slot,
         row,
         calls: Vec::new(),
         completed: false,
