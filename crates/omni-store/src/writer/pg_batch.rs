@@ -6,9 +6,9 @@
 //! The shape is `batch.rs`'s, with Postgres's types and locks:
 //!
 //! - **`request_logs`.** The touched rows are read `FOR UPDATE`, the events
-//!   are replayed in memory with the TS statement semantics. Large all-new
-//!   sets use binary COPY; on an id conflict they roll back and replay using
-//!   the guarded `INSERT … SELECT FROM unnest(...)`. Its `DO UPDATE` is allowed only for ids the batch read and
+//!   are replayed in memory with the TS statement semantics, and every
+//!   changed row is written by one `INSERT … SELECT FROM unnest(...)`
+//!   upsert. Its `DO UPDATE` is allowed only for ids the batch read and
 //!   locked: a row another writer inserted after the read is not
 //!   overwritten, the statement reports fewer rows than it was given, and the
 //!   batch fails as a [`StoreError::Conflict`], which the writer retries (the
@@ -41,8 +41,7 @@ use crate::rollup;
 use deadpool_postgres::GenericClient;
 use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet};
-use tokio_postgres::error::SqlState;
-use tokio_postgres::types::{ToSql, Type};
+use tokio_postgres::types::ToSql;
 
 /// One `request_logs` row, typed as the Postgres schema holds it.
 #[derive(Debug, Clone, PartialEq)]
@@ -80,104 +79,6 @@ const COLUMNS: &str = "id, state, node_id, at, api_key_id, requested_model, reso
     cache_read_tokens, cache_write_tokens, ttft_ms, duration_ms, cost_usd, degradations,
     rtk_applied, rtk_filter_hits, rtk_original_code_units, rtk_compressed_code_units,
     rtk_estimated_tokens_saved, rtk_filters";
-
-// Keep the cheap cached INSERT for small batches. Amortize COPY's extra
-// protocol round trips (including the xid read) over a large all-new set.
-const COPY_MIN_ROWS: usize = 1024;
-const COPY_CONFLICT: &str = "request_logs COPY: primary key raced";
-
-async fn copy_new_logs(
-    c: &deadpool_postgres::Transaction<'_>,
-    rows: &[&Row],
-) -> Result<String, StoreError> {
-    const TYPES: [Type; 26] = [
-        Type::TEXT,
-        Type::TEXT,
-        Type::TEXT,
-        Type::INT8,
-        Type::TEXT,
-        Type::TEXT,
-        Type::TEXT,
-        Type::TEXT,
-        Type::TEXT,
-        Type::INT4,
-        Type::INT4,
-        Type::TEXT,
-        Type::INT8,
-        Type::INT8,
-        Type::INT8,
-        Type::INT8,
-        Type::INT8,
-        Type::INT8,
-        Type::FLOAT8,
-        Type::TEXT,
-        Type::BOOL,
-        Type::INT8,
-        Type::INT8,
-        Type::INT8,
-        Type::INT8,
-        Type::TEXT,
-    ];
-    let stmt = c
-        .prepare_cached(&format!("COPY request_logs ({COLUMNS}) FROM STDIN BINARY"))
-        .await?;
-    let sink = c.copy_in(&stmt).await?;
-    let mut copy = std::pin::pin!(tokio_postgres::binary_copy::BinaryCopyInWriter::new(
-        sink, &TYPES
-    ));
-    for row in rows {
-        copy.as_mut()
-            .write(&[
-                &row.id,
-                &row.state,
-                &row.node_id,
-                &row.at,
-                &row.api_key_id,
-                &row.requested_model,
-                &row.resolved_provider,
-                &row.resolved_model,
-                &row.credential_id,
-                &row.attempts,
-                &row.status,
-                &row.error_code,
-                &row.input_tokens,
-                &row.output_tokens,
-                &row.cache_read_tokens,
-                &row.cache_write_tokens,
-                &row.ttft_ms,
-                &row.duration_ms,
-                &row.cost_usd,
-                &row.degradations,
-                &row.rtk_applied,
-                &row.rtk_filter_hits,
-                &row.rtk_original_code_units,
-                &row.rtk_compressed_code_units,
-                &row.rtk_estimated_tokens_saved,
-                &row.rtk_filters,
-            ])
-            .await
-            .map_err(copy_error)?;
-    }
-    let written = copy.as_mut().finish().await.map_err(copy_error)?;
-    if written != rows.len() as u64 {
-        return Err(StoreError::Conflict(
-            "request_logs: COPY did not write every row".into(),
-        ));
-    }
-    let stmt = c
-        .prepare_cached("SELECT pg_current_xact_id()::text")
-        .await?;
-    Ok(c.query_one(&stmt, &[]).await?.try_get(0)?)
-}
-
-fn copy_error(error: tokio_postgres::Error) -> StoreError {
-    if error.as_db_error().is_some_and(|e| {
-        e.code() == &SqlState::UNIQUE_VIOLATION && e.constraint() == Some("request_logs_pkey")
-    }) {
-        return StoreError::Conflict(COPY_CONFLICT.into());
-    }
-    error.into()
-}
 
 fn json_strings(items: &[String]) -> String {
     let array = serde_json::Value::Array(
@@ -413,11 +314,7 @@ impl Logs {
         Ok(())
     }
 
-    async fn write(
-        &self,
-        c: &deadpool_postgres::Transaction<'_>,
-        allow_copy: bool,
-    ) -> Result<Option<String>, StoreError> {
+    async fn write(&self, c: &impl GenericClient) -> Result<Option<String>, StoreError> {
         let mut rows: Vec<&Row> = self
             .dirty
             .keys()
@@ -428,9 +325,6 @@ impl Logs {
         }
         // Inserted in id order, as they were locked.
         rows.sort_unstable_by(|a, b| a.id.cmp(&b.id));
-        if allow_copy && self.existed.is_empty() && rows.len() >= COPY_MIN_ROWS {
-            return copy_new_logs(c, &rows).await.map(Some);
-        }
         macro_rules! col {
             ($f:ident) => {
                 rows.iter().map(|r| r.$f.clone()).collect::<Vec<_>>()
@@ -1180,11 +1074,11 @@ pub(crate) async fn write(
     let fresh = events
         .iter()
         .all(|e| matches!(e, WriteEvent::Log(LogEvent::Finish(_))));
-    let result = write_once(client, events, node_id, day_offset_minutes, fresh, true).await;
-    if matches!(result, Err(StoreError::Conflict(ref reason)) if reason == COPY_CONFLICT
-        || (fresh && reason.starts_with("request_logs:")))
+    let result = write_once(client, events, node_id, day_offset_minutes, fresh).await;
+    if fresh
+        && matches!(result, Err(StoreError::Conflict(ref reason)) if reason.starts_with("request_logs:"))
     {
-        return write_once(client, events, node_id, day_offset_minutes, false, false).await;
+        return write_once(client, events, node_id, day_offset_minutes, false).await;
     }
     result
 }
@@ -1195,7 +1089,6 @@ async fn write_once(
     node_id: &str,
     day_offset_minutes: i64,
     fresh: bool,
-    allow_copy: bool,
 ) -> Result<Outcome, StoreError> {
     let measure = std::env::var_os("OMNI_WRITER_PHASES").is_some();
     let start = std::time::Instant::now();
@@ -1216,15 +1109,7 @@ async fn write_once(
         }
     }
     let folded = start.elapsed();
-    let log_xid = match logs.write(&tx, allow_copy).await {
-        Err(StoreError::Conflict(reason)) if reason == COPY_CONFLICT => {
-            // COPY may already have inserted a prefix before seeing the
-            // raced id. End that transaction before re-reading anything.
-            tx.rollback().await?;
-            return Err(StoreError::Conflict(reason));
-        }
-        other => other?,
-    };
+    let log_xid = logs.write(&tx).await?;
     let logs_elapsed = start.elapsed();
 
     let mut rolled = Vec::new();
