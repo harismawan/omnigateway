@@ -26,6 +26,174 @@ const TABLES: [&str; 4] = [
 const T0: i64 = 1_794_007_800_000;
 
 #[tokio::test]
+async fn large_all_new_batch_commits_rows_rollups_and_one_xid() {
+    let Some(base) = base_url("large_all_new_batch_commits_rows_rollups_and_one_xid") else {
+        return;
+    };
+    let db = TestDb::create(&base, "copy_success").await;
+    let store = prepare(&db, 0).await;
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    let writer = Writer::spawn_postgres(
+        store,
+        WriterConfig {
+            commit_sink: Some(tx),
+            interval: Duration::from_secs(2),
+            ..config(0, 1024)
+        },
+    )
+    .expect("writer");
+    let h = writer.handle();
+    for i in 0..1024 {
+        let [slot] = h
+            .reserve_finishes::<1>()
+            .await
+            .expect("credit")
+            .into_slots();
+        let mut log = done(&format!("log-{i:04}"), T0 + i, Some("copy-key"), "m", 1);
+        log.resolved_model = Some("upstream".into());
+        log.ttft_ms = Some(93);
+        log.duration_ms = 159;
+        log.rtk_applied = true;
+        log.rtk_filter_hits = 3;
+        log.rtk_filters = vec!["example-filter".into()];
+        assert!(h.finish(slot, log));
+    }
+    let stats = writer.close().await.expect("drain");
+    assert_eq!((stats.written, stats.failed), (1024, 0));
+    let Some(Committed::Completions(rows)) = rx.recv().await else {
+        panic!("missing postcommit debits")
+    };
+    assert_eq!(rows.len(), 1024);
+    let xid = rows[0]
+        .commit_id
+        .as_deref()
+        .expect("canonical postcommit xid8");
+    assert!(rows.iter().all(|row| row.commit_id.as_deref() == Some(xid)));
+    let c = db.client().await;
+    let row = c.query_one(
+        "SELECT count(*) FROM request_logs WHERE state='done' AND api_key_id='copy-key' AND requested_model='m' AND resolved_model='upstream' AND status=200 AND ttft_ms=93 AND duration_ms=159 AND rtk_applied AND rtk_filter_hits=3 AND rtk_filters='[\"example-filter\"]' AND xmin = ($1::text::xid8)::xid",
+        &[&xid],
+    ).await.expect("copied log fields and xid");
+    assert_eq!(row.get::<_, i64>(0), 1024);
+    for table in ["usage_daily", "usage_rollup"] {
+        let row = c
+            .query_one(
+                &format!("SELECT requests FROM {table} WHERE api_key_id='copy-key'"),
+                &[],
+            )
+            .await
+            .expect("rollup");
+        assert_eq!(row.get::<_, i64>(0), 1024);
+    }
+}
+
+#[tokio::test]
+async fn large_all_new_copy_conflict_replays_without_double_rollups() {
+    let Some(base) = base_url("large_all_new_copy_conflict_replays_without_double_rollups") else {
+        return;
+    };
+    let db = TestDb::create(&base, "copy_conflict").await;
+    let store = prepare(&db, 0).await;
+    let mut other = db.client().await;
+    let tx = other.transaction().await.expect("racing transaction");
+    let pid: i32 = tx
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await
+        .expect("pid")
+        .get(0);
+    tx.batch_execute("INSERT INTO request_logs (id, node_id, at, requested_model, status, duration_ms) VALUES ('z', 'other', 7, 'theirs', 200, 3)")
+        .await.expect("raced row");
+    let (commit_tx, mut commit_rx) = tokio::sync::mpsc::channel(4);
+    let writer = Writer::spawn_postgres(
+        store,
+        WriterConfig {
+            commit_sink: Some(commit_tx),
+            interval: Duration::from_secs(2),
+            ..config(0, 1024)
+        },
+    )
+    .expect("writer");
+    let h = writer.handle();
+    for i in 0..1023 {
+        let [slot] = h
+            .reserve_finishes::<1>()
+            .await
+            .expect("credit")
+            .into_slots();
+        assert!(h.finish(
+            slot,
+            done(&format!("copy-{i:04}"), T0, Some("copy-key"), "m", 1)
+        ));
+    }
+    let [slot] = h
+        .reserve_finishes::<1>()
+        .await
+        .expect("credit")
+        .into_slots();
+    assert!(h.finish(slot, done("z", T0, Some("copy-key"), "m", 99)));
+    let probe = db.client().await;
+    let query = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(row) = probe.query_opt(
+                "SELECT query FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND wait_event_type = 'Lock'", &[&pid],
+            ).await.expect("query in progress") {
+                break row.get::<_, String>(0);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("writer blocked on the racing id");
+    assert!(
+        query.starts_with("COPY request_logs"),
+        "expected binary copy, got {query}"
+    );
+    let hidden: i64 = probe
+        .query_one("SELECT count(*) FROM request_logs", &[])
+        .await
+        .expect("MVCC")
+        .get(0);
+    assert_eq!(hidden, 0, "COPY must not publish an uncommitted prefix");
+    assert!(commit_rx.try_recv().is_err());
+    tx.commit().await.expect("commit racer");
+    let stats = writer.close().await.expect("roll back copy and replay");
+    assert_eq!((stats.written, stats.failed), (1024, 0));
+    let row = other
+        .query_one("SELECT requested_model FROM request_logs WHERE id='z'", &[])
+        .await
+        .expect("raced row");
+    assert_eq!(row.get::<_, String>(0), "theirs");
+    for table in ["usage_daily", "usage_rollup"] {
+        let row = other
+            .query_one(
+                &format!("SELECT requests FROM {table} WHERE api_key_id='copy-key'"),
+                &[],
+            )
+            .await
+            .expect("rollup");
+        assert_eq!(row.get::<_, i64>(0), 1023);
+    }
+    let Some(Committed::Completions(rows)) = commit_rx.recv().await else {
+        panic!("missing postcommit debits")
+    };
+    assert_eq!(rows.len(), 1023);
+    let row = other
+        .query_one(
+            "SELECT xmin = ($1::text::xid8)::xid FROM request_logs WHERE id='copy-0000'",
+            &[&rows[0]
+                .commit_id
+                .as_deref()
+                .expect("canonical postcommit xid8")],
+        )
+        .await
+        .expect("committed row");
+    assert!(row.get::<_, bool>(0));
+    let xid = &rows[0].commit_id;
+    assert!(
+        rows.iter()
+            .all(|row| row.id != "z" && &row.commit_id == xid)
+    );
+}
+
+#[tokio::test]
 async fn healthy_postgres_retains_finish_when_optional_queue_is_full() {
     let Some(base) = base_url("healthy_postgres_retains_finish_when_optional_queue_is_full") else {
         return;

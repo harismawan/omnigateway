@@ -30,8 +30,8 @@
 //! [`HealthWriter`] instead.
 //!
 //! **Postgres.** [`Writer::spawn_postgres`] runs the same task over a pool;
-//! each batch is one transaction whose `request_logs` and rollup writes are
-//! single `INSERT … SELECT FROM unnest(...)` upserts (`pg_batch.rs`). A row
+//! each batch is one transaction; large all-new log sets use binary COPY,
+//! otherwise logs and rollups use guarded upserts (`pg_batch.rs`). A row
 //! race with another replica, a serialization failure, a deadlock, or a
 //! statement or pool timeout is the transient class there.
 

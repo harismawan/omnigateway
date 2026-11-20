@@ -1004,6 +1004,8 @@ reading the body, so the deadline bounds retention in that case. `Begin`
 and `Route` can shed first; every admitted request can enqueue its `Finish`
 without waiting, including on cancellation. The writer commits log and rollups
 atomically before handing off a debit with that transaction's top-level xid8.
+Large all-new log sets use binary COPY; a raced primary-key insert rolls the
+transaction back before the writer rereads existing rows and uses its guarded upsert.
 A failed write still hands off a debit, without an xid. PG retains a batch when
 the commit consumer is full; shutdown drains writer, consumer, limiter, then
 coordinator, in that order. See the
