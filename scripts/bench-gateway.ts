@@ -1697,11 +1697,24 @@ async function main(): Promise<void> {
       signal: AbortSignal.timeout(5000),
     });
     const models = await catalog.json();
+    if (
+      catalog.status !== 200 ||
+      typeof models !== "object" ||
+      models === null ||
+      !("data" in models) ||
+      !Array.isArray(models.data)
+    )
+      throw Error("smoke catalog response is not a model list");
     let count = 0;
     for (const scenario of matrixScenarios().filter((s) => matches(s.name, flags.only))) {
       if (
-        catalog.status !== 200 ||
-        !models.data.some((m: { id: string }) => m.id === JSON.parse(scenario.body).model)
+        !models.data.some(
+          (m: unknown) =>
+            typeof m === "object" &&
+            m !== null &&
+            "id" in m &&
+            m.id === JSON.parse(scenario.body).model,
+        )
       )
         throw Error("smoke catalog missing model");
       const verdict = await matrixSmoke(BASE, keys.plain, scenario);
