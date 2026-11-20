@@ -8,14 +8,13 @@
 use aes_gcm::aead::{Aead as _, KeyInit as _};
 use aes_gcm::{Aes256Gcm, Nonce};
 use rand::RngCore as _;
-use std::num::NonZeroU32;
 
 const KDF_SALT: &[u8] = b"omnigateway-field-encryption-v1";
-const KDF_ITERATIONS: NonZeroU32 = NonZeroU32::new(210_000).expect("nonzero iteration count");
+const KDF_ITERATIONS: u32 = 210_000;
 const IV_BYTES: usize = 12;
 const TAG_BYTES: usize = 16;
 
-/// The derived AES-256-GCM key. Derive it once, not per request.
+/// The derived AES-256-GCM key. Deriving costs ~100 ms by design: do it once.
 #[derive(Clone)]
 pub struct FieldKey {
     raw: [u8; 32],
@@ -50,13 +49,7 @@ pub enum FieldError {
 
 pub fn derive_key(secret: &str) -> FieldKey {
     let mut raw = [0u8; 32];
-    ring::pbkdf2::derive(
-        ring::pbkdf2::PBKDF2_HMAC_SHA256,
-        KDF_ITERATIONS,
-        KDF_SALT,
-        secret.as_bytes(),
-        &mut raw,
-    );
+    pbkdf2::pbkdf2_hmac::<sha2::Sha256>(secret.as_bytes(), KDF_SALT, KDF_ITERATIONS, &mut raw);
     FieldKey { raw }
 }
 
