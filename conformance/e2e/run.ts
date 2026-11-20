@@ -339,9 +339,18 @@ async function seed(): Promise<Record<string, string>> {
   const db = new Database(join(seedRoot, "omni.db"));
   const a = { ...target("", "claude-opus-5-5", 1), provider: "anthropic" };
   const o = { ...target("", "gpt-6.1-sol", 1), provider: "openai" };
-  for (const [id, targets] of [["catalog-anthropic", [a]], ["catalog-openai", [o]], ["catalog-pool", [a, o]]] as const)
-    db.run("INSERT INTO virtual_models(id, targets, strategy, is_alias) VALUES (?, ?, 'priority', 0)", [id, JSON.stringify(targets)]);
-  db.run("UPDATE credentials SET provider='openai', auth_type='oauth', enabled=0 WHERE id=?", [ids.off!]);
+  for (const [id, targets] of [
+    ["catalog-anthropic", [a]],
+    ["catalog-openai", [o]],
+    ["catalog-pool", [a, o]],
+  ] as const)
+    db.run(
+      "INSERT INTO virtual_models(id, targets, strategy, is_alias) VALUES (?, ?, 'priority', 0)",
+      [id, JSON.stringify(targets)],
+    );
+  db.run("UPDATE credentials SET provider='openai', auth_type='oauth', enabled=0 WHERE id=?", [
+    ids.off!,
+  ]);
   db.close();
   const keys: Record<string, string> = {};
   keys.plain = (await cli(["keys", "create", "--label", "plain"])).key;
@@ -456,24 +465,30 @@ const ROWS: Row[] = [
   },
   { name: "models", run: one("GET", "/v1/models", (k) => ({ "x-api-key": k.plain })) },
   { name: "models allowlisted", run: one("GET", "/v1/models", (k) => ({ "x-api-key": k.allow })) },
-  ...[false, true].map((oauth): Row => ({
-    name: `models catalogs ${oauth ? "oauth" : "no oauth"}`,
-    listingOAuth: oauth,
-    expect: (xs) => {
-      const data = JSON.parse(fatal.decode(xs[0]!.body)).data;
-      for (const [id, label, context] of [
-        ["catalog-anthropic", "Claude Opus 5.5", 1000000],
-        ["catalog-openai", "GPT-6.1 Sol", oauth ? 272000 : 922000],
-        ["catalog-pool", "catalog-pool", oauth ? 272000 : 922000],
-      ]) {
-        const m = data.find((m: { id: string }) => m.id === id);
-        if (m?.display_name !== label || m?.max_input_tokens !== context || m?.max_tokens !== 128000)
-          return `wrong catalog facts for ${id}`;
-      }
-      return null;
-    },
-    run: one("GET", "/v1/models", (k) => ({ "x-api-key": k.plain })),
-  })),
+  ...[false, true].map(
+    (oauth): Row => ({
+      name: `models catalogs ${oauth ? "oauth" : "no oauth"}`,
+      listingOAuth: oauth,
+      expect: (xs) => {
+        const data = JSON.parse(fatal.decode(xs[0]!.body)).data;
+        for (const [id, label, context] of [
+          ["catalog-anthropic", "Claude Opus 5.5", 1000000],
+          ["catalog-openai", "GPT-6.1 Sol", oauth ? 272000 : 922000],
+          ["catalog-pool", "catalog-pool", oauth ? 272000 : 922000],
+        ]) {
+          const m = data.find((m: { id: string }) => m.id === id);
+          if (
+            m?.display_name !== label ||
+            m?.max_input_tokens !== context ||
+            m?.max_tokens !== 128000
+          )
+            return `wrong catalog facts for ${id}`;
+        }
+        return null;
+      },
+      run: one("GET", "/v1/models", (k) => ({ "x-api-key": k.plain })),
+    }),
+  ),
   { name: "auth none", run: one("POST", "/v1/messages", () => ({}), msg("ok", false)) },
   {
     name: "auth bad",
@@ -787,7 +802,9 @@ async function runAgainst(
       resetGate();
       if (row.listingOAuth !== undefined) {
         const d = new Database(db);
-        d.run("UPDATE credentials SET enabled=? WHERE provider='openai' AND auth_type='oauth'", [Number(row.listingOAuth)]);
+        d.run("UPDATE credentials SET enabled=? WHERE provider='openai' AND auth_type='oauth'", [
+          Number(row.listingOAuth),
+        ]);
         d.close();
         await sleep(1200);
       }

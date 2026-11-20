@@ -1,8 +1,9 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { resolve, join } from "node:path";
-import { deriveKey, encrypt, decrypt } from "../../packages/store/src/encryption.ts";
+import { join, resolve } from "node:path";
 import { isDeepStrictEqual as equal } from "node:util";
+import { decrypt, deriveKey, encrypt } from "../../packages/store/src/encryption.ts";
+
 const [binary, work] = process.argv.slice(2).map((p) => resolve(p));
 const env = {
   PATH: process.env.PATH!,
@@ -34,7 +35,7 @@ const server = Bun.listen<{ bytes: Buffer }>({
       const path = head.split(" ")[1]!;
       const body = s.data.bytes.subarray(end + 4, end + 4 + len).toString();
       requests.push({ path, body, head });
-      let status =
+      const status =
         mode === "limited"
           ? 429
           : mode === "nothing"
@@ -238,8 +239,8 @@ for (const provider of ["openai", "anthropic", "antigravity"])
       }
       const end = Date.now();
       const d = new Database(join(root, "omnigateway.db"));
-      let windows = d.query("SELECT * FROM quota_windows").all() as Record<string, unknown>[];
-      let samples = d.query("SELECT * FROM quota_samples").all() as Record<string, unknown>[];
+      const windows = d.query("SELECT * FROM quota_windows").all() as Record<string, unknown>[];
+      const samples = d.query("SELECT * FROM quota_samples").all() as Record<string, unknown>[];
       for (const row of [...windows, ...samples])
         for (const k of ["starts_at", "observed_at"])
           if (k in row) {

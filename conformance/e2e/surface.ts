@@ -60,6 +60,7 @@ import { connect } from "node:net";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import type { Subprocess } from "bun";
+import { writerMetricsVerdict } from "./surface-accepted.ts";
 
 const { values: flags } = parseArgs({
   options: {
@@ -494,13 +495,23 @@ const auth: [string, string] = ["authorization", `Bearer ${TOKEN}`];
 
 function staticRows(prefix: string): Row[] {
   const rows: Row[] = [
-    { name: `${prefix}client login invalid key`, target: "/api/client/login", method: "POST", headers: [["content-type", "application/json"]], body: '{"key":"unknown"}' },
+    {
+      name: `${prefix}client login invalid key`,
+      target: "/api/client/login",
+      method: "POST",
+      headers: [["content-type", "application/json"]],
+      body: '{"key":"unknown"}',
+    },
     { name: `${prefix}client logout anonymous`, target: "/api/client/logout", method: "POST" },
     { name: `${prefix}client summary anonymous`, target: "/api/client/summary", method: "GET" },
     { name: `${prefix}client logs anonymous`, target: "/api/client/logs", method: "GET" },
     { name: `${prefix}client usage anonymous`, target: "/api/client/usage", method: "GET" },
     { name: `${prefix}client quota anonymous`, target: "/api/client/quota", method: "GET" },
-    { name: `${prefix}client history anonymous`, target: "/api/client/quota/history", method: "GET" },
+    {
+      name: `${prefix}client history anonymous`,
+      target: "/api/client/quota/history",
+      method: "GET",
+    },
   ];
   const add = (target: string, extra: Partial<Row> = {}) =>
     rows.push({
@@ -1170,12 +1181,19 @@ for (const cfg of configs) {
       }
       continue;
     }
-    if (same) {
+    const metrics = writerMetricsVerdict(cfg.label, row.name, a, b);
+    if (metrics === "rust-writer-metrics-additive") {
+      expected++;
+      report.push(`expected-diff ${cfg.label}: ${row.name} (${metrics})`);
+      continue;
+    }
+    if (same && metrics === null) {
       equal++;
       continue;
     }
     failures++;
-    report.push(`DIFF ${cfg.label}: ${row.name}\n--- ts\n${a}\n--- rust\n${b}\n`);
+    const detail = metrics === "unexpected" ? " (writer metrics manifest mismatch)" : "";
+    report.push(`DIFF ${cfg.label}: ${row.name}${detail}\n--- ts\n${a}\n--- rust\n${b}\n`);
   }
   writeFileSync(join(out, `${cfg.label}-ts.json`), JSON.stringify(Object.fromEntries(ts), null, 1));
   writeFileSync(

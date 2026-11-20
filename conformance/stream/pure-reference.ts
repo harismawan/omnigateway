@@ -1,8 +1,9 @@
 // These imports are byte-identical to frozen 1780bb39.
+
+import { authorised } from "../../apps/gateway/src/routes/stream.ts";
+import { createCoalescer } from "../../apps/gateway/src/stream/coalescer.ts";
 import { parseClientFrame, topicClass } from "../../apps/gateway/src/stream/protocol.ts";
 import { createRing } from "../../apps/gateway/src/stream/ring.ts";
-import { createCoalescer } from "../../apps/gateway/src/stream/coalescer.ts";
-import { authorised } from "../../apps/gateway/src/routes/stream.ts";
 
 const input = JSON.parse(await Bun.stdin.text());
 const output: string[] = [];
@@ -11,7 +12,13 @@ for (const raw of input.frames) record(parseClientFrame(raw));
 for (const topic of input.topics) {
   record(topicClass(topic));
   for (const kind of ["admin", "viewer", "client", "machine"]) {
-    record(authorised({ opened: () => false } as any, { kind, pluginId: "p" } as any, topic));
+    record(
+      authorised(
+        { opened: () => false } as Parameters<typeof authorised>[0],
+        { kind, pluginId: "p" } as Parameters<typeof authorised>[1],
+        topic,
+      ),
+    );
   }
 }
 const ring = createRing(input.limits);
@@ -26,12 +33,16 @@ let now = 0;
 const timers = new Map<number, { at: number; run: () => void }>();
 let next = 0;
 const coalescer = createCoalescer({
-  floors: { "res:quota": 5000 }, defaultFloorMs: 1000, now: () => now,
+  floors: { "res:quota": 5000 },
+  defaultFloorMs: 1000,
+  now: () => now,
   sink: (topic, payload) => record({ at: now, topic, payload }),
   schedule: (run, ms) => {
     const id = next++;
     timers.set(id, { at: now + ms, run });
-    return () => { timers.delete(id); };
+    return () => {
+      timers.delete(id);
+    };
   },
 });
 for (const op of input.coalescer) {
@@ -42,7 +53,7 @@ for (const op of input.coalescer) {
     const end = op[1];
     now = end;
     while (true) {
-      const first = [...timers].filter(([, v]) => v.at <= end).sort((a,b) => a[1].at-b[1].at)[0];
+      const first = [...timers].filter(([, v]) => v.at <= end).sort((a, b) => a[1].at - b[1].at)[0];
       if (!first) break;
       timers.delete(first[0]);
       first[1].run();

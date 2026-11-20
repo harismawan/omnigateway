@@ -1,12 +1,17 @@
 // Frozen oracle: this product module must remain identical to 1780bb39.
 import { createBodyCollector, createFrameSink } from "../../apps/gateway/src/bodyCapture.ts";
+
 const input = JSON.parse(await Bun.stdin.text());
 if (!Array.isArray(input)) {
-  console.log(JSON.stringify(input.sinks.map((writes: string[]) => {
-    const sink = createFrameSink();
-    for (const write of writes) sink.write(write);
-    return { frames: sink.frames, truncated: sink.truncated };
-  })));
+  console.log(
+    JSON.stringify(
+      input.sinks.map((writes: string[]) => {
+        const sink = createFrameSink();
+        for (const write of writes) sink.write(write);
+        return { frames: sink.frames, truncated: sink.truncated };
+      }),
+    ),
+  );
   process.exit(0);
 }
 const cases = input;
@@ -19,7 +24,8 @@ for (const c of cases) {
     const http = collector.wrap(async () => {
       if (a.mode === "throw") throw new Error("transport failed");
       return {
-        status: 200, headers: new Headers(),
+        status: 200,
+        headers: new Headers(),
         body: new ReadableStream({
           start(controller) {
             for (const chunk of a.chunks ?? []) controller.enqueue(Uint8Array.from(chunk));
@@ -38,12 +44,20 @@ for (const c of cases) {
         // branch: capture completion must be independent of adapter reads.
         void res.body;
       }
-    } catch { /* The attempted call is still captured. */ }
+    } catch {
+      /* The attempted call is still captured. */
+    }
   }
   await collector.settle();
-  out.push(JSON.stringify({
-    schemaVersion: 1, requestId: "req_1", at: 123,
-    client: collector.client, attempts: collector.attempts(), error: null,
-  }));
+  out.push(
+    JSON.stringify({
+      schemaVersion: 1,
+      requestId: "req_1",
+      at: 123,
+      client: collector.client,
+      attempts: collector.attempts(),
+      error: null,
+    }),
+  );
 }
 console.log(JSON.stringify(out));

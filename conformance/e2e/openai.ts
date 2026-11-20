@@ -2,9 +2,9 @@
 /** Actual gateway HTTP differential. Run via openai-ns.sh, never live providers. */
 import { Database } from "bun:sqlite";
 import { copyFileSync, mkdirSync } from "node:fs";
-import { resolve, join } from "node:path";
+import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { deriveKey, encrypt, decrypt } from "../../packages/store/src/encryption.ts";
+import { decrypt, deriveKey, encrypt } from "../../packages/store/src/encryption.ts";
 import { normalize, normalizedEqual, show } from "./masks.ts";
 
 const { values: f } = parseArgs({
@@ -26,13 +26,16 @@ const env = {
   OMNI_STATIC_DIR: join(work, "absent"),
 };
 async function cli(args: string[], input?: string) {
-  const p = Bun.spawn(["bun", "--no-env-file", "apps/cli/src/index.ts", "--root", seed, "--json", ...args], {
-    cwd: resolve(import.meta.dir, "../.."),
-    env,
-    stdin: input ? new TextEncoder().encode(input) : "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  const p = Bun.spawn(
+    ["bun", "--no-env-file", "apps/cli/src/index.ts", "--root", seed, "--json", ...args],
+    {
+      cwd: resolve(import.meta.dir, "../.."),
+      env,
+      stdin: input ? new TextEncoder().encode(input) : "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
   const [out, err] = await Promise.all([
     new Response(p.stdout).text(),
     new Response(p.stderr).text(),
@@ -267,7 +270,7 @@ async function run(binary: string, label: string) {
       const columns = Object.keys(row);
       db.run(
         `INSERT INTO credentials (${columns.join(",")}) VALUES (${columns.map(() => "?").join(",")})`,
-        Object.values(row) as any[],
+        Object.values(row) as import("bun:sqlite").SQLQueryBindings[],
       );
       db.close();
     }
@@ -420,8 +423,16 @@ async function run(binary: string, label: string) {
           .query(
             "SELECT access_token,refresh_token,id_token,expires_at,account_email,provider_data,token_version,enabled,disabled_reason FROM credentials",
           )
-          .get() as any;
-        for (const col of ["access_token", "refresh_token", "id_token"])
+          .get() as {
+          access_token: string | null;
+          refresh_token: string | null;
+          id_token: string | null;
+          expires_at: number | string;
+          account_email: string | null;
+          provider_data: string;
+          token_version: number;
+        };
+        for (const col of ["access_token", "refresh_token", "id_token"] as const)
           if (row[col] !== null) row[col] = await decrypt(fieldKey, row[col]);
         if (
           row.access_token !== (loser ? "winner-access" : "refreshed-access") ||
@@ -434,7 +445,10 @@ async function run(binary: string, label: string) {
           if (row.expires_at !== 4102444800000 || row.account_email !== null)
             throw Error("losing metadata overwrote winner");
         } else {
-          if (Math.abs(row.expires_at - Date.now() - 3600000) > 10000)
+          if (
+            typeof row.expires_at !== "number" ||
+            Math.abs(row.expires_at - Date.now() - 3600000) > 10000
+          )
             throw Error("refresh expiry outside window");
           row.expires_at = "<validated refresh clock + 3600s>";
         }
@@ -456,7 +470,9 @@ async function run(binary: string, label: string) {
           data.idSalt = "<validated 32 random bytes>";
         }
         row.provider_data = JSON.stringify(data);
-        (credentials[0] as any).provider_data = row.provider_data;
+        const credential = credentials[0] as { provider_data: string } | undefined;
+        if (!credential) throw Error("missing persisted credential");
+        credential.provider_data = row.provider_data;
         const accounting = Object.fromEntries(
           ["request_logs", "usage_daily", "usage_rollup", "credential_health"].map((table) => {
             const order = {
@@ -468,7 +484,7 @@ async function run(binary: string, label: string) {
             }[table];
             const rows = db.query(`SELECT * FROM ${table} ORDER BY ${order}`).all() as Record<
               string,
-              any
+              unknown
             >[];
             for (const r of rows) {
               for (const col of table === "request_logs"

@@ -1,5 +1,6 @@
-import { test, expect } from "bun:test";
+import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+
 test("disable acknowledgment is the last mutation before its routing assertion", () => {
   const s = readFileSync(new URL("admin-routes.ts", import.meta.url), "utf8");
   const end = s.indexOf('name: "disabled credential stops routing"');

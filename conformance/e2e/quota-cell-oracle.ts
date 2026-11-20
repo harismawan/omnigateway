@@ -1,6 +1,7 @@
 // Read the frozen router predicate rather than maintaining a second oracle.
 import { Database } from "bun:sqlite";
 import { readFileSync } from "node:fs";
+
 const source = readFileSync(
   new URL("../../packages/router/src/filters.ts", import.meta.url),
   "utf8",

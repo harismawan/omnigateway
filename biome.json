@@ -8,6 +8,7 @@
       "!.claude",
       "!.superpowers",
       "!graphify-out",
+      "!!target",
       "!apps/dashboard/src/routeTree.gen.ts"
     ]
   },

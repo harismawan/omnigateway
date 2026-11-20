@@ -118,7 +118,7 @@ the fleet. Targets did not change.
 | B4 (`b4-integration-rereview.md`) | Antigravity can connect with an empty project but refuses inference until reconnected with a valid project. |
 | A3 (`a3-review2.md`) | SQLite body artifacts are written directly before the database row. Failed SQL or replacement on a different day can leave orphan files until sweeping; back up both artifact tree and database. |
 | A14 (`a14-review3.md`) and A9 framing ruling | Idle timeout classes match, not exact timer ticks (10 s initial headers, 255 s ordinary idle). Transport counts raw framing bytes while the body reader counts decoded bytes near the 4,177,920-byte rearm threshold. Empty/close response framing and HEAD export headers can differ without changing the payload. |
-| A12 (`a12-review4.md`) backlog | In stored scoring settings a literal `±1e400` can cause Rust to reset the whole settings object where TS defaults the field. Extreme finite target prices (e.g. `1e308`/`-1e308`) can produce NaN cost and fail Rust usage persistence; frozen behavior was not established for that case. Avoid these values and investigate persistence errors. |
+| A12 (`a12-review4.md`) backlog | When reading stored scoring settings, a literal `±1e400` can cause Rust to use defaults for the entire settings object where TS defaults only the field. Extreme finite target prices (e.g. `1e308`/`-1e308`) can produce NaN cost and fail Rust usage persistence; frozen behavior was not established for that case. Avoid these values and investigate persistence errors. |
 
 ## 3. Stage the release and preserve the old installation
 

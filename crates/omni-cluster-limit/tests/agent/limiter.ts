@@ -13,7 +13,7 @@
  *
  * Nothing in the frozen tree is modified; this file only imports it.
  */
-import { ApiKeyRateLimiter, type Admission } from "../../../../apps/gateway/src/auth/rateLimit.ts";
+import { type Admission, ApiKeyRateLimiter } from "../../../../apps/gateway/src/auth/rateLimit.ts";
 import { redisCoord } from "../../../../apps/gateway/src/coord/redis.ts";
 import { memoryStore, requestLog, seedApiKey } from "../../../../packages/testkit/src/index.ts";
 
@@ -169,7 +169,10 @@ async function run(op: string, a: Args): Promise<unknown> {
         if (a[3] !== null && r.model !== s(a[3])) continue;
         const b = Math.floor(r.at / g) * g;
         const was = by.get(b);
-        by.set(b, was === undefined ? [r.at, r.at] : [Math.min(was[0], r.at), Math.max(was[1], r.at)]);
+        by.set(
+          b,
+          was === undefined ? [r.at, r.at] : [Math.min(was[0], r.at), Math.max(was[1], r.at)],
+        );
       }
       return {
         rows: rows.map(([start, c]) => [start, c.requests, c.tokens, c.costUsd]),
