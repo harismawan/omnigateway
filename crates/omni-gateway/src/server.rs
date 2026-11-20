@@ -14,7 +14,7 @@ use futures_util::StreamExt as _;
 use http_body_util::{BodyExt as _, Full, Limited, StreamBody, combinators::UnsyncBoxBody};
 use hyper::body::{Frame, Incoming};
 use hyper::header::HeaderValue;
-use hyper::{Method, Request, Response, StatusCode};
+use hyper::{HeaderMap, Method, Request, Response, StatusCode};
 use omni_dialects::egress::{
     AnthropicStream, Dialect, OpenAiStream, ResponsesRender, ResponsesStream, StreamEncoder,
     retry_after,
@@ -717,10 +717,19 @@ fn metrics(app: &App, req: &Request<Incoming>) -> Response<Body> {
     }
     if let Some(values) = app.deps.writer.route_pacing() {
         use std::fmt::Write as _;
-        for (suffix, value) in ["waits", "wait_nanoseconds", "refused", "cancelled"]
-            .into_iter()
-            .zip(values)
-        {
+        for (suffix, value) in [
+            "waits",
+            "wait_nanoseconds",
+            "refused",
+            "cancelled",
+            "revalidated",
+        ]
+        .into_iter()
+        .zip(
+            values
+                .into_iter()
+                .chain([app.deps.telemetry.route_revalidated()]),
+        ) {
             let name = format!("omni_request_log_writer_route_{suffix}_total");
             writeln!(text, "# TYPE {name} counter\n{name} {value}")
                 .expect("writing to a String cannot fail");
@@ -867,8 +876,12 @@ async fn bench_flush(app: &App) -> Response<Body> {
 /// WHATWG `Headers.get`: every value of `name`, HTTP whitespace trimmed,
 /// joined with `", "`. Non-UTF-8 bytes are read as Latin-1, as Bun does.
 fn header(req: &Request<Incoming>, name: &str) -> Option<String> {
+    header_value(req.headers(), name)
+}
+
+fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
     let mut out: Option<String> = None;
-    for v in req.headers().get_all(name) {
+    for v in headers.get_all(name) {
         let text: String = v.as_bytes().iter().map(|&b| char::from(b)).collect();
         let text = text.trim_matches(|c| matches!(c, ' ' | '\t' | '\r' | '\n'));
         match &mut out {
@@ -965,8 +978,8 @@ fn body_error(e: &(dyn std::error::Error + 'static)) -> GatewayError {
 /// replacement and a leading BOM stripped. A body that goes quiet for `idle`
 /// ends the request; the connection task then closes the socket, as Bun's
 /// `idleTimeout` does.
-async fn read_body(req: Request<Incoming>, idle: Duration) -> Result<String, GatewayError> {
-    let mut body = Limited::new(req.into_body(), BODY_LIMIT);
+async fn read_body(body: Incoming, idle: Duration) -> Result<String, GatewayError> {
+    let mut body = Limited::new(body, BODY_LIMIT);
     let mut bytes = bytes::BytesMut::new();
     let mut deadline = tokio::time::Instant::now() + idle;
     let mut received = 0_u64;
@@ -1109,30 +1122,37 @@ fn screens(auth: &ProxyAuth, primary: Option<&omni_store::Settings>) -> (bool, b
 /// on this slow path; a lagging peer snapshot is not enough to find a revoke.
 async fn revalidate_waiter(
     app: &App,
-    req: &Request<Incoming>,
+    headers: &HeaderMap,
+    deadline: tokio::time::Instant,
 ) -> Result<(AuthenticatedKey, Arc<GatewaySnapshot>, omni_store::Settings), GatewayError> {
-    let authorization = header(req, "authorization");
-    let x_api_key = header(req, "x-api-key");
+    let authorization = header_value(headers, "authorization");
+    let x_api_key = header_value(headers, "x-api-key");
     let chosen = api_key_header(authorization.as_deref(), x_api_key.as_deref())?;
     let Some(raw) = omni_gateway_core::snapshot::extract_token(chosen) else {
         return Err(GatewaySnapshot::refuse_unknown());
     };
     let store = &app.deps.refresher.store;
-    let row = store
-        .find_api_key_entry(&omni_crypto::apikey::hash(raw))
-        .await
-        .map_err(|_| writer_overload(app, WriterRefusal::Revalidation))?;
-    // Read the small settings row instead of forcing a snapshot rebuild.
-    // Neither a publication nor the poll need have caught up to this commit.
-    let settings = store
-        .get_settings()
-        .await
-        .map_err(|_| writer_overload(app, WriterRefusal::Revalidation))?;
+    let (row, settings) = tokio::time::timeout_at(deadline, async {
+        let row = store
+            .find_api_key_entry(&omni_crypto::apikey::hash(raw))
+            .await?;
+        // Read the small settings row instead of forcing a snapshot rebuild.
+        // Neither a publication nor the poll need have caught up to this commit.
+        Ok::<_, omni_store::StoreError>((row, store.get_settings().await?))
+    })
+    .await
+    .map_err(|_| writer_overload(app, WriterRefusal::Deadline))?
+    .map_err(|_| writer_overload(app, WriterRefusal::Revalidation))?;
     let key = GatewaySnapshot::authenticate_read(row, (app.deps.now)())?;
+    if app.deps.writer.postgres_closed() {
+        return Err(writer_overload(app, WriterRefusal::Closed));
+    }
+    if tokio::time::Instant::now() >= deadline {
+        return Err(writer_overload(app, WriterRefusal::Deadline));
+    }
     Ok((key, app.deps.holder.load(), settings))
 }
 
-#[derive(Default)]
 struct ReservationWait<'a> {
     turn: Option<omni_store::writer::FinishWaiter<'a>>,
     settings: Option<Arc<omni_store::Settings>>,
@@ -1140,7 +1160,7 @@ struct ReservationWait<'a> {
 
 async fn reserve_proxy<'a, const N: usize>(
     app: &'a App,
-    req: &Request<Incoming>,
+    headers: &HeaderMap,
     mut auth: ProxyAuth,
     deadline: tokio::time::Instant,
     wait: &mut ReservationWait<'a>,
@@ -1165,16 +1185,7 @@ async fn reserve_proxy<'a, const N: usize>(
                 .reserve::<N>(deadline)
                 .await
                 .map_err(|e| writer_overload(app, e.into()))?;
-            let (key, snapshot, settings) =
-                tokio::time::timeout_at(deadline, revalidate_waiter(app, req))
-                    .await
-                    .map_err(|_| writer_overload(app, WriterRefusal::Deadline))??;
-            if writer.postgres_closed() {
-                return Err(writer_overload(app, WriterRefusal::Closed));
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(writer_overload(app, WriterRefusal::Deadline));
-            }
+            let (key, snapshot, settings) = revalidate_waiter(app, headers, deadline).await?;
             auth = Ok((key, snapshot));
             wait.settings = Some(Arc::new(settings));
             reservation
@@ -1193,26 +1204,31 @@ struct PreparedProxy {
 
 async fn prepare_proxy(
     app: &App,
-    req: &Request<Incoming>,
+    headers: &HeaderMap,
     mut auth: ProxyAuth,
     deadline: tokio::time::Instant,
+    settings: Option<Arc<omni_store::Settings>>,
 ) -> Result<PreparedProxy, GatewayError> {
-    let mut wait = ReservationWait::default();
+    let mut wait = ReservationWait {
+        turn: None,
+        settings,
+    };
     loop {
         let (judge, smart) = screens(&auth, wait.settings.as_deref());
         let (next, slots, count) = match (judge, smart) {
             (true, true) => {
-                let (next, slots) = reserve_proxy::<3>(app, req, auth, deadline, &mut wait).await?;
+                let (next, slots) =
+                    reserve_proxy::<3>(app, headers, auth, deadline, &mut wait).await?;
                 (next, slots, 3)
             }
             (false, false) => {
                 let (next, [slot]) =
-                    reserve_proxy::<1>(app, req, auth, deadline, &mut wait).await?;
+                    reserve_proxy::<1>(app, headers, auth, deadline, &mut wait).await?;
                 (next, [slot, None, None], 1)
             }
             _ => {
                 let (next, [slot, screen]) =
-                    reserve_proxy::<2>(app, req, auth, deadline, &mut wait).await?;
+                    reserve_proxy::<2>(app, headers, auth, deadline, &mut wait).await?;
                 (next, [slot, screen, None], 2)
             }
         };
@@ -1264,10 +1280,10 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
     let reservation_deadline = tokio::time::Instant::now() + omni_store::writer::FINISH_WAIT;
     let PreparedProxy {
         auth,
-        slots: [slot, judge_slot, check_slot],
-        smart,
-        screening_settings,
-    } = match prepare_proxy(&app, &req, auth, reservation_deadline).await {
+        mut slots,
+        mut smart,
+        mut screening_settings,
+    } = match prepare_proxy(&app, req.headers(), auth, reservation_deadline, None).await {
         Ok(prepared) => prepared,
         Err(e) => return error_response(dialect, &e, &[]),
     };
@@ -1278,7 +1294,7 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
         sname,
         now,
     );
-    fin.slot = slot;
+    fin.slot = slots[0].take();
     if let Some(t) = &app.deps.telemetry.tracing {
         t.start(
             &request_id,
@@ -1307,7 +1323,7 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
     };
 
     let outcome: Result<Response<Body>, GatewayError> = async {
-        let (key, snapshot) = auth.inspect_err(|e| {
+        let (mut key, snapshot) = auth.inspect_err(|e| {
             if e.code == ErrorCode::Auth {
                 tracing::warn!(requestId = %request_id, surface = sname,
                     reason = "invalid credentials", "authentication rejected");
@@ -1328,16 +1344,13 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
             });
         }
         let headers = headers_of(&req);
-        let body = read_body(req, Duration::ZERO).await?;
+        let (parts, incoming) = req.into_parts();
+        let body = read_body(incoming, Duration::ZERO).await?;
         // Reading a slow body can outlive the writer even after a successful
         // reservation. No completion owner should file a row in that case.
         if app.deps.writer.postgres_closed() {
             fin.abandon_before_admission();
             return Err(writer_overload(&app, WriterRefusal::Closed));
-        }
-        if app.cluster && missed {
-            #[allow(clippy::cast_precision_loss)]
-            app.limiter.preseed(&key.id, &key.limits, now() as f64);
         }
         if let Some(capture) = &fin.capture
             && let Ok(parsed) = omni_ir::jsjson::parse_js(&body)
@@ -1378,14 +1391,85 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
                     return Err(writer_overload(&app, e.into()));
                 }
             };
+            if first
+                .as_ref()
+                .is_some_and(omni_store::writer::RouteSlot::waited)
+            {
+                app.deps.telemetry.record_route_revalidation();
+                let refreshed = async {
+                    let (fresh, snap, settings) =
+                        revalidate_waiter(&app, &parts.headers, deadline).await?;
+                    omni_dialects::ingress::check_model_allowed(
+                        &chat.model,
+                        fresh.allows(&chat.model, lone),
+                    )?;
+                    let settings = Arc::new(settings);
+                    let (judge, next_smart) = (
+                        fresh.guardrail_policy.is_some(),
+                        fresh.smart_routing && settings.smart_router_enabled,
+                    );
+                    if (judge, next_smart) != (key.guardrail_policy.is_some(), smart) {
+                        // Return the partial set before asking for the new set.
+                        drop(fin.slot.take());
+                        drop(std::mem::take(&mut slots));
+                        let next = prepare_proxy(
+                            &app,
+                            &parts.headers,
+                            Ok((fresh, snap)),
+                            deadline,
+                            Some(settings),
+                        )
+                        .await?;
+                        if app.deps.writer.postgres_closed() {
+                            return Err(writer_overload(&app, WriterRefusal::Closed));
+                        }
+                        if tokio::time::Instant::now() >= deadline {
+                            return Err(writer_overload(&app, WriterRefusal::Deadline));
+                        }
+                        let (replacement, _) = next.auth?;
+                        omni_dialects::ingress::check_model_allowed(
+                            &chat.model,
+                            replacement.allows(&chat.model, lone),
+                        )?;
+                        slots = next.slots;
+                        fin.slot = slots[0].take();
+                        smart = next.smart;
+                        screening_settings = next.screening_settings;
+                        Ok::<_, GatewayError>(replacement)
+                    } else {
+                        screening_settings = Some(settings);
+                        Ok(fresh)
+                    }
+                }
+                .await;
+                key = match refreshed {
+                    Ok(fresh) => fresh,
+                    Err(e) => {
+                        fin.abandon_before_admission();
+                        return Err(e);
+                    }
+                };
+                fin.key_id = Some(key.id.clone());
+                if key.body_logging_opt_out
+                    || screening_settings
+                        .as_ref()
+                        .is_some_and(|s| !s.body_logging_enabled)
+                {
+                    fin.capture = None;
+                }
+            }
             Some(dispatch::RoutePacing {
                 first,
-                reservation_deadline,
                 dispatch_deadline,
             })
         } else {
             None
         };
+        if app.cluster && missed {
+            #[allow(clippy::cast_precision_loss)]
+            app.limiter.preseed(&key.id, &key.limits, now() as f64);
+        }
+        let [_, judge_slot, check_slot] = slots;
         admission_at = if app.cluster { now() } else { started_at };
         #[allow(clippy::cast_precision_loss)]
         match app
@@ -1813,6 +1897,51 @@ mod reservation_tests {
     }
 
     #[tokio::test]
+    async fn pg_route_pacing_revalidates_key_revoked_while_waiting() {
+        let Some((server, store)) = fixture().await else {
+            return;
+        };
+        server.snapshot_refresh.0.abort();
+        server.snapshot_refresh.1.as_ref().unwrap().abort();
+        let writer = &server.app.deps.writer;
+        let held = writer
+            .reserve_route(tokio::time::Instant::now() + Duration::from_secs(1))
+            .await
+            .unwrap();
+        let pending = request(server.addr, CHAT).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !matches!(
+                writer.finish_waiter(),
+                Err(omni_store::writer::ReserveError::Full)
+            ) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("request parked on optional credit");
+        store
+            .client()
+            .await
+            .unwrap()
+            .execute("UPDATE api_keys SET revoked_at=1", &[])
+            .await
+            .unwrap();
+        drop(held);
+        let (status, body) = reply(pending, Duration::from_secs(2)).await;
+        assert_eq!(status, 401, "{body}");
+        assert_eq!(body["error"]["code"], "invalid_api_key");
+        no_work(&server.app, &store).await;
+        let metrics = reservation_metrics(server.addr).await;
+        assert!(
+            metrics
+                .lines()
+                .any(|line| line == "omni_request_log_writer_route_revalidated_total 1")
+        );
+        server.shutdown();
+        server.wait().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn pg_route_pacing_uses_dispatch_deadline_before_sse_headers() {
         let Some((mut cfg, store)) = fixture_config().await else {
             return;
@@ -2037,6 +2166,15 @@ mod reservation_tests {
 
     #[tokio::test]
     async fn pg_reservation_obeys_fleet_screening_enabled_by_a_peer_during_the_wait() {
+        fleet_screening_enabled_during_wait(false).await;
+    }
+
+    #[tokio::test]
+    async fn pg_route_pacing_obeys_fleet_screening_enabled_by_a_peer_during_the_wait() {
+        fleet_screening_enabled_during_wait(true).await;
+    }
+
+    async fn fleet_screening_enabled_during_wait(route_wait: bool) {
         let Some((cfg, store)) = fixture_config().await else {
             return;
         };
@@ -2065,7 +2203,19 @@ mod reservation_tests {
         server.snapshot_refresh.0.abort();
         server.snapshot_refresh.1.as_ref().unwrap().abort();
         let writer = &server.app.deps.writer;
-        let held = writer.reserve_finishes::<3>().await.unwrap();
+        let held_route = if route_wait {
+            writer
+                .reserve_route(tokio::time::Instant::now() + Duration::from_secs(1))
+                .await
+                .unwrap()
+        } else {
+            None
+        };
+        let held_finish = if route_wait {
+            None
+        } else {
+            Some(writer.reserve_finishes::<3>().await.unwrap())
+        };
         let waiting = request(server.addr, CHAT).await;
         tokio::time::timeout(Duration::from_secs(1), async {
             while !matches!(
@@ -2097,12 +2247,23 @@ mod reservation_tests {
                 .smart_router_enabled
         );
 
-        drop(held);
+        drop(held_route);
+        drop(held_finish);
         let (status, body) = reply(waiting, Duration::from_secs(2)).await;
         assert_eq!(status, 500, "{body}");
         assert_eq!(
             body["error"]["message"],
             "confidential routing is not configured"
+        );
+        let count = format!(
+            "omni_request_log_writer_route_revalidated_total {}",
+            u8::from(route_wait)
+        );
+        assert!(
+            reservation_metrics(server.addr)
+                .await
+                .lines()
+                .any(|line| line == count)
         );
         server.shutdown();
         peer.shutdown();
@@ -2303,7 +2464,7 @@ async fn count_tokens(app: Arc<App>, req: Request<Incoming>) -> Response<Body> {
     let result: Result<f64, GatewayError> = async {
         let (key, _snapshot) = authenticate(&app, &req, now).await?;
         let headers = headers_of(&req);
-        let body = read_body(req, app.idle_timeout).await?;
+        let body = read_body(req.into_body(), app.idle_timeout).await?;
         let ingested = ingest_body(Surface::Anthropic, &body, &headers)?;
         let lone = ingested.model_lone;
         let chat = ingested.request;

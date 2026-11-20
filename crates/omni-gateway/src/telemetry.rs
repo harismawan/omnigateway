@@ -710,6 +710,7 @@ pub struct Telemetry {
     registry: Arc<Registry>,
     pub tracing: Option<Arc<crate::otlp::Tracing>>,
     writer_refusals: [std::sync::atomic::AtomicU64; WriterRefusal::ALL.len()],
+    route_revalidated: std::sync::atomic::AtomicU64,
     /// `openBreakers`: per provider, in first-seen order.
     open_breakers: Mutex<Vec<(String, f64)>>,
 }
@@ -765,6 +766,7 @@ impl Telemetry {
             registry: Arc::new(Registry::new(max_series)),
             tracing: None,
             writer_refusals: Default::default(),
+            route_revalidated: Default::default(),
             open_breakers: Mutex::new(Vec::new()),
         };
         if enabled {
@@ -785,6 +787,16 @@ impl Telemetry {
 
     pub(crate) fn record_writer_refusal(&self, reason: WriterRefusal) {
         self.writer_refusals[reason as usize].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_route_revalidation(&self) {
+        self.route_revalidated
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) fn route_revalidated(&self) -> u64 {
+        self.route_revalidated
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub(crate) fn writer_refusal_counts(&self) -> [(&'static str, u64); WriterRefusal::ALL.len()] {

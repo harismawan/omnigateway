@@ -65,6 +65,10 @@ async fn healthy_pg_paces_optional_events_without_spending_the_finish_credit() {
     h.send_route(pending("queued", T0, Some("key-1"), "m"), deadline)
         .await
         .expect("first queue entry");
+    assert!(matches!(
+        h.try_send_route(route("queued", "custom", "m", "credential")),
+        Err(ReserveError::Full)
+    ));
     let mut parked = Box::pin(h.send_route(pending("next", T0, Some("key-1"), "m"), deadline));
     std::future::poll_fn(|cx| {
         assert!(std::future::Future::poll(parked.as_mut(), cx).is_pending());
@@ -105,7 +109,7 @@ async fn healthy_pg_paces_optional_events_without_spending_the_finish_credit() {
     assert_eq!((stats.terminal_dropped, stats.optional_dropped), (0, 0));
     assert!(matches!(refused, Err(ReserveError::Closed)));
     let [waits, nanos, refused, cancelled] = h.route_pacing().expect("PG pacing counters");
-    assert_eq!((waits, refused, cancelled), (4, 2, 1));
+    assert_eq!((waits, refused, cancelled), (4, 3, 1));
     assert!(nanos >= 30_000_000);
     let names = c
         .query("SELECT id FROM request_logs ORDER BY id", &[])

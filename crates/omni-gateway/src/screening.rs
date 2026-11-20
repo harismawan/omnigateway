@@ -239,7 +239,6 @@ async fn judge_with_model(
             },
             pacing.map(|p| dispatch::RoutePacing {
                 first: p.first.take(),
-                reservation_deadline: p.reservation_deadline,
                 dispatch_deadline: p.dispatch_deadline,
             }),
         );

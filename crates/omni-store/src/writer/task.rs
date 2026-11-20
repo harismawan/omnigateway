@@ -424,6 +424,14 @@ pub struct FinishSlot(tokio::sync::OwnedSemaphorePermit);
 pub struct RouteSlot {
     credit: tokio::sync::OwnedSemaphorePermit,
     lane: tokio::sync::OwnedSemaphorePermit,
+    waited: bool,
+}
+
+impl RouteSlot {
+    /// The caller used the bounded slow path and must revalidate before admission.
+    pub fn waited(&self) -> bool {
+        self.waited
+    }
 }
 
 struct RouteWait<'a> {
@@ -451,6 +459,13 @@ pub enum ReserveError {
     Full,
     Deadline,
     Closed,
+}
+
+fn reserve_error(e: tokio::sync::TryAcquireError) -> ReserveError {
+    match e {
+        tokio::sync::TryAcquireError::Closed => ReserveError::Closed,
+        tokio::sync::TryAcquireError::NoPermits => ReserveError::Full,
+    }
 }
 
 pub enum FinishReservation<const N: usize> {
@@ -519,6 +534,30 @@ impl<const N: usize> FinishReservation<N> {
 pub const FINISH_WAIT: Duration = Duration::from_secs(4);
 
 impl WriterHandle {
+    fn try_route(&self) -> Result<Option<RouteSlot>, ReserveError> {
+        let (Some(routes), Some(credits)) = (&self.routes, &self.terminal) else {
+            return Ok(None);
+        };
+        if self.postgres_closed() {
+            return Err(ReserveError::Closed);
+        }
+        let lane = routes.clone().try_acquire_owned().map_err(reserve_error)?;
+        let credit = credits.clone().try_acquire_owned().map_err(reserve_error)?;
+        Ok(Some(RouteSlot {
+            credit,
+            lane,
+            waited: false,
+        }))
+    }
+
+    /// Later attempts already hold admission. Do not park them on the writer.
+    pub fn try_send_route(&self, event: super::events::LogEvent) -> Result<(), ReserveError> {
+        let slot = self.try_route().inspect_err(|_| {
+            self.counters.route_refused.fetch_add(1, Ordering::Relaxed);
+        })?;
+        self.enqueue_route(slot, event)
+    }
+
     /// Reserve and enqueue an optional event in one operation.
     pub async fn send_route(
         &self,
@@ -541,13 +580,10 @@ impl WriterHandle {
         };
         let mut waited = None;
         let acquire = async {
-            if self.postgres_closed() {
-                return Err(ReserveError::Closed);
-            }
-            if let Ok(lane) = routes.clone().try_acquire_owned()
-                && let Ok(credit) = credits.clone().try_acquire_owned()
-            {
-                return Ok(RouteSlot { credit, lane });
+            match self.try_route() {
+                Ok(slot) => return Ok(slot),
+                Err(ReserveError::Full) => {}
+                Err(e) => return Err(e),
             }
             waited = Some(RouteWait {
                 counters: &self.counters,
@@ -558,7 +594,7 @@ impl WriterHandle {
                 return Err(ReserveError::Deadline);
             }
             let _turn = self.finish_waiter()?;
-            tokio::time::timeout_at(deadline, async {
+            let taking = tokio::time::timeout_at(deadline, async {
                 let lane = routes
                     .clone()
                     .acquire_owned()
@@ -575,10 +611,22 @@ impl WriterHandle {
                 if Instant::now() >= deadline {
                     return Err(ReserveError::Deadline);
                 }
-                Ok(RouteSlot { credit, lane })
+                Ok((credit, lane))
+            });
+            tokio::pin!(taking);
+            let mut waited = false;
+            let (credit, lane) = std::future::poll_fn(|cx| {
+                let poll = std::future::Future::poll(taking.as_mut(), cx);
+                waited |= poll.is_pending();
+                poll
             })
             .await
-            .map_err(|_| ReserveError::Deadline)?
+            .map_err(|_| ReserveError::Deadline)??;
+            Ok(Some(RouteSlot {
+                credit,
+                lane,
+                waited,
+            }))
         };
         let result = acquire.await;
         if let Some(waited) = &mut waited {
@@ -587,7 +635,7 @@ impl WriterHandle {
         if result.is_err() {
             self.counters.route_refused.fetch_add(1, Ordering::Relaxed);
         }
-        result.map(Some)
+        result
     }
 
     /// Files a paced Begin/Route immediately once its separate slot is owned.
@@ -600,7 +648,7 @@ impl WriterHandle {
             event,
             super::events::LogEvent::Begin(_) | super::events::LogEvent::Route { .. }
         ));
-        let Some(RouteSlot { credit, lane }) = slot else {
+        let Some(RouteSlot { credit, lane, .. }) = slot else {
             assert!(
                 self.routes.is_none(),
                 "PG route requires its own reservation"
@@ -664,10 +712,7 @@ impl WriterHandle {
         let reserved = credits
             .clone()
             .try_acquire_many_owned(u32::try_from(N).expect("finish slot count"))
-            .map_err(|e| match e {
-                tokio::sync::TryAcquireError::Closed => ReserveError::Closed,
-                tokio::sync::TryAcquireError::NoPermits => ReserveError::Full,
-            })?;
+            .map_err(reserve_error)?;
         Ok(finish_reservation(reserved))
     }
 

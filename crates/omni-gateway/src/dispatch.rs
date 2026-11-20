@@ -513,7 +513,6 @@ pub fn dispatch_with_options(
 #[derive(Debug)]
 pub(crate) struct RoutePacing {
     pub(crate) first: Option<omni_store::writer::RouteSlot>,
-    pub(crate) reservation_deadline: tokio::time::Instant,
     pub(crate) dispatch_deadline: Option<tokio::time::Instant>,
 }
 
@@ -811,8 +810,7 @@ fn run(mut s: RunState) -> EventsStream {
                     if let Some(first) = pacing.first.take() {
                         deps.writer.enqueue_route(Some(first), event)
                     } else {
-                        let deadline = s.deadline.map_or(pacing.reservation_deadline, |at| at.min(pacing.reservation_deadline));
-                        Box::pin(deps.writer.send_route(event, deadline)).await
+                        deps.writer.try_send_route(event)
                     }
                 } else {
                     deps.writer.send(event);
