@@ -165,6 +165,35 @@ async fn expired_anthropic_refreshes_before_inference() {
 }
 
 #[tokio::test]
+async fn fractional_expiry_just_outside_lead_does_not_refresh() {
+    let f = fixture(&["c0"]);
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute(
+        "UPDATE credentials SET provider='anthropic',provider_data='{}',auth_type='oauth',access_token=api_key,expires_at=1.5,refresh_token=?",
+        [omni_crypto::field::encrypt(&key(), "refresh")],
+    ).expect("oauth");
+    let body = "event: message_start\ndata: {\"message\":{\"id\":\"m\",\"model\":\"claude-opus-5-5\"}}\n\nevent: message_stop\ndata: {}\n\n";
+    let mut h = harness(&f, vec![Reply::Http(200, vec![], vec![body.into()])]);
+    // The end of the lead is 1ms. Truncating 1.5ms makes refresh due.
+    std::sync::Arc::get_mut(&mut h.deps).expect("deps").now =
+        || 1 - omni_gateway::dispatch::REFRESH_LEAD_MS;
+    let mut request = req("claude-opus-5-5");
+    request.route_started_at = (h.deps.now)();
+    let mut d = dispatch(h.deps.clone(), request);
+    let events = drain(&mut d).await;
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    {
+        let seen = h.script.seen.lock().expect("seen");
+        assert_eq!(seen.len(), 1);
+        assert!(seen[0].url.contains("/v1/messages"));
+    }
+    flush(h).await;
+}
+
+#[tokio::test]
 async fn anthropic_401_refreshes_and_retries_once() {
     let f = fixture(&["c0"]);
     let conn = rusqlite::Connection::open(&f.path).expect("db");

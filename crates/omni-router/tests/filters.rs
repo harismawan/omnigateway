@@ -561,24 +561,24 @@ fn expiry_excludes_only_an_unrefreshable_oauth_credential() {
     let run = |c| eligible(&input(&r, &m, &creds(vec![c]))).pairs.len();
     assert_eq!(
         run(cred_with("a", |c| {
-            c.expires_at = Some(999_999);
+            c.expires_at = Some(999_999.0);
             c.has_refresh_token = false;
         })),
         0
     );
     let dead = cred_with("a", |c| {
-        c.expires_at = Some(999_999);
+        c.expires_at = Some(999_999.0);
         c.has_refresh_token = false;
     });
     assert_eq!(
         reasons(&eligible(&input(&r, &m, &creds(vec![dead])))),
         ["expired"]
     );
-    assert_eq!(run(cred_with("a", |c| c.expires_at = Some(999_999))), 1);
+    assert_eq!(run(cred_with("a", |c| c.expires_at = Some(999_999.0))), 1);
     assert_eq!(
         run(cred_with("a", |c| {
             c.auth_type = omni_store::AuthType::ApiKey;
-            c.expires_at = Some(999_999);
+            c.expires_at = Some(999_999.0);
             c.has_refresh_token = false;
         })),
         1

@@ -125,16 +125,16 @@ impl Refresher {
         let mut touched = 0;
         for c in credentials {
             let now = (self.now)();
+            #[allow(clippy::cast_precision_loss)]
+            let now_number = now as f64;
             if !c.enabled
                 || c.auth_type != omni_store::AuthType::OAuth
-                || !c
-                    .expires_at
-                    .is_some_and(|at| at.saturating_sub(300_000) <= now)
+                || !c.expires_at.is_some_and(|at| at - 300_000.0 <= now_number)
             {
                 continue;
             }
             if !c.has_refresh_token {
-                if c.expires_at.is_some_and(|at| at <= now) {
+                if c.expires_at.is_some_and(|at| at <= now_number) {
                     self.store
                         .disable_credential(&c.id, now, "expiredNoRefresh")
                         .await
@@ -354,7 +354,6 @@ impl Refresher {
         // TextEncoder, which TS encryption uses, replaces unpaired UTF-16 units.
         let access = String::from_utf16_lossy(&result.access_token);
         let refresh = result.refresh_token.as_ref().map(js_text);
-        #[allow(clippy::cast_possible_truncation)]
         let update = omni_store::credentials::TokenUpdate {
             access_token: Some(access),
             refresh_token: refresh,
@@ -363,7 +362,7 @@ impl Refresher {
                 .id_token
                 .as_ref()
                 .map(|s| String::from_utf16_lossy(s)),
-            expires_at: persisted_expiry(result.expires_at),
+            expires_at: result.expires_at,
             updated_at: (self.now)(),
         };
         if self
@@ -419,7 +418,6 @@ fn refresh_threw(provider: &str) -> GatewayError {
         format!("{provider} oauth refresh threw"),
     )
 }
-// X2: the shared integer carrier truncates fractions and saturates infinities.
 // TS setInterval keeps its phase; callbacks while `running` simply return.
 fn next_sweep(previous: tokio::time::Instant, now: tokio::time::Instant) -> tokio::time::Instant {
     let period = std::time::Duration::from_secs(60);
@@ -428,13 +426,6 @@ fn next_sweep(previous: tokio::time::Instant, now: tokio::time::Instant) -> toki
         next += period;
     }
     next
-}
-
-// X2: the shared integer carrier truncates fractions and saturates infinities.
-// SQLite binds NaN as NULL; preserving that avoids repeated preemptive refresh.
-#[allow(clippy::cast_possible_truncation)]
-pub(crate) fn persisted_expiry(expiry: Option<f64>) -> Option<i64> {
-    expiry.filter(|n| !n.is_nan()).map(|n| n as i64)
 }
 
 pub(crate) fn email_text(
@@ -511,12 +502,104 @@ mod persistence_tests {
             start + std::time::Duration::from_secs(180)
         );
     }
-    #[test]
-    fn expiry_carrier_preserves_nonfinite_routing() {
-        assert_eq!(persisted_expiry(Some(f64::NAN)), None);
-        assert_eq!(persisted_expiry(Some(f64::INFINITY)), Some(i64::MAX));
-        assert_eq!(persisted_expiry(Some(f64::NEG_INFINITY)), Some(i64::MIN));
-        assert_eq!(persisted_expiry(Some(1.5)), Some(1));
+    #[tokio::test]
+    async fn expiry_carrier_preserves_nonfinite_routing() {
+        use omni_gateway_core::snapshot::SnapshotHolder;
+        use omni_store::credentials::{OAuthCredential, TokenUpdate};
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("db");
+        let store = Arc::new(
+            Backend::open(omni_store::StoreConfig::Sqlite { path: path.clone() }, 0)
+                .await
+                .expect("store"),
+        );
+        let key = omni_crypto::field::derive_key("expiry-test");
+        for (id, expiry, expected) in [
+            ("nan", f64::NAN, None),
+            ("positive-inf", f64::INFINITY, Some(f64::INFINITY)),
+            ("negative-inf", f64::NEG_INFINITY, Some(f64::NEG_INFINITY)),
+        ] {
+            // NaN can arrive in a FlowResult but is not an OAuth JSON literal.
+            let tokens = TokenUpdate {
+                access_token: Some("fixture".into()),
+                refresh_token: None,
+                api_key: None,
+                id_token: None,
+                expires_at: Some(expiry),
+                updated_at: 1,
+            };
+            store
+                .save_oauth(
+                    &key,
+                    &OAuthCredential {
+                        id,
+                        provider: "anthropic",
+                        label: id,
+                        provider_data: "{}",
+                        account_email: None,
+                        tokens: &tokens,
+                        reconnect: false,
+                    },
+                )
+                .await
+                .expect("create");
+            assert!(
+                store
+                    .update_tokens(&key, id, &tokens, 0)
+                    .await
+                    .expect("rotate")
+            );
+            let db = omni_store::SqliteStore::open(&path, 0).expect("sqlite");
+            let kind: String = db
+                .connection()
+                .query_row(
+                    "SELECT typeof(expires_at) FROM credentials WHERE id=?",
+                    [id],
+                    |r| r.get(0),
+                )
+                .expect("raw expiry");
+            assert_eq!(kind, if expected.is_none() { "null" } else { "real" });
+            let holder = SnapshotHolder::build(&db, key.clone(), 1.0).expect("snapshot");
+            let snapshot = holder.load();
+            let credential = snapshot
+                .routing
+                .credentials
+                .iter()
+                .find(|c| c.id == id)
+                .expect("routable row");
+            assert_eq!(credential.expires_at, expected);
+            assert_eq!(credential.token_version, 1);
+        }
+        // NULL and +Infinity are not due; only -Infinity disables the
+        // unrefreshable credential. No transport should be needed.
+        let refresher = Arc::new(Refresher::new(
+            store.clone(),
+            key.clone(),
+            Arc::new(omni_providers::http::Client::new()),
+            || 1,
+        ));
+        assert_eq!(
+            refresher.sweep(None).await.expect("sweep"),
+            SweepOutcome {
+                refreshed: 0,
+                touched: 1
+            }
+        );
+        for (id, enabled) in [
+            ("nan", true),
+            ("positive-inf", true),
+            ("negative-inf", false),
+        ] {
+            assert_eq!(
+                store
+                    .credential(&key, id)
+                    .await
+                    .expect("read")
+                    .expect("credential")
+                    .enabled,
+                enabled
+            );
+        }
     }
     #[test]
     fn sqlite_email_binding_is_not_text_encoder_coercion() {

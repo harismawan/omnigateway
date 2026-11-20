@@ -72,7 +72,7 @@ pub fn run(
     let need = parse_need(input)?;
     let models = models(store, id)?;
     let snapshot = Snapshot::new(
-        credentials(store, now)?,
+        credentials(store)?,
         health(store)?,
         store.list_quota()?,
         models,
@@ -372,7 +372,7 @@ fn models(store: &SqliteStore, selected: &str) -> Result<Vec<omni_store::Virtual
     Ok(out)
 }
 
-fn credentials(store: &SqliteStore, now: f64) -> Result<Vec<omni_store::Credential>, Failure> {
+fn credentials(store: &SqliteStore) -> Result<Vec<omni_store::Credential>, Failure> {
     use crate::cli_cell::{scalar_number, scalar_string};
     // Keep bare JSON.parse errors for CLI as well as whole-call HTTP failure.
     let mut stmt = store
@@ -394,11 +394,7 @@ fn credentials(store: &SqliteStore, now: f64) -> Result<Vec<omni_store::Credenti
         if matches!(data, JsValue::Null) {
             return Err(Failure::internal("null provider_data"));
         }
-        // Encode the already evaluated expiry predicate, avoiding integer truncation
-        // at fractional millisecond boundaries. API-key expiry is not consulted.
-        let expires_at = (!matches!(cell("expiresAt"), JsValue::Null)
-            && number("expiresAt") <= now)
-            .then_some(i64::MIN);
+        let expires_at = (!matches!(cell("expiresAt"), JsValue::Null)).then(|| number("expiresAt"));
         out.push(omni_store::Credential {
             lone_endpoint: None,
             id: text("id"),

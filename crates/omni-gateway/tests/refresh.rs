@@ -111,7 +111,7 @@ async fn openai_local_endpoint_retry_id_token_and_cas_loser() {
         refresh_token: Some("old".into()),
         api_key: None,
         id_token: None,
-        expires_at: Some(1),
+        expires_at: Some(1.0),
         updated_at: 99,
     };
     assert!(
