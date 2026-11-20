@@ -705,7 +705,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         static_root,
         admin,
         base_url_https: api::base_url_is_https(&config.base_url),
-        control,
+        control: control.with_base_url(&config.base_url),
         credential_key: key.clone(),
         connect: Arc::new(
             redis
@@ -908,6 +908,81 @@ mod tests {
     use std::time::Duration;
 
     use tokio::io::AsyncWriteExt as _;
+
+    #[test]
+    fn auth_refusal_id_is_no_later_than_logged_start() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                use tokio::io::AsyncReadExt as _;
+
+                let dir = tempfile::tempdir().expect("tempdir");
+                let path = dir.path().join("gateway.db");
+                let env = std::collections::HashMap::from([
+                    (
+                        "OMNI_ENCRYPTION_KEY".into(),
+                        "test-encryption-key-0123456789".into(),
+                    ),
+                    ("OMNI_DB_PATH".into(), path.to_str().expect("path").into()),
+                ]);
+                let mut config = omni_gateway_core::config::load_config(&env, || 0).expect("config");
+                config.port = 0;
+                let running = crate::start(config, crate::Options::default())
+                    .await
+                    .expect("start");
+
+                // Hold the only blocking worker so the auth miss cannot finish
+                // in the same millisecond that the proxy records its start.
+                let (release, gate) = tokio::sync::oneshot::channel::<()>();
+                let held = tokio::task::spawn_blocking(move || drop(gate.blocking_recv()));
+                let mut socket = tokio::net::TcpStream::connect(running.addr)
+                    .await
+                    .expect("connect");
+                socket
+                    .write_all(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer sk-omni-unknown\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{}")
+                    .await
+                    .expect("write");
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while running.app.miss.in_flight() == 0 {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                    let observed_at = crate::clock::now_ms();
+                    while crate::clock::now_ms() <= observed_at {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                })
+                .await
+                .expect("auth miss crossed a wall-clock millisecond");
+                release.send(()).expect("release auth lookup");
+                held.await.expect("blocking worker");
+
+                let mut response = Vec::new();
+                tokio::time::timeout(Duration::from_secs(5), socket.read_to_end(&mut response))
+                    .await
+                    .expect("response deadline")
+                    .expect("read response");
+                assert!(response.starts_with(b"HTTP/1.1 401"));
+                running.shutdown();
+                running.wait().await.expect("stop");
+
+                let db = rusqlite::Connection::open(path).expect("open logs");
+                let (id, at): (String, i64) = db
+                    .query_row(
+                        "SELECT id, at FROM request_logs WHERE status = 401 AND error_code = 'AUTH'",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .expect("auth refusal row");
+                let uuid = id.strip_prefix("req_").expect("request ID prefix");
+                assert_eq!(uuid.as_bytes()[14], b'7');
+                let id_ms = i64::from_str_radix(&uuid[..13].replace('-', ""), 16)
+                    .expect("UUIDv7 timestamp");
+                assert!(id_ms <= at, "UUIDv7 time {id_ms} is after log start {at}");
+            });
+    }
 
     /// Review A4-I1 over HTTP: a client that hangs up while its login's
     /// Argon2 verification runs does not free that verification's slot. The

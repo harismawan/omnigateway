@@ -37,6 +37,8 @@ pub struct ControlStore(
     Arc<tokio::sync::Semaphore>,
     Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
     Arc<Mutex<Vec<SqliteStore>>>,
+    // Public URL for agent setup snippets, independent of the request origin.
+    Arc<str>,
 );
 
 #[derive(Clone)]
@@ -83,6 +85,7 @@ impl ControlStore {
             Arc::new(tokio::sync::Semaphore::new(4)),
             None,
             Arc::new(Mutex::new(Vec::new())),
+            Arc::from(""),
         )
     }
 
@@ -96,7 +99,13 @@ impl ControlStore {
             Arc::new(tokio::sync::Semaphore::new(4)),
             None,
             Arc::new(Mutex::new(Vec::new())),
+            Arc::from(""),
         )
+    }
+
+    pub(crate) fn with_base_url(mut self, base_url: &str) -> Self {
+        self.7 = Arc::from(base_url);
+        self
     }
 
     pub(crate) fn postgres(&self) -> Option<&omni_store::pg::PgStore> {
@@ -243,6 +252,7 @@ pub enum Admin {
     RemoveCredential(Option<String>),
     CredentialHealth,
     ListModels,
+    AgentSetup,
     DryRun(Option<String>),
     PutModel(Option<String>),
     RemoveModel(Option<String>),
@@ -301,6 +311,7 @@ pub fn route(method: &hyper::Method, path: &str) -> Option<Admin> {
         "/api/credentials" if *method == M::POST => return Some(Admin::CreateCredential),
         "/api/credentials/health" if get => return Some(Admin::CredentialHealth),
         "/api/models" if get => return Some(Admin::ListModels),
+        "/api/agent-setup" if get => return Some(Admin::AgentSetup),
         "/api/catalog" if get => return Some(Admin::Catalog),
         "/api/keys" if get => return Some(Admin::ListKeys),
         "/api/keys" if *method == M::POST => return Some(Admin::CreateKey),
@@ -695,6 +706,25 @@ async fn serve_inner(
                 ));
             }
             Ok(json_ok(control.run(ops::list_models).await?))
+        }
+        Admin::AgentSetup => {
+            require_reader(req.headers(), &app.admin).await?;
+            let query = req.uri().query().unwrap_or_default();
+            let base_url = control.7.clone();
+            let reader = control.reader().await?;
+            if let Some(pg) = reader.postgres() {
+                return Ok(json_ok(
+                    omni_control::setup::agent_setup_postgres(pg, &base_url, query)
+                        .await
+                        .map_err(failure)?,
+                ));
+            }
+            let query = query.to_owned();
+            Ok(json_ok(
+                reader
+                    .run(move |s| omni_control::setup::agent_setup(s, &base_url, &query))
+                    .await?,
+            ))
         }
         Admin::Catalog => {
             require_reader(req.headers(), &app.admin).await?;
