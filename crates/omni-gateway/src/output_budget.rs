@@ -3,6 +3,8 @@ use omni_ir::error::{ErrorCode, GatewayError};
 use omni_ir::jsjson::JsValue;
 use omni_ir::stream::{ContentBlockStart, Delta, StreamEvent};
 
+const MAX_BYTES: usize = 8 * 1024 * 1024;
+
 #[derive(Default)]
 pub(crate) struct OutputBudget {
     bytes: usize,
@@ -43,7 +45,7 @@ impl OutputBudget {
         };
         self.bytes = self.bytes.saturating_add(bytes);
         self.events += 1;
-        if self.bytes > 8 * 1024 * 1024 || self.events > 65_536 || self.items > 4096 {
+        if self.bytes > MAX_BYTES || self.events > 65_536 || self.items > 4096 {
             return Err(limit());
         }
         Ok(())
@@ -51,23 +53,30 @@ impl OutputBudget {
 }
 
 fn js_bytes(root: &JsValue) -> usize {
+    // Match the old map charge: keys and each contained value, not the root
+    // map wrapper. Keep just an iterator per level, not a stack of siblings.
     let mut bytes = 0usize;
-    let mut stack: Vec<Box<dyn Iterator<Item = (&JsValue, usize)>>> =
-        vec![Box::new(std::iter::once((root, 0)))];
+    type Entries<'a> = Box<dyn Iterator<Item = (&'a JsValue, &'a [u16])> + 'a>;
+    let mut stack: Vec<Entries<'_>> = match root {
+        JsValue::Object(o) => vec![Box::new(o.iter().map(|(k, v)| (v, k.as_slice())))],
+        _ => vec![Box::new(std::iter::once((root, &[][..])))],
+    };
     while let Some(iter) = stack.last_mut() {
-        if let Some((value, key_bytes)) = iter.next() {
-            bytes = bytes
-                .saturating_add(std::mem::size_of::<JsValue>())
-                .saturating_add(key_bytes);
+        if let Some((value, key)) = iter.next() {
+            bytes += std::mem::size_of::<serde_json::Value>();
+            charge_text(key, &mut bytes);
+            if bytes > MAX_BYTES {
+                break;
+            }
             match value {
-                JsValue::String(s) => bytes = bytes.saturating_add(s.len().saturating_mul(6)),
-                JsValue::Array(a) => stack.push(Box::new(a.iter().map(|v| (v, 0)))),
-                JsValue::Object(o) => stack.push(Box::new(
-                    o.iter().map(|(k, v)| (v, k.len().saturating_mul(6))),
-                )),
+                JsValue::String(s) => charge_text(s, &mut bytes),
+                JsValue::Array(a) => stack.push(Box::new(a.iter().map(|v| (v, &[][..])))),
+                JsValue::Object(o) => {
+                    stack.push(Box::new(o.iter().map(|(k, v)| (v, k.as_slice()))))
+                }
                 _ => {}
             }
-            if bytes > 8 * 1024 * 1024 {
+            if bytes > MAX_BYTES {
                 break;
             }
         } else {
@@ -75,6 +84,16 @@ fn js_bytes(root: &JsValue) -> usize {
         }
     }
     bytes
+}
+
+fn charge_text(units: &[u16], bytes: &mut usize) {
+    for unit in char::decode_utf16(units.iter().copied()) {
+        // Keep the ordinary UTF-8 charge; a lone unit is emitted as \uXXXX.
+        *bytes += unit.map_or(6, char::len_utf8);
+        if *bytes > MAX_BYTES {
+            break;
+        }
+    }
 }
 
 fn map_bytes(map: &serde_json::Map<String, serde_json::Value>) -> usize {
@@ -93,7 +112,7 @@ fn map_bytes(map: &serde_json::Map<String, serde_json::Value>) -> usize {
                 }
                 _ => {}
             }
-            if bytes > 8 * 1024 * 1024 {
+            if bytes > MAX_BYTES {
                 return bytes;
             }
         } else {
@@ -110,6 +129,42 @@ fn limit() -> GatewayError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_reasoning_charges_utf8_bytes_not_six_bytes_per_unit() {
+        let event = StreamEvent::BlockDelta {
+            index: 0,
+            delta: Delta::ProviderNative {
+                provider: "openai".into(),
+                delta_type: "response.output_item.done".into(),
+                fold: Some(omni_ir::stream::NativeFold::Merge),
+                data: JsValue::object([(
+                    "encrypted_content",
+                    JsValue::String(vec![u16::from(b'x'); 2 * 1024 * 1024]),
+                )]),
+            },
+        };
+        let mut budget = OutputBudget::default();
+        for _ in 0..3 {
+            budget.charge(&event).expect("ordinary native payload fits");
+        }
+        assert!(
+            budget.charge(&event).is_err(),
+            "aggregate native budget exceeded"
+        );
+    }
+
+    #[test]
+    fn native_keys_and_values_charge_pairs_and_lone_units_by_emitted_width() {
+        // A (1), é (2), 水 (3), 😀 (4), lone low surrogate (6).
+        let units = vec![0x41, 0xe9, 0x6c34, 0xd83d, 0xde00, 0xdc00];
+        let data = JsValue::Object(vec![(units.clone(), JsValue::String(units))]);
+        assert_eq!(
+            js_bytes(&data),
+            32 + std::mem::size_of::<serde_json::Value>()
+        );
+    }
+
     #[test]
     fn exact_bytes_and_many_small_events_are_bounded() {
         let mut b = OutputBudget::default();

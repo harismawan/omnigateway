@@ -14,8 +14,8 @@
 //!   positional (array-as-struct) reading anywhere ([`MapOnly`]);
 //! - a repeated field is a serde error, so `JSON.parse`'s last-wins case
 //!   goes generic;
-//! - every field read is a `Value`, absent kept apart from `null` ([`present`]),
-//!   so `d.id !== undefined` and friends see what they would;
+//! - absent fields are kept apart from `null` ([`present`], [`scalar`]), so
+//!   `d.id !== undefined` and friends see what they would;
 //! - syntax, the depth limit and lone surrogates fail exactly where the
 //!   generic parse's first attempt fails, and then go generic.
 
@@ -24,13 +24,36 @@ use std::marker::PhantomData;
 use omni_ir::jsjson::JsValue as Value;
 use serde::de::{Deserialize, Deserializer, MapAccess, Visitor, value::MapAccessDeserializer};
 
-use super::chat::{ChoiceView, ChunkView, DeltaView};
+use super::chat::{ChoiceView, ChunkView, DeltaView, Scalar};
 
 /// `Some(value)` for a present field, `null` included; `None` only when absent.
 /// Boxed: a `Value` is large, and serde moves each field through several
 /// layers of `Result`; a pointer keeps those moves small.
 fn present<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Box<Value>>, D::Error> {
     serde_json::Value::deserialize(d).map(|v| Some(Box::new(Value::from(&v))))
+}
+
+enum FastScalar {
+    Utf8(String),
+    Js(Box<Value>),
+}
+
+impl FastScalar {
+    fn view(&self) -> Scalar<'_> {
+        match self {
+            Self::Utf8(s) => Scalar::Utf8(s),
+            Self::Js(v) => Scalar::Js(v),
+        }
+    }
+}
+
+fn scalar<'de, D: Deserializer<'de>>(d: D) -> Result<Option<FastScalar>, D::Error> {
+    serde_json::Value::deserialize(d).map(|v| {
+        Some(match v {
+            serde_json::Value::String(s) => FastScalar::Utf8(s),
+            other => FastScalar::Js(Box::new(Value::from(&other))),
+        })
+    })
 }
 
 /// A struct read from a JSON object only: serde's derived structs also
@@ -55,10 +78,10 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for MapOnly<T> {
 
 #[derive(serde::Deserialize)]
 pub(super) struct FastChunk {
-    #[serde(default, deserialize_with = "present")]
-    id: Option<Box<Value>>,
-    #[serde(default, deserialize_with = "present")]
-    model: Option<Box<Value>>,
+    #[serde(default, deserialize_with = "scalar")]
+    id: Option<FastScalar>,
+    #[serde(default, deserialize_with = "scalar")]
+    model: Option<FastScalar>,
     #[serde(default, deserialize_with = "present")]
     usage: Option<Box<Value>>,
     /// `null` and absent both mean no choice (`index0` of either is undefined).
@@ -71,18 +94,18 @@ struct FastChoice {
     /// `null` and absent read the same: `prop(choice, "delta")` filtered of null.
     #[serde(default)]
     delta: Option<MapOnly<FastDelta>>,
-    #[serde(default, deserialize_with = "present")]
-    finish_reason: Option<Box<Value>>,
+    #[serde(default, deserialize_with = "scalar")]
+    finish_reason: Option<FastScalar>,
 }
 
 #[derive(serde::Deserialize)]
 struct FastDelta {
-    #[serde(default, deserialize_with = "present")]
-    content: Option<Box<Value>>,
-    #[serde(default, deserialize_with = "present")]
-    reasoning: Option<Box<Value>>,
-    #[serde(default, deserialize_with = "present")]
-    reasoning_content: Option<Box<Value>>,
+    #[serde(default, deserialize_with = "scalar")]
+    content: Option<FastScalar>,
+    #[serde(default, deserialize_with = "scalar")]
+    reasoning: Option<FastScalar>,
+    #[serde(default, deserialize_with = "scalar")]
+    reasoning_content: Option<FastScalar>,
     #[serde(default, deserialize_with = "present")]
     reasoning_details: Option<Box<Value>>,
     #[serde(default, deserialize_with = "present")]
@@ -111,18 +134,18 @@ impl FastChunk {
                 delta: match &c.delta {
                     None => DeltaView::default(),
                     Some(MapOnly(d)) => DeltaView {
-                        content: d.content.as_deref(),
-                        reasoning: d.reasoning.as_deref(),
-                        reasoning_content: d.reasoning_content.as_deref(),
+                        content: d.content.as_ref().map(FastScalar::view),
+                        reasoning: d.reasoning.as_ref().map(FastScalar::view),
+                        reasoning_content: d.reasoning_content.as_ref().map(FastScalar::view),
                         reasoning_details: d.reasoning_details.as_deref(),
                         tool_calls: d.tool_calls.as_deref(),
                     },
                 },
-                finish_reason: c.finish_reason.as_deref(),
+                finish_reason: c.finish_reason.as_ref().map(FastScalar::view),
             });
         ChunkView {
-            id: self.id.as_deref(),
-            model: self.model.as_deref(),
+            id: self.id.as_ref().map(FastScalar::view),
+            model: self.model.as_ref().map(FastScalar::view),
             usage: self.usage.as_deref(),
             choice,
         }
@@ -202,6 +225,7 @@ mod tests {
             &[r#"{"id":"a","id":"b","choices":[]}"#],
             // Escaped key names, lone surrogates, bad syntax, trailing text.
             &[r#"{"\u0069d":"a","choices":[{"delta":{"c\u006fntent":"x"}}]}"#],
+            &[r#"{"id":"a","choices":[{"delta":{"content":"水\ud83d\ude00"}}]}"#],
             &[r#"{"id":"a","x":"\ud800","choices":[{"delta":{"content":"\udc00y"}}]}"#],
             &[r#"{"id":"a","choices":[{"delta":{"content":"x"}}]"#],
             &[r#"{"id":"a"} x"#],
