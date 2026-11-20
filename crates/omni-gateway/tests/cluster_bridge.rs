@@ -245,7 +245,11 @@ async fn actual_writer_seed_and_ignored_before_seed_recover_without_double_debit
     log.requested_model = "model".into();
     log.model_unencodable = true;
     log.input_tokens = 11;
-    let [slot] = h.reserve_finishes::<1>().await;
+    let [slot] = h
+        .reserve_finishes::<1>()
+        .await
+        .expect("terminal credit")
+        .into_slots();
     assert!(h.finish(slot, log));
     assert_eq!(h.flush().await.expect("failure barrier").failed, 1);
     let omni_store::writer::Committed::Completions(fallback) =
@@ -292,7 +296,11 @@ async fn actual_writer_seed_and_ignored_before_seed_recover_without_double_debit
         log.api_key_id = Some(key.clone());
         log.requested_model = "model".into();
         log.input_tokens = 3;
-        let [slot] = h.reserve_finishes::<1>().await;
+        let [slot] = h
+            .reserve_finishes::<1>()
+            .await
+            .expect("terminal credit")
+            .into_slots();
         assert!(h.finish(slot, log));
     }
     let c = pg.client().await.expect("primary reader");

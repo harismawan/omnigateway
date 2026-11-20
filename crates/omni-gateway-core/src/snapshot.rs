@@ -49,6 +49,16 @@ pub struct GatewaySnapshot {
 }
 
 impl GatewaySnapshot {
+    /// Judge the authoritative row after a PG reservation wait. Share the
+    /// same usability, corrupt-row and limits rules as snapshot auth.
+    pub fn authenticate_read(
+        entry: Option<Result<ApiKey, KeyRowError>>,
+        now_ms: i64,
+    ) -> Result<AuthenticatedKey, GatewayError> {
+        let entry = entry.map(|row| row.map(Arc::new).map_err(Arc::new));
+        judge(entry.as_ref(), now_ms)
+    }
+
     /// The readable keys.
     pub fn keys(&self) -> impl Iterator<Item = &Arc<ApiKey>> {
         self.keys_by_hash.values().filter_map(|e| e.as_ref().ok())

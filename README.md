@@ -418,6 +418,7 @@ The snapshot list is empty; use Postgres backup tooling rather than SQLite
 snapshot, import, restore, or vacuum actions. Authenticated `/metrics` exposes
 process-local `omni_request_log_writer_*_total` counters for optional and
 terminal queue drops, persistence failures, and completion delivery loss.
+Unlike the TypeScript gateway, Rust cluster inference returns HTTP 503 before admission if the request-log writer is closed or its bounded wait queue is full or expires (4 seconds).
 
 ## Configuration
 

@@ -991,7 +991,12 @@ publish row identities (never keys or secrets) on `routing`; the receiving
 worker reads current primary state and patches its snapshot. A 500 ms version
 poll repairs missed publications. Health mutations serialize against the stored
 row, while fleet load is published and read in the background every 100 ms.
-PG inference reserves bounded terminal queue capacity before admission. `Begin`
+PG inference reserves bounded terminal queue capacity before admission. The waiter cap
+is one per default-sized batch of queue credits (32 by default), and its 4 s
+deadline also covers revalidation against the primary. A full wait queue,
+deadline, or closed writer returns the surface's overload response without
+dispatch or a completion row. Hyper need not notice a disconnect before
+reading the body, so the deadline bounds retention in that case. `Begin`
 and `Route` can shed first; every admitted request can enqueue its `Finish`
 without waiting, including on cancellation. The writer commits log and rollups
 atomically before handing off a debit with that transaction's top-level xid8.

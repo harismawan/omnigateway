@@ -48,7 +48,11 @@ async fn healthy_postgres_retains_finish_when_optional_queue_is_full() {
     )
     .expect("writer");
     let h = writer.handle();
-    let [slot] = h.reserve_finishes::<1>().await;
+    let [slot] = h
+        .reserve_finishes::<1>()
+        .await
+        .expect("terminal credit")
+        .into_slots();
     assert!(h.finish(slot, done("blocker", T0, Some("key-1"), "m", 1)));
     let holder_pid: i32 = locked
         .query_one("SELECT pg_backend_pid()", &[])
@@ -61,7 +65,11 @@ async fn healthy_postgres_retains_finish_when_optional_queue_is_full() {
         assert!(h.send(pending(&format!("pending-{i}"), T0, Some("key-1"), "m")));
     }
     assert!(!h.send(route("pending-0", "openai", "m", "cred-1")));
-    let slots = h.reserve_finishes::<4>().await;
+    let slots = h
+        .reserve_finishes::<4>()
+        .await
+        .expect("terminal credits")
+        .into_slots();
     for (i, slot) in slots.into_iter().enumerate() {
         assert!(h.finish(
             slot,
@@ -78,9 +86,15 @@ async fn healthy_postgres_retains_finish_when_optional_queue_is_full() {
     locked.commit().await.expect("release writer");
     let [slot] = tokio::time::timeout(Duration::from_secs(3), h.reserve_finishes::<1>())
         .await
-        .expect("cancelled waiter did not take the next slot");
+        .expect("cancelled waiter did not take the next slot")
+        .expect("terminal credit")
+        .into_slots();
     let accepted = h.finish(slot, done("pending-0", T0, Some("key-1"), "m", 9));
-    let slots = h.reserve_finishes::<3>().await;
+    let slots = h
+        .reserve_finishes::<3>()
+        .await
+        .expect("terminal credits")
+        .into_slots();
     for (i, slot) in slots.into_iter().enumerate() {
         assert!(h.finish(
             slot,

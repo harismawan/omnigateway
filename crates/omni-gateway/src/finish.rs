@@ -118,6 +118,12 @@ impl Finisher {
         self.phase = Phase::Streaming;
     }
 
+    /// The writer closed after we reserved, but before we admitted work.
+    pub fn abandon_before_admission(&mut self) {
+        debug_assert!(self.admission.is_none() && self.outcome.is_none());
+        self.done = true;
+    }
+
     /// `outcome?.log() ?? newCompletedRequestLog(...)`.
     fn current(&self) -> RequestLog {
         match &self.outcome {
@@ -137,6 +143,12 @@ impl Finisher {
         }
         log.api_key_id = self.key_id.clone();
         log.model_unencodable = self.model_unencodable;
+        // If Begin was shed (or dispatch failed before Begin), PG inserts
+        // this row directly. Its timestamp must still be the HTTP arrival,
+        // not the post-reservation dispatch clock carried by the outcome.
+        if self.slot.is_some() {
+            log.at = self.started_at;
+        }
         // PG acquired its terminal credit before admission, including for
         // this destructor path. There is no capacity wait with a slot held.
         // Telemetry is recorded whether or not the writer took the row, as

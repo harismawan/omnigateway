@@ -398,7 +398,11 @@ async fn cluster_listener_uses_postgres_without_opening_a_sqlite_shadow() {
     let writer = omni_store::writer::Writer::spawn_postgres(primary.clone(), Default::default())
         .expect("writer");
     let writes = writer.handle();
-    let [slot] = writes.reserve_finishes::<1>().await;
+    let [slot] = writes
+        .reserve_finishes::<1>()
+        .await
+        .expect("terminal credit")
+        .into_slots();
     assert!(writes.finish(slot, row));
     writer.close().await.expect("seed log");
     primary

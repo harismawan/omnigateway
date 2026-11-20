@@ -380,33 +380,139 @@ pub struct WriterHandle {
     tx: mpsc::Sender<Queued>,
     counters: Arc<Counters>,
     terminal: Option<Arc<tokio::sync::Semaphore>>,
+    waiters: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 /// A Postgres terminal slot acquired before starting work. Its send never
 /// waits, including from a cancelled request's destructor.
 pub struct FinishSlot(tokio::sync::OwnedSemaphorePermit);
 
+#[derive(Debug, Clone, Copy)]
+pub enum ReserveError {
+    Full,
+    Deadline,
+    Closed,
+}
+
+pub enum FinishReservation<const N: usize> {
+    Sqlite,
+    Postgres([FinishSlot; N]),
+}
+
+/// One turn in the bounded PG slow path. Hold it through key revalidation
+/// and any larger reservation that a policy change requires.
+pub struct FinishWaiter<'a> {
+    writer: &'a WriterHandle,
+    _turn: tokio::sync::SemaphorePermit<'a>,
+}
+
+impl FinishWaiter<'_> {
+    pub async fn reserve<const N: usize>(
+        &self,
+        deadline: Instant,
+    ) -> Result<FinishReservation<N>, ReserveError> {
+        if Instant::now() >= deadline {
+            return Err(ReserveError::Deadline);
+        }
+        let writer = self.writer;
+        assert!(N <= writer.tx.max_capacity());
+        let credits = writer.terminal.as_ref().expect("PG credits");
+        let reserve = async {
+            tokio::select! {
+                biased;
+                () = writer.tx.closed() => Err(ReserveError::Closed),
+                permit = credits.clone().acquire_many_owned(u32::try_from(N).expect("finish slot count")) =>
+                    permit.map_err(|_| ReserveError::Closed),
+            }
+        };
+        let reserved = tokio::time::timeout_at(deadline, reserve)
+            .await
+            .map_err(|_| ReserveError::Deadline)??;
+        if Instant::now() >= deadline {
+            return Err(ReserveError::Deadline);
+        }
+        if writer.postgres_closed() {
+            return Err(ReserveError::Closed);
+        }
+        Ok(finish_reservation(reserved))
+    }
+}
+
+fn finish_reservation<const N: usize>(
+    mut permit: tokio::sync::OwnedSemaphorePermit,
+) -> FinishReservation<N> {
+    FinishReservation::Postgres(std::array::from_fn(|_| {
+        FinishSlot(permit.split(1).expect("reserved finish slot"))
+    }))
+}
+
+impl<const N: usize> FinishReservation<N> {
+    pub fn into_slots(self) -> [Option<FinishSlot>; N] {
+        match self {
+            Self::Sqlite => std::array::from_fn(|_| None),
+            Self::Postgres(slots) => slots.map(Some),
+        }
+    }
+}
+
+// Stay within the shortest inference keepalive interval and below PG's 5 s
+// statement timeout: a stalled statement must not hold these HTTP waiters open.
+pub const FINISH_WAIT: Duration = Duration::from_secs(4);
+
 impl WriterHandle {
     /// Reserve the entire request's terminal row set atomically, before
     /// taking admission. Dropping a pending reservation or unused slots
     /// returns the credits. SQLite needs no reservation.
-    pub async fn reserve_finishes<const N: usize>(&self) -> [Option<FinishSlot>; N] {
-        let mut slots = std::array::from_fn(|_| None);
+    pub fn try_reserve_finishes<const N: usize>(
+        &self,
+    ) -> Result<FinishReservation<N>, ReserveError> {
         let Some(credits) = &self.terminal else {
-            return slots;
+            return Ok(FinishReservation::Sqlite);
         };
         assert!(N <= self.tx.max_capacity());
-        let Ok(mut reserved) = credits
-            .clone()
-            .acquire_many_owned(u32::try_from(N).expect("finish slot count"))
-            .await
-        else {
-            return slots;
-        };
-        for slot in &mut slots {
-            *slot = reserved.split(1).map(FinishSlot);
+        if self.tx.is_closed() {
+            return Err(ReserveError::Closed);
         }
-        slots
+        let reserved = credits
+            .clone()
+            .try_acquire_many_owned(u32::try_from(N).expect("finish slot count"))
+            .map_err(|e| match e {
+                tokio::sync::TryAcquireError::Closed => ReserveError::Closed,
+                tokio::sync::TryAcquireError::NoPermits => ReserveError::Full,
+            })?;
+        Ok(finish_reservation(reserved))
+    }
+
+    pub async fn reserve_finishes<const N: usize>(
+        &self,
+    ) -> Result<FinishReservation<N>, ReserveError> {
+        match self.try_reserve_finishes() {
+            Err(ReserveError::Full) => {
+                self.finish_waiter()?
+                    .reserve(Instant::now() + FINISH_WAIT)
+                    .await
+            }
+            other => other,
+        }
+    }
+
+    /// Call only after a PG reservation hit pressure.
+    pub fn finish_waiter(&self) -> Result<FinishWaiter<'_>, ReserveError> {
+        let waiters = self.waiters.as_ref().ok_or(ReserveError::Closed)?;
+        if self.postgres_closed() {
+            return Err(ReserveError::Closed);
+        }
+        let turn = waiters.try_acquire().map_err(|_| ReserveError::Full)?;
+        Ok(FinishWaiter {
+            writer: self,
+            _turn: turn,
+        })
+    }
+
+    pub fn postgres_closed(&self) -> bool {
+        self.terminal
+            .as_ref()
+            .is_some_and(|credits| credits.is_closed() || self.tx.is_closed())
     }
 
     pub fn finish(&self, slot: Option<FinishSlot>, log: super::events::RequestLog) -> bool {
@@ -741,6 +847,7 @@ impl Writer {
                 tx,
                 counters,
                 terminal: None,
+                waiters: None,
             },
             shutdown: Some(shutdown),
             task,
@@ -763,6 +870,11 @@ impl Writer {
         let (shutdown, stop) = oneshot::channel();
         let counters = Arc::new(Counters::new());
         let terminal = Arc::new(tokio::sync::Semaphore::new(capacity));
+        // One waiting HTTP request per default-sized writer batch of credits
+        // (32 by default). Waiters hold connections, not just queue entries.
+        let waiters = Arc::new(tokio::sync::Semaphore::new(
+            capacity.div_ceil(WriterConfig::default().max_batch),
+        ));
         let task = tokio::spawn({
             let terminal = terminal.clone();
             let counters = counters.clone();
@@ -777,6 +889,7 @@ impl Writer {
                 tx,
                 counters,
                 terminal: Some(terminal),
+                waiters: Some(waiters),
             },
             shutdown: Some(shutdown),
             task,

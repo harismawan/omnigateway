@@ -150,7 +150,10 @@ pub async fn judge(
     policy: &str,
     local_classifier: Option<String>,
 ) -> (Option<Refusal>, Vec<String>) {
-    let [slot] = deps.writer.reserve_finishes::<1>().await;
+    let Ok(reservation) = deps.writer.reserve_finishes::<1>().await else {
+        return (Some(writer_overload()), Vec::new());
+    };
+    let [slot] = reservation.into_slots();
     judge_with_model(deps, req, policy, local_classifier, None, slot).await
 }
 
@@ -282,6 +285,16 @@ pub enum SmartDecision {
     Refused(Refusal),
 }
 
+pub(crate) const WRITER_OVERLOAD: &str = "request log writer is busy or unavailable";
+
+fn writer_overload() -> Refusal {
+    Refusal {
+        code: ErrorCode::Overloaded,
+        message: WRITER_OVERLOAD,
+        notes: &[],
+    }
+}
+
 fn unavailable() -> SmartDecision {
     SmartDecision::Refused(Refusal {
         code: ErrorCode::Upstream,
@@ -402,7 +415,10 @@ impl Drop for CheckRow {
 /// Validate both configured models before the already-local bypass. No provider
 /// call, pending row, or cache entry exists until these checks have succeeded.
 pub async fn check_confidentiality(deps: Arc<Deps>, req: &Request) -> SmartDecision {
-    let [slot] = deps.writer.reserve_finishes::<1>().await;
+    let Ok(reservation) = deps.writer.reserve_finishes::<1>().await else {
+        return SmartDecision::Refused(writer_overload());
+    };
+    let [slot] = reservation.into_slots();
     check_with_slot(deps, req, slot).await
 }
 
