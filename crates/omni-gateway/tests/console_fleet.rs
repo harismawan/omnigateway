@@ -64,6 +64,15 @@ async fn addressed_console_reads_remote_source_and_missing_node_times_out() {
     assert_eq!(all["source"], "fleet");
     assert_eq!(all["lines"][0]["nodeId"], "b");
     assert_eq!(all["unreachable"], serde_json::json!(["missing"]));
+    let all = a
+        .read_all_with_timeout(
+            &["a".into(), "b".into()],
+            Query::from_query(""),
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .expect("all answered");
+    assert!(all.get("unreachable").is_none(), "{all}");
     let error = a
         .read_with_timeout(
             "missing",
@@ -75,4 +84,27 @@ async fn addressed_console_reads_remote_source_and_missing_node_times_out() {
     assert_eq!(error.message, "that gateway process did not answer");
     a.stop();
     b.stop();
+}
+
+#[tokio::test]
+async fn remote_console_fanout_does_not_restart_the_deadline_for_queued_peers() {
+    let coord = Arc::new(omni_coord::MemoryCoord::default());
+    let fleet = Fleet::new(coord, "self".into(), Source::None);
+    let mut nodes = vec!["self".to_string()];
+    nodes.extend((0..33).map(|n| format!("absent-{n}")));
+    let read = tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        fleet.read_all_with_timeout(
+            &nodes,
+            Query::from_query(""),
+            std::time::Duration::from_millis(100),
+        ),
+    )
+    .await
+    .expect("one deadline, not three waves")
+    .expect("self answered");
+    assert_eq!(
+        read["unreachable"].as_array().expect("missing peers").len(),
+        33
+    );
 }

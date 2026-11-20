@@ -412,6 +412,13 @@ Several replicas behind a load balancer are **cluster mode** on Postgres and
 Redis. All of it, with the nginx block and the Kubernetes base, is in
 [docs/deploying.md](docs/deploying.md).
 
+In Rust cluster mode, the database panel reports Postgres size and table stats
+with credentials redacted. Clearing captured bodies leaves request logs intact.
+The snapshot list is empty; use Postgres backup tooling rather than SQLite
+snapshot, import, restore, or vacuum actions. Authenticated `/metrics` exposes
+process-local `omni_request_log_writer_*_total` counters for optional and
+terminal queue drops, persistence failures, and completion delivery loss.
+
 ## Configuration
 
 Configuration is environment variables, read from the installation's `.env`:

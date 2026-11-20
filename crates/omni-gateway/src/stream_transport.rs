@@ -72,6 +72,16 @@ impl Default for Hub {
 }
 
 impl Hub {
+    pub(crate) fn single(node: &str) -> Arc<Self> {
+        let mut hub = Self::default();
+        hub.console_fleet = Some(crate::console::Fleet::new(
+            Arc::new(omni_coord::MemoryCoord::default()),
+            node.into(),
+            hub.console.clone(),
+        ));
+        Arc::new(hub)
+    }
+
     pub(crate) fn with_console_fleet(coord: Arc<dyn omni_coord::Coord>, node: &str) -> Arc<Self> {
         let mut hub = Self::default();
         hub.console_fleet = Some(crate::console::Fleet::new(

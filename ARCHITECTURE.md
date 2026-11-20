@@ -991,9 +991,18 @@ publish row identities (never keys or secrets) on `routing`; the receiving
 worker reads current primary state and patches its snapshot. A 500 ms version
 poll repairs missed publications. Health mutations serialize against the stored
 row, while fleet load is published and read in the background every 100 ms.
-Long-window debit deduplication uses the completing transaction's top-level xid8;
-completion rows drain before the limiter and coordinator stop. See the
+PG inference reserves bounded terminal queue capacity before admission. `Begin`
+and `Route` can shed first; every admitted request can enqueue its `Finish`
+without waiting, including on cancellation. The writer commits log and rollups
+atomically before handing off a debit with that transaction's top-level xid8.
+A failed write still hands off a debit, without an xid. PG retains a batch when
+the commit consumer is full; shutdown drains writer, consumer, limiter, then
+coordinator, in that order. See the
 [offline bucket sweep](docs/rust-cluster-cutover.md) for a lineage change.
+
+Console reads address a process in both Rust modes. `node=all` merges the
+store's live nodes (only the local node in SQLite), tags lines, and shares one
+deadline across remote publication and replies, including queued fanout.
 
 **The store.** `OMNI_CLUSTER_MODE=true` selects `packages/store/src/postgres/` at
 `OMNI_DATABASE_URL`, a second implementation of the same `Store` interface over `Bun.SQL`.

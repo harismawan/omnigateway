@@ -411,11 +411,18 @@ async fn serve_inner(
                     .map(|(_, v)| v);
                 if let Some(node) = node.filter(|n| !n.is_empty() && n != app.node_id.as_str()) {
                     let read = if node == "all" {
-                        let reader = control.reader().await?;
-                        let pg = reader.postgres().ok_or_else(ApiError::internal)?;
-                        let nodes = pg.live_nodes(now).await.map_err(|e| failure(e.into()))?;
-                        let ids: Vec<_> = nodes.into_iter().map(|(id, _)| id).collect();
-                        drop(reader);
+                        let ids = if control.postgres().is_some() {
+                            let reader = control.reader().await?;
+                            let pg = reader.postgres().ok_or_else(ApiError::internal)?;
+                            pg.live_nodes(now)
+                                .await
+                                .map_err(|e| failure(e.into()))?
+                                .into_iter()
+                                .map(|(id, _)| id)
+                                .collect()
+                        } else {
+                            vec![app.node_id.clone()]
+                        };
                         fleet
                             .read_all_with_timeout(&ids, query, std::time::Duration::from_secs(3))
                             .await

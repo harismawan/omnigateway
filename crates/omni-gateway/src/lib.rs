@@ -424,7 +424,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
 
     let (commit_tx, mut commit_rx) = tokio::sync::mpsc::channel(4096);
     let stream = redis.as_ref().map_or_else(
-        || Arc::new(stream_transport::Hub::default()),
+        || stream_transport::Hub::single(&node_id),
         |coord| stream_transport::Hub::with_console_fleet(coord.clone(), &node_id),
     );
     let writer = store

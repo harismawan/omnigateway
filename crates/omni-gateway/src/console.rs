@@ -148,6 +148,16 @@ impl Fleet {
         query: Query,
         timeout: std::time::Duration,
     ) -> Result<Value, omni_ir::error::GatewayError> {
+        self.read_before(node, query, tokio::time::Instant::now() + timeout)
+            .await
+    }
+
+    async fn read_before(
+        &self,
+        node: &str,
+        query: Query,
+        deadline: tokio::time::Instant,
+    ) -> Result<Value, omni_ir::error::GatewayError> {
         if node == self.node {
             let source = self.source.clone();
             return tokio::task::spawn_blocking(move || source.read(&query))
@@ -158,6 +168,9 @@ impl Fleet {
                         "console read failed",
                     )
                 });
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(remote_timeout());
         }
         let id = crate::clock::uuid_v4();
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
@@ -171,17 +184,17 @@ impl Fleet {
         );
         let level = query.level.map(|i| ["debug", "info", "warn", "error"][i]);
         let ask = json!({"id":id,"nodeId":node,"query":{"lines":query.lines,"level":level,"since":query.since}});
-        self.coord.publish("console:read", &ask.to_string()).await;
-        tokio::time::timeout(timeout, rx.recv())
-            .await
-            .ok()
-            .flatten()
-            .ok_or_else(|| {
-                omni_ir::error::GatewayError::new(
-                    omni_ir::error::ErrorCode::Timeout,
-                    "that gateway process did not answer",
-                )
-            })
+        tokio::time::timeout_at(deadline, async {
+            let payload = ask.to_string();
+            tokio::select! {
+                answer = rx.recv() => answer,
+                () = self.coord.publish("console:read", &payload) => rx.recv().await,
+            }
+        })
+        .await
+        .ok()
+        .flatten()
+        .ok_or_else(remote_timeout)
     }
 
     pub async fn read_all_with_timeout(
@@ -191,23 +204,37 @@ impl Fleet {
         timeout: std::time::Duration,
     ) -> Result<Value, omni_ir::error::GatewayError> {
         use futures_util::{StreamExt as _, stream};
+        let deadline = tokio::time::Instant::now() + timeout;
+        // Keep the local read out of the remote fanout queue. A fleet with
+        // many unreachable peers must still return the local answer.
         let requests = nodes
             .iter()
+            .filter(|node| **node != self.node)
             .map(|node| (node.clone(), query.clone()))
             .collect::<Vec<_>>();
-        let reads = stream::iter(requests)
+        let remote = stream::iter(requests)
             .map(|(node, query)| async move {
-                let read = self.read_with_timeout(&node, query, timeout).await;
+                let read = self.read_before(&node, query, deadline).await;
                 (node, read)
             })
             .buffer_unordered(16)
-            .collect::<Vec<_>>()
-            .await;
+            .collect::<Vec<_>>();
+        let local = async {
+            if nodes.contains(&self.node) {
+                Some((
+                    self.node.clone(),
+                    self.read_before(&self.node, query.clone(), deadline).await,
+                ))
+            } else {
+                None
+            }
+        };
+        let (reads, local) = tokio::join!(remote, local);
         let mut lines = Vec::new();
         let mut unreachable = Vec::new();
         let mut answered = 0;
         let mut captured = false;
-        for (node, read) in reads {
+        for (node, read) in reads.into_iter().chain(local) {
             match read {
                 Err(_) => unreachable.push(node),
                 Ok(read) => {
@@ -239,9 +266,11 @@ impl Fleet {
             lines.drain(..lines.len() - query.lines);
         }
         unreachable.sort();
-        Ok(
-            json!({"source":if captured { "fleet" } else { "none" },"lines":lines,"unreachable":unreachable}),
-        )
+        let mut result = json!({"source":if captured { "fleet" } else { "none" },"lines":lines});
+        if !unreachable.is_empty() {
+            result["unreachable"] = json!(unreachable);
+        }
+        Ok(result)
     }
 
     pub fn stop(&self) {
@@ -251,6 +280,13 @@ impl Fleet {
             .take();
         self.worker.abort();
     }
+}
+
+fn remote_timeout() -> omni_ir::error::GatewayError {
+    omni_ir::error::GatewayError::new(
+        omni_ir::error::ErrorCode::Timeout,
+        "that gateway process did not answer",
+    )
 }
 impl Drop for Fleet {
     fn drop(&mut self) {

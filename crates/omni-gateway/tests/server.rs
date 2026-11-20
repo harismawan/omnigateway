@@ -319,7 +319,7 @@ async fn cluster_listener_uses_postgres_without_opening_a_sqlite_shadow() {
     assert_eq!(health["coord"], "ok");
     assert!(!path.exists(), "cluster created a SQLite shadow");
     let store = omni_store::Store::open(
-        omni_store::StoreConfig::Postgres(omni_store::pg::PgConfig::new(pg)),
+        omni_store::StoreConfig::Postgres(omni_store::pg::PgConfig::new(&pg)),
         0,
     )
     .await
@@ -370,6 +370,79 @@ async fn cluster_listener_uses_postgres_without_opening_a_sqlite_shadow() {
         token_of(&set_cookie(&headers).expect("login cookie"))
     );
     let auth = [("cookie", cookie.as_str())];
+    let (status, _, body) = call(&peer_base, "GET", "/api/database", &auth, "").await;
+    assert_eq!(status, 200, "PG database overview: {body}");
+    let overview: serde_json::Value = serde_json::from_str(&body).expect("overview");
+    assert_eq!(overview["engine"], "postgres");
+    assert_eq!(overview["location"], omni_store::pg::redacted(&pg));
+    assert!(
+        overview["stats"]["pageCount"]
+            .as_i64()
+            .is_some_and(|n| n > 0)
+    );
+    assert_eq!(overview["freeDiskBytes"], serde_json::Value::Null);
+    assert_eq!(overview["fileBytes"], 0);
+    assert_eq!(overview["walBytes"], 0);
+    let tables = overview["tables"].as_array().expect("tables");
+    assert_eq!(
+        overview["bodiesBytes"],
+        tables
+            .iter()
+            .find(|t| t["name"] == "request_bodies")
+            .expect("bodies table")["bytes"]
+    );
+    let omni_store::Store::Postgres(primary) = store.as_ref() else {
+        panic!("PG fixture")
+    };
+    let row = omni_store::writer::RequestLog::new("d4-database-bodies", 1, 200);
+    let writer = omni_store::writer::Writer::spawn_postgres(primary.clone(), Default::default())
+        .expect("writer");
+    let writes = writer.handle();
+    let [slot] = writes.reserve_finishes::<1>().await;
+    assert!(writes.finish(slot, row));
+    writer.close().await.expect("seed log");
+    primary
+        .put_body(
+            &omni_crypto::field::derive_key(ENC),
+            "d4-database-bodies",
+            1,
+            "{}",
+            false,
+        )
+        .await
+        .expect("seed body");
+    for (method, path, payload) in [
+        ("GET", "/api/database/snapshots", ""),
+        ("DELETE", "/api/database/bodies", ""),
+        (
+            "PUT",
+            "/api/database/retention",
+            r#"{"keepLatest":5,"maxAgeDays":42}"#,
+        ),
+    ] {
+        let (status, _, body) = call(&peer_base, method, path, &auth, payload).await;
+        let expected = match method {
+            "GET" => serde_json::json!({"snapshots":[]}),
+            "DELETE" => serde_json::json!({"ok":true,"removed":1,"orphans":0}),
+            _ => serde_json::json!({"keepLatest":5.0,"maxAgeDays":42.0}),
+        };
+        assert_eq!(status, 200, "{method} {path}: {body}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).expect("JSON"),
+            expected
+        );
+    }
+    let c = primary.client().await.expect("PG fixture connection");
+    let row = c.query_one("SELECT EXISTS (SELECT 1 FROM request_logs WHERE id = 'd4-database-bodies'), EXISTS (SELECT 1 FROM request_bodies WHERE request_id = 'd4-database-bodies')", &[]).await.expect("body and log");
+    assert_eq!(
+        (row.get::<_, bool>(0), row.get::<_, bool>(1)),
+        (true, false)
+    );
+    drop(c);
+    let (_, _, body) = call(&base, "GET", "/api/database", &auth, "").await;
+    let retention = serde_json::from_str::<serde_json::Value>(&body).expect("overview");
+    assert_eq!(retention["retention"]["keepLatest"].as_f64(), Some(5.0));
+    assert_eq!(retention["retention"]["maxAgeDays"].as_f64(), Some(42.0));
     let (status, _, response) = call(
         &base,
         "POST",
@@ -1144,9 +1217,9 @@ async fn cluster_listener_uses_postgres_without_opening_a_sqlite_shadow() {
     assert_eq!(status, 200, "{response}");
     let console: serde_json::Value = serde_json::from_str(&response).expect("console response");
     assert!(
-        console["unreachable"]
+        console.get("unreachable").is_none_or(|v| v
             .as_array()
-            .is_some_and(|ids| !ids.contains(&health["nodeId"])),
+            .is_some_and(|ids| !ids.contains(&health["nodeId"]))),
         "{response}"
     );
     let node = health["nodeId"].as_str().expect("node id");
@@ -2709,7 +2782,8 @@ async fn metrics_route_is_token_gated_and_records_completions() {
         "text/plain; version=0.0.4; charset=utf-8".into()
     )));
     assert!(
-        body.ends_with("omni_build_info{version=\"1.2.3\"} 1\n"),
+        body.lines()
+            .any(|line| line == "omni_build_info{version=\"1.2.3\"} 1"),
         "{body}"
     );
     assert!(!body.contains("omni_requests_total"));
@@ -2743,6 +2817,17 @@ async fn metrics_route_is_token_gated_and_records_completions() {
     );
     assert!(body.contains("omni_upstream_duration_seconds_count{provider=\"custom\"} 1\n"));
     assert!(body.contains("omni_ttft_seconds_count{provider=\"custom\",model=\"mock-c1-d0\"} 1\n"));
+    for name in [
+        "terminal_dropped",
+        "optional_dropped",
+        "failed_batches",
+        "sink_dropped",
+    ] {
+        assert!(
+            body.contains(&format!("omni_request_log_writer_{name}_total 0\n")),
+            "{body}"
+        );
+    }
     // `localCounts()` is empty once the slot is released, and no scrape set
     // the gauge while it was held: TS registers no `omni_inflight` series.
     assert!(!body.contains("omni_inflight"), "{body}");
@@ -2936,6 +3021,66 @@ fn token_of(cookie: &str) -> String {
         .and_then(|r| r.split(';').next())
         .expect("token")
         .to_owned()
+}
+
+#[tokio::test]
+async fn sqlite_console_selectors_merge_self_and_never_fall_back_for_other_node() {
+    let g = boot().await;
+    let (status, headers, body) = call(
+        &g.base,
+        "POST",
+        "/api/setup",
+        &[],
+        r#"{"password":"correct-horse-battery"}"#,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let cookie = format!(
+        "omni_admin={}",
+        token_of(&set_cookie(&headers).expect("cookie"))
+    );
+    let auth = [("cookie", cookie.as_str())];
+    let (_, _, body) = call(&g.base, "GET", "/health", &[], "").await;
+    let health: serde_json::Value = serde_json::from_str(&body).expect("health");
+    let node = health["nodeId"].as_str().expect("node id");
+    let (status, _, local) = call(&g.base, "GET", "/api/console", &auth, "").await;
+    assert_eq!(status, 200, "{local}");
+    for path in [
+        "/api/console?node=".to_string(),
+        format!("/api/console?node={node}"),
+    ] {
+        let (status, _, body) = call(&g.base, "GET", &path, &auth, "").await;
+        assert_eq!((status, body.as_str()), (200, local.as_str()));
+    }
+    let (status, _, body) = call(
+        &g.base,
+        "GET",
+        "/api/console?node=missing-d4-node",
+        &auth,
+        "",
+    )
+    .await;
+    assert_eq!(status, 504, "must not return local data: {body}");
+    let (status, _, body) = call(&g.base, "GET", "/api/console?node=all", &auth, "").await;
+    assert_eq!(status, 200, "{body}");
+    let all: serde_json::Value = serde_json::from_str(&body).expect("fleet");
+    assert!(all.get("unreachable").is_none(), "{all}");
+    let local: serde_json::Value = serde_json::from_str(&local).expect("local");
+    assert_eq!(
+        all["source"],
+        if local["source"] == "none" {
+            "none"
+        } else {
+            "fleet"
+        }
+    );
+    assert!(
+        all["lines"]
+            .as_array()
+            .expect("lines")
+            .iter()
+            .all(|l| l["nodeId"] == node)
+    );
 }
 
 #[tokio::test]

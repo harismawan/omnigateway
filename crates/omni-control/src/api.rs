@@ -883,7 +883,16 @@ pub async fn settings_postgres(pg: &omni_store::pg::PgStore) -> Result<JsValue> 
 
 pub async fn put_settings_postgres(pg: &omni_store::pg::PgStore, body: &JsValue) -> Result<()> {
     let patch = crate::settings::parse_patch(body).map_err(Failure::from_control)?;
-    let settings = crate::settings_value::merge(settings_postgres(pg).await?, &patch, body);
+    merge_settings_postgres(pg, &patch, body).await
+}
+
+/// Internal settings patch from a control operation that validated its own schema.
+pub async fn merge_settings_postgres(
+    pg: &omni_store::pg::PgStore,
+    patch: &serde_json::Value,
+    original: &JsValue,
+) -> Result<()> {
+    let settings = crate::settings_value::merge(settings_postgres(pg).await?, patch, original);
     pg.write_operator_settings_raw(&stringify(&settings).expect("settings"))
         .await?;
     Ok(())
