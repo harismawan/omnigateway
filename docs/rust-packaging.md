@@ -12,7 +12,9 @@ healthcheck, with `omni` also available on PATH.
 The accepted benchmark policy is `MIMALLOC_PURGE_DELAY=1`, set **before** process
 startup. Docker sets this default; Kubernetes inherits it from the image.
 Operators may override it explicitly. For a checkout, use
-`scripts/run-rust-gateway.sh`. For an installed binary's systemd unit, include:
+`MIMALLOC_PURGE_DELAY=1 scripts/run-rust-gateway.sh` to select that policy
+explicitly while the checkout launcher tests immediate purge. For an installed
+binary's systemd unit, include:
 
 ```ini
 [Service]
