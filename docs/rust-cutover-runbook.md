@@ -1,6 +1,6 @@
 # TypeScript → Rust cutover runbook
 
-**Status: preparation, not authorization to deploy.** Source baseline: `48b9356a`.
+**Status: preparation, not authorization to deploy.** Migration baseline: `0b89f34b`.
 This is the operator procedure for the approved first Rust release, not evidence
 that its release gates have passed. Do not execute a production cutover until
 the release owner signs off the gates below against the exact release artifact.
@@ -16,10 +16,10 @@ service scope and backup location in the change record. Keep secrets out of it.
 | Established source contract | Still required before cutover |
 | --- | --- |
 | Release archive layout and Linux CLI/service boundary exist. | Actual tagged assets/checksums and target-platform validation; native Darwin supervision is not established by Linux results. |
-| D1/D2/D3 store, coordination and limiter libraries were reviewed. | D4 actual gateway Postgres/Redis integration, live-PG supported flows, fleet fanout, shared health, writer/seed/drain evidence and cluster benchmarks. Library review is not fleet proof. |
+| D4 (`7c2d7adc`) integrated Postgres and Redis in the gateway and verified live PG17/Valkey8, TLS, fleet fanout, shared health and writer/seed/drain. | Confirm the release artifact and the installation's transport, topology and recovery plan. Do not downgrade TLS. |
 | Migration design requires in-place upgrade with no Rust-only migrations in the first release. | SQLite **and** Postgres TS→Rust and Rust→TS cross-reads on the candidate, including credentials, passwords and bodies; production-copy rehearsals in both shapes. |
-| Full conformance and the design's performance targets are release gates. | Full conformance, X1 lossless text/usage carriers, X2 credential-expiry carriers, and the outstanding A9 native-platform/poll-latency disposition. No blanket parity claim follows from ordinary smoke tests. |
-| Cluster config parses PG and Redis URLs. | D4 backend wiring and deployment transport approval. At this baseline the gateway still boots SQLite/local dependencies; accepting cluster config is **not** cluster support. PG NoTls / Redis plain TCP do not prove TLS support. |
+| X1 (`35409ef6`) and X2 (`aeccaf84`) closed the parked stream/usage and credential-expiry carrier gaps. A9 was accepted with Linux-only evidence. | Record full F3 conformance against the frozen oracles, plus the controller's admin-route differential. Native macOS console behavior and polling latency remain unvalidated. |
+| P1 measured single-node and two-replica release performance against unchanged targets. | Record the measured limitations below and the P2 disposition; P1 is not an all-target pass. |
 
 The release owner must attach the completed gate evidence or an explicit,
 documented scope decision; this runbook does not waive a gate. In particular,
@@ -42,7 +42,7 @@ completion→limiter→coordinator drain ordering, consistent `fleet_max_keys`, 
 dense-window/concurrent-refresh performance evidence. These are release-owner
 checks, not manual Redis repairs an operator should improvise.
 
-## 2. Confirm that this release serves this installation
+## 2. Confirm scope and limitations
 
 - Executable providers in scope: **Anthropic, OpenAI/Codex, Antigravity and
   custom endpoints**. Grok, Kimi, Kilo, Muse and Qoder are deferred. Their stored
@@ -57,9 +57,68 @@ checks, not manual Redis repairs an operator should improvise.
   proving their compatibility.
 - Ponytail was dropped from the migration scope. RTK remains in scope. Resolve
   an installation's dependency on the dropped feature before the window.
+- The CLI administers local SQLite only. Use authenticated admin HTTP and the
+  database's own tooling for a Postgres fleet.
 - Rust ships as release binaries and the container image, **not a Bun/npm
   runtime upgrade**. The final TS npm package stays published. Windows is not a
   Rust release target; Linux and macOS targets are listed below.
+
+### Measured performance and overload behavior
+
+Source: P1 FINAL, retained at `/tmp/opencode/p1/report.md` (`12275c33`, merged
+as `0b89f34b`). The full Linux run used 20 s of load, 3 s of warmup where
+applicable and 1,000 held streams. No crashes were observed. Cluster throughput
+is the **sum across two replicas**, not per replica. Cluster idle, held-stream
+and boot budgets apply per replica; the early-cancel recovery budget applies to
+the fleet. Targets did not change.
+
+| Check (unchanged target) | SQLite single | Postgres/Valkey ×2 |
+| --- | ---: | ---: |
+| Chat throughput (≥10,000 / ≥8,000 req/s fleet) | 51,315 req/s | 29,866 req/s fleet |
+| Chat p99 (≤10 / ≤15 ms) | 3.665 ms | 4.675 ms (request-weighted blend) |
+| Overhead-c1 p50/p99 (≤0.30/1 ms) | 0.087/0.239 ms | — |
+| Many-chunks CPU (≤1.50 ms/req) | 1.347 ms/req | — |
+| Backing CPU (≤0.10 ms/req), Anthropic JSON p99 (≤20 ms) | — | 0.02808 ms/req; 4.650 ms |
+| `omni keys list` p50 (≤15 ms) | 1.685 ms | — |
+| Idle RSS (≤20 MiB per process) | 15.77 MiB | 14.09/13.11 MiB |
+| Client-cancel RSS by 10 s (≤+20 MiB) | −13.60 MiB | −0.97 MiB fleet |
+| Boot-to-health p50 (≤30 ms) | **31.5 ms, accepted miss** | **42.5 ms, accepted miss** (one externally timed replica; both missed) |
+| Held-stream peak (≤80 MiB per process) | **92.95 MiB, miss** | **133.90/132.71 MiB, miss** |
+| Early-cancel RSS by 10 s (≤+20 MiB) | +10.71 MiB at 5 s; exact harness verdict inconclusive (10 s sample 0.142 ms early) | **+53.05 MiB fleet, miss** (+29.29/+23.76 MiB estimated per PID) |
+
+- **Boot (P1, Nov 20 ruling):** the 210,000-round KDF is a storage contract
+  (~21.5 ms on single-node); it was not weakened to meet the target.
+- **Memory — P2 disposition pending:** retain the P1 held-stream and early-cancel
+  verdicts above until the P2 memory investigation supplies replacement evidence
+  or the release owner explicitly accepts the remaining misses. Elevated RSS
+  after load is not by itself proof of a leak.
+- **Postgres drain overload (P1, Nov 20 ruling):** Rust may shed optional
+  Begin/Route events rather than wait as TS does. Interim pending/route visibility
+  and the corresponding live invalidations may be absent; Finish accounting,
+  completed usage rows, rollups and limiter debits are not shed by this policy.
+  Alert on authenticated `/metrics` `omni_request_log_writer_optional_dropped_total`
+  alongside `omni_request_log_writer_queued` and `omni_request_log_writer_credits_in_use`.
+  P1 counted 2,546,918 optional drops, zero terminal drops or stranded pending
+  rows, and reconciled 3,825,762 completed cluster rows and 519,578 Valkey debits.
+- **Bounded PG reservation (D4/P1):** inference can return HTTP 503 before
+  admission if the wait queue is full, the wait expires (up to 4 seconds), or
+  the writer is closed. A primary revalidation read can also fail after waiting. Monitor
+  `omni_request_log_writer_reservation_refused_total` by `cap`, `deadline`,
+  `closed` and `revalidation`; investigate the cause rather than counting them
+  as optional events. P1 observed 11,456 HTTP 503s, all in the early-cancel
+  workload; the harness did not identify the cause of each 503.
+
+### Compatibility limits from the migration ledger
+
+| Source | Limit and operator implication |
+| --- | --- |
+| A9 (`67f4872d`, Nov 20 ruling) | Linux console only was verified. Native macOS `/api/stream`/console behavior and polling latency are unvalidated; do not infer them from Linux, or infer native Darwin supervision from E4. |
+| A8 (`a8-report.md`) | Client login has no built-in attempt limiter, as in frozen TS. Apply an appropriate external login rate limit if exposing it. |
+| A15 (`a15-review5.md`) | PKCE poll attempts the exchange with an empty code; racing poll and finish can redeem twice. Pending flows are process-local (600,000 ms TTL) and lost on restart. Finish the flow rather than treating poll as a device-code protocol. |
+| B4 (`b4-integration-rereview.md`) | Antigravity can connect with an empty project but refuses inference until reconnected with a valid project. |
+| A3 (`a3-review2.md`) | SQLite body artifacts are written directly before the database row. Failed SQL or replacement on a different day can leave orphan files until sweeping; back up both artifact tree and database. |
+| A14 (`a14-review3.md`) and A9 framing ruling | Idle timeout classes match, not exact timer ticks (10 s initial headers, 255 s ordinary idle). Transport counts raw framing bytes while the body reader counts decoded bytes near the 4,177,920-byte rearm threshold. Empty/close response framing and HEAD export headers can differ without changing the payload. |
+| A12 (`a12-review4.md`) backlog | In stored scoring settings a literal `±1e400` can cause Rust to reset the whole settings object where TS defaults the field. Extreme finite target prices (e.g. `1e308`/`-1e308`) can produce NaN cost and fail Rust usage persistence; frozen behavior was not established for that case. Avoid these values and investigate persistence errors. |
 
 ## 3. Stage the release and preserve the old installation
 
@@ -165,7 +224,7 @@ encrypted accounts and key hashes; treat it and body archives as sensitive.
    `/health` alone does not accept the cutover. If diagnostics report the wrong
    root/binary, unreadable accounts or an unexpected migration, **stop**.
 
-## 5. Postgres + Redis fleet maintenance window (after D4 approval)
+## 5. Postgres + Redis fleet maintenance window
 
 1. Arrange the first Rust image promotion **manually**. In that same reviewed
    promotion PR set deployment strategy to **Recreate**, not RollingUpdate or a
@@ -299,7 +358,7 @@ up during incident recovery.
 - [Rust CLI/service boundary](rust-cli-service.md), backed by
   `crates/omni-cli/src/{context,service,doctor}.rs`.
 - `.github/workflows/release.yml` (archive/public/symlink/checksums),
-  `crates/omni-gateway/src/lib.rs` (static directory and baseline boot),
+  `crates/omni-gateway/src/lib.rs` (static directory and boot),
   `crates/omni-control/src/config.rs` (cluster environment).
 - [Operations](operations.md#snapshots-and-restore) and its body-format rollback
   constraint; `crates/omni-cluster-limit/src/scripts.rs` (bucket companions).

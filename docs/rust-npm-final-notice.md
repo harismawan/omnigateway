@@ -36,6 +36,7 @@ endpoints. Grok, Kimi, Kilo, Muse and Qoder are deferred; retained accounts are 
 served by Rust. Plugins are unsupported, although their stored data remains.
 The plugin API and dashboard SDK packages remain published but frozen; that is
 not Rust plugin compatibility. Ponytail is not carried into this release scope.
+CLI administration is local SQLite only; use the admin HTTP surface for a fleet.
 If your installation depends on those features or deferred providers, postpone
 migration rather than assuming silent fallback.
 
@@ -44,7 +45,8 @@ an installation. It covers root/environment selection, backups, body preservatio
 SQLite versus Postgres/Redis, service replacement, health/admin checks and
 compatible rollback versions. Do not infer readiness, full data cross-read
 compatibility or performance from this notice; use the approved Rust release's
-recorded acceptance evidence.
+recorded acceptance evidence. The runbook lists the Linux-only console validation,
+measured boot and memory limits, and the Postgres overload behavior.
 
 ## Proposed short postinstall notice (text only)
 
