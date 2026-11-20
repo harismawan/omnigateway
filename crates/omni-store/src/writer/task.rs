@@ -178,6 +178,8 @@ pub struct WriterStats {
 
 #[derive(Debug)]
 struct Counters {
+    #[cfg(feature = "pg-queue-probe")]
+    queue_probe: Option<std::sync::Mutex<super::queue_probe::Probe>>,
     callbacks: std::sync::Mutex<tokio::task::JoinSet<()>>,
     /// Barrier accounting, lock-free on the producer side (see `epoch.rs`).
     epochs: Epochs,
@@ -205,6 +207,8 @@ struct Counters {
 impl Counters {
     fn new() -> Self {
         Self {
+            #[cfg(feature = "pg-queue-probe")]
+            queue_probe: None,
             callbacks: std::sync::Mutex::new(tokio::task::JoinSet::new()),
             epochs: Epochs::default(),
             resolved: std::sync::Mutex::new(Resolved::default()),
@@ -223,6 +227,13 @@ impl Counters {
             sink_dropped: AtomicU64::new(0),
             seeds_dropped: AtomicU64::new(0),
         }
+    }
+
+    #[cfg(feature = "pg-queue-probe")]
+    fn queue_probe(&self) -> Option<std::sync::MutexGuard<'_, super::queue_probe::Probe>> {
+        self.queue_probe
+            .as_ref()
+            .map(|p| p.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
     }
 
     fn snapshot(&self) -> WriterStats {
@@ -460,6 +471,58 @@ impl<const N: usize> FinishReservation<N> {
 pub const FINISH_WAIT: Duration = Duration::from_secs(4);
 
 impl WriterHandle {
+    #[inline]
+    fn try_enqueue(&self, q: Queued) -> Result<(), BarrierError> {
+        #[cfg(feature = "pg-queue-probe")]
+        if let Some(mut probe) = self.counters.queue_probe() {
+            use super::events::LogEvent;
+            let event = match &q.item {
+                Item::Event(WriteEvent::Log(l)) => Some((
+                    l.id().to_owned(),
+                    matches!(l, LogEvent::Finish(_)),
+                    q.epoch.expect("log epoch"),
+                )),
+                _ => None,
+            };
+            let boundary = matches!(
+                q.item,
+                Item::Barrier(_) | Item::Fence(_) | Item::Event(WriteEvent::Seed(_))
+            );
+            let result = self.try_enqueue_raw(q);
+            match event {
+                Some((id, true, epoch)) if result.is_ok() => probe.finish(&id, epoch),
+                Some((id, false, epoch)) => probe.optional(id, epoch, result.is_ok()),
+                _ if boundary && result.is_ok() => probe.boundary(),
+                _ => {}
+            }
+            return result;
+        }
+        self.try_enqueue_raw(q)
+    }
+
+    #[inline]
+    fn try_enqueue_raw(&self, q: Queued) -> Result<(), BarrierError> {
+        self.tx.try_send(q).map_err(|e| match e {
+            mpsc::error::TrySendError::Full(_) => BarrierError::Full,
+            mpsc::error::TrySendError::Closed(_) => BarrierError::Closed,
+        })
+    }
+
+    #[cfg(feature = "pg-queue-probe")]
+    fn probe_shed(&self, event: &WriteEvent, epoch: u64) {
+        use super::events::LogEvent;
+        if let WriteEvent::Log(log @ (LogEvent::Begin(_) | LogEvent::Route { .. })) = event
+            && let Some(mut probe) = self.counters.queue_probe()
+        {
+            probe.optional(log.id().to_owned(), epoch, false);
+        }
+    }
+
+    #[cfg(feature = "pg-queue-probe")]
+    pub fn queue_probe_stats(&self) -> Option<super::QueueProbeStats> {
+        self.counters.queue_probe().map(|probe| probe.totals())
+    }
+
     /// Reserve the entire request's terminal row set atomically, before
     /// taking admission. Dropping a pending reservation or unused slots
     /// returns the credits. SQLite needs no reservation.
@@ -522,8 +585,7 @@ impl WriterHandle {
         let c = &self.counters;
         let entered = c.epochs.enter();
         let ok = self
-            .tx
-            .try_send(Queued {
+            .try_enqueue(Queued {
                 at: Instant::now(),
                 item: Item::Event(super::events::LogEvent::Finish(log).into()),
                 epoch: Some(entered.0),
@@ -571,6 +633,18 @@ impl WriterHandle {
             epoch: None,
             _credit: credit,
         };
+        #[cfg(feature = "pg-queue-probe")]
+        if self.counters.queue_probe.is_some() {
+            if let Ok(permit) = self.tx.reserve().await {
+                {
+                    let mut probe = self.counters.queue_probe().expect("PG probe");
+                    permit.send(queued);
+                    probe.boundary();
+                }
+                fence.0.notified().await;
+            }
+            return;
+        }
         if self.tx.send(queued).await.is_ok() {
             fence.0.notified().await;
         }
@@ -599,14 +673,13 @@ impl WriterHandle {
         let credit = self.try_credit(optional);
         if matches!(event, WriteEvent::Seed(_)) {
             let ok = credit.is_ok_and(|credit| {
-                self.tx
-                    .try_send(Queued {
-                        at: Instant::now(),
-                        item: Item::Event(event),
-                        epoch: None,
-                        _credit: credit,
-                    })
-                    .is_ok()
+                self.try_enqueue(Queued {
+                    at: Instant::now(),
+                    item: Item::Event(event),
+                    epoch: None,
+                    _credit: credit,
+                })
+                .is_ok()
             });
             if !ok {
                 c.seeds_refused.fetch_add(1, Ordering::Relaxed);
@@ -614,15 +687,18 @@ impl WriterHandle {
             return ok;
         }
         let entered: Entered = c.epochs.enter();
+        #[cfg(feature = "pg-queue-probe")]
+        if credit.is_err() && optional {
+            self.probe_shed(&event, entered.0);
+        }
         let ok = credit.is_ok_and(|credit| {
-            self.tx
-                .try_send(Queued {
-                    at: Instant::now(),
-                    item: Item::Event(event),
-                    epoch: Some(entered.0),
-                    _credit: credit,
-                })
-                .is_ok()
+            self.try_enqueue(Queued {
+                at: Instant::now(),
+                item: Item::Event(event),
+                epoch: Some(entered.0),
+                _credit: credit,
+            })
+            .is_ok()
         });
         if ok {
             c.enqueued.fetch_add(1, Ordering::Relaxed);
@@ -716,12 +792,8 @@ impl WriterHandle {
             epoch: None,
             _credit: self.try_credit(false)?,
         };
-        match self.tx.try_send(queued) {
-            Ok(()) => {}
-            // The guard goes with the refused item, freeing the slot.
-            Err(mpsc::error::TrySendError::Full(_)) => return Err(BarrierError::Full),
-            Err(mpsc::error::TrySendError::Closed(_)) => return Err(BarrierError::Closed),
-        }
+        // The guard goes with a refused item, freeing the slot.
+        self.try_enqueue(queued)?;
         let result = rx.await.map_err(|_| BarrierError::Closed);
         if std::env::var_os("OMNI_WRITER_PHASES").is_some() {
             eprintln!(
@@ -878,7 +950,15 @@ impl Writer {
         let capacity = config.capacity.max(3);
         let (tx, rx) = mpsc::channel(capacity);
         let (shutdown, stop) = oneshot::channel();
-        let counters = Arc::new(Counters::new());
+        let counters = Counters::new();
+        #[cfg(feature = "pg-queue-probe")]
+        let counters = Counters {
+            queue_probe: Some(std::sync::Mutex::new(super::queue_probe::Probe::new(
+                capacity,
+            ))),
+            ..counters
+        };
+        let counters = Arc::new(counters);
         let terminal = Arc::new(tokio::sync::Semaphore::new(capacity));
         // One waiting HTTP request per default-sized writer batch of credits
         // (32 by default). Waiters hold connections, not just queue entries.
@@ -1376,6 +1456,49 @@ fn take(q: Queued, batch: &mut Vec<Tagged>, barriers: &mut Vec<Pending>) {
     }
 }
 
+// Record removal in the same critical section as the channel pop. Doing this
+// later in `take` would incorrectly count an intervening producer's Finish.
+#[cfg(feature = "pg-queue-probe")]
+fn probe_dequeue(probe: &mut super::queue_probe::Probe, q: &Queued) {
+    use super::events::LogEvent;
+    if let Item::Event(WriteEvent::Log(log @ (LogEvent::Begin(_) | LogEvent::Route { .. }))) =
+        &q.item
+    {
+        probe.dequeue_optional(log.id());
+    }
+}
+
+#[inline]
+async fn recv(rx: &mut mpsc::Receiver<Queued>, _counters: &Counters) -> Option<Queued> {
+    #[cfg(feature = "pg-queue-probe")]
+    if _counters.queue_probe.is_some() {
+        return std::future::poll_fn(|cx| {
+            let mut probe = _counters.queue_probe().expect("PG probe");
+            let polled = rx.poll_recv(cx);
+            if let std::task::Poll::Ready(Some(q)) = &polled {
+                probe_dequeue(&mut probe, q);
+            }
+            polled
+        })
+        .await;
+    }
+    rx.recv().await
+}
+
+#[inline]
+fn try_recv(
+    rx: &mut mpsc::Receiver<Queued>,
+    _counters: &Counters,
+) -> Result<Queued, mpsc::error::TryRecvError> {
+    #[cfg(feature = "pg-queue-probe")]
+    if let Some(mut probe) = _counters.queue_probe() {
+        let q = rx.try_recv()?;
+        probe_dequeue(&mut probe, &q);
+        return Ok(q);
+    }
+    rx.try_recv()
+}
+
 /// An event and its barrier epoch (`None` for a seed).
 type Tagged = (WriteEvent, Option<u64>);
 
@@ -1554,7 +1677,7 @@ async fn run(
         let first = tokio::select! {
             biased;
             _ = &mut stop => break 'running,
-            e = rx.recv() => match e {
+            e = recv(&mut rx, &counters) => match e {
                 Some(e) => e,
                 None => break 'running,
             },
@@ -1578,7 +1701,7 @@ async fn run(
             && barriers.is_empty()
             && !matches!(batch.last(), Some((WriteEvent::Seed(_), _)))
         {
-            if let Ok(e) = rx.try_recv() {
+            if let Ok(e) = try_recv(&mut rx, &counters) {
                 take(e, &mut batch, &mut barriers);
                 continue;
             }
@@ -1586,7 +1709,7 @@ async fn run(
                 biased;
                 _ = &mut stop => { stopping = true; break; }
                 () = sleep_until(deadline) => break,
-                e = rx.recv() => match e {
+                e = recv(&mut rx, &counters) => match e {
                     Some(e) => take(e, &mut batch, &mut barriers),
                     None => break,
                 },
@@ -1611,7 +1734,7 @@ async fn run(
         let mut barriers = Vec::new();
         let mut ended = false;
         while batch.len() < max_batch && barriers.is_empty() {
-            match rx.recv().await {
+            match recv(&mut rx, &counters).await {
                 Some(e) => take(e, &mut batch, &mut barriers),
                 None => {
                     ended = true;
