@@ -419,6 +419,21 @@ snapshot, import, restore, or vacuum actions. Authenticated `/metrics` exposes
 process-local `omni_request_log_writer_*_total` counters for optional and
 terminal queue drops, persistence failures, and completion delivery loss.
 Unlike the TypeScript gateway, Rust cluster inference returns HTTP 503 before admission if the request-log writer is closed or its bounded wait queue is full or expires (4 seconds).
+On the authenticated Rust `/metrics` endpoint, `omni_request_log_writer_reservation_refused_total`
+counts these refusals by `reason` (`closed`, `cap`, `deadline`). `revalidation` separately counts
+503s caused by a failed primary key or settings read after waiting. The response does not expose the cause.
+The cluster-only `omni_request_log_writer_queued` and `omni_request_log_writer_credits_in_use`
+gauges distinguish queued entries from the total budget in use, which also includes reservations.
+The gauges are sampled independently and exclude batches already dequeued for persistence.
+
+When incoming log events outpace the Postgres writer and half or less of its
+queue credit is free, Rust cluster mode may skip `Begin` and `Route` log events
+instead of waiting as the TypeScript gateway does. Authenticated `/metrics`
+reports these skips in `omni_request_log_writer_optional_dropped_total`;
+`omni_request_log_writer_terminal_dropped_total` tracks terminal queue loss
+separately. This policy never sheds `Finish` events and does not change completed
+rows, usage rollups, or rate-limit debits. The console may miss a request's
+in-flight row or a routing update under overload.
 
 ## Configuration
 

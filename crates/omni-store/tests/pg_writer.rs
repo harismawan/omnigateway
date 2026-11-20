@@ -25,6 +25,62 @@ const TABLES: [&str; 4] = [
 /// 2026-11-06T23:30:00Z, half an hour before midnight UTC.
 const T0: i64 = 1_794_007_800_000;
 
+#[cfg(feature = "pg-queue-probe")]
+#[tokio::test]
+async fn pg_queue_probe_distinguishes_queued_dequeued_and_shed_optional_events() {
+    let Some(base) = base_url("pg_queue_probe_distinguishes_optional_events") else {
+        return;
+    };
+    let db = TestDb::create(&base, "queue_probe").await;
+    let store = prepare(&db, 0).await;
+    let mut c = db.client().await;
+    let locked = c.transaction().await.expect("lock transaction");
+    locked
+        .batch_execute("LOCK TABLE request_logs IN ACCESS EXCLUSIVE MODE")
+        .await
+        .expect("stall writer");
+    let pid = locked
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await
+        .expect("lock holder PID")
+        .get(0);
+    let writer = Writer::spawn_postgres(
+        store,
+        WriterConfig {
+            capacity: 8,
+            ..config(0, 1)
+        },
+    )
+    .expect("writer");
+    let h = writer.handle();
+    assert!(h.send(pending("already-dequeued", T0, Some("key-1"), "m")));
+    // A Begin batch reads and locks first; only Finish-only batches can
+    // reach the insert before taking this table's read lock.
+    wait_for_blocked(&db, pid, "SELECT id, state, node_id, at").await;
+    assert!(h.send(pending("still-queued", T0, Some("key-1"), "m")));
+    assert!(h.send(route("still-queued", "openai", "m", "cred-1")));
+    let [first, second] = h
+        .reserve_finishes::<2>()
+        .await
+        .expect("finish credits")
+        .into_slots();
+    assert!(!h.send(route("still-queued", "openai", "m", "cred-1")));
+    assert!(!h.send(pending("no-finish", T0, Some("key-1"), "m")));
+    assert!(h.finish(first, done("already-dequeued", T0, Some("key-1"), "m", 1)));
+    assert!(h.finish(second, done("still-queued", T0, Some("key-1"), "m", 1)));
+    locked.commit().await.expect("unblock writer");
+    let totals = writer.close().await.expect("drain writer");
+    let stats = h.queue_probe_stats().expect("PG probe enabled");
+    assert_eq!(totals.optional_dropped, 2);
+    assert_eq!(stats.finishes, 2);
+    assert_eq!(stats.finishes_with_queued_optional, 1);
+    assert_eq!(stats.queued_optional, 2);
+    assert_eq!(stats.same_epoch_queued_optional, 2);
+    assert_eq!(stats.shed_optional_with_finish, 1);
+    assert_eq!(stats.shed_optional_unmatched, 1);
+    assert_eq!(stats.shed_tracking_overflow, 0);
+}
+
 #[tokio::test]
 async fn healthy_postgres_retains_finish_when_optional_queue_is_full() {
     let Some(base) = base_url("healthy_postgres_retains_finish_when_optional_queue_is_full") else {

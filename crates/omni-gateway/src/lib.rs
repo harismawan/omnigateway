@@ -849,6 +849,20 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
             if bench_accounting {
                 use std::sync::atomic::Ordering::Relaxed;
                 let writer = writer_handle.stats();
+                #[cfg(feature = "pg-queue-probe")]
+                if let Some(s) = writer_handle.queue_probe_stats() {
+                    tracing::warn!(
+                        "benchmark PG queue overlap after drain finishes={} finishesWithQueuedOptional={} queuedOptional={} sameEpochQueuedOptional={} shedOptionalWithFinish={} shedOptionalUnmatched={} shedTrackingOverflow={} acceptedOptional={}",
+                        s.finishes,
+                        s.finishes_with_queued_optional,
+                        s.queued_optional,
+                        s.same_epoch_queued_optional,
+                        s.shed_optional_with_finish,
+                        s.shed_optional_unmatched,
+                        s.shed_tracking_overflow,
+                        s.accepted_optional,
+                    );
+                }
                 let m = cluster.metrics();
                 // The harness captures warn and above. The formatter drops
                 // nonstandard fields, so put these fixed counters in the

@@ -10,6 +10,9 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+pg-queue-probe = ["omni-store/pg-queue-probe"]
+
 [[bin]]
 name = "omnigateway"
 path = "src/main.rs"

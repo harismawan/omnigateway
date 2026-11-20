@@ -10,6 +10,9 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+pg-queue-probe = []
+
 [dependencies]
 omni-crypto = { path = "../omni-crypto" }
 omni-ir = { path = "../omni-ir" }

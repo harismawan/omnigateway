@@ -41,6 +41,10 @@ mod events;
 mod health;
 mod num;
 mod pg_batch;
+#[cfg(feature = "pg-queue-probe")]
+mod queue_probe;
+#[cfg(feature = "pg-queue-probe")]
+pub use queue_probe::QueueProbeStats;
 mod sql;
 mod task;
 pub use task::LogObserver;
