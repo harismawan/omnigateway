@@ -129,6 +129,81 @@ pub async fn admin(url: &str) -> redis::aio::MultiplexedConnection {
         .expect("admin connect")
 }
 
+/// Wait for the listener's startup PING before testing the command queue.
+/// Call before using the command connection, with the periodic heartbeat
+/// outside the test window. Zero alone can precede PING submission, so
+/// first observe it on the normal connection in this test's leased DB.
+pub async fn settle_startup_ping(base: &str, db: &Db, remote: &omni_coord::redis::Remote) {
+    let mut inspector = admin(base).await;
+    let selected_db = format!("db={}", db.index);
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let clients: String = redis::cmd("CLIENT")
+                .arg("LIST")
+                .arg("TYPE")
+                .arg("NORMAL")
+                .query_async(&mut inspector)
+                .await
+                .expect("inspect Redis clients");
+            let ping_seen = clients.lines().any(|line| {
+                let mut fields = line.split_whitespace();
+                fields.clone().any(|f| f == selected_db) && fields.any(|f| f == "cmd=ping")
+            });
+            if ping_seen && remote.outstanding_bytes() == 0 {
+                break;
+            }
+            sleep_ms(1).await;
+        }
+    })
+    .await
+    .expect("startup PING completed");
+}
+
+/// A controlled write stall. `INCR` and scripts wait, but reads such as
+/// `PING` still answer. End it within the coordinator's command deadline;
+/// Redis's 20 s safety timeout is only for a test that panics first.
+pub struct WriteStall {
+    conn: redis::aio::MultiplexedConnection,
+    ended: bool,
+}
+
+impl WriteStall {
+    pub async fn start(url: &str) -> Self {
+        let mut conn = admin(url).await;
+        let _: () = redis::cmd("CLIENT")
+            .arg("PAUSE")
+            .arg(20_000)
+            .arg("WRITE")
+            .query_async(&mut conn)
+            .await
+            .expect("pause writes");
+        Self { conn, ended: false }
+    }
+
+    pub async fn end(mut self) {
+        let _: () = redis::cmd("CLIENT")
+            .arg("UNPAUSE")
+            .query_async(&mut self.conn)
+            .await
+            .expect("unpause");
+        self.ended = true;
+    }
+}
+
+impl Drop for WriteStall {
+    fn drop(&mut self) {
+        if !self.ended {
+            let mut conn = self.conn.clone();
+            tokio::spawn(async move {
+                let _done: redis::RedisResult<()> = redis::cmd("CLIENT")
+                    .arg("UNPAUSE")
+                    .query_async(&mut conn)
+                    .await;
+            });
+        }
+    }
+}
+
 /// Kills every client connection selected on database `db` except `keep`'s.
 /// What a dropped TCP connection looks like to the coordinator, scoped so
 /// that tests on other databases are not disturbed.

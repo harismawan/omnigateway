@@ -7,7 +7,7 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use common::{Proxy, fresh_db, host_port, redis_base, sleep_ms};
+use common::{Proxy, WriteStall, fresh_db, host_port, redis_base, settle_startup_ping, sleep_ms};
 use omni_coord::redis::{CoordScript, Fault};
 use omni_coord::{RedisCoord, RedisCoordOptions};
 
@@ -18,46 +18,6 @@ fn opts(command_timeout_ms: u64) -> RedisCoordOptions {
         command_timeout: Duration::from_millis(command_timeout_ms),
         fault_log_interval: Duration::ZERO,
         ..RedisCoordOptions::default()
-    }
-}
-
-/// A server stall the test controls: `CLIENT PAUSE … WRITE` from a control
-/// connection holds every write and script (`EVAL`/`EVALSHA`, `SET`) until
-/// [`Stall::end`] sends `CLIENT UNPAUSE` — not a CPU loop whose length
-/// depends on the host. Reads (`PING`, the D2 heartbeat) still answer at
-/// once — so a stall holds only writes and scripts, and tests that need a
-/// held command use a write. A stall must end inside `command_timeout` or
-/// the watchdog may retire the socket; each test ends it as soon as its
-/// condition is observed (bounded by [`observe_within`]).
-/// The pause carries a 20 s safety timeout in case a test panics first.
-struct Stall {
-    conn: redis::aio::MultiplexedConnection,
-    ended: bool,
-}
-
-impl Stall {
-    async fn end(mut self) {
-        let _: () = redis::cmd("CLIENT")
-            .arg("UNPAUSE")
-            .query_async(&mut self.conn)
-            .await
-            .expect("unpause");
-        self.ended = true;
-    }
-}
-
-impl Drop for Stall {
-    fn drop(&mut self) {
-        if !self.ended {
-            // A panicking test: unpause on the way out (best effort).
-            let mut conn = self.conn.clone();
-            tokio::spawn(async move {
-                let _done: redis::RedisResult<()> = redis::cmd("CLIENT")
-                    .arg("UNPAUSE")
-                    .query_async(&mut conn)
-                    .await;
-            });
-        }
     }
 }
 
@@ -72,22 +32,6 @@ async fn observe_within(limit: Duration, what: &str, mut cond: impl FnMut() -> b
         );
         tokio::task::yield_now().await;
     }
-}
-
-async fn stall(url: &str) -> Stall {
-    let mut conn = redis::Client::open(url)
-        .expect("url")
-        .get_multiplexed_async_connection()
-        .await
-        .expect("control");
-    let _: () = redis::cmd("CLIENT")
-        .arg("PAUSE")
-        .arg(20_000)
-        .arg("WRITE")
-        .query_async(&mut conn)
-        .await
-        .expect("pause");
-    Stall { conn, ended: false }
 }
 
 // --- N1: no-response requests ------------------------------------------------
@@ -125,7 +69,7 @@ async fn no_response_commands_stay_charged_and_cannot_break_release_order() {
         Ok(0)
     );
 
-    let spinning = stall(&db.url).await;
+    let spinning = WriteStall::start(&db.url).await;
     let mut accepted = 0_usize;
     for _ in 0..200 {
         let mut write = redis::cmd("INCR");
@@ -245,35 +189,10 @@ async fn the_eval_fallback_is_validated_and_charged() {
     .await
     .expect("connect");
     let remote = coord.remote().clone();
-    // A zero counter alone can precede the listener's startup PING. Since
-    // nothing else has used this command connection, Valkey seeing PING
-    // followed by zero bytes here proves the probe has already settled.
-    let mut inspector = common::admin(&base).await;
-    let selected_db = format!("db={}", db.index);
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let clients: String = redis::cmd("CLIENT")
-                .arg("LIST")
-                .arg("TYPE")
-                .arg("NORMAL")
-                .query_async(&mut inspector)
-                .await
-                .expect("inspect Valkey clients");
-            let ping_seen = clients.lines().any(|line| {
-                let mut fields = line.split_whitespace();
-                fields.clone().any(|f| f == selected_db) && fields.any(|f| f == "cmd=ping")
-            });
-            if ping_seen && remote.outstanding_bytes() == 0 {
-                break;
-            }
-            sleep_ms(1).await;
-        }
-    })
-    .await
-    .expect("startup PING completed");
+    settle_startup_ping(&base, &db, &remote).await;
 
     // Hold writes before checking the refusal and throughout admission.
-    let spinning = stall(&db.url).await;
+    let spinning = WriteStall::start(&db.url).await;
     assert_eq!(remote.eval(&huge, &[], &[]).await, Err(Fault::TooLarge));
     assert_eq!(remote.outstanding_bytes(), 0, "oversized EVAL was charged");
 
@@ -357,7 +276,7 @@ async fn release_then_immediate_reacquire_of_the_same_key_under_backpressure() {
             "round {round}"
         );
         // Stall and fill: 90 admissions from other tasks queue behind it.
-        let spinning = stall(&db.url).await;
+        let spinning = WriteStall::start(&db.url).await;
         let mut noise = Vec::new();
         for t in 0..90 {
             let r = remote.clone();

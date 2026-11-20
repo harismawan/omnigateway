@@ -9,7 +9,7 @@ mod common;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use common::{Proxy, fresh_db, host_port, redis_base, sleep_ms};
+use common::{Proxy, WriteStall, fresh_db, host_port, redis_base, settle_startup_ping, sleep_ms};
 use omni_coord::redis::scripts;
 use omni_coord::redis::{Fault, Refused};
 use omni_coord::{Coord, RedisCoord, RedisCoordOptions, with_lock};
@@ -173,76 +173,78 @@ async fn spin(url: &str) -> tokio::task::JoinHandle<()> {
 /// refused and counted rather than silently dropped.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn under_saturation_releases_stay_ordered_and_bounded() {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
     let _serial = SERIAL.lock().await;
     let Some(base) = redis_base() else { return };
     let db = fresh_db(&base).await;
-    let coord = Arc::new(
-        RedisCoord::connect(
-            &db.url,
-            RedisCoordOptions {
-                queue_capacity: 64,
-                release_reserve: 16,
-                ..opts(3_000)
-            },
-        )
-        .await
-        .expect("connect"),
-    );
+    let coord = RedisCoord::connect(
+        &db.url,
+        RedisCoordOptions {
+            queue_capacity: 64,
+            release_reserve: 16,
+            heartbeat: Duration::from_secs(60),
+            ..opts(3_000)
+        },
+    )
+    .await
+    .expect("connect");
     let remote = coord.remote().clone();
+    settle_startup_ping(&base, &db, &remote).await;
     assert_eq!(
         remote.gauge_acquire("lim", 0.0, 60_000, Some("a")).await,
         Ok(0)
     );
 
-    let spinning = spin(&db.url).await;
-    // 48 admissions fill the admission share of the queue.
+    let stall = WriteStall::start(&db.url).await;
+    // Poll each admission once while writes are held. A shared queue depth
+    // is not proof that every fill was admitted.
+    let names: Vec<_> = (0..48).map(|i| format!("fill{i}")).collect();
     let mut held = Vec::new();
-    for i in 0..48 {
-        let r = remote.clone();
-        held.push(tokio::spawn(
-            async move { r.incr(&format!("fill{i}")).await },
-        ));
+    for name in &names {
+        let mut call = Box::pin(remote.incr(name));
+        assert_eq!(
+            call.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Pending,
+            "{name} must be admitted and held"
+        );
+        held.push(call);
     }
-    while remote.outstanding() < 48 {
-        sleep_ms(1).await;
-    }
+    assert_eq!(remote.outstanding(), 48);
     assert_eq!(remote.incr("one-more").await, Err(Fault::Saturated));
     // The release goes into the reserve...
     assert_eq!(remote.gauge_release_detached("lim", 0.0, Some("a")), Ok(()));
-    // ...and is ordered before an admission issued after it. The queue has
-    // room again only once the server drains, so retry until it takes.
-    let after = {
-        let r = remote.clone();
-        tokio::spawn(async move {
-            loop {
-                match r.gauge_acquire("lim", 0.0, 60_000, Some("b")).await {
-                    Err(Fault::Saturated) => tokio::task::yield_now().await,
-                    other => return other,
-                }
-            }
-        })
-    };
     // Fill the reserve; past full capacity a release is refused, counted.
     let dropped_before = remote.releases_dropped();
-    let mut refused = 0;
     for i in 0..32 {
-        if remote.lock_release_detached(&format!("x{i}"), "t") == Err(Refused::Full) {
-            refused += 1;
-        }
+        let want = if i < 15 { Ok(()) } else { Err(Refused::Full) };
+        assert_eq!(remote.lock_release_detached(&format!("x{i}"), "t"), want);
     }
-    assert!(refused > 0, "capacity is a hard bound");
-    assert_eq!(remote.releases_dropped(), dropped_before + refused);
-    assert!(remote.outstanding() <= 64);
+    assert_eq!(remote.releases_dropped(), dropped_before + 17);
+    assert_eq!(remote.outstanding(), 64, "capacity is a hard bound");
 
-    spinning.await.expect("spin");
-    for h in held {
-        assert!(h.await.expect("task").is_ok());
-    }
+    // Start the later acquire before unpausing; retry only saturation.
+    let after = async {
+        loop {
+            match remote.gauge_acquire("lim", 0.0, 60_000, Some("b")).await {
+                Err(Fault::Saturated) => tokio::task::yield_now().await,
+                other => return other,
+            }
+        }
+    };
+    let (after, ()) = tokio::join!(
+        tokio::time::timeout(Duration::from_secs(3), after),
+        stall.end()
+    );
     assert_eq!(
-        after.await.expect("task"),
+        after.expect("acquire after queue drains"),
         Ok(0),
         "release ran before the acquire"
     );
+    for (name, h) in names.iter().zip(held) {
+        assert_eq!(h.await, Ok(1), "{name} must succeed after unpause");
+    }
     coord.close();
 }
 
