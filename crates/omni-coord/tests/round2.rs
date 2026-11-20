@@ -68,6 +68,7 @@ async fn hostile_server(
         let seen = Arc::clone(&seen);
         async move {
             let mut r = tokio::io::BufReader::new(r);
+            let mut attacked = false;
             while let Some(req) = read_request(&mut r).await {
                 let cmd = req
                     .first()
@@ -80,6 +81,7 @@ async fn hostile_server(
                     }
                     "PING" => b"+PONG\r\n".to_vec(),
                     "INCR" | "ECHO" => {
+                        attacked = true;
                         let until = Instant::now() + Duration::from_secs(3);
                         'push: loop {
                             for chunk in hostile() {
@@ -92,10 +94,11 @@ async fn hostile_server(
                                     Ok(Ok(())) => {
                                         seen.bytes.fetch_add(chunk.len(), Ordering::SeqCst);
                                     }
-                                    Ok(Err(_)) => {
+                                    Ok(Err(e)) if disconnected(&e) => {
                                         seen.closed.store(true, Ordering::SeqCst);
                                         return;
                                     }
+                                    Ok(Err(e)) => panic!("writing hostile reply: {e}"),
                                     // Not draining: the client stopped reading
                                     // without closing. Keep trying until the end.
                                     Err(_) => {}
@@ -112,16 +115,30 @@ async fn hostile_server(
                     }
                     _ => b"+OK\r\n".to_vec(),
                 };
-                if w.write_all(&reply).await.is_err() {
+                if let Err(e) = w.write_all(&reply).await {
+                    // The startup PING can be buffered behind INCR. The
+                    // reply then sees a reset instead of read_request seeing
+                    // EOF. Only the socket we attacked can prove a hang-up.
+                    if attacked && disconnected(&e) {
+                        seen.closed.store(true, Ordering::SeqCst);
+                    }
                     return;
                 }
             }
-            // The client closed the connection (EOF on its requests).
-            seen.closed.store(true, Ordering::SeqCst);
+            if attacked {
+                seen.closed.store(true, Ordering::SeqCst);
+            }
         }
     })
     .await;
     (port, pushed)
+}
+
+fn disconnected(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+    )
 }
 
 /// The reply side is bounded: a never-terminated header line, a huge
