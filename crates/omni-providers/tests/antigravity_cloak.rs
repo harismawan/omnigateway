@@ -15,7 +15,12 @@ fn cloak_matches_frozen_ts() {
     for (i, row) in rows.as_array().expect("array").iter().enumerate() {
         let request = serde_json::from_value(row["request"].clone()).expect("request");
         let cloak = omni_providers::antigravity::cloak::ToolCloak::build(&request);
-        assert_eq!(serde_json::json!(cloak.to_wire), row["toWire"], "row {i}");
+        let pairs: Vec<_> = cloak
+            .to_wire
+            .iter()
+            .map(|(name, alias)| (name.as_utf8().expect("fixture name"), alias))
+            .collect();
+        assert_eq!(serde_json::json!(pairs), row["toWire"], "row {i}");
         for lookup in row["lookups"].as_array().expect("lookups") {
             let name = lookup[0].as_str().expect("name");
             assert_eq!(

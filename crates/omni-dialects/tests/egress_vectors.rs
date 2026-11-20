@@ -75,7 +75,7 @@ fn encode_owned(mut enc: StreamEncoder, evs: &[StreamEvent]) -> String {
 fn check(
     dialect: &str,
     make: impl Fn() -> StreamEncoder,
-    respond: impl Fn(&[StreamEvent]) -> omni_ir::deep::Owned,
+    respond: impl Fn(&[StreamEvent]) -> jsjson::JsValue,
 ) {
     let cases = egress_root()[dialect].as_array().expect("cases");
     assert!(cases.len() >= 30, "{dialect}: {} sequences", cases.len());

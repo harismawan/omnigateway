@@ -98,9 +98,19 @@ fn public_boundary_inventory_matches() {
             signature.to_owned()
         })
         .collect();
-    assert_eq!(
-        actual, expected,
-        "review additions/removals and update the boundary inventory"
+    assert!(
+        actual == expected,
+        "review additions/removals and update the boundary inventory\nadded:\n{}\nremoved:\n{}",
+        actual
+            .difference(&expected)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n"),
+        expected
+            .difference(&actual)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n"),
     );
 }
 

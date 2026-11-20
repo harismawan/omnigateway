@@ -73,7 +73,7 @@ fn compare(surrogates: bool) {
         .iter()
         .enumerate()
         {
-            let actual = omni_ir::jsjson::to_string(&v.0);
+            let actual = omni_ir::jsjson::to_string(v);
             if actual != row["json"][i].as_str().expect("expected") {
                 eprintln!(
                     "{name}/{chunk}/client-{i}\nRust: {actual}\nTS: {}",
@@ -91,7 +91,6 @@ fn raw_utf8_matches_ts() {
 }
 
 #[test]
-#[ignore = "parked: roadmap X1 (lossless UTF-16 stream text)"]
 fn lone_surrogates_match_ts() {
     compare(true);
 }

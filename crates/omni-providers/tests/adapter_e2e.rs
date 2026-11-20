@@ -123,7 +123,7 @@ async fn responses_coerced_arguments_streamed_and_buffered() {
                             ..
                         } = &e
                         {
-                            raw.push_str(partial);
+                            raw.push_str(partial.as_utf8().expect("fixture arguments"));
                         }
                         events.push(e);
                     }
@@ -143,7 +143,7 @@ async fn responses_coerced_arguments_streamed_and_buffered() {
                 if buffered {
                     let response = omni_ir::stream::try_collect(events).unwrap();
                     let rendered = omni_dialects::egress::anthropic::response(&response, "r");
-                    assert!(rendered.to_string().contains(&"[".repeat(40001)));
+                    assert!(omni_ir::jsjson::to_string(&rendered).contains(&"[".repeat(40001)));
                 }
             } else {
                 assert!(raw.is_empty(), "overflowing fragment escaped");

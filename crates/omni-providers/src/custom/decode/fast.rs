@@ -21,8 +21,8 @@
 
 use std::marker::PhantomData;
 
+use omni_ir::jsjson::JsValue as Value;
 use serde::de::{Deserialize, Deserializer, MapAccess, Visitor, value::MapAccessDeserializer};
-use serde_json::Value;
 
 use super::chat::{ChoiceView, ChunkView, DeltaView};
 
@@ -30,7 +30,7 @@ use super::chat::{ChoiceView, ChunkView, DeltaView};
 /// Boxed: a `Value` is large, and serde moves each field through several
 /// layers of `Result`; a pointer keeps those moves small.
 fn present<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Box<Value>>, D::Error> {
-    Value::deserialize(d).map(|v| Some(Box::new(v)))
+    serde_json::Value::deserialize(d).map(|v| Some(Box::new(Value::from(&v))))
 }
 
 /// A struct read from a JSON object only: serde's derived structs also

@@ -2,10 +2,10 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use super::{nullish_or, prop};
 use omni_ir::error::ErrorCode;
-use omni_ir::js::{nullish_or, prop};
 use omni_ir::stream::{ContentBlockStart, Delta, StopReason, StreamEvent};
-use serde_json::Value;
+use omni_ir::{jsjson::JsValue as Value, text::Text};
 
 use super::{JsKey, KeyMint, json_object, or_zero, usage_of};
 use crate::codec::{DecodeError, Flow, StreamDecoder};
@@ -53,7 +53,7 @@ pub struct ResponsesDecoder {
     identity_budget: super::IdentityBudget,
     argument_depth: std::collections::HashMap<u32, super::ArgumentDepth>,
     /// Keyed by the template string `${output_index}:${content_index}`.
-    indices: HashMap<String, u32>,
+    indices: HashMap<Text, u32>,
     next: u32,
     saw_tool_call: bool,
     terminal: bool,
@@ -68,11 +68,8 @@ impl ResponsesDecoder {
     }
 
     fn ir_index(&mut self, output: &Value, content: &Value) -> Result<u32, DecodeError> {
-        let key = format!(
-            "{}:{}",
-            super::string(Some(output))?,
-            super::string(Some(content))?
-        );
+        let mut key = super::string(Some(output))?.surrounded("", ":");
+        key.push(&super::string(Some(content))?);
         if let Some(&i) = self.indices.get(&key) {
             return Ok(i);
         }
@@ -85,9 +82,9 @@ impl ResponsesDecoder {
 }
 
 /// `String(x ?? "")`.
-fn string_or_empty(v: Option<&Value>) -> Result<String, DecodeError> {
+fn string_or_empty(v: Option<&Value>) -> Result<Text, DecodeError> {
     match v {
-        None | Some(Value::Null) => Ok(String::new()),
+        None | Some(Value::Null) => Ok(Text::default()),
         some => super::string(some),
     }
 }
@@ -112,7 +109,8 @@ impl StreamDecoder for ResponsesDecoder {
                     message: format!(
                         "unrecognized custom endpoint stream event \"{}\"",
                         msg.event
-                    ),
+                    )
+                    .into(),
                     retryable: false,
                 });
                 return Ok(Flow::Stop);
@@ -123,7 +121,7 @@ impl StreamDecoder for ResponsesDecoder {
             let d = Some(&d);
             let output = or_zero(prop(d, "output_index"));
             let content = or_zero(prop(d, "content_index"));
-            let zero = Value::from(0);
+            let zero = Value::from(0.0);
 
             match msg.event.as_str() {
                 "response.created" => {
@@ -135,7 +133,8 @@ impl StreamDecoder for ResponsesDecoder {
                 }
                 "response.output_item.added" => {
                     let item = prop(d, "item").filter(|v| !v.is_null());
-                    match prop(item, "type").and_then(Value::as_str) {
+                    let kind = prop(item, "type").and_then(Value::as_text);
+                    match kind.as_ref().and_then(Text::as_utf8) {
                         Some("reasoning") => {
                             let key = self.keys.key(&output);
                             if !self.owns_block.contains(&key) {
@@ -168,8 +167,7 @@ impl StreamDecoder for ResponsesDecoder {
                     }
                 }
                 "response.content_part.added" => {
-                    if prop(prop(d, "part"), "type").and_then(Value::as_str) == Some("output_text")
-                    {
+                    if prop(prop(d, "part"), "type").is_some_and(|v| v.string_eq("output_text")) {
                         let index = self.ir_index(&output, &content)?;
                         out.push_back(StreamEvent::BlockStart {
                             index,
@@ -230,27 +228,27 @@ impl StreamDecoder for ResponsesDecoder {
                     } else {
                         StopReason::EndTurn
                     };
-                    match reason.and_then(Value::as_str) {
+                    let reason_text = reason.and_then(Value::as_text);
+                    match reason_text.as_ref().and_then(Text::as_utf8) {
                         Some("max_output_tokens") => stop = StopReason::MaxTokens,
                         Some("content_filter") => stop = StopReason::ContentFilter,
                         _ => {
-                            let status_bad =
-                                status.is_some_and(|s| s.as_str() != Some("completed"));
+                            let status_bad = status.is_some_and(|s| !s.string_eq("completed"));
                             if reason.is_some() || msg.event == "response.incomplete" || status_bad
                             {
                                 let message = if reason.is_some() {
-                                    format!(
-                                        "unrecognized custom endpoint incomplete reason \"{}\"",
-                                        super::string(reason)?
+                                    super::string(reason)?.surrounded(
+                                        "unrecognized custom endpoint incomplete reason \"",
+                                        "\"",
                                     )
-                                } else if status.is_some_and(|s| s.as_str() != Some("incomplete")) {
-                                    format!(
-                                        "custom endpoint reported terminal response status \"{}\"",
-                                        super::string(status)?
+                                } else if status.is_some_and(|s| !s.string_eq("incomplete")) {
+                                    super::string(status)?.surrounded(
+                                        "custom endpoint reported terminal response status \"",
+                                        "\"",
                                     )
                                 } else {
                                     "custom endpoint reported the response incomplete without a reason"
-                                    .to_string()
+                                    .into()
                                 };
                                 out.push_back(StreamEvent::Error {
                                     code: ErrorCode::Upstream,
@@ -282,10 +280,10 @@ impl StreamDecoder for ResponsesDecoder {
                     let raw = super::string(nullish_or(prop(err, "code"), prop(err, "type")))?;
                     let code = RESPONSES_ERROR_CODE
                         .iter()
-                        .find(|(k, _)| *k == raw)
+                        .find(|(k, _)| raw == *k)
                         .map_or(ErrorCode::Upstream, |(_, c)| *c);
                     let message = match nullish_or(prop(err, "message"), None) {
-                        None => "upstream error".to_string(),
+                        None => "upstream error".into(),
                         some => super::string(some)?,
                     };
                     out.push_back(StreamEvent::Error {

@@ -49,7 +49,6 @@ fn wire_matches_frozen_ts() {
         {
             failures.push(row["label"].as_str().expect("label").to_owned());
         }
-        omni_ir::deep::drop(body);
     }
     eprintln!(
         "wire corpus: {} rows; {} green; {} red",
@@ -61,9 +60,11 @@ fn wire_matches_frozen_ts() {
 }
 
 #[test]
-#[ignore = "X1: shared Rust string IR cannot represent lone UTF-16 surrogate text"]
 fn x1_lone_surrogate_text_retained_red() {
     let input = r#"{"model":"m","stream":true,"messages":[{"role":"user","content":[{"type":"text","text":"\ud800"}]}]}"#;
-    let _: omni_ir::request::ChatRequest =
-        serde_json::from_str(input).expect("X1: preserve lone surrogate without normalization");
+    let request = omni_ir::request::CanonicalRequest::parse(input).expect("canonical request");
+    let built = omni_providers::antigravity::codec::AntigravityCodec
+        .build_canonical(&request, "m", "t", &"p".into(), Some(&"r".into()))
+        .expect("wire");
+    assert!(built.request.body.contains(r#""text":"\ud800""#));
 }

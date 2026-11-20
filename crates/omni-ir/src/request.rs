@@ -405,6 +405,38 @@ pub struct ChatRequest {
     pub conversation_id: Option<String>,
 }
 
+/// A canonical request imported from JS JSON. The validated projection is
+/// suitable for ordinary request policy; wire code can read the original
+/// value where a UTF-8-only string or serde number cannot represent it.
+pub struct CanonicalRequest {
+    pub validated: ChatRequest,
+    pub source: crate::jsjson::JsValue,
+}
+
+impl CanonicalRequest {
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let source = crate::jsjson::parse_bounded(text, crate::deep::depth_of(text))
+            .map_err(|e| format!("canonical request JSON: {e:?}"))?;
+        Self::from_source(source)
+    }
+
+    pub fn from_source(source: crate::jsjson::JsValue) -> Result<Self, String> {
+        // Deserialize via the usual deep request boundary, not from_value,
+        // which cannot safely release nested values after a failed visit.
+        let utf8 = crate::deep::Owned(crate::jsjson::to_serde_lossy(&source));
+        let json = crate::jsjson::to_string(&utf8);
+        let validated = crate::deep::scope_for(&json, || {
+            let mut de = serde_json::Deserializer::from_str(&json);
+            de.disable_recursion_limit();
+            <ChatRequest as serde::Deserialize>::deserialize(serde_stacker::Deserializer::new(
+                &mut de,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+        Ok(Self { validated, source })
+    }
+}
+
 impl ChatRequest {
     /// `req.vendor?.[name]`, when it is the object TS types it as.
     pub fn vendor_bag(&self, name: &str) -> Option<&Map<String, Value>> {

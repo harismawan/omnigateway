@@ -9,12 +9,10 @@ fn coercions() {
     compare(None);
 }
 #[test]
-#[ignore = "parked: roadmap X1 (upstream numbers beyond the double range)"]
 fn chat_overflow() {
     compare(Some("chat"));
 }
 #[test]
-#[ignore = "parked: roadmap X1 (upstream numbers beyond the double range)"]
 fn responses_overflow() {
     compare(Some("responses"));
 }

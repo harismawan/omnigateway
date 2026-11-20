@@ -93,7 +93,6 @@ fn frozen_ts_decoder_generated_corpus() {
     compare(false);
 }
 #[test]
-#[ignore = "parked: roadmap X1 (upstream numbers beyond the double range)"]
 fn overflow_matches_ts() {
     compare(true);
 }

@@ -6,9 +6,10 @@ use crate::{
 };
 use omni_ir::{
     error::ErrorCode,
+    jsjson::{self, JsValue as Value},
     stream::{ContentBlockStart, Delta, StopReason, StreamEvent, Usage, usage_from_prompt_total},
+    text::Text,
 };
-use serde_json::Value;
 use std::collections::VecDeque;
 
 #[derive(Default)]
@@ -24,11 +25,11 @@ pub struct AntigravityDecoder {
 fn nonnull(v: Option<&Value>) -> Option<&Value> {
     v.filter(|v| !v.is_null())
 }
-fn string(v: Option<&Value>, default: &str) -> Result<String, DecodeError> {
+fn string(v: Option<&Value>, default: &str) -> Result<Text, DecodeError> {
     nonnull(v).map_or_else(
         || Ok(default.into()),
         |v| {
-            omni_ir::js::try_to_string(Some(v))
+            jsjson::coerce_text(Some(v))
                 .map_err(|_| DecodeError::Throw("JavaScript coercion threw"))
         },
     )
@@ -49,12 +50,9 @@ fn usage(v: &Value) -> Usage {
 }
 fn length(v: &Value) -> Value {
     match v {
-        Value::Array(a) => Value::from(a.len()),
-        Value::String(s) => Value::from(s.encode_utf16().count()),
-        _ => v
-            .get("length")
-            .map(omni_ir::deep::clone)
-            .unwrap_or(Value::Null),
+        Value::Array(a) => Value::from(a.len() as f64),
+        Value::String(s) => Value::from(s.len() as f64),
+        _ => v.get("length").cloned().unwrap_or(Value::Null),
     }
 }
 impl AntigravityDecoder {
@@ -91,7 +89,7 @@ impl AntigravityDecoder {
         &mut self,
         out: &mut VecDeque<StreamEvent>,
         code: ErrorCode,
-        message: String,
+        message: Text,
         retryable: bool,
     ) -> Flow {
         self.terminal = true;
@@ -114,14 +112,13 @@ impl AntigravityDecoder {
         if msg.data == "[DONE]" {
             return Ok(Flow::Continue);
         }
-        let frame = match omni_ir::deep::parse_bounded(&msg.data, bound) {
-            Ok(v) => omni_ir::deep::Owned(v),
+        let frame = match jsjson::parse_bounded(&msg.data, bound) {
+            Ok(v) => v,
             Err(omni_ir::deep::ParseError::Syntax) => return Ok(Flow::Continue),
             Err(omni_ir::deep::ParseError::TooDeep) => {
                 return Err(DecodeError::Throw("upstream JSON exceeds depth 40000"));
             }
         };
-        let frame = &frame.0;
         if !frame.is_object() && !frame.is_array() {
             return Ok(Flow::Continue);
         }
@@ -134,11 +131,11 @@ impl AntigravityDecoder {
                 return Err(DecodeError::Throw("null error payload"));
             }
             let status = string(f.get("status"), "")?;
-            let code = match status.as_str() {
-                "RESOURCE_EXHAUSTED" => ErrorCode::RateLimit,
-                "UNAUTHENTICATED" | "PERMISSION_DENIED" => ErrorCode::Auth,
-                "INVALID_ARGUMENT" | "FAILED_PRECONDITION" => ErrorCode::BadRequest,
-                "DEADLINE_EXCEEDED" => ErrorCode::Timeout,
+            let code = match status.as_utf8() {
+                Some("RESOURCE_EXHAUSTED") => ErrorCode::RateLimit,
+                Some("UNAUTHENTICATED" | "PERMISSION_DENIED") => ErrorCode::Auth,
+                Some("INVALID_ARGUMENT" | "FAILED_PRECONDITION") => ErrorCode::BadRequest,
+                Some("DEADLINE_EXCEEDED") => ErrorCode::Timeout,
                 _ => ErrorCode::Upstream,
             };
             let message = string(f.get("message"), "upstream error")?;
@@ -152,8 +149,7 @@ impl AntigravityDecoder {
         }
         let empty = Value::Array(Vec::new());
         let candidates = nonnull(response.get("candidates")).unwrap_or(&empty);
-        let len_owner = omni_ir::deep::Owned(length(candidates));
-        let len = &len_owner.0;
+        let len = &length(candidates);
         if response
             .get("promptFeedback")
             .and_then(|p| p.get("blockReason"))
@@ -163,8 +159,8 @@ impl AntigravityDecoder {
             self.terminal = true;
             if !self.started {
                 out.push_back(StreamEvent::Start {
-                    id: String::new(),
-                    model: String::new(),
+                    id: Text::default(),
+                    model: Text::default(),
                 });
             }
             self.close(out);
@@ -181,7 +177,7 @@ impl AntigravityDecoder {
             let model = string(response.get("modelVersion"), "")?;
             out.push_back(StreamEvent::Start { id, model });
         }
-        if omni_ir::js::try_to_number(Some(len))
+        if jsjson::coerce_number(Some(len))
             .map_err(|_| DecodeError::Throw("JavaScript coercion threw"))?
             > 1.0
         {
@@ -191,14 +187,18 @@ impl AntigravityDecoder {
             return Ok(self.error(
                 out,
                 ErrorCode::Upstream,
-                format!("Antigravity returned {n} candidates, which cannot be represented"),
+                n.surrounded(
+                    "Antigravity returned ",
+                    " candidates, which cannot be represented",
+                ),
                 false,
             ));
         }
         let candidate = candidates
-            .get(0)
+            .as_array()
+            .and_then(|a| a.first())
             .or_else(|| candidates.get("0"))
-            .unwrap_or(&Value::Null);
+            .unwrap_or(&empty);
         let parts =
             nonnull(candidate.get("content").and_then(|c| c.get("parts"))).unwrap_or(&empty);
         if !parts.is_array() && !parts.is_string() {
@@ -213,26 +213,24 @@ impl AntigravityDecoder {
                     if call.is_null() {
                         return Err(DecodeError::Throw("null functionCall"));
                     }
-                    if let Some(name) = call.get("name").and_then(Value::as_str) {
+                    if let Some(name) = call.get("name").and_then(Value::as_text) {
                         self.close(out);
                         let Some(index) = self.allocate_index(out) else {
                             return Ok(Flow::Stop);
                         };
                         let id = call
                             .get("id")
-                            .and_then(Value::as_str)
+                            .and_then(Value::as_text)
                             .filter(|s| !s.is_empty())
-                            .map(str::to_owned)
-                            .unwrap_or_else(|| format!("fc_{}", self.tool_calls));
+                            .unwrap_or_else(|| format!("fc_{}", self.tool_calls).into());
+                        let name = self.cloak.original_text(name);
                         out.push_back(StreamEvent::BlockStart {
                             index,
-                            block: ContentBlockStart::ToolUse {
-                                id,
-                                name: self.cloak.original(name).into(),
-                            },
+                            block: ContentBlockStart::ToolUse { id, name },
                         });
                         let args = nonnull(call.get("args"));
-                        let partial = args.map_or_else(|| "{}".into(), omni_ir::jsjson::to_string);
+                        let partial =
+                            args.map_or_else(|| "{}".into(), |v| jsjson::render(v).into());
                         out.push_back(StreamEvent::BlockDelta {
                             index,
                             delta: Delta::ToolJson { partial },
@@ -243,7 +241,7 @@ impl AntigravityDecoder {
                         continue;
                     }
                 }
-                let Some(text) = part.get("text").and_then(Value::as_str) else {
+                let Some(text) = part.get("text").and_then(Value::as_text) else {
                     continue;
                 };
                 let thinking = part.get("thought") == Some(&Value::Bool(true));
@@ -269,9 +267,9 @@ impl AntigravityDecoder {
                 out.push_back(StreamEvent::BlockDelta {
                     index,
                     delta: if thinking {
-                        Delta::Thinking { text: text.into() }
+                        Delta::Thinking { text }
                     } else {
-                        Delta::Text { text: text.into() }
+                        Delta::Text { text }
                     },
                 });
             }
@@ -282,13 +280,13 @@ impl AntigravityDecoder {
         self.terminal = true;
         self.close(out);
         let raw = string(Some(finish), "")?;
-        let reason = match raw.as_str() {
-            "STOP" => StopReason::EndTurn,
-            "MAX_TOKENS" => StopReason::MaxTokens,
-            "SAFETY" | "PROHIBITED_CONTENT" | "SPII" | "BLOCKLIST" | "RECITATION" => {
+        let reason = match raw.as_utf8() {
+            Some("STOP") => StopReason::EndTurn,
+            Some("MAX_TOKENS") => StopReason::MaxTokens,
+            Some("SAFETY" | "PROHIBITED_CONTENT" | "SPII" | "BLOCKLIST" | "RECITATION") => {
                 StopReason::ContentFilter
             }
-            "MALFORMED_FUNCTION_CALL" => {
+            Some("MALFORMED_FUNCTION_CALL") => {
                 return Ok(self.error(
                     out,
                     ErrorCode::BadRequest,
@@ -300,7 +298,7 @@ impl AntigravityDecoder {
                 return Ok(self.error(
                     out,
                     ErrorCode::Upstream,
-                    format!("unrecognized Antigravity finish reason \"{raw}\""),
+                    raw.surrounded("unrecognized Antigravity finish reason \"", "\""),
                     false,
                 ));
             }
@@ -424,7 +422,7 @@ mod tests {
                     StreamEvent::BlockStart {
                         block: ContentBlockStart::ToolUse { id, .. },
                         ..
-                    } => Some(id.as_str()),
+                    } => id.as_utf8(),
                     _ => None,
                 })
                 .collect();

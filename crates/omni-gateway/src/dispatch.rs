@@ -104,16 +104,7 @@ fn event_size(e: &StreamEvent) -> usize {
             ContentBlockStart::ToolUse { id, name } => id.len() + name.len(),
             ContentBlockStart::ProviderNative {
                 block_type, data, ..
-            } => {
-                block_type.len()
-                    + omni_ir::jsjson::to_string(
-                        &omni_ir::deep::Owned(serde_json::Value::Object(omni_ir::deep::clone_map(
-                            data,
-                        )))
-                        .0,
-                    )
-                    .len()
-            }
+            } => block_type.len() + omni_ir::jsjson::render(data).len(),
             _ => 0,
         },
         StreamEvent::BlockDelta { delta, .. } => match delta {
@@ -121,10 +112,7 @@ fn event_size(e: &StreamEvent) -> usize {
             Delta::ThinkingSignature { signature } => signature.len(),
             Delta::ToolJson { partial } => partial.len(),
             Delta::ProviderNativeJson { partial, .. } => partial.len(),
-            Delta::ProviderNative { data, .. } => omni_ir::jsjson::to_string(
-                &omni_ir::deep::Owned(serde_json::Value::Object(omni_ir::deep::clone_map(data))).0,
-            )
-            .len(),
+            Delta::ProviderNative { data, .. } => omni_ir::jsjson::render(data).len(),
         },
         StreamEvent::End { vendor, .. } => vendor.as_ref().map_or(0, |v| {
             omni_ir::jsjson::to_string(
@@ -327,7 +315,7 @@ fn classify_send(e: SendError) -> GatewayError {
 /// `rewrap`: a fresh error keeping who wrote the message.
 fn rewrap(e: &GatewayError) -> GatewayError {
     let mut out =
-        GatewayError::new(e.code, e.message.clone()).with_retry_after_ms(e.retry_after_ms);
+        GatewayError::from_text(e.code, e.client_message()).with_retry_after_ms(e.retry_after_ms);
     out.provider = e.provider.clone();
     out.gateway_authored = e.gateway_authored;
     out
@@ -499,7 +487,7 @@ pub fn refused(deps: &Deps, req: &Request, refusal: &Refusal, surface: &str) -> 
         deadline: None,
         events: Box::pin(futures_util::stream::iter([Ok(StreamEvent::Error {
             code: refusal.code,
-            message: refusal.message.to_owned(),
+            message: refusal.message.into(),
             retryable: refusal.code.retryable(),
         })])),
         log: Arc::new(Mutex::new(log)),
@@ -543,7 +531,7 @@ pub fn dispatch_with_options(
         }
         Box::pin(futures_util::stream::iter([Ok(StreamEvent::Error {
             code,
-            message,
+            message: message.into(),
             retryable: code.retryable(),
         })]))
     };
@@ -918,7 +906,7 @@ fn run(mut s: RunState) -> EventsStream {
                         if let StreamEvent::Error { code, message, .. } = &event {
                             let (code, message) = (*code, message.clone());
                             if !committed && code.retryable() {
-                                break 'attempt Err(GatewayError::new(code, message)
+                                break 'attempt Err(GatewayError::from_text(code, message)
                                     .with_provider(c.target.provider.clone()));
                             }
                             {
@@ -926,7 +914,7 @@ fn run(mut s: RunState) -> EventsStream {
                                 l.status = i64::from(code.http_status());
                                 l.error_code = Some(code.as_str().to_owned());
                                 l.duration_ms = now() - s.started_at;
-                                report_rejection(&l, &GatewayError::new(code, message)
+                                report_rejection(&l, &GatewayError::from_text(code, message)
                                     .with_provider(c.target.provider.clone()), None);
                             }
                             yield Ok(event);
@@ -1055,7 +1043,7 @@ fn run(mut s: RunState) -> EventsStream {
                     slot.release(ttft);
                     yield Ok(StreamEvent::Error {
                         code: failure.code,
-                        message: failure.message,
+                        message: failure.client_message(),
                         retryable: false,
                     });
                     return;
@@ -1079,19 +1067,19 @@ fn run(mut s: RunState) -> EventsStream {
             _ => ErrorCode::AllCandidatesFailed,
         };
         let message = match &last_error {
-            Some(e) => e.message.clone(),
+            Some(e) => e.client_message(),
             None if untried => format!(
                 "no eligible credential for model \"{}\"",
                 safe_token(&s.req.request.model)
-            ),
-            None => "all candidates failed".to_owned(),
+            ).into(),
+            None => "all candidates failed".into(),
         };
         {
             let mut l = lock(&log);
             l.status = i64::from(code.http_status());
             l.error_code = Some(code.as_str().to_owned());
             l.duration_ms = now() - s.started_at;
-            let mut reported = GatewayError::new(code, message.clone());
+            let mut reported = GatewayError::from_text(code, message.clone());
             if let Some(e) = &last_error
                 && e.provider.is_some()
             {

@@ -58,7 +58,7 @@ fn decoded_client_json_and_sse_bytes_match_ts() {
         .enumerate()
         {
             assert_eq!(
-                omni_ir::jsjson::to_string(&value.0),
+                omni_ir::jsjson::to_string(value),
                 row["json"][i].as_str().expect("JSON")
             );
         }

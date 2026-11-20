@@ -1,5 +1,6 @@
 //! Aggregate retained response limits, checked before buffering/rendering.
 use omni_ir::error::{ErrorCode, GatewayError};
+use omni_ir::jsjson::JsValue;
 use omni_ir::stream::{ContentBlockStart, Delta, StreamEvent};
 
 #[derive(Default)]
@@ -17,7 +18,7 @@ impl OutputBudget {
                 self.items += 1;
                 match block {
                     ContentBlockStart::ToolUse { id, name } => id.len().saturating_add(name.len()),
-                    ContentBlockStart::ProviderNative { data, .. } => map_bytes(data),
+                    ContentBlockStart::ProviderNative { data, .. } => js_bytes(data),
                     _ => 0,
                 }
             }
@@ -27,12 +28,17 @@ impl OutputBudget {
                 Delta::ToolJson { partial } | Delta::ProviderNativeJson { partial, .. } => {
                     partial.len()
                 }
-                Delta::ProviderNative { data, .. } => map_bytes(data),
+                Delta::ProviderNative { data, .. } => js_bytes(data),
             },
             StreamEvent::Error { message, .. } => message.len(),
-            StreamEvent::End {
-                vendor: Some(data), ..
-            } => map_bytes(data),
+            StreamEvent::End { usage, vendor, .. } => {
+                let raw = [&usage.raw_output_tokens, &usage.raw_cache_read_tokens];
+                raw.into_iter()
+                    .filter_map(Option::as_deref)
+                    .map(js_bytes)
+                    .sum::<usize>()
+                    .saturating_add(vendor.as_ref().map_or(0, map_bytes))
+            }
             _ => 0,
         };
         self.bytes = self.bytes.saturating_add(bytes);
@@ -42,6 +48,33 @@ impl OutputBudget {
         }
         Ok(())
     }
+}
+
+fn js_bytes(root: &JsValue) -> usize {
+    let mut bytes = 0usize;
+    let mut stack: Vec<Box<dyn Iterator<Item = (&JsValue, usize)>>> =
+        vec![Box::new(std::iter::once((root, 0)))];
+    while let Some(iter) = stack.last_mut() {
+        if let Some((value, key_bytes)) = iter.next() {
+            bytes = bytes
+                .saturating_add(std::mem::size_of::<JsValue>())
+                .saturating_add(key_bytes);
+            match value {
+                JsValue::String(s) => bytes = bytes.saturating_add(s.len().saturating_mul(6)),
+                JsValue::Array(a) => stack.push(Box::new(a.iter().map(|v| (v, 0)))),
+                JsValue::Object(o) => stack.push(Box::new(
+                    o.iter().map(|(k, v)| (v, k.len().saturating_mul(6))),
+                )),
+                _ => {}
+            }
+            if bytes > 8 * 1024 * 1024 {
+                break;
+            }
+        } else {
+            stack.pop();
+        }
+    }
+    bytes
 }
 
 fn map_bytes(map: &serde_json::Map<String, serde_json::Value>) -> usize {
@@ -83,7 +116,7 @@ mod tests {
         let event = StreamEvent::BlockDelta {
             index: 0,
             delta: Delta::Text {
-                text: "x".repeat(1024),
+                text: "x".repeat(1024).into(),
             },
         };
         for _ in 0..8192 {

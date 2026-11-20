@@ -93,7 +93,7 @@ fn emitted_depth() {
                                 omni_dialects::egress::openai::response(&collected, "req", 123),
                                 omni_dialects::egress::responses::response(&collected, &config),
                             ] {
-                                assert!(!omni_ir::jsjson::to_string(&value.0).is_empty());
+                                assert!(!omni_ir::jsjson::to_string(&value).is_empty());
                             }
                         }
                         drop(out);

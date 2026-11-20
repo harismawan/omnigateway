@@ -2,16 +2,13 @@
 
 use std::collections::HashMap;
 
-use omni_ir::deep::Owned;
 use omni_ir::error::ErrorCode;
-use omni_ir::jsjson::{write_number, write_str};
-use omni_ir::request::ContentBlock;
+use omni_ir::jsjson::{JsValue, write_js_value, write_number, write_str};
 use omni_ir::stream::{
-    CollectedResponse, ContentBlockStart, Delta, StopReason, StreamEvent, Usage, number,
-    prompt_tokens,
+    CollectedBlock, CollectedResponse, ContentBlockStart, Delta, StopReason, StreamEvent, Usage,
 };
+use omni_ir::text::Text;
 use omni_ratelimit::HeadroomByDimension;
-use serde_json::{Map, Value, json};
 
 use super::{Obj, begin_frame, end_frame, js_max0, js_string, reported};
 
@@ -47,33 +44,28 @@ pub fn error_type(code: ErrorCode) -> (&'static str, &'static str) {
 }
 
 fn write_usage(u: &Usage, out: &mut String) {
-    let prompt = prompt_tokens(u);
-    let mut o = Obj::new(out);
-    o.num("prompt_tokens", prompt)
-        .num("completion_tokens", u.output_tokens)
-        .num("total_tokens", prompt + u.output_tokens);
-    let d = o.key("prompt_tokens_details");
-    d.push_str(r#"{"cached_tokens":"#);
-    write_number(u.cache_read_tokens, d);
-    d.push('}');
-    o.close();
+    write_js_value(&usage_value(u), out);
 }
 
-fn usage_value(u: &Usage) -> Value {
-    let prompt = prompt_tokens(u);
-    json!({
-        "prompt_tokens": number(prompt),
-        "completion_tokens": number(u.output_tokens),
-        "total_tokens": number(prompt + u.output_tokens),
-        "prompt_tokens_details": { "cached_tokens": number(u.cache_read_tokens) },
-    })
+fn usage_value(u: &Usage) -> JsValue {
+    let prompt = u.client_prompt();
+    let total = u.client_total(&prompt);
+    JsValue::object([
+        ("prompt_tokens", prompt),
+        ("completion_tokens", u.client_output()),
+        ("total_tokens", total),
+        (
+            "prompt_tokens_details",
+            JsValue::object([("cached_tokens", u.client_cache_read())]),
+        ),
+    ])
 }
 
 /// `openaiStream`, one event at a time.
 pub struct OpenAiStream {
     request_id: String,
     created: i64,
-    model: String,
+    model: Text,
     role_sent: bool,
     completed: bool,
     tool_index: HashMap<u32, u32>,
@@ -84,7 +76,7 @@ impl OpenAiStream {
         OpenAiStream {
             request_id: request_id.to_string(),
             created,
-            model: String::new(),
+            model: Text::default(),
             role_sent: false,
             completed: false,
             tool_index: HashMap::new(),
@@ -101,7 +93,7 @@ impl OpenAiStream {
         #[allow(clippy::cast_precision_loss)]
         write_number(self.created as f64, out);
         out.push_str(r#","model":"#);
-        write_str(&self.model, out);
+        self.model.write_json(out);
         out.push_str(r#","choices":[{"index":0,"delta":"#);
     }
 
@@ -149,9 +141,9 @@ impl OpenAiStream {
                     out.push_str(r#""tool_calls":[{"index":"#);
                     write_number(f64::from(at), out);
                     out.push_str(r#","id":"#);
-                    write_str(id, out);
+                    id.write_json(out);
                     out.push_str(r#","type":"function","function":{"name":"#);
-                    write_str(name, out);
+                    name.write_json(out);
                     out.push_str(r#","arguments":""}}]}"#);
                     Self::chunk_tail(out);
                 }
@@ -161,14 +153,14 @@ impl OpenAiStream {
                 Delta::Text { text } => {
                     self.chunk_head(out);
                     out.push_str(r#"{"content":"#);
-                    write_str(text, out);
+                    text.write_json(out);
                     out.push('}');
                     Self::chunk_tail(out);
                 }
                 Delta::Thinking { text } => {
                     self.chunk_head(out);
                     out.push_str(r#"{"reasoning_content":"#);
-                    write_str(text, out);
+                    text.write_json(out);
                     out.push('}');
                     Self::chunk_tail(out);
                 }
@@ -178,7 +170,7 @@ impl OpenAiStream {
                     out.push_str(r#"{"tool_calls":[{"index":"#);
                     write_number(f64::from(at), out);
                     out.push_str(r#","function":{"arguments":"#);
-                    write_str(partial, out);
+                    partial.write_json(out);
                     out.push_str("}}]}");
                     Self::chunk_tail(out);
                 }
@@ -202,7 +194,7 @@ impl OpenAiStream {
                 begin_frame("message", out);
                 out.push_str(r#"{"error":"#);
                 Obj::new(out)
-                    .str("message", message)
+                    .text("message", message)
                     .str("type", t)
                     .str("code", c)
                     .close_ref();
@@ -222,69 +214,85 @@ impl OpenAiStream {
 }
 
 /// `openaiResponse`.
-/// The body holds client payloads (tool inputs, native blocks), so it is
-/// returned as a [`Owned`] that drops iteratively.
-pub fn response(collected: &CollectedResponse, request_id: &str, created: i64) -> Owned {
-    Owned(response_value(collected, request_id, created))
-}
-
-fn response_value(collected: &CollectedResponse, request_id: &str, created: i64) -> Value {
-    let mut text = String::new();
-    let mut reasoning = String::new();
+pub fn response(collected: &CollectedResponse, request_id: &str, created: i64) -> JsValue {
+    let mut text = Text::default();
+    let mut reasoning = Text::default();
     let mut tool_calls = Vec::new();
     for b in &collected.content {
         match b {
-            ContentBlock::Text(t) => text.push_str(&t.text),
-            ContentBlock::Thinking(t) => reasoning.push_str(&t.text),
-            ContentBlock::ToolUse(t) => tool_calls.push(json!({
-                "id": t.id,
-                "type": "function",
-                "function": { "name": t.name, "arguments": omni_ir::jsjson::to_string(&t.input) },
-            })),
+            CollectedBlock::Text { text: t, .. } => text.push(t),
+            CollectedBlock::Thinking { text: t, .. } => reasoning.push(t),
+            CollectedBlock::ToolUse { id, name, input } => tool_calls.push(JsValue::object([
+                ("id", id.into()),
+                ("type", "function".into()),
+                (
+                    "function",
+                    JsValue::object([
+                        ("name", name.into()),
+                        ("arguments", omni_ir::jsjson::render(input).as_str().into()),
+                    ]),
+                ),
+            ])),
             _ => {}
         }
     }
-    let mut message = Map::new();
-    omni_ir::deep::insert(&mut message, "role".into(), "assistant".into());
-    omni_ir::deep::insert(
-        &mut message,
-        "content".into(),
-        if !tool_calls.is_empty() && text.is_empty() {
-            Value::Null
-        } else {
-            Value::String(text)
-        },
-    );
-    if !reasoning.is_empty() {
-        omni_ir::deep::insert(
-            &mut message,
-            "reasoning_content".into(),
-            Value::String(reasoning),
-        );
-    }
-    if !tool_calls.is_empty() {
-        omni_ir::deep::insert(&mut message, "tool_calls".into(), Value::Array(tool_calls));
-    }
+    let message = JsValue::object([
+        ("role", "assistant".into()),
+        (
+            "content",
+            if !tool_calls.is_empty() && text.is_empty() {
+                JsValue::Null
+            } else {
+                (&text).into()
+            },
+        ),
+        (
+            "reasoning_content",
+            if reasoning.is_empty() {
+                JsValue::Undefined
+            } else {
+                (&reasoning).into()
+            },
+        ),
+        (
+            "tool_calls",
+            if tool_calls.is_empty() {
+                JsValue::Undefined
+            } else {
+                JsValue::Array(tool_calls)
+            },
+        ),
+    ]);
     #[allow(clippy::cast_precision_loss)]
-    let created = number(created as f64);
-    json!({
-        "id": request_id,
-        "object": "chat.completion",
-        "created": created,
-        "model": collected.model,
-        "choices": [{
-            "index": 0,
-            "message": Value::Object(message),
-            "finish_reason": finish_reason(collected.stop_reason),
-        }],
-        "usage": usage_value(&collected.usage),
-    })
+    let created = created as f64;
+    JsValue::object([
+        ("id", request_id.into()),
+        ("object", "chat.completion".into()),
+        ("created", created.into()),
+        ("model", (&collected.model).into()),
+        (
+            "choices",
+            JsValue::Array(vec![JsValue::object([
+                ("index", 0.0.into()),
+                ("message", message),
+                ("finish_reason", finish_reason(collected.stop_reason).into()),
+            ])]),
+        ),
+        ("usage", usage_value(&collected.usage)),
+    ])
 }
 
 /// `openaiErrorBody`.
-pub fn error_body(code: ErrorCode, message: &str) -> Value {
+pub fn error_body(code: ErrorCode, message: &Text) -> JsValue {
     let (t, c) = error_type(code);
-    json!({ "error": { "message": message, "type": t, "code": c } })
+    JsValue::object([(
+        "error",
+        JsValue::object([
+            ("message", message.into()),
+            ("type", t.into()),
+            ("code", c.into()),
+        ]),
+    )])
 }
 
 /// `duration`: `4h51m22s`, `6m0s`, `22s`; whole seconds rounded up.

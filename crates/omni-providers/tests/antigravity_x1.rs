@@ -17,27 +17,18 @@ fn compare(label: &str) {
         .find(|r| r["label"] == label)
         .expect("fixture");
     // The oracle envelope escapes the raw input so Rust never normalizes it.
-    let input: serde_json::Value = serde_json::from_str(row["input"].as_str().expect("fixture"))
-        .expect("X1: raw request must remain representable (UTF-16 / out-of-double-range number)");
-    let request = serde_json::from_value(input["request"].clone()).expect("fixture");
-    let credentials = omni_providers::codec::Credentials {
-        access_token: Some("t".into()),
-        api_key: None,
-        provider_data: serde_json::json!({"projectId":input["project"]})
-            .as_object()
-            .expect("fixture")
-            .clone(),
-    };
+    let input =
+        omni_ir::jsjson::parse_js(row["input"].as_str().expect("fixture")).expect("fixture");
+    let request =
+        omni_ir::request::CanonicalRequest::from_source(input["request"].clone()).expect("fixture");
     let result = omni_providers::antigravity::codec::AntigravityCodec
-        .build_request(&omni_providers::codec::CodecInput {
-            request: &request,
-            model: "m",
-            credentials: &credentials,
-            request_id: input["requestId"].as_str(),
-            auto_cache_enabled: None,
-            max_output_tokens: None,
-            request_started_at: None,
-        })
+        .build_canonical(
+            &request,
+            "m",
+            "t",
+            &input["project"].as_text().expect("fixture"),
+            input["requestId"].as_text().as_ref(),
+        )
         .expect("fixture");
     assert_eq!(
         result.request.body,
@@ -48,7 +39,6 @@ fn compare(label: &str) {
 macro_rules! retained {
     ($name:ident, $label:literal) => {
         #[test]
-        #[ignore = "X1: shared JSON/IR representation gap; paired frozen expectation"]
         fn $name() {
             compare($label);
         }

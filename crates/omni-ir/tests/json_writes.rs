@@ -92,8 +92,38 @@ const ALLOW: &[(&str, &str, &str)] = &[
     ),
     (
         "omni-ir/src/stream.rs",
-        "if let Some(old) = blocks.insert(*index, acc) {",
-        "typed accumulator map; displaced accumulator fields explicitly released iteratively",
+        "blocks.insert(*index, acc);",
+        "Accumulators own JsValue; replaced JSON uses iterative Drop",
+    ),
+    (
+        "omni-ir/src/jsjson.rs",
+        "at.insert(entries.len() - 1);",
+        "UTF-16 key to position index, not JSON",
+    ),
+    (
+        "omni-providers/src/antigravity/cloak.rs",
+        "if !seen.insert(name.clone()) {",
+        "set of lossless Text names, not nested JSON",
+    ),
+    (
+        "omni-providers/src/antigravity/cloak.rs",
+        "cloak.from_wire.insert(alias.clone(), name.clone());",
+        "wire alias to lossless Text",
+    ),
+    (
+        "omni-providers/src/antigravity/cloak.rs",
+        "cloak.name_index.insert(name.clone(), cloak.to_wire.len());",
+        "lossless Text to position index",
+    ),
+    (
+        "omni-providers/src/antigravity/wire.rs",
+        "names.insert(text(b, \"id\", &t.id), text(b, \"name\", &t.name));",
+        "tool id/name map of Text, not nested JSON",
+    ),
+    (
+        "omni-providers/src/antigravity/wire.rs",
+        "if !seen.insert(name.clone()) {",
+        "set of lossless Text names",
     ),
     (
         "omni-providers/src/anthropic/profile.rs",

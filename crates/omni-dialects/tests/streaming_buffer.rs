@@ -23,6 +23,7 @@ use std::collections::HashSet;
 use omni_dialects::egress::{
     AnthropicStream, OpenAiStream, ResponsesRender, ResponsesStream, StreamEncoder,
 };
+use omni_ir::jsjson::JsValue;
 use omni_ir::stream::{ContentBlockStart, Delta, StreamEvent};
 use serde_json::{Map, json};
 
@@ -136,13 +137,13 @@ fn native_deltas_reuse_one_frame_of_buffer() {
         ContentBlockStart::ProviderNative {
             provider: "openai".into(),
             block_type: "reasoning".into(),
-            data: Map::new(),
+            data: JsValue::Object(Vec::new()),
         },
         Delta::ProviderNative {
             provider: "openai".into(),
             delta_type: "reasoning_summary_text.delta".into(),
             fold: None,
-            data: native_map(),
+            data: omni_ir::jsjson::object_from_serde(&native_map()),
         },
     );
 }
@@ -210,15 +211,14 @@ fn an_owned_native_merge_is_moved_into_the_item_not_copied() {
             block: ContentBlockStart::ProviderNative {
                 provider: "openai".into(),
                 block_type: "reasoning".into(),
-                data: Map::new(),
+                data: JsValue::Object(Vec::new()),
             },
         },
         &mut buf,
     );
-    let blob = "e".repeat(4096);
+    let blob: Vec<_> = "e".repeat(4096).encode_utf16().collect();
     let at = blob.as_ptr();
-    let mut data = Map::new();
-    data.insert("encrypted_content".into(), serde_json::Value::String(blob));
+    let data = JsValue::object([("encrypted_content", JsValue::String(blob))]);
     enc.push_owned(
         StreamEvent::BlockDelta {
             index: 0,
@@ -231,9 +231,9 @@ fn an_owned_native_merge_is_moved_into_the_item_not_copied() {
         },
         &mut buf,
     );
-    let kept = enc.open_native().expect("open item")["encrypted_content"]
-        .as_str()
-        .expect("string");
+    let JsValue::String(kept) = &enc.open_native().expect("open item")["encrypted_content"] else {
+        panic!("expected retained string");
+    };
     assert_eq!(kept.len(), 4096);
     assert_eq!(
         kept.as_ptr(),
@@ -276,9 +276,10 @@ fn objects_without_index_keys_build_no_key_order_vector() {
         &mut buf,
     );
     let before = key_order_builds();
-    enc.push(&start(plain.clone()), &mut buf);
+    let plain_js = omni_ir::jsjson::object_from_serde(&plain);
+    enc.push(&start(plain_js.clone()), &mut buf);
     for _ in 0..100 {
-        enc.push(&delta(plain.clone()), &mut buf);
+        enc.push(&delta(plain_js.clone()), &mut buf);
         buf.clear();
     }
     let mut v = String::new();
@@ -288,7 +289,10 @@ fn objects_without_index_keys_build_no_key_order_vector() {
         before,
         "the common path built a key-order Vec"
     );
-    enc.push(&delta(numeric.clone()), &mut buf);
+    enc.push(
+        &delta(omni_ir::jsjson::object_from_serde(&numeric)),
+        &mut buf,
+    );
     assert!(
         buf.contains(r#"{"7":2,"type":"citations_delta","b":1}"#),
         "{buf}"
