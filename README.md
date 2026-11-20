@@ -422,6 +422,9 @@ Unlike the TypeScript gateway, Rust cluster inference returns HTTP 503 before ad
 On the authenticated Rust `/metrics` endpoint, `omni_request_log_writer_reservation_refused_total`
 counts these refusals by `reason` (`closed`, `cap`, `deadline`). `revalidation` separately counts
 503s caused by a failed primary key or settings read after waiting. The response does not expose the cause.
+The cluster-only `omni_request_log_writer_queued` and `omni_request_log_writer_credits_in_use`
+gauges distinguish queued entries from the total budget in use, which also includes reservations.
+The gauges are sampled independently and exclude batches already dequeued for persistence.
 
 ## Configuration
 

@@ -707,6 +707,14 @@ fn metrics(app: &App, req: &Request<Incoming>) -> Response<Body> {
         .telemetry
         .scrape_with_streams(&app.deps.load.provider_counts(), app.stream.stats());
     append_writer_metrics(&mut text, app.deps.writer.stats());
+    if let Some((queued, credits)) = app.deps.writer.postgres_pressure() {
+        use std::fmt::Write as _;
+        for (suffix, value) in [("queued", queued), ("credits_in_use", credits)] {
+            let name = format!("omni_request_log_writer_{suffix}");
+            writeln!(text, "# TYPE {name} gauge\n{name} {value}")
+                .expect("writing to a String cannot fail");
+        }
+    }
     append_writer_refusals(&mut text, &app.deps.telemetry);
     append_cluster_metrics(&mut text, app);
     let mut res = Response::new(full(text));
@@ -1705,14 +1713,7 @@ mod reservation_tests {
         deadline: u64,
         closed: u64,
     ) {
-        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
-        client.write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer reservation-test-metrics\r\nConnection: close\r\n\r\n").await.unwrap();
-        let mut response = String::new();
-        tokio::time::timeout(Duration::from_secs(1), client.read_to_string(&mut response))
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        let response = reservation_metrics(addr).await;
         for (reason, count) in [
             ("cap", cap),
             ("deadline", deadline),
@@ -1723,6 +1724,48 @@ mod reservation_tests {
                 "omni_request_log_writer_reservation_refused_total{{reason=\"{reason}\"}} {count}"
             )), "missing {reason}={count} from scrape");
         }
+    }
+
+    async fn reservation_metrics(addr: std::net::SocketAddr) -> String {
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        client.write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer reservation-test-metrics\r\nConnection: close\r\n\r\n").await.unwrap();
+        let mut response = String::new();
+        tokio::time::timeout(Duration::from_secs(1), client.read_to_string(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        response
+    }
+
+    #[tokio::test]
+    async fn pg_writer_pressure_distinguishes_reserved_credits_from_queued_events() {
+        let Some((server, store)) = fixture().await else {
+            return;
+        };
+        let writer = &server.app.deps.writer;
+        let held = writer.reserve_finishes::<3>().await.unwrap();
+        let response = reservation_metrics(server.addr).await;
+        assert!(
+            response
+                .lines()
+                .any(|line| line == "omni_request_log_writer_queued 0")
+        );
+        assert!(
+            response
+                .lines()
+                .any(|line| line == "omni_request_log_writer_credits_in_use 3")
+        );
+        drop(held);
+        let response = reservation_metrics(server.addr).await;
+        assert!(
+            response
+                .lines()
+                .any(|line| line == "omni_request_log_writer_credits_in_use 0")
+        );
+        no_work(&server.app, &store).await;
+        server.shutdown();
+        server.wait().await.unwrap();
     }
 
     #[tokio::test]

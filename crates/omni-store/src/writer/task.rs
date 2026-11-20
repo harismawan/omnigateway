@@ -747,6 +747,16 @@ impl WriterHandle {
     pub fn stats(&self) -> WriterStats {
         self.counters.snapshot()
     }
+
+    /// Postgres queue occupancy and credits in use, sampled independently.
+    /// Credits cover both queued entries and reservations not yet enqueued.
+    /// Scrapes are approximate under concurrent traffic; neither sample
+    /// includes a batch already dequeued for persistence.
+    pub fn postgres_pressure(&self) -> Option<(usize, usize)> {
+        let credits = self.terminal.as_ref()?;
+        let cap = self.tx.max_capacity();
+        Some((cap - self.tx.capacity(), cap - credits.available_permits()))
+    }
 }
 
 /// The running writer. Call [`Self::close`] to flush on shutdown; dropping it
