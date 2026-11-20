@@ -88,10 +88,13 @@ the fleet. Targets did not change.
 
 - **Boot (P1, Nov 20 ruling):** the 210,000-round KDF is a storage contract
   (~21.5 ms on single-node); it was not weakened to meet the target.
-- **Memory — P2 disposition pending:** retain the P1 held-stream and early-cancel
-  verdicts above until the P2 memory investigation supplies replacement evidence
-  or the release owner explicitly accepts the remaining misses. Elevated RSS
-  after load is not by itself proof of a leak.
+- **Memory — release disposition pending:** P2's fresh cluster control on the
+  same release reproduced held peaks of 126.34/133.03 MiB and early-cancel
+  increases of +46.88/+43.28 MiB per replica at about 10 s
+  (`/tmp/opencode/p2/report.md`, matched cluster arms). Neither tested change
+  was retained; P2 did not replace the P1 single-node result. Keep these misses
+  open until the release owner accepts them or newer qualification evidence
+  supersedes them. Elevated RSS after load is not by itself proof of a leak.
 - **Postgres drain overload (P1, Nov 20 ruling):** Rust may shed optional
   Begin/Route events rather than wait as TS does. Interim pending/route visibility
   and the corresponding live invalidations may be absent; Finish accounting,
