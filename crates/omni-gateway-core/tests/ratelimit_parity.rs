@@ -214,6 +214,7 @@ fn run_rust(limits_json: &str, history: &[Value], steps: &[Value]) -> Vec<Value>
                 limiter.apply_at(
                     omni_store::writer::Committed::Completions(vec![
                         omni_store::writer::Completion {
+                            commit_id: None,
                             id: format!("r{n}"),
                             api_key_id: Some("k1".into()),
                             requested_model: last.clone(),

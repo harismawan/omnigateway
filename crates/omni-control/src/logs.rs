@@ -78,8 +78,41 @@ pub fn export_page(
         q.internal_cursor = Some(cursor);
         q
     });
+    let out = encode_export(&rows, jsonl);
+    tracing::debug!(
+        "export_page_read elapsed_us={} read_us={} parse_us={} encode_us={}",
+        started.elapsed().as_micros(),
+        read_done,
+        parse_done - read_done,
+        started.elapsed().as_micros() - parse_done
+    );
+    Ok((out, next))
+}
+
+pub async fn export_page_postgres(
+    pg: &omni_store::pg::PgStore,
+    q: &Query,
+    jsonl: bool,
+) -> Result<(String, Option<Query>), Failure> {
+    let mut rows = pg.log_page(q).await?;
+    let mut next = None;
+    if rows.len() > q.limit {
+        rows.truncate(q.limit);
+        if let Some(last) = rows.last()
+            && let (Some(JsValue::Number(at)), Some(JsValue::String(id))) =
+                (field(last, "at"), field(last, "id"))
+        {
+            let mut query = q.clone();
+            query.cursor = Some((*at, id.clone()));
+            next = Some(query);
+        }
+    }
+    Ok((encode_export(&rows, jsonl), next))
+}
+
+fn encode_export(rows: &[JsValue], jsonl: bool) -> String {
     let mut out = String::new();
-    for row in &rows {
+    for row in rows {
         if jsonl {
             out.push_str(&stringify(row).unwrap_or_default());
             out.push('\n');
@@ -93,14 +126,7 @@ pub fn export_page(
             out.push_str("\r\n");
         }
     }
-    tracing::debug!(
-        "export_page_read elapsed_us={} read_us={} parse_us={} encode_us={}",
-        started.elapsed().as_micros(),
-        read_done,
-        parse_done - read_done,
-        started.elapsed().as_micros() - parse_done
-    );
-    Ok((out, next))
+    out
 }
 
 pub const CSV_HEADER: &str = "id,state,at,apiKeyId,requestedModel,resolvedProvider,resolvedModel,credentialId,attempts,status,errorCode,inputTokens,outputTokens,cacheReadTokens,cacheWriteTokens,ttftMs,durationMs,costUsd,degradations,rtkApplied,rtkFilterHits,rtkOriginalCodeUnits,rtkCompressedCodeUnits,rtkEstimatedTokensSaved,rtkFilters\r\n";
@@ -135,9 +161,29 @@ pub fn page(store: &SqliteStore, raw: &str) -> Result<String, Failure> {
     page_encoding(store, raw, false)
 }
 
+pub async fn page_postgres(pg: &omni_store::pg::PgStore, raw: &str) -> Result<String, Failure> {
+    let q = parse_query(raw)?;
+    let page = render_page(pg.log_page(&q).await?, q.limit);
+    Ok(stringify(&page).unwrap_or_default())
+}
+
 /// Only the ten client filters cross the HTTP boundary. Identity comes from
 /// the verified session, and projection is an allowlist, never subtraction.
 pub fn client_page(store: &SqliteStore, raw: &str, api_key_id: &str) -> Result<String, Failure> {
+    let query = client_query(raw, api_key_id)?;
+    client_projection(page_from_query(store, &query, false)?)
+}
+
+pub async fn client_page_postgres(
+    pg: &omni_store::pg::PgStore,
+    raw: &str,
+    api_key_id: &str,
+) -> Result<String, Failure> {
+    let query = client_query(raw, api_key_id)?;
+    client_projection(render_page(pg.log_page(&query).await?, query.limit))
+}
+
+fn client_query(raw: &str, api_key_id: &str) -> Result<Query, Failure> {
     let mut forwarded = url::form_urlencoded::Serializer::new(String::new());
     for (k, v) in url::form_urlencoded::parse(raw.as_bytes()) {
         if [
@@ -159,7 +205,10 @@ pub fn client_page(store: &SqliteStore, raw: &str, api_key_id: &str) -> Result<S
     }
     let mut query = parse_query(&forwarded.finish())?;
     query.api_key_id = Some(api_key_id.to_owned());
-    let mut page = page_from_query(store, &query, false)?;
+    Ok(query)
+}
+
+fn client_projection(mut page: JsValue) -> Result<String, Failure> {
     if let JsValue::Object(fields) = &mut page {
         for (name, value) in fields {
             if name.iter().copied().eq("logs".encode_utf16())
@@ -417,8 +466,13 @@ pub fn parse_query(raw: &str) -> Result<Query, Failure> {
 }
 
 fn page_from_query(store: &SqliteStore, q: &Query, csv: bool) -> Result<JsValue, Failure> {
-    let limit = q.limit;
-    let mut rows = omni_store::logs::page_encoding(store, q, csv)?;
+    Ok(render_page(
+        omni_store::logs::page_encoding(store, q, csv)?,
+        q.limit,
+    ))
+}
+
+fn render_page(mut rows: Vec<JsValue>, limit: usize) -> JsValue {
     let next = if rows.len() > limit {
         rows.truncate(limit);
         let last = &rows[limit - 1];
@@ -433,8 +487,5 @@ fn page_from_query(store: &SqliteStore, q: &Query, csv: bool) -> Result<JsValue,
     } else {
         JsValue::Null
     };
-    Ok(obj(vec![
-        ("logs", JsValue::Array(rows)),
-        ("nextCursor", next),
-    ]))
+    obj(vec![("logs", JsValue::Array(rows)), ("nextCursor", next)])
 }

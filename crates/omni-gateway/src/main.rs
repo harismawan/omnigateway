@@ -39,10 +39,39 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     };
-    let code = runtime.block_on(run());
+    let code = if rest.as_slice() == ["cluster-cutover-sweep"] {
+        runtime.block_on(cluster_cutover_sweep())
+    } else {
+        runtime.block_on(run())
+    };
     // Connection tasks still alive past the drain deadline are dropped here.
     runtime.shutdown_timeout(std::time::Duration::from_millis(100));
     code
+}
+
+/// A separate one-shot, never part of ordinary replica startup. The operator
+/// must stop every writer in the selected namespace before invoking it.
+async fn cluster_cutover_sweep() -> std::process::ExitCode {
+    let Some(url) = process_env()
+        .remove("OMNI_REDIS_URL")
+        .filter(|v| !v.is_empty())
+    else {
+        eprintln!("cluster cutover sweep requires OMNI_REDIS_URL");
+        return std::process::ExitCode::FAILURE;
+    };
+    logging::install(logging::level_of(LogLevel::Info));
+    let Ok(coord) = omni_coord::redis::RedisCoord::connect(&url, Default::default()).await else {
+        tracing::error!("cluster cutover coordinator connection failed");
+        return std::process::ExitCode::FAILURE;
+    };
+    let result = coord.remote().sweep_buckets_for_cutover().await;
+    coord.shutdown().await;
+    if result.is_err() {
+        tracing::error!("cluster cutover sweep failed; keep the fleet stopped and retry");
+        return std::process::ExitCode::FAILURE;
+    }
+    tracing::info!("cluster cutover bucket sweep complete");
+    std::process::ExitCode::SUCCESS
 }
 
 async fn run() -> std::process::ExitCode {

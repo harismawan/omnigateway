@@ -1,5 +1,8 @@
 # OmniGateway
 
+For an offline Rust cluster cutover or Postgres lineage replacement, see
+[the bucket sweep procedure](docs/rust-cluster-cutover.md) before starting any replica.
+
 Rust local service commands and diagnostic migration limits are documented in
 [Rust CLI service boundary](docs/rust-cli-service.md).
 
@@ -408,6 +411,14 @@ set `OMNI_BASE_URL` and pass WebSocket upgrades and unbuffered SSE through.
 Several replicas behind a load balancer are **cluster mode** on Postgres and
 Redis. All of it, with the nginx block and the Kubernetes base, is in
 [docs/deploying.md](docs/deploying.md).
+
+In Rust cluster mode, the database panel reports Postgres size and table stats
+with credentials redacted. Clearing captured bodies leaves request logs intact.
+The snapshot list is empty; use Postgres backup tooling rather than SQLite
+snapshot, import, restore, or vacuum actions. Authenticated `/metrics` exposes
+process-local `omni_request_log_writer_*_total` counters for optional and
+terminal queue drops, persistence failures, and completion delivery loss.
+Unlike the TypeScript gateway, Rust cluster inference returns HTTP 503 before admission if the request-log writer is closed or its bounded wait queue is full or expires (4 seconds).
 
 ## Configuration
 

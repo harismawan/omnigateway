@@ -1,4 +1,4 @@
-//! Single-node stream transport. Publishers attach here, never to HTTP dispatch.
+//! Local socket delivery and fleet fanout. Publishers attach here, never to HTTP dispatch.
 use crate::{
     server::{App, Body},
     stream::{self, Ring},
@@ -22,10 +22,14 @@ use tokio::{
 pub struct Hub {
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     pub console: crate::console::Source,
+    pub(crate) console_fleet: Option<crate::console::Fleet>,
+    fleet: Option<Fanout>,
     subscribers: [AtomicUsize; RESOURCE_TOPICS.len()],
     state: Arc<Mutex<State>>,
     shutdown: watch::Sender<bool>,
     heartbeat_epoch: Instant,
+    outbound: Pending,
+    inbound: Pending,
 }
 impl std::fmt::Debug for Hub {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -36,7 +40,10 @@ impl omni_store::writer::LogObserver for Hub {
     fn committed(&self, logs: usize, finishes: usize) {
         // No allocation, lock or send for an unsubscribed topic. Preserve
         // every call: reducing N calls to one loses the trailing frame.
-        if !self.empty_resource("res:logs") || !self.empty_resource("res:usage") {
+        if self.fleet.is_some()
+            || !self.empty_resource("res:logs")
+            || !self.empty_resource("res:usage")
+        {
             for _ in 0..logs.saturating_sub(finishes) {
                 self.invalidate("res:logs", None);
             }
@@ -52,12 +59,213 @@ impl Default for Hub {
         Self {
             tasks: Mutex::default(),
             console: crate::console::Source::resolve(),
+            console_fleet: None,
+            fleet: None,
             subscribers: std::array::from_fn(|_| AtomicUsize::new(0)),
             state: Arc::default(),
             shutdown: watch::channel(false).0,
             heartbeat_epoch: Instant::now(),
+            outbound: Pending::default(),
+            inbound: Pending::default(),
         }
     }
+}
+
+impl Hub {
+    pub(crate) fn single(node: &str) -> Arc<Self> {
+        let mut hub = Self::default();
+        hub.console_fleet = Some(crate::console::Fleet::new(
+            Arc::new(omni_coord::MemoryCoord::default()),
+            node.into(),
+            hub.console.clone(),
+        ));
+        Arc::new(hub)
+    }
+
+    pub(crate) fn with_console_fleet(coord: Arc<dyn omni_coord::Coord>, node: &str) -> Arc<Self> {
+        let mut hub = Self::default();
+        hub.console_fleet = Some(crate::console::Fleet::new(
+            coord.clone(),
+            node.into(),
+            hub.console.clone(),
+        ));
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<(Value, Option<String>)>(512);
+        let fleet_node = node.to_owned();
+        let sender = coord.clone();
+        let task = tokio::spawn(async move {
+            while let Some((wire, seq)) = rx.recv().await {
+                let wire = wire.to_string();
+                if let Some(seq) = seq {
+                    sender.publish_sequenced("broadcast", &wire, &seq).await;
+                } else {
+                    sender.publish("broadcast", &wire).await;
+                }
+            }
+        });
+        let target = Arc::new(std::sync::OnceLock::<std::sync::Weak<Self>>::new());
+        let broadcast = coord.subscribe(
+            "broadcast",
+            Arc::new({
+                let target = target.clone();
+                move |_, raw| {
+                    if let Some(hub) = target.get().and_then(std::sync::Weak::upgrade) {
+                        hub.receive(raw);
+                    }
+                }
+            }),
+        );
+        let reconnected = coord.subscribe(
+            omni_coord::RECONNECTED_TOPIC,
+            Arc::new({
+                let target = target.clone();
+                move |_, _| {
+                    if let Some(hub) = target.get().and_then(std::sync::Weak::upgrade) {
+                        hub.hello();
+                    }
+                }
+            }),
+        );
+        hub.fleet = Some(Fanout {
+            tx,
+            task,
+            node: fleet_node,
+            local: Mutex::default(),
+            _broadcast: broadcast,
+            _reconnected: reconnected,
+        });
+        let hub = Arc::new(hub);
+        assert!(target.set(Arc::downgrade(&hub)).is_ok());
+        hub.hello();
+        hub
+    }
+
+    fn hello(&self) {
+        if let Some(fleet) = &self.fleet {
+            fleet.send(json!({"kind":"hello", "nodeId": fleet.node}), None);
+        }
+    }
+
+    fn receive(&self, raw: &str) {
+        let (seq, raw) =
+            omni_coord::split_sequenced(raw).map_or((None, raw), |(seq, raw)| (Some(seq), raw));
+        let Ok(wire) = serde_json::from_str::<Value>(raw) else {
+            return;
+        };
+        let topic = wire["topic"].as_str().unwrap_or("");
+        let payload = || wire.get("payload").cloned().unwrap_or(Value::Null);
+        match wire["kind"].as_str() {
+            Some("stream") if topic.starts_with("stream:") => {
+                if let Some(seq) = seq {
+                    #[allow(clippy::cast_precision_loss)]
+                    self.deliver_here(topic, payload(), Some(seq as f64));
+                }
+            }
+            Some("res") if topic == "res:*" => self.deliver_here(topic, payload(), None),
+            Some("res") if resource_index(topic).is_some() && !self.empty_resource(topic) => {
+                let state = self.state.clone();
+                coalesce(&self.inbound, topic, payload(), move |topic, payload| {
+                    deliver(
+                        &mut state.lock().expect("stream state"),
+                        topic,
+                        payload,
+                        None,
+                    );
+                });
+            }
+            Some("declare") if topic.starts_with("stream:") => {
+                self.state
+                    .lock()
+                    .expect("stream state")
+                    .declared
+                    .insert(topic.to_owned());
+            }
+            Some("hello") => {
+                if let Some(fleet) = &self.fleet
+                    && wire["nodeId"] != fleet.node
+                {
+                    for topic in fleet.local.lock().expect("local topics").iter() {
+                        fleet.declare(topic);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+type Pending = Arc<Mutex<HashMap<String, Option<Value>>>>;
+struct Fanout {
+    tx: tokio::sync::mpsc::Sender<(Value, Option<String>)>,
+    task: tokio::task::JoinHandle<()>,
+    node: String,
+    local: Mutex<HashSet<String>>,
+    _broadcast: omni_coord::Subscription,
+    _reconnected: omni_coord::Subscription,
+}
+impl Fanout {
+    fn send(&self, wire: Value, seq: Option<String>) {
+        offer(&self.tx, wire, seq);
+    }
+    fn declare(&self, topic: &str) {
+        self.send(
+            json!({"kind":"declare", "topic":topic, "nodeId":self.node}),
+            None,
+        );
+    }
+}
+impl Drop for Fanout {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+fn offer(
+    tx: &tokio::sync::mpsc::Sender<(Value, Option<String>)>,
+    wire: Value,
+    seq: Option<String>,
+) {
+    if tx.try_send((wire, seq)).is_err() {
+        tracing::debug!(
+            reason = "fanout queue unavailable",
+            "stream publish dropped"
+        );
+    }
+}
+
+fn coalesce(
+    pending: &Pending,
+    topic: &str,
+    payload: Value,
+    send: impl Fn(&str, Value) + Send + 'static,
+) {
+    {
+        let mut state = pending.lock().expect("pending invalidations");
+        if let Some(queued) = state.get_mut(topic) {
+            *queued = Some(payload);
+            return;
+        }
+        state.insert(topic.into(), None);
+        send(topic, payload);
+    }
+    let pending = pending.clone();
+    let topic = topic.to_owned();
+    tokio::spawn(async move {
+        let floor = if matches!(topic.as_str(), "res:credentials" | "res:quota") {
+            5000
+        } else {
+            1000
+        };
+        loop {
+            tokio::time::sleep(Duration::from_millis(floor)).await;
+            let mut state = pending.lock().expect("pending invalidations");
+            if let Some(payload) = state.get_mut(&topic).and_then(Option::take) {
+                send(&topic, payload);
+            } else {
+                state.remove(&topic);
+                break;
+            }
+        }
+    });
 }
 // All resource publisher topics; arbitrary extension topics retain normal delivery.
 const RESOURCE_TOPICS: [&str; 8] = [
@@ -151,6 +359,22 @@ impl Hub {
     }
     /// Leading/trailing latest-value invalidation; empty resource topics do no work.
     pub fn invalidate(&self, topic: &str, keys: Option<Value>) {
+        if let Some(fleet) = &self.fleet {
+            let tx = fleet.tx.clone();
+            coalesce(
+                &self.outbound,
+                topic,
+                keys.map_or(Value::Null, |keys| json!({"keys":keys})),
+                move |topic, payload| {
+                    offer(
+                        &tx,
+                        json!({"kind":"res","topic":topic,"payload":payload}),
+                        None,
+                    );
+                },
+            );
+            return;
+        }
         if self.empty_resource(topic) {
             return;
         }
@@ -190,9 +414,31 @@ impl Hub {
             .expect("stream state")
             .declared
             .insert(topic.into());
+        if let Some(fleet) = &self.fleet {
+            fleet
+                .local
+                .lock()
+                .expect("local topics")
+                .insert(topic.to_owned());
+            fleet.declare(topic);
+        }
     }
     /// External sequence is the D4 coordinator seam. Local numbering otherwise.
     pub fn publish(&self, topic: &str, payload: Value, seq: Option<f64>) {
+        if let Some(fleet) = &self.fleet
+            && seq.is_none()
+        {
+            let stream = !topic.starts_with("res:");
+            fleet.send(
+                json!({"kind": if stream {"stream"} else {"res"},"topic":topic,"payload":payload}),
+                stream.then(|| format!("seq:{topic}")),
+            );
+            return;
+        }
+        self.deliver_here(topic, payload, seq);
+    }
+
+    fn deliver_here(&self, topic: &str, payload: Value, seq: Option<f64>) {
         if self.empty_resource(topic) {
             return;
         }
@@ -677,6 +923,208 @@ async fn run(
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn fleet_replays_streams_from_both_replicas_with_shared_sequence() {
+        let coord: Arc<dyn omni_coord::Coord> =
+            Arc::new(omni_coord::MemoryCoord::new(omni_coord::system_clock()));
+        let a = Hub::with_console_fleet(coord.clone(), "a");
+        let b = Hub::with_console_fleet(coord, "b");
+        let topic = "stream:console:a";
+        a.declare(topic);
+        a.publish(topic, json!("a"), None);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while b.replay_for_test(topic, 0.0)["frames"][0]["payload"] != "a" {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("foreign declaration and first stream publish");
+        b.publish(topic, json!("b"), None);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while a.replay_for_test(topic, 1.0)["frames"][0]["payload"] != "b" {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("second replica advances fleet sequence");
+        for hub in [&a, &b] {
+            assert!(hub.state.lock().unwrap().declared.contains(topic));
+            assert_eq!(
+                hub.replay_for_test(topic, 1.0)["frames"][0]["seq"].as_f64(),
+                Some(2.0)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn redis_fleet_hello_redeclares_existing_topics_and_replay_uses_shared_sequence() {
+        use omni_coord::{Coord as _, RedisCoord};
+        let Ok(url) = std::env::var("OMNI_TEST_REDIS_URL") else {
+            return;
+        };
+        let coord_a = Arc::new(RedisCoord::connect(&url, Default::default()).await.unwrap());
+        let node = crate::clock::uuid_v4();
+        let topic = format!("stream:console:{node}");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let watched = node.clone();
+        let _watch = coord_a.subscribe(
+            "broadcast",
+            Arc::new(move |_, raw| {
+                if let Ok(frame) = serde_json::from_str::<Value>(raw)
+                    && frame["kind"] == "declare"
+                    && frame["nodeId"] == watched
+                {
+                    drop(tx.send(frame));
+                }
+            }),
+        );
+        let a = Hub::with_console_fleet(coord_a.clone(), &node);
+        a.declare(&topic);
+        let first = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first["topic"], topic);
+        // B missed the original declaration. Its hello makes the existing
+        // owner resend, so the topic resolves without a local console source.
+        let coord_b = Arc::new(RedisCoord::connect(&url, Default::default()).await.unwrap());
+        let b = Hub::with_console_fleet(coord_b.clone(), &crate::clock::uuid_v4());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !b.state.lock().unwrap().declared.contains(&topic) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("hello restores the foreign declaration");
+        for (publisher, receiver, after, seq, line) in
+            [(&a, &b, 0.0, 1.0, "from A"), (&b, &a, 1.0, 2.0, "from B")]
+        {
+            publisher.publish(&topic, json!(line), None);
+            let frame = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let frame = receiver.replay_for_test(&topic, after)["frames"][0].clone();
+                    if !frame.is_null() {
+                        break frame;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("cross-node Redis stream");
+            assert_eq!(frame["payload"], line);
+            assert_eq!(frame["seq"].as_f64(), Some(seq));
+        }
+        drop((a, b));
+        coord_a.shutdown().await;
+        coord_b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn fleet_redis_reconnect_restores_a_missed_declaration() {
+        use omni_coord::{Coord as _, RedisCoord};
+        use tokio::net::{TcpListener, TcpStream};
+        // Keep this test's fault scoped to B's own sockets. The relay does not
+        // inspect Redis traffic or change the disposable server's state.
+        let Ok(url) = std::env::var("OMNI_TEST_REDIS_URL") else {
+            return;
+        };
+        if url != "redis://127.0.0.1:6379/0" {
+            return;
+        }
+        let a_coord = Arc::new(RedisCoord::connect(&url, Default::default()).await.unwrap());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_url = format!("redis://{}/0", listener.local_addr().unwrap());
+        let (cut, mut cuts) = tokio::sync::mpsc::channel::<tokio::sync::oneshot::Sender<()>>(1);
+        let (resume, mut resumes) = tokio::sync::oneshot::channel();
+        let relay = tokio::spawn(async move {
+            let mut links = tokio::task::JoinSet::new();
+            let mut paused = false;
+            loop {
+                tokio::select! {
+                    Some(ack) = cuts.recv() => {
+                        paused = true;
+                        links.shutdown().await;
+                        let _sent = ack.send(());
+                    }
+                    _ = &mut resumes, if paused => paused = false,
+                    Ok((mut incoming, _)) = listener.accept(), if !paused => {
+                        links.spawn(async move {
+                            let mut outgoing = TcpStream::connect("127.0.0.1:6379").await.unwrap();
+                            drop(tokio::io::copy_bidirectional(&mut incoming, &mut outgoing).await);
+                        });
+                    }
+                    _ = links.join_next(), if !links.is_empty() => {}
+                }
+            }
+        });
+        let b_coord = Arc::new(
+            RedisCoord::connect(&relay_url, Default::default())
+                .await
+                .unwrap(),
+        );
+        assert!(b_coord.remote().listening());
+        let node = crate::clock::uuid_v4();
+        let topic = format!("stream:console:{node}");
+        let a = Hub::with_console_fleet(a_coord.clone(), &node);
+        let peer = crate::clock::uuid_v4();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let watched = topic.clone();
+        let watched_peer = peer.clone();
+        let watch = a_coord.subscribe(
+            "broadcast",
+            Arc::new(move |_, raw| {
+                if let Ok(frame) = serde_json::from_str::<Value>(raw) {
+                    if frame["kind"] == "hello" && frame["nodeId"] == watched_peer {
+                        let _sent = tx.try_send("hello");
+                    } else if frame["kind"] == "declare" && frame["topic"] == watched {
+                        let _sent = tx.try_send("declare");
+                    }
+                }
+            }),
+        );
+        let b = Hub::with_console_fleet(b_coord.clone(), &peer);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .unwrap(),
+            Some("hello")
+        );
+        let (ack, cut_done) = tokio::sync::oneshot::channel();
+        cut.send(ack).await.unwrap();
+        cut_done.await.unwrap();
+        a.declare(&topic);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .unwrap(),
+            Some("declare")
+        );
+        assert!(!b.state.lock().unwrap().declared.contains(&topic));
+        let (tx, mut reconnect) = tokio::sync::mpsc::channel(1);
+        let observed = b_coord.clone();
+        let reconnect_watch = b_coord.subscribe(
+            omni_coord::RECONNECTED_TOPIC,
+            Arc::new(move |_, _| {
+                let _sent = tx.try_send((observed.healthy(), observed.faults()));
+            }),
+        );
+        resume.send(()).unwrap();
+        let ready = tokio::time::timeout(Duration::from_secs(2), reconnect.recv())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !b.state.lock().unwrap().declared.contains(&topic) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("B resubscribe must send hello and A redeclare; reconnect={ready:?}, listening={}, healthy={}, faults={}, frames={:?}", b_coord.remote().listening(), b_coord.healthy(), b_coord.faults(), rx.try_recv()));
+        drop((watch, reconnect_watch, a, b));
+        b_coord.shutdown().await;
+        a_coord.shutdown().await;
+        relay.abort();
+        drop(relay.await);
+    }
     #[test]
     fn utf16_registry_keys_do_not_collide() {
         let hub = hub();

@@ -55,6 +55,7 @@ async fn commit_crossing_minute_uses_application_time_not_row_time() {
     h.limiter.seed_now(&h.store);
     h.limiter.apply_at(
         Committed::Completions(vec![omni_store::writer::Completion {
+            commit_id: None,
             id: "boundary".into(),
             api_key_id: Some(KEY.into()),
             requested_model: "fast".into(),

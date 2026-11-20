@@ -16,6 +16,8 @@ path = "src/main.rs"
 
 [dependencies]
 omni-coord = { path = "../omni-coord" }
+omni-cluster-limit = { path = "../omni-cluster-limit" }
+async-trait = "0.1"
 omni-cli = { path = "../omni-cli" }
 omni-control = { path = "../omni-control" }
 omni-crypto = { path = "../omni-crypto" }
@@ -31,6 +33,7 @@ foldhash = "0.2"
 httpdate = "1"
 subtle = "2.6"
 serde_json.workspace = true
+serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 url = "2.5"

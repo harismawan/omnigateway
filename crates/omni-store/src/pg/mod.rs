@@ -25,9 +25,13 @@
 
 pub mod bodies;
 pub mod health;
+mod logs;
 mod maintenance;
 pub mod migrate;
+mod quota;
+mod reports;
 mod rows;
+mod tls;
 pub mod usage;
 
 use crate::error::StoreError;
@@ -38,7 +42,6 @@ use crate::{Credential, CredentialHealth, QuotaWindow, SnapshotData};
 use deadpool_postgres::{GenericClient, Manager, ManagerConfig, Pool, RecyclingMethod, Timeouts};
 use omni_crypto::field::FieldKey;
 use std::time::Duration;
-use tokio_postgres::NoTls;
 
 /// How the pool is sized and bounded. `Debug` redacts the URL's password.
 #[derive(Clone)]
@@ -183,8 +186,9 @@ impl PgStore {
     /// fixed offset every daily bucket uses.
     pub async fn open(config: PgConfig, day_offset_minutes: i64) -> Result<Self, StoreError> {
         let pg = config.pg_config()?;
+        let tls = tls::Connector::new();
         {
-            let (client, conn) = pg.connect(NoTls).await?;
+            let (client, conn) = pg.connect(tls.clone()).await?;
             let driver = tokio::spawn(async move {
                 if let Err(e) = conn.await {
                     tracing::debug!(reason = %e, "postgres migration connection ended");
@@ -210,7 +214,7 @@ impl PgStore {
         pooled.options(options);
         let manager = Manager::from_config(
             pooled,
-            NoTls,
+            tls,
             ManagerConfig {
                 recycling_method: RecyclingMethod::Fast,
             },
@@ -269,7 +273,7 @@ impl PgStore {
             .await?;
         let data = SnapshotData {
             api_keys: rows::list_key_entries(&tx).await?,
-            credentials: rows::list_credentials(&tx, key).await?,
+            credentials: rows::snapshot_credentials(&tx, key).await?,
             health: rows::list_health(&tx).await?,
             models: rows::list_models(&tx).await?,
             quota: rows::list_quota(&tx).await?,
@@ -288,6 +292,13 @@ impl PgStore {
         rows::find_key(&self.client().await?, "hash", hash).await
     }
 
+    pub async fn find_api_key_entry(
+        &self,
+        hash: &str,
+    ) -> Result<Option<Result<ApiKey, crate::keys::KeyRowError>>, StoreError> {
+        rows::find_key_entry(&self.client().await?, hash).await
+    }
+
     pub async fn list_credentials(&self, key: &FieldKey) -> Result<Vec<Credential>, StoreError> {
         rows::list_credentials(&self.client().await?, key).await
     }
@@ -300,6 +311,25 @@ impl PgStore {
         let sealed = omni_crypto::field::encrypt(key, input.api_key);
         self.client().await?.execute("INSERT INTO credentials(id,provider,label,auth_type,enabled,tier,weight,provider_data,api_key,created_at,updated_at) VALUES($1,$2,$3,'apiKey',true,1,1,$4,$5,$6,$6)",&[&input.id,&input.provider,&input.label,&input.provider_data,&sealed,&input.now]).await?;
         Ok(())
+    }
+
+    /// Public credential fields only; secret columns never leave this query.
+    pub async fn credential_metadata(&self, id: Option<&str>) -> Result<Vec<String>, StoreError> {
+        let c = self.client().await?;
+        let rows = query_rows(
+            &c,
+            "SELECT json_build_object(
+            'id', id, 'provider', provider, 'label', label, 'authType', auth_type,
+            'enabled', enabled, 'tier', tier, 'weight', weight, 'expiresAt', expires_at,
+            'accountEmail', account_email, 'providerData', provider_data::json,
+            'disabledReason', disabled_reason, 'disabledAt', disabled_at,
+            'hasRefreshToken', refresh_token IS NOT NULL, 'tokenVersion', token_version,
+            'createdAt', created_at, 'updatedAt', updated_at)::text
+            FROM credentials WHERE ($1::text IS NULL OR id=$1) ORDER BY tier,label",
+            &[&id],
+        )
+        .await?;
+        rows.iter().map(|row| Ok(row.try_get(0)?)).collect()
     }
 
     pub async fn patch_credential(
@@ -416,6 +446,25 @@ impl PgStore {
         rows::list_health(&self.client().await?).await
     }
 
+    pub async fn health_for(
+        &self,
+        id: &str,
+        model: &str,
+    ) -> Result<Option<CredentialHealth>, StoreError> {
+        rows::health(&self.client().await?, id, model).await
+    }
+
+    pub async fn quota_for(&self, id: &str) -> Result<Vec<QuotaWindow>, StoreError> {
+        rows::quota_for(&self.client().await?, id).await
+    }
+
+    pub async fn key_entry_by_id(
+        &self,
+        id: &str,
+    ) -> Result<Option<Result<ApiKey, crate::keys::KeyRowError>>, StoreError> {
+        rows::key_entry_by_id(&self.client().await?, id).await
+    }
+
     pub async fn list_models(
         &self,
     ) -> Result<Vec<Result<VirtualModel, ModelRowError>>, StoreError> {
@@ -435,6 +484,17 @@ impl PgStore {
     /// `KeyRepo.create`, with the row the caller built.
     pub async fn create_key(&self, key: &ApiKey) -> Result<(), StoreError> {
         rows::create_key(&self.client().await?, key).await
+    }
+
+    pub async fn create_key_columns(
+        &self,
+        k: &crate::keys::NewKeyColumns<'_>,
+    ) -> Result<(), StoreError> {
+        self.client().await?.execute(
+            "INSERT INTO api_keys (id,label,prefix,hash,model_allowlist,limits,body_logging_opt_out,created_at,revoked_at,expires_at,guardrail_policy,smart_routing) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULL,$9,$10,$11)",
+            &[&k.id,&k.label,&k.prefix,&k.hash,&k.model_allowlist,&k.limits,&k.body_logging_opt_out,&k.created_at,&k.expires_at,&k.guardrail_policy,&k.smart_routing],
+        ).await?;
+        Ok(())
     }
 
     /// One explicit key mutation; SQL identifiers never come from input.

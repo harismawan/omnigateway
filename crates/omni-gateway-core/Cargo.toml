@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 omni-control = { path = "../omni-control" }
+omni-cluster-limit = { path = "../omni-cluster-limit" }
 omni-crypto = { path = "../omni-crypto" }
 omni-ir = { path = "../omni-ir" }
 omni-ratelimit = { path = "../omni-ratelimit" }
@@ -19,6 +20,7 @@ omni-router = { path = "../omni-router" }
 omni-store = { path = "../omni-store" }
 arc-swap = "1"
 serde_json.workspace = true
+serde.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 tracing.workspace = true

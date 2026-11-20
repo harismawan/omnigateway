@@ -364,6 +364,7 @@ pub struct App {
     pub lifecycle: crate::lifecycle::Lifecycle,
     pub version: String,
     pub cluster: bool,
+    pub redis: Option<Arc<omni_coord::redis::RedisCoord>>,
     pub stop: tokio::sync::watch::Sender<bool>,
     pub connect: Arc<crate::connect::ConnectFlows>,
     pub deadline_workers: DeadlineWorkers,
@@ -400,6 +401,9 @@ pub struct App {
 }
 
 impl App {
+    pub(crate) fn routing_committed(&self, change: crate::routing::RoutingChange) {
+        self.deps.refresher.routing_committed(change);
+    }
     /// `reportCatalogProblem`: `provider catalog repaired`, once per
     /// distinct `field provider` per process.
     pub fn report_catalog_problems(&self, problems: Vec<omni_control::api::CatalogProblem>) {
@@ -697,10 +701,12 @@ fn metrics(app: &App, req: &Request<Incoming>) -> Response<Body> {
         *res.status_mut() = StatusCode::UNAUTHORIZED;
         return res;
     }
-    let text = app
+    let mut text = app
         .deps
         .telemetry
         .scrape_with_streams(&app.deps.load.provider_counts(), app.stream.stats());
+    append_writer_metrics(&mut text, app.deps.writer.stats());
+    append_cluster_metrics(&mut text, app);
     let mut res = Response::new(full(text));
     res.headers_mut().insert(
         "content-type",
@@ -709,10 +715,83 @@ fn metrics(app: &App, req: &Request<Incoming>) -> Response<Body> {
     res
 }
 
+fn append_writer_metrics(text: &mut String, stats: omni_store::writer::WriterStats) {
+    use std::fmt::Write as _;
+    for (kind, count) in [
+        ("terminal_dropped", stats.terminal_dropped),
+        ("optional_dropped", stats.optional_dropped),
+        ("failed_batches", stats.failed_batches),
+        ("failed_events", stats.failed),
+        ("sink_dropped", stats.sink_dropped),
+    ] {
+        let metric = format!("omni_request_log_writer_{kind}_total");
+        writeln!(text, "# TYPE {metric} counter\n{metric} {count}")
+            .expect("writing to a String cannot fail");
+    }
+}
+
+fn append_cluster_metrics(text: &mut String, app: &App) {
+    use std::fmt::Write as _;
+    use std::sync::atomic::Ordering::Relaxed;
+    macro_rules! counters {
+        ($prefix:literal, $m:ident, $($field:ident),+ $(,)?) => {
+            $(writeln!(text, concat!("# TYPE ", $prefix, stringify!($field),
+                "_total counter\n", $prefix, stringify!($field), "_total {}"), $m.$field.load(Relaxed))
+                .expect("writing to a String cannot fail");)+
+        };
+    }
+    if let Some(m) = app.limiter.cluster_metrics() {
+        counters!(
+            "omni_cluster_limiter_",
+            m,
+            redis_calls,
+            local_admissions,
+            refusals,
+            unseeded_admits,
+            seeds_queued,
+            seeds_installed,
+            seeds_already,
+            seed_failures,
+            seed_lock_unavailable,
+            debits_queued,
+            debit_buckets_applied,
+            debit_rows_applied,
+            debit_rows_covered,
+            debit_buckets_unseeded,
+            debit_rows_unseeded,
+            debit_buckets_waiting,
+            debit_buckets_lost,
+            debit_batches,
+            releases_refused,
+            verdict_mismatches
+        );
+    }
+    if let Some(m) = app.deps.load.fleet_metrics() {
+        counters!(
+            "omni_cluster_load_",
+            m,
+            publishes,
+            publish_faults,
+            refreshes,
+            refresh_faults,
+            truncated
+        );
+    }
+}
+
 fn health(app: &App) -> Response<Body> {
-    let mut body = String::from("{\"ok\":true,\"mode\":\"single\",\"nodeId\":");
+    let mode = if app.redis.is_some() {
+        "cluster"
+    } else {
+        "single"
+    };
+    let mut body = format!("{{\"ok\":true,\"mode\":\"{mode}\",\"nodeId\":");
     omni_ir::jsjson::write_str(&app.node_id, &mut body);
-    body.push_str(",\"coord\":\"ok\"}");
+    if app.redis.as_ref().is_some_and(|c| !c.healthy()) {
+        body.push_str(",\"coord\":\"fallback\"}");
+    } else {
+        body.push_str(",\"coord\":\"ok\"}");
+    }
     json_response(200, JSON_UTF8, body, &[])
 }
 
@@ -779,6 +858,18 @@ async fn authenticate(
     req: &Request<Incoming>,
     now: i64,
 ) -> Result<(AuthenticatedKey, Arc<GatewaySnapshot>), GatewayError> {
+    let mut missed = false;
+    let auth = authenticate_for(app, req, now, &mut missed).await;
+    preseed_miss(app, &auth, missed, now);
+    auth
+}
+
+async fn authenticate_for(
+    app: &App,
+    req: &Request<Incoming>,
+    now: i64,
+    missed: &mut bool,
+) -> ProxyAuth {
     let authorization = header(req, "authorization");
     let x_api_key = header(req, "x-api-key");
     let chosen = api_key_header(authorization.as_deref(), x_api_key.as_deref())?;
@@ -794,8 +885,7 @@ async fn authenticate(
                     let snapshot = app.deps.holder.load();
                     match snapshot.authenticate(chosen, now) {
                         AuthOutcome::Ok(k) => {
-                            #[allow(clippy::cast_precision_loss)]
-                            app.limiter.preseed(&k.id, &k.limits, now as f64);
+                            *missed = true;
                             Ok((k, snapshot))
                         }
                         AuthOutcome::Refused(e) => Err(e),
@@ -812,6 +902,13 @@ async fn authenticate(
                 MissResult::Absent | MissResult::Shed => Err(GatewaySnapshot::refuse_unknown()),
             }
         }
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn preseed_miss(app: &App, auth: &ProxyAuth, missed: bool, now: i64) {
+    if missed && let Ok((key, _)) = auth {
+        app.limiter.preseed(&key.id, &key.limits, now as f64);
     }
 }
 
@@ -959,14 +1056,177 @@ fn floor_secs(ms: i64) -> i64 {
     ms.div_euclid(1000)
 }
 
+type ProxyAuth = Result<(AuthenticatedKey, Arc<GatewaySnapshot>), GatewayError>;
+type FinishSlots = [Option<omni_store::writer::FinishSlot>; 3];
+
+fn writer_overload() -> GatewayError {
+    GatewayError::new(ErrorCode::Overloaded, crate::screening::WRITER_OVERLOAD).gateway_authored()
+}
+
+fn screens(auth: &ProxyAuth, primary: Option<&omni_store::Settings>) -> (bool, bool) {
+    auth.as_ref().map_or((false, false), |(key, snapshot)| {
+        let settings = primary.unwrap_or(&snapshot.routing.settings);
+        (
+            key.guardrail_policy.is_some(),
+            key.smart_routing && settings.smart_router_enabled,
+        )
+    })
+}
+
+/// A wait can outlive a policy or key publication. Read the primary only
+/// on this slow path; a lagging peer snapshot is not enough to find a revoke.
+async fn revalidate_waiter(
+    app: &App,
+    req: &Request<Incoming>,
+) -> Result<(AuthenticatedKey, Arc<GatewaySnapshot>, omni_store::Settings), GatewayError> {
+    let authorization = header(req, "authorization");
+    let x_api_key = header(req, "x-api-key");
+    let chosen = api_key_header(authorization.as_deref(), x_api_key.as_deref())?;
+    let Some(raw) = omni_gateway_core::snapshot::extract_token(chosen) else {
+        return Err(GatewaySnapshot::refuse_unknown());
+    };
+    let store = &app.deps.refresher.store;
+    let row = store
+        .find_api_key_entry(&omni_crypto::apikey::hash(raw))
+        .await
+        .map_err(|_| writer_overload())?;
+    // Read the small settings row instead of forcing a snapshot rebuild.
+    // Neither a publication nor the poll need have caught up to this commit.
+    let settings = store.get_settings().await.map_err(|_| writer_overload())?;
+    let key = GatewaySnapshot::authenticate_read(row, (app.deps.now)())?;
+    Ok((key, app.deps.holder.load(), settings))
+}
+
+#[derive(Default)]
+struct ReservationWait<'a> {
+    turn: Option<omni_store::writer::FinishWaiter<'a>>,
+    settings: Option<Arc<omni_store::Settings>>,
+}
+
+async fn reserve_proxy<'a, const N: usize>(
+    app: &'a App,
+    req: &Request<Incoming>,
+    mut auth: ProxyAuth,
+    deadline: tokio::time::Instant,
+    wait: &mut ReservationWait<'a>,
+) -> Result<(ProxyAuth, [Option<omni_store::writer::FinishSlot>; N]), GatewayError> {
+    use omni_store::writer::ReserveError;
+    let writer = &app.deps.writer;
+    let slots = match writer.try_reserve_finishes::<N>() {
+        Ok(reservation) => reservation,
+        Err(ReserveError::Full) => {
+            drop(auth);
+            if wait.turn.is_none() {
+                wait.turn = Some(writer.finish_waiter().map_err(|_| writer_overload())?);
+            }
+            let reservation = wait
+                .turn
+                .as_ref()
+                .expect("waiting turn")
+                .reserve::<N>(deadline)
+                .await
+                .map_err(|_| writer_overload())?;
+            let (key, snapshot, settings) =
+                tokio::time::timeout_at(deadline, revalidate_waiter(app, req))
+                    .await
+                    .map_err(|_| writer_overload())??;
+            if writer.postgres_closed() || tokio::time::Instant::now() >= deadline {
+                return Err(writer_overload());
+            }
+            auth = Ok((key, snapshot));
+            wait.settings = Some(Arc::new(settings));
+            reservation
+        }
+        Err(_) => return Err(writer_overload()),
+    };
+    Ok((auth, slots.into_slots()))
+}
+
+struct PreparedProxy {
+    auth: ProxyAuth,
+    slots: FinishSlots,
+    smart: bool,
+    screening_settings: Option<Arc<omni_store::Settings>>,
+}
+
+async fn prepare_proxy(
+    app: &App,
+    req: &Request<Incoming>,
+    mut auth: ProxyAuth,
+) -> Result<PreparedProxy, GatewayError> {
+    let deadline = tokio::time::Instant::now() + omni_store::writer::FINISH_WAIT;
+    let mut wait = ReservationWait::default();
+    loop {
+        let (judge, smart) = screens(&auth, wait.settings.as_deref());
+        let (next, slots, count) = match (judge, smart) {
+            (true, true) => {
+                let (next, slots) = reserve_proxy::<3>(app, req, auth, deadline, &mut wait).await?;
+                (next, slots, 3)
+            }
+            (false, false) => {
+                let (next, [slot]) =
+                    reserve_proxy::<1>(app, req, auth, deadline, &mut wait).await?;
+                (next, [slot, None, None], 1)
+            }
+            _ => {
+                let (next, [slot, screen]) =
+                    reserve_proxy::<2>(app, req, auth, deadline, &mut wait).await?;
+                (next, [slot, screen, None], 2)
+            }
+        };
+        let (judge, smart) = screens(&next, wait.settings.as_deref());
+        let needed = 1 + usize::from(judge) + usize::from(smart);
+        if needed <= count {
+            let [main, second, third] = slots;
+            return Ok(PreparedProxy {
+                auth: next,
+                slots: match (judge, smart) {
+                    (true, true) => [main, second, third],
+                    (true, false) => [main, second, None],
+                    (false, true) => [main, None, second],
+                    (false, false) => [main, None, None],
+                },
+                smart,
+                screening_settings: wait.settings,
+            });
+        }
+        // Policy now needs more rows. Return the partial set before trying
+        // for the whole set, without starting a new wait budget.
+        drop(slots);
+        if tokio::time::Instant::now() >= deadline {
+            return Err(writer_overload());
+        }
+        auth = next;
+    }
+}
+
 /// `handle` in `routes/proxy.ts`.
 #[allow(clippy::too_many_lines)]
 async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Response<Body> {
     let now = app.deps.now;
-    let request_id = crate::clock::request_id();
     let started_at = now();
     let dialect = dialect_of(surface);
     let sname = surface_name(surface);
+    // Reserve the maximum row set before creating any completion owner or
+    // claiming admission. A disconnect while waiting has spent nothing.
+    if app.deps.writer.postgres_closed() {
+        return error_response(dialect, &writer_overload(), &[]);
+    }
+    let mut missed = false;
+    let auth = authenticate_for(&app, &req, started_at, &mut missed).await;
+    if !app.cluster {
+        preseed_miss(&app, &auth, missed, started_at);
+    }
+    let PreparedProxy {
+        auth,
+        slots: [slot, judge_slot, check_slot],
+        smart,
+        screening_settings,
+    } = match prepare_proxy(&app, &req, auth).await {
+        Ok(prepared) => prepared,
+        Err(e) => return error_response(dialect, &e, &[]),
+    };
+    let request_id = crate::clock::request_id();
     let mut fin = Finisher::new(
         app.deps.writer.clone(),
         request_id.clone(),
@@ -974,6 +1234,7 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
         sname,
         now,
     );
+    fin.slot = slot;
     if let Some(t) = &app.deps.telemetry.tracing {
         t.start(
             &request_id,
@@ -990,9 +1251,10 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
     }
     let mut headroom = HeadroomByDimension::default();
     let mut admitted = false;
-    let limit_headers = |headroom: &HeadroomByDimension, admitted: bool| {
+    let mut admission_at = started_at;
+    let limit_headers = |headroom: &HeadroomByDimension, admitted: bool, admission_at: i64| {
         #[allow(clippy::cast_precision_loss)]
-        let at = started_at as f64;
+        let at = admission_at as f64;
         if admitted {
             dialect.rate_limit_headers(&after_this_request(headroom), at)
         } else {
@@ -1001,14 +1263,12 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
     };
 
     let outcome: Result<Response<Body>, GatewayError> = async {
-        let (key, snapshot) = authenticate(&app, &req, started_at)
-            .await
-            .inspect_err(|e| {
-                if e.code == ErrorCode::Auth {
-                    tracing::warn!(requestId = %request_id, surface = sname,
+        let (key, snapshot) = auth.inspect_err(|e| {
+            if e.code == ErrorCode::Auth {
+                tracing::warn!(requestId = %request_id, surface = sname,
                     reason = "invalid credentials", "authentication rejected");
-                }
-            })?;
+            }
+        })?;
         fin.key_id = Some(key.id.clone());
         if app.body_logging_allowed
             && !key.body_logging_opt_out
@@ -1025,6 +1285,16 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
         }
         let headers = headers_of(&req);
         let body = read_body(req, Duration::ZERO).await?;
+        // Reading a slow body can outlive the writer even after a successful
+        // reservation. No completion owner should file a row in that case.
+        if app.deps.writer.postgres_closed() {
+            fin.abandon_before_admission();
+            return Err(writer_overload());
+        }
+        if app.cluster && missed {
+            #[allow(clippy::cast_precision_loss)]
+            app.limiter.preseed(&key.id, &key.limits, now() as f64);
+        }
         if let Some(capture) = &fin.capture
             && let Ok(parsed) = omni_ir::jsjson::parse_js(&body)
         {
@@ -1046,10 +1316,12 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
             fin.model_unencodable = true;
             return Err(omni_dialects::ingress::lone_surrogate_model_error());
         }
+        admission_at = if app.cluster { now() } else { started_at };
         #[allow(clippy::cast_precision_loss)]
         match app
             .limiter
-            .admit(&key.id, &key.limits, &chat.model, started_at as f64)
+            .admit_selected(&key.id, &key.limits, &chat.model, admission_at as f64)
+            .await
         {
             Ok(a) => {
                 headroom = a.headroom;
@@ -1077,8 +1349,6 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
             route_started_at: started_at,
         };
         // After admission: a refused screen still counts as one request.
-        let smart =
-            key.smart_routing && app.deps.holder.load().routing.settings.smart_router_enabled;
         let request_deps = fin.capture.as_ref().map_or_else(
             || app.deps.clone(),
             |capture| {
@@ -1090,18 +1360,15 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
             },
         );
         let dispatched = if smart || key.guardrail_policy.is_some() {
-            if let Some(classifier) = &app.deps.holder.load().routing.settings.guardrail_model {
+            let snapshot = app.deps.holder.load();
+            let settings = screening_settings
+                .as_deref()
+                .unwrap_or(&snapshot.routing.settings);
+            if let Some(classifier) = &settings.guardrail_model {
                 app.limiter
                     .record_override(&key.id, &key.limits, classifier);
             }
-            if let Some(classifier) = &app
-                .deps
-                .holder
-                .load()
-                .routing
-                .settings
-                .smart_router_classifier_model
-            {
+            if let Some(classifier) = &settings.smart_router_classifier_model {
                 app.limiter
                     .record_override(&key.id, &key.limits, classifier);
             }
@@ -1111,6 +1378,8 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
                 key.guardrail_policy.clone(),
                 smart,
                 sname,
+                [judge_slot, check_slot],
+                screening_settings,
             )
         } else {
             dispatch::dispatch(request_deps, dreq)
@@ -1167,7 +1436,7 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
             );
             h.insert("connection", HeaderValue::from_static("keep-alive"));
             h.insert("x-accel-buffering", HeaderValue::from_static("no"));
-            for (k, v) in limit_headers(&headroom, admitted) {
+            for (k, v) in limit_headers(&headroom, admitted, admission_at) {
                 if let (Ok(name), Ok(value)) = (
                     hyper::header::HeaderName::from_bytes(k.as_bytes()),
                     HeaderValue::from_str(&v),
@@ -1226,7 +1495,7 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
                 (200, omni_ir::jsjson::to_string(&rendered))
             }
         };
-        let mut response_headers = limit_headers(&headroom, admitted);
+        let mut response_headers = limit_headers(&headroom, admitted, admission_at);
         if smart && status == 200 {
             let log = fin
                 .outcome
@@ -1273,7 +1542,7 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
                 );
             }
             fin.reject(&e);
-            let mut headers = limit_headers(&headroom, admitted);
+            let mut headers = limit_headers(&headroom, admitted, admission_at);
             if let Some(v) = retry_after(&e) {
                 headers.push(("retry-after".into(), v));
             }
@@ -1289,6 +1558,423 @@ const COALESCE_BYTES: usize = 64 * 1024;
 /// which the task yields. Without it, an upstream that delivers a long run of
 /// such events at once would keep one poll going through all of them.
 const COALESCE_EVENTS: usize = 64;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod reservation_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const KEY: &str = "sk-omni-fix2-local-test";
+    const CHAT: &str = "/v1/chat/completions";
+
+    async fn fixture_config() -> Option<(omni_gateway_core::config::Config, omni_store::pg::PgStore)>
+    {
+        let (Ok(pg), Ok(redis)) = (
+            std::env::var("OMNI_TEST_DATABASE_URL"),
+            std::env::var("OMNI_TEST_REDIS_URL"),
+        ) else {
+            assert_ne!(std::env::var("OMNI_TEST_REQUIRE_PG").as_deref(), Ok("1"));
+            return None;
+        };
+        let base = omni_store::pg::PgStore::open(omni_store::pg::PgConfig::new(&pg), 0)
+            .await
+            .unwrap();
+        let db = format!("d4_fix2_{}", crate::clock::uuid_v4().replace('-', ""));
+        base.client()
+            .await
+            .unwrap()
+            .batch_execute(&format!("CREATE DATABASE {db}"))
+            .await
+            .unwrap();
+        let mut url = url::Url::parse(&pg).unwrap();
+        url.set_path(&format!("/{db}"));
+        let store = omni_store::pg::PgStore::open(omni_store::pg::PgConfig::new(url.as_str()), 0)
+            .await
+            .unwrap();
+        store.client().await.unwrap().execute(
+            r#"INSERT INTO api_keys(id,label,prefix,hash,limits,created_at) VALUES($1,'gate','sk-omni',$2,'{"requests":{"1m":1},"tokens":{"5h":1000}}',0)"#,
+            &[&db, &omni_crypto::apikey::hash(KEY)],
+        ).await.unwrap();
+        let env = [
+            (
+                "OMNI_ENCRYPTION_KEY".into(),
+                "test-encryption-key-0123456789".into(),
+            ),
+            ("OMNI_CLUSTER_MODE".into(), "1".into()),
+            ("OMNI_DATABASE_URL".into(), url.to_string()),
+            ("OMNI_REDIS_URL".into(), redis),
+        ]
+        .into_iter()
+        .collect();
+        let mut cfg = omni_gateway_core::config::load_config(&env, || 0).unwrap();
+        cfg.port = 0;
+        Some((cfg, store))
+    }
+
+    async fn fixture() -> Option<(crate::Running, omni_store::pg::PgStore)> {
+        let (cfg, store) = fixture_config().await?;
+        let running = crate::start(
+            cfg,
+            crate::Options {
+                writer_capacity: Some(3),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        Some((running, store))
+    }
+
+    async fn request(addr: std::net::SocketAddr, path: &str) -> tokio::net::TcpStream {
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let body = r#"{"model":"unconfigured","messages":[{"role":"user","content":"hello"}]}"#;
+        client.write_all(format!("POST {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {KEY}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        client
+    }
+
+    async fn reply(mut client: tokio::net::TcpStream, bound: Duration) -> (u16, serde_json::Value) {
+        let mut buf = String::new();
+        tokio::time::timeout(bound, client.read_to_string(&mut buf))
+            .await
+            .expect("bounded HTTP refusal")
+            .unwrap();
+        let (head, body) = buf.split_once("\r\n\r\n").unwrap();
+        let status = head
+            .split_ascii_whitespace()
+            .nth(1)
+            .unwrap()
+            .parse()
+            .unwrap();
+        (status, serde_json::from_str(body).unwrap())
+    }
+
+    async fn no_work(app: &App, store: &omni_store::pg::PgStore) {
+        assert_eq!(app.deps.writer.stats().enqueued, 0);
+        let row = store
+            .client()
+            .await
+            .unwrap()
+            .query_one("SELECT count(*) FROM request_logs", &[])
+            .await
+            .unwrap();
+        assert_eq!(row.get::<_, i64>(0), 0);
+        let metrics = app.limiter.cluster_metrics().unwrap();
+        assert_eq!(
+            metrics
+                .redis_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            metrics
+                .debits_queued
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn pg_reservation_overload_refuses_full_waiters_and_expired_waits() {
+        let Some((server, store)) = fixture().await else {
+            return;
+        };
+        let held = server
+            .app
+            .deps
+            .writer
+            .reserve_finishes::<3>()
+            .await
+            .unwrap();
+        let waiting = request(server.addr, CHAT).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        for (path, kind, code, param) in [
+            ("/v1/messages", "overloaded_error", None, false),
+            (CHAT, "server_error", Some("server_error"), false),
+            ("/v1/responses", "server_error", Some("server_error"), true),
+        ] {
+            let (status, body) =
+                reply(request(server.addr, path).await, Duration::from_secs(1)).await;
+            assert_eq!(status, 503, "{body}");
+            assert_eq!(body["error"]["type"], kind);
+            assert_eq!(body["error"]["code"].as_str(), code);
+            assert_eq!(
+                body["error"].get("param"),
+                param.then_some(&serde_json::Value::Null)
+            );
+        }
+        let (status, body) = reply(waiting, Duration::from_secs(5)).await;
+        assert_eq!(status, 503, "{body}");
+        no_work(&server.app, &store).await;
+        drop(held);
+        server.shutdown();
+        server.wait().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pg_reservation_overload_refuses_a_closed_writer() {
+        let Some((server, store)) = fixture().await else {
+            return;
+        };
+        let app = server.app.clone();
+        server.shutdown();
+        server.wait().await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let serving = tokio::spawn({
+            let app = app.clone();
+            async move {
+                let (sock, _) = listener.accept().await.unwrap();
+                hyper::server::conn::http1::Builder::new()
+                    .serve_connection(
+                        hyper_util::rt::TokioIo::new(sock),
+                        hyper::service::service_fn(move |req| handle(app.clone(), req)),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        let (status, body) = reply(request(addr, CHAT).await, Duration::from_secs(1)).await;
+        assert_eq!(status, 503, "{body}");
+        assert_eq!(
+            body["error"]["message"],
+            "request log writer is busy or unavailable"
+        );
+        serving.await.unwrap();
+        no_work(&app, &store).await;
+    }
+
+    #[tokio::test]
+    async fn pg_reservation_overload_expires_without_work() {
+        let Some((server, store)) = fixture().await else {
+            return;
+        };
+        let held = server
+            .app
+            .deps
+            .writer
+            .reserve_finishes::<3>()
+            .await
+            .unwrap();
+        let (status, body) = reply(request(server.addr, CHAT).await, Duration::from_secs(5)).await;
+        assert_eq!(status, 503, "{body}");
+        assert_eq!(
+            body["error"]["message"],
+            "request log writer is busy or unavailable"
+        );
+        no_work(&server.app, &store).await;
+        drop(held);
+        server.shutdown();
+        server.wait().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pg_reservation_revalidates_a_key_revoked_during_the_wait() {
+        let Some((server, store)) = fixture().await else {
+            return;
+        };
+        let held = server
+            .app
+            .deps
+            .writer
+            .reserve_finishes::<3>()
+            .await
+            .unwrap();
+        let waiting = request(server.addr, CHAT).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        // Mutate the primary without sending a routing publication. Do not
+        // depend on the 500 ms snapshot backstop winning the race.
+        store
+            .client()
+            .await
+            .unwrap()
+            .execute("UPDATE api_keys SET revoked_at=1", &[])
+            .await
+            .unwrap();
+        drop(held);
+        let (status, body) = reply(waiting, Duration::from_secs(2)).await;
+        assert_eq!(status, 401, "{body}");
+        assert_eq!(body["error"]["code"], "invalid_api_key");
+        no_work(&server.app, &store).await;
+        server.shutdown();
+        server.wait().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pg_reservation_applies_the_guardrail_added_while_waiting() {
+        let Some((server, store)) = fixture().await else {
+            return;
+        };
+        let held = server
+            .app
+            .deps
+            .writer
+            .reserve_finishes::<3>()
+            .await
+            .unwrap();
+        let waiting = request(server.addr, CHAT).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        store
+            .client()
+            .await
+            .unwrap()
+            .execute("UPDATE api_keys SET guardrail_policy='test policy'", &[])
+            .await
+            .unwrap();
+        drop(held);
+        let (status, body) = reply(waiting, Duration::from_secs(2)).await;
+        assert_eq!(status, 500, "{body}");
+        assert_eq!(
+            body["error"]["message"],
+            "usage policy check is not configured"
+        );
+        server.shutdown();
+        server.wait().await.unwrap();
+        let row = store
+            .client()
+            .await
+            .unwrap()
+            .query_one(
+                "SELECT count(*) FROM request_logs WHERE status=500 AND state='done'",
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(row.get::<_, i64>(0), 1);
+    }
+
+    #[tokio::test]
+    async fn pg_reservation_obeys_fleet_screening_enabled_by_a_peer_during_the_wait() {
+        let Some((cfg, store)) = fixture_config().await else {
+            return;
+        };
+        store
+            .client()
+            .await
+            .unwrap()
+            .execute("UPDATE api_keys SET smart_routing=true", &[])
+            .await
+            .unwrap();
+        let server = crate::start(
+            cfg.clone(),
+            crate::Options {
+                writer_capacity: Some(3),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let peer = crate::start(cfg, crate::Options::default()).await.unwrap();
+        let password = "private-fix3-admin-password";
+        peer.app.admin.set_password(password).await.unwrap();
+        let token = peer.app.admin.login(password).await.unwrap().unwrap();
+
+        // Keep the waiting replica stale even if the test crosses a poll tick.
+        server.snapshot_refresh.0.abort();
+        server.snapshot_refresh.1.as_ref().unwrap().abort();
+        let writer = &server.app.deps.writer;
+        let held = writer.reserve_finishes::<3>().await.unwrap();
+        let waiting = request(server.addr, CHAT).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !matches!(
+                writer.finish_waiter(),
+                Err(omni_store::writer::ReserveError::Full)
+            ) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("inference holds the only waiter turn");
+
+        let mut admin = tokio::net::TcpStream::connect(peer.addr).await.unwrap();
+        let mut settings = omni_store::settings::default_settings_json();
+        settings["smartRouterEnabled"] = serde_json::Value::Bool(true);
+        let body = settings.to_string();
+        admin.write_all(format!("PUT /api/settings HTTP/1.1\r\nHost: localhost\r\nCookie: omni_admin={token}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+        let (status, body) = reply(admin, Duration::from_secs(1)).await;
+        assert_eq!(status, 200, "{body}");
+        assert!(store.get_settings().await.unwrap().smart_router_enabled);
+        assert!(
+            !server
+                .app
+                .deps
+                .holder
+                .load()
+                .routing
+                .settings
+                .smart_router_enabled
+        );
+
+        drop(held);
+        let (status, body) = reply(waiting, Duration::from_secs(2)).await;
+        assert_eq!(status, 500, "{body}");
+        assert_eq!(
+            body["error"]["message"],
+            "confidential routing is not configured"
+        );
+        server.shutdown();
+        peer.shutdown();
+        server.wait().await.unwrap();
+        peer.wait().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::cast_precision_loss)]
+    async fn pg_reservation_stamps_the_minute_at_admission_but_keeps_arrival_on_the_row() {
+        let Some((server, store)) = fixture().await else {
+            return;
+        };
+        let held = server
+            .app
+            .deps
+            .writer
+            .reserve_finishes::<3>()
+            .await
+            .unwrap();
+        let waiting = request(server.addr, CHAT).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let released_at = crate::clock::now_ms();
+        drop(held);
+        let (_, body) = reply(waiting, Duration::from_secs(2)).await;
+        assert_eq!(body["error"]["code"], "service_unavailable", "{body}");
+        let key = server
+            .app
+            .deps
+            .holder
+            .load()
+            .keys()
+            .next()
+            .unwrap()
+            .id
+            .clone();
+        let now = crate::clock::now_ms() as f64;
+        let window = server
+            .app
+            .redis
+            .as_ref()
+            .unwrap()
+            .remote()
+            .window_claim(&key, 60_000.0, now)
+            .await
+            .unwrap();
+        assert_eq!(window.before.used, 1.0);
+        assert!(
+            window.before.reset_at - 60_000.0 >= released_at as f64,
+            "minute stamp predates admission: {:?}",
+            window.before
+        );
+        server.shutdown();
+        server.wait().await.unwrap();
+        let row = store
+            .client()
+            .await
+            .unwrap()
+            .query_one("SELECT at FROM request_logs", &[])
+            .await
+            .unwrap();
+        assert!(row.get::<_, i64>(0) < released_at, "arrival time changed");
+    }
+}
 
 /// `sseResponse`: frames into one reused buffer, `: keepalive` while idle,
 /// and the row completed exactly once — at the end, on a break, or (through
@@ -1449,7 +2135,8 @@ async fn count_tokens(app: Arc<App>, req: Request<Incoming>) -> Response<Body> {
         };
         #[allow(clippy::cast_precision_loss)]
         app.limiter
-            .consume(&key.id, limits, &chat.model, now as f64)
+            .consume_selected(&key.id, limits, &chat.model, now as f64)
+            .await
             .map_err(|r| {
                 app.deps.telemetry.rate_limit(
                     r.violation.dimension.as_str(),

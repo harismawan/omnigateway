@@ -41,6 +41,7 @@ const SWEEP_EVERY_MS: f64 = 60_000.0;
 #[derive(Default)]
 pub struct LoadRegistry {
     state: Mutex<State>,
+    fleet: Option<Arc<omni_cluster_limit::load::LoadView>>,
 }
 
 impl std::fmt::Debug for LoadRegistry {
@@ -52,6 +53,17 @@ impl std::fmt::Debug for LoadRegistry {
 impl LoadRegistry {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    pub fn shared(view: Arc<omni_cluster_limit::load::LoadView>) -> Arc<Self> {
+        Arc::new(Self {
+            fleet: Some(view),
+            ..Self::default()
+        })
+    }
+
+    pub(crate) fn fleet_metrics(&self) -> Option<&omni_cluster_limit::load::LoadMetrics> {
+        self.fleet.as_ref().map(|view| &view.metrics)
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -71,11 +83,13 @@ impl LoadRegistry {
                 None => st.providers.push((provider.to_owned(), 1)),
             }
         }
+        let fleet = self.fleet.as_ref().map(|fleet| fleet.acquire(&key));
         LoadSlot {
             registry: Some(self.clone()),
             key,
             provider: provider.to_owned(),
             ttft_ms: None,
+            fleet,
         }
     }
 
@@ -86,7 +100,21 @@ impl LoadRegistry {
 
     /// In-flight count per `healthKey`; a missing key is zero.
     pub fn counts(&self) -> Arc<HashMap<String, f64>> {
-        self.lock().local.clone()
+        let local = self.lock().local.clone();
+        let Some(remote) = self.fleet.as_ref().map(|f| f.remote()) else {
+            return local;
+        };
+        if remote.is_empty() {
+            return local;
+        }
+        if local.is_empty() {
+            return remote;
+        }
+        let mut both = remote.as_ref().clone();
+        for (key, n) in local.iter() {
+            *both.entry(key.clone()).or_default() += n;
+        }
+        Arc::new(both)
     }
 
     /// This process's record per `healthKey`.
@@ -159,6 +187,7 @@ pub struct LoadSlot {
     key: String,
     provider: String,
     ttft_ms: Option<i64>,
+    fleet: Option<omni_cluster_limit::load::LoadSlot>,
 }
 
 impl LoadSlot {
@@ -173,6 +202,7 @@ impl LoadSlot {
 
     /// Idempotent.
     pub fn release(&mut self, ttft_ms: Option<i64>) {
+        drop(self.fleet.take());
         if let Some(r) = self.registry.take() {
             #[allow(clippy::cast_precision_loss)]
             r.release(
@@ -196,11 +226,41 @@ impl Drop for LoadSlot {
 #[derive(Default, Debug)]
 pub struct Probes {
     held: Mutex<HashMap<String, u32>>,
+    remote: Option<omni_coord::redis::Remote>,
 }
 
 impl Probes {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    pub fn shared(remote: omni_coord::redis::Remote) -> Arc<Self> {
+        Arc::new(Self {
+            remote: Some(remote),
+            ..Self::default()
+        })
+    }
+
+    /// The released fleet policy uses an expiring probe, not a renewed lease.
+    /// The named release guard also covers cancellation while Redis is replying.
+    pub async fn claim(self: &Arc<Self>, key: &str) -> (u64, ProbeClaim) {
+        if let Some(remote) = &self.remote {
+            let holder = omni_crypto::codex::uuid_v4_from(&omni_crypto::apikey::generate());
+            let claim = ProbeClaim {
+                probes: None,
+                key: key.to_owned(),
+                remote: Some((remote.clone(), holder)),
+            };
+            if let Some((remote, holder)) = &claim.remote
+                && let Ok(before) = remote
+                    .gauge_acquire(key, probe_now(), 180_000, Some(holder))
+                    .await
+            {
+                return (before, claim);
+            }
+        }
+        let (before, claim) = self.acquire(key);
+        (u64::from(before), claim)
     }
 
     /// Claims and reports how many were held before this claim.
@@ -214,20 +274,31 @@ impl Probes {
             ProbeClaim {
                 probes: Some(self.clone()),
                 key: key.to_owned(),
+                remote: None,
             },
         )
     }
 }
 
 /// Released on drop.
-#[derive(Debug)]
 pub struct ProbeClaim {
     probes: Option<Arc<Probes>>,
     key: String,
+    remote: Option<(omni_coord::redis::Remote, String)>,
 }
 
 impl Drop for ProbeClaim {
     fn drop(&mut self) {
+        if let Some((remote, holder)) = &self.remote
+            && remote
+                .gauge_release_detached(&self.key, probe_now(), Some(holder))
+                .is_err()
+        {
+            tracing::debug!(
+                reason = "coord release refused",
+                "probe release deferred to expiry"
+            );
+        }
         if let Some(p) = self.probes.take() {
             let mut held = p.held.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(n) = held.get_mut(&self.key) {
@@ -238,6 +309,11 @@ impl Drop for ProbeClaim {
             }
         }
     }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn probe_now() -> f64 {
+    crate::clock::now_ms() as f64
 }
 
 #[cfg(test)]

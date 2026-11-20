@@ -1,4 +1,4 @@
-//! Browser OAuth and process-local coordinator pending state.
+//! Browser OAuth with expiring coordinator pending state.
 use crate::{
     api::{ApiError, json_ok, read_json, require_admin},
     server::{App, Body},
@@ -50,13 +50,16 @@ pub struct ConnectFlows {
 }
 impl Default for ConnectFlows {
     fn default() -> Self {
-        Self {
-            coord: Arc::new(MemoryCoord::new(omni_coord::system_clock())),
-            flights: std::sync::Mutex::default(),
-        }
+        Self::new(Arc::new(MemoryCoord::new(omni_coord::system_clock())))
     }
 }
 impl ConnectFlows {
+    pub fn new(coord: Arc<dyn Coord>) -> Self {
+        Self {
+            coord,
+            flights: std::sync::Mutex::default(),
+        }
+    }
     async fn poll(
         self: &Arc<Self>,
         host: Arc<crate::refresh::Refresher>,
@@ -76,20 +79,10 @@ impl ConnectFlows {
                 let owner = self.clone();
                 let key = id.clone();
                 tokio::spawn(async move {
-                    let mut result = match owner.pending(&key, false).await {
+                    let result = match owner.pending(&key, true).await {
                         Ok(flow) => complete(host, holder, flow, "").await,
                         Err(e) => Err(e),
                     };
-                    // The exchange owns consumption even when every HTTP waiter
-                    // has disconnected, or the initial peek failed.
-                    if owner
-                        .coord
-                        .kv_del(&format!("oauth:pending:{key}"))
-                        .await
-                        .is_err()
-                    {
-                        result = Err(internal());
-                    }
                     owner
                         .flights
                         .lock()
@@ -122,14 +115,29 @@ impl ConnectFlows {
     }
     async fn pending(&self, id: &str, take: bool) -> Result<JsValue> {
         let key = format!("oauth:pending:{id}");
+        if take {
+            return omni_coord::with_lock(
+                self.coord.as_ref(),
+                &key,
+                10_000,
+                std::time::Duration::from_secs(1),
+                || self.read_pending(&key, true),
+            )
+            .await
+            .map_err(|_| internal())?;
+        }
+        self.read_pending(&key, false).await
+    }
+
+    async fn read_pending(&self, key: &str, take: bool) -> Result<JsValue> {
         let raw = self
             .coord
-            .kv_get(&key)
+            .kv_get(key)
             .await
             .map_err(|_| internal())?
             .ok_or_else(|| bad("unknown or expired authorization"))?;
         if take {
-            self.coord.kv_del(&key).await.map_err(|_| internal())?;
+            self.coord.kv_del(key).await.map_err(|_| internal())?;
         }
         parse_js(&raw).map_err(|_| internal())
     }
@@ -446,6 +454,7 @@ async fn complete(
         )
         .await
         .map_err(|_| internal())?;
+    host.routing_committed(crate::routing::RoutingChange::Credential { id: id.clone() });
     if holder.rebuild_from(host.store.clone()).await.is_err() {
         tracing::warn!(credentialId = %id, "credential snapshot publication failed; retaining previous snapshot");
     }

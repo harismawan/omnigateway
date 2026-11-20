@@ -48,6 +48,7 @@ async fn frozen_body_route_matrix() {
         lifecycle: omni_gateway::lifecycle::Lifecycle::default(),
         version: "0.0.0-dev".into(),
         cluster: false,
+        redis: None,
         stop: tokio::sync::watch::channel(false).0,
         deadline_workers: server::DeadlineWorkers::new(),
         miss: MissResolver::new(

@@ -152,7 +152,7 @@ fn classify_commit(
 }
 
 /// A COMMIT's error as the caller should act on it.
-fn commit_error(e: tokio_postgres::Error) -> StoreError {
+pub(crate) fn commit_error(e: tokio_postgres::Error) -> StoreError {
     match commit_rejection(&e) {
         Some(CommitRejection::Retryable) => StoreError::Postgres(e),
         Some(CommitRejection::Refused) => StoreError::Refused(

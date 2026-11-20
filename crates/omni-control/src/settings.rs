@@ -22,6 +22,10 @@ fn error(path: &str, message: impl std::fmt::Display) -> String {
     format!("BAD_REQUEST: {path}: {message}")
 }
 pub fn put(store: &SqliteStore, raw: &JsValue) -> Result<JsValue, String> {
+    sv::write(store, &parse_patch(raw)?, raw)
+}
+
+pub(crate) fn parse_patch(raw: &JsValue) -> Result<Value, String> {
     let defaults = omni_store::settings::default_settings_json();
     let mut input = Map::new();
     // Schema order matters: do not prevalidate later fields before earlier ones.
@@ -238,7 +242,7 @@ pub fn put(store: &SqliteStore, raw: &JsValue) -> Result<JsValue, String> {
         }
         patch.insert(key.clone(), v);
     }
-    sv::write(store, &Value::Object(patch), raw)
+    Ok(Value::Object(patch))
 }
 
 #[cfg(test)]

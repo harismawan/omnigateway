@@ -99,6 +99,28 @@ pub(crate) async fn list_key_entries(
         .collect()
 }
 
+pub(crate) async fn find_key_entry(
+    c: &impl GenericClient,
+    hash: &str,
+) -> Result<Option<Result<ApiKey, keys::KeyRowError>>, StoreError> {
+    query_rows(c, "SELECT * FROM api_keys WHERE hash = $1", &[&hash])
+        .await?
+        .first()
+        .map(to_key_entry)
+        .transpose()
+}
+
+pub(crate) async fn key_entry_by_id(
+    c: &impl GenericClient,
+    id: &str,
+) -> Result<Option<Result<ApiKey, keys::KeyRowError>>, StoreError> {
+    query_rows(c, "SELECT * FROM api_keys WHERE id=$1", &[&id])
+        .await?
+        .first()
+        .map(to_key_entry)
+        .transpose()
+}
+
 /// `one(where, arg)`: `where` is one of two fixed column names.
 pub(crate) async fn find_key(
     c: &impl GenericClient,
@@ -337,6 +359,23 @@ pub(crate) async fn list_credentials(
         .collect()
 }
 
+/// Routing refresh must not freeze unrelated accounts because one row is
+/// unreadable. Operator list/get retain their existing explicit error surface.
+pub(crate) async fn snapshot_credentials(
+    c: &impl GenericClient,
+    key: &FieldKey,
+) -> Result<Vec<Credential>, StoreError> {
+    let rows = query_rows(c, "SELECT * FROM credentials ORDER BY tier, label", &[]).await?;
+    let mut credentials = Vec::with_capacity(rows.len());
+    for row in &rows {
+        match to_credential(row, key) {
+            Ok(credential) => credentials.push(credential),
+            Err(_) => tracing::warn!("unreadable credential omitted from routing snapshot"),
+        }
+    }
+    Ok(credentials)
+}
+
 pub(crate) async fn credential(
     c: &impl GenericClient,
     key: &FieldKey,
@@ -355,18 +394,36 @@ pub(crate) async fn list_health(
     query_rows(c, "SELECT * FROM credential_health", &[])
         .await?
         .iter()
-        .map(|r| {
-            Ok(CredentialHealth {
-                scalar: None,
-                credential_id: r.try_get("credential_id")?,
-                model: r.try_get("model")?,
-                breaker_state: BreakerState::parse(r.try_get("breaker_state")?),
-                consecutive_failures: i64::from(r.try_get::<_, i32>("consecutive_failures")?),
-                opened_at: opt_f(r.try_get("opened_at")?),
-                rate_limited_until: opt_f(r.try_get("rate_limited_until")?),
-            })
-        })
+        .map(to_health)
         .collect()
+}
+
+pub(crate) async fn health(
+    c: &impl GenericClient,
+    id: &str,
+    model: &str,
+) -> Result<Option<CredentialHealth>, StoreError> {
+    query_rows(
+        c,
+        "SELECT * FROM credential_health WHERE credential_id=$1 AND model=$2",
+        &[&id, &model],
+    )
+    .await?
+    .first()
+    .map(to_health)
+    .transpose()
+}
+
+fn to_health(r: &Row) -> Result<CredentialHealth, StoreError> {
+    Ok(CredentialHealth {
+        scalar: None,
+        credential_id: r.try_get("credential_id")?,
+        model: r.try_get("model")?,
+        breaker_state: BreakerState::parse(r.try_get("breaker_state")?),
+        consecutive_failures: i64::from(r.try_get::<_, i32>("consecutive_failures")?),
+        opened_at: opt_f(r.try_get("opened_at")?),
+        rate_limited_until: opt_f(r.try_get("rate_limited_until")?),
+    })
 }
 
 pub(crate) async fn operator_credentials(
@@ -389,20 +446,37 @@ pub(crate) async fn list_quota(c: &impl GenericClient) -> Result<Vec<QuotaWindow
     query_rows(c, "SELECT * FROM quota_windows", &[])
         .await?
         .iter()
-        .map(|r| {
-            Ok(QuotaWindow {
-                text_spent: None,
-                credential_id: r.try_get("credential_id")?,
-                window_type: WindowType::parse(r.try_get("window_type")?),
-                starts_at: f(r.try_get("starts_at")?),
-                used: f(r.try_get("used")?),
-                limit: opt_f(r.try_get("limit_value")?),
-                resets_at: opt_f(r.try_get("resets_at")?),
-                observed_at: f(r.try_get("observed_at")?),
-                window_ms: opt_f(r.try_get("window_ms")?),
-            })
-        })
+        .map(to_quota)
         .collect()
+}
+
+pub(crate) async fn quota_for(
+    c: &impl GenericClient,
+    id: &str,
+) -> Result<Vec<QuotaWindow>, StoreError> {
+    query_rows(
+        c,
+        "SELECT * FROM quota_windows WHERE credential_id=$1",
+        &[&id],
+    )
+    .await?
+    .iter()
+    .map(to_quota)
+    .collect()
+}
+
+fn to_quota(r: &Row) -> Result<QuotaWindow, StoreError> {
+    Ok(QuotaWindow {
+        text_spent: None,
+        credential_id: r.try_get("credential_id")?,
+        window_type: WindowType::parse(r.try_get("window_type")?),
+        starts_at: f(r.try_get("starts_at")?),
+        used: f(r.try_get("used")?),
+        limit: opt_f(r.try_get("limit_value")?),
+        resets_at: opt_f(r.try_get("resets_at")?),
+        observed_at: f(r.try_get("observed_at")?),
+        window_ms: opt_f(r.try_get("window_ms")?),
+    })
 }
 
 // --- virtual_models -------------------------------------------------------

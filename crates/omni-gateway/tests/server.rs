@@ -15,6 +15,10 @@ use tokio::net::{TcpListener, TcpStream};
 /// A chat-completions SSE upstream: `mock-c<n>-d<ms>` streams n deltas
 /// `ms` apart, as `bench-gateway-upstream.ts` does.
 async fn upstream() -> u16 {
+    upstream_with_key(None).await
+}
+
+async fn upstream_with_key(expected_key: Option<&'static str>) -> u16 {
     let l = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let port = l.local_addr().expect("addr").port();
     tokio::spawn(async move {
@@ -34,6 +38,17 @@ async fn upstream() -> u16 {
                     let Some(end) = text.find("\r\n\r\n") else {
                         continue;
                     };
+                    if let Some(key) = expected_key
+                        && !text[..end].lines().any(|line| {
+                            line.split_once(':').is_some_and(|(name, value)| {
+                                name.eq_ignore_ascii_case("authorization")
+                                    && value.trim().strip_prefix("Bearer ") == Some(key)
+                            })
+                        })
+                    {
+                        drop(s.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await);
+                        return;
+                    }
                     let len: usize = text[..end]
                         .lines()
                         .find_map(|l| {
@@ -53,6 +68,11 @@ async fn upstream() -> u16 {
                         .and_then(|r| r.split('"').next())
                         .unwrap_or("")
                         .to_owned();
+                    if model == "mock-unavailable" {
+                        tokio::time::sleep(Duration::from_millis(80)).await;
+                        drop(s.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await);
+                        return;
+                    }
                     let parts: Vec<&str> = model.trim_start_matches("mock-c").split("-d").collect();
                     let chunks: usize = parts.first().and_then(|c| c.parse().ok()).unwrap_or(1);
                     let delay: u64 = parts.get(1).and_then(|c| c.parse().ok()).unwrap_or(0);
@@ -109,6 +129,58 @@ struct Gw {
 }
 
 const KEY: &str = "sk-omni-test-key-plain";
+
+async fn cluster_socket(base: &str, cookie: &str) -> TcpStream {
+    let mut socket = TcpStream::connect(base).await.expect("websocket TCP");
+    socket.write_all(format!("GET /api/stream HTTP/1.1\r\nHost: {base}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nCookie: {cookie}\r\n\r\n").as_bytes()).await.expect("upgrade");
+    let mut head = Vec::new();
+    while !head.ends_with(b"\r\n\r\n") {
+        head.push(socket.read_u8().await.expect("upgrade byte"));
+        assert!(head.len() < 8192);
+    }
+    assert!(head.starts_with(b"HTTP/1.1 101"));
+    socket
+}
+
+async fn cluster_subscribe(
+    socket: &mut TcpStream,
+    topic: &str,
+    since: Option<u64>,
+) -> serde_json::Value {
+    let mut text = serde_json::json!({"type":"subscribe", "topic":topic});
+    if let Some(seq) = since {
+        text["sinceSeq"] = seq.into();
+    }
+    let text = text.to_string();
+    let mask = [1, 2, 3, 4];
+    let mut msg = vec![
+        0x81,
+        0x80 | u8::try_from(text.len()).expect("short payload"),
+    ];
+    msg.extend(mask);
+    msg.extend(text.bytes().enumerate().map(|(i, b)| b ^ mask[i % 4]));
+    socket.write_all(&msg).await.expect("subscribe");
+    cluster_frame(socket).await
+}
+
+async fn cluster_frame(socket: &mut TcpStream) -> serde_json::Value {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        assert_eq!(socket.read_u8().await.expect("server frame"), 0x81);
+        let n = match socket.read_u8().await.expect("server frame length") {
+            n @ 0..=125 => usize::from(n),
+            126 => usize::from(socket.read_u16().await.expect("extended frame length")),
+            n => panic!("unexpected server frame length tag: {n}"),
+        };
+        let mut body = vec![0; n];
+        socket
+            .read_exact(&mut body)
+            .await
+            .expect("server frame body");
+        serde_json::from_slice(&body).expect("websocket JSON")
+    })
+    .await
+    .expect("websocket message deadline")
+}
 
 fn add_key(path: &std::path::Path, id: &str, raw: &str, extra: &str, value: &str) {
     let c = rusqlite::Connection::open(path).expect("open");
@@ -181,6 +253,1112 @@ async fn boot() -> Gw {
         Duration::from_secs(10),
     )
     .await
+}
+
+#[tokio::test]
+async fn cluster_listener_uses_postgres_without_opening_a_sqlite_shadow() {
+    let (Ok(pg), Ok(redis)) = (
+        std::env::var("OMNI_TEST_DATABASE_URL"),
+        std::env::var("OMNI_TEST_REDIS_URL"),
+    ) else {
+        assert_ne!(std::env::var("OMNI_TEST_REQUIRE_PG").as_deref(), Ok("1"));
+        return;
+    };
+    // Keep the disposable base unchanged and leave this run's database as evidence.
+    let admin = omni_store::pg::PgStore::open(omni_store::pg::PgConfig::new(pg.clone()), 0)
+        .await
+        .expect("disposable PG fixture");
+    let database = format!(
+        "d4_listener_{}",
+        omni_crypto::codex::uuid_v4_from(&omni_crypto::apikey::generate()).replace('-', "")
+    );
+    admin
+        .client()
+        .await
+        .expect("admin connection")
+        .batch_execute(&format!("CREATE DATABASE {database}"))
+        .await
+        .expect("fresh database");
+    drop(admin);
+    let mut url = url::Url::parse(&pg).expect("fixture URL");
+    url.set_path(&format!("/{database}"));
+    let pg = url.to_string();
+    let dir = tempfile::tempdir().expect("private root");
+    let path = dir.path().join("no-shadow.db");
+    let env = [
+        ("OMNI_ENCRYPTION_KEY".into(), ENC.into()),
+        ("OMNI_DB_PATH".into(), path.to_str().expect("path").into()),
+        ("OMNI_CLUSTER_MODE".into(), "1".into()),
+        ("OMNI_DATABASE_URL".into(), pg.clone()),
+        ("OMNI_REDIS_URL".into(), redis.clone()),
+        ("OMNI_BODY_LOGGING_ALLOWED".into(), "true".into()),
+        ("OMNI_METRICS_TOKEN".into(), "d4-private-metrics".into()),
+    ]
+    .into_iter()
+    .collect();
+    let mut config = load_config(&env, || 0).expect("config");
+    config.port = 0;
+    let running = start(
+        config.clone(),
+        Options {
+            stop_deadline: Duration::from_millis(500),
+            ..Options::default()
+        },
+    )
+    .await
+    .expect("cluster boot");
+    let peer = start(config.clone(), Options::default())
+        .await
+        .expect("peer boot");
+    let base = format!("127.0.0.1:{}", running.addr.port());
+    let peer_base = format!("127.0.0.1:{}", peer.addr.port());
+    let (status, _, response) = call(&base, "GET", "/health", &[], "").await;
+    assert_eq!(status, 200);
+    let health: serde_json::Value = serde_json::from_str(&response).expect("health JSON");
+    assert_eq!(health["mode"], "cluster");
+    assert_eq!(health["coord"], "ok");
+    assert!(!path.exists(), "cluster created a SQLite shadow");
+    let store = omni_store::Store::open(
+        omni_store::StoreConfig::Postgres(omni_store::pg::PgConfig::new(&pg)),
+        0,
+    )
+    .await
+    .expect("fixture store");
+    let store = std::sync::Arc::new(store);
+    let (status, headers, response) = call(
+        &base,
+        "POST",
+        "/api/setup",
+        &[],
+        r#"{"password":"private-test-password"}"#,
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    let initial = format!(
+        "omni_admin={}",
+        token_of(&set_cookie(&headers).expect("setup cookie"))
+    );
+    assert_eq!(
+        call(&peer_base, "GET", "/api/nodes", &[("cookie", &initial)], "")
+            .await
+            .0,
+        200
+    );
+    assert_eq!(
+        call(
+            &peer_base,
+            "POST",
+            "/api/setup",
+            &[],
+            r#"{"password":"another-private-password"}"#
+        )
+        .await
+        .0,
+        409
+    );
+    let (status, headers, response) = call(
+        &peer_base,
+        "POST",
+        "/api/login",
+        &[],
+        r#"{"password":"private-test-password"}"#,
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    let cookie = format!(
+        "omni_admin={}",
+        token_of(&set_cookie(&headers).expect("login cookie"))
+    );
+    let auth = [("cookie", cookie.as_str())];
+    let (status, _, body) = call(&peer_base, "GET", "/api/database", &auth, "").await;
+    assert_eq!(status, 200, "PG database overview: {body}");
+    let overview: serde_json::Value = serde_json::from_str(&body).expect("overview");
+    assert_eq!(overview["engine"], "postgres");
+    assert_eq!(overview["location"], omni_store::pg::redacted(&pg));
+    assert!(
+        overview["stats"]["pageCount"]
+            .as_i64()
+            .is_some_and(|n| n > 0)
+    );
+    assert_eq!(overview["freeDiskBytes"], serde_json::Value::Null);
+    assert_eq!(overview["fileBytes"], 0);
+    assert_eq!(overview["walBytes"], 0);
+    let tables = overview["tables"].as_array().expect("tables");
+    assert_eq!(
+        overview["bodiesBytes"],
+        tables
+            .iter()
+            .find(|t| t["name"] == "request_bodies")
+            .expect("bodies table")["bytes"]
+    );
+    let omni_store::Store::Postgres(primary) = store.as_ref() else {
+        panic!("PG fixture")
+    };
+    let row = omni_store::writer::RequestLog::new("d4-database-bodies", 1, 200);
+    let writer = omni_store::writer::Writer::spawn_postgres(primary.clone(), Default::default())
+        .expect("writer");
+    let writes = writer.handle();
+    let [slot] = writes
+        .reserve_finishes::<1>()
+        .await
+        .expect("terminal credit")
+        .into_slots();
+    assert!(writes.finish(slot, row));
+    writer.close().await.expect("seed log");
+    primary
+        .put_body(
+            &omni_crypto::field::derive_key(ENC),
+            "d4-database-bodies",
+            1,
+            "{}",
+            false,
+        )
+        .await
+        .expect("seed body");
+    for (method, path, payload) in [
+        ("GET", "/api/database/snapshots", ""),
+        ("DELETE", "/api/database/bodies", ""),
+        (
+            "PUT",
+            "/api/database/retention",
+            r#"{"keepLatest":5,"maxAgeDays":42}"#,
+        ),
+    ] {
+        let (status, _, body) = call(&peer_base, method, path, &auth, payload).await;
+        let expected = match method {
+            "GET" => serde_json::json!({"snapshots":[]}),
+            "DELETE" => serde_json::json!({"ok":true,"removed":1,"orphans":0}),
+            _ => serde_json::json!({"keepLatest":5.0,"maxAgeDays":42.0}),
+        };
+        assert_eq!(status, 200, "{method} {path}: {body}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).expect("JSON"),
+            expected
+        );
+    }
+    let c = primary.client().await.expect("PG fixture connection");
+    let row = c.query_one("SELECT EXISTS (SELECT 1 FROM request_logs WHERE id = 'd4-database-bodies'), EXISTS (SELECT 1 FROM request_bodies WHERE request_id = 'd4-database-bodies')", &[]).await.expect("body and log");
+    assert_eq!(
+        (row.get::<_, bool>(0), row.get::<_, bool>(1)),
+        (true, false)
+    );
+    drop(c);
+    let (_, _, body) = call(&base, "GET", "/api/database", &auth, "").await;
+    let retention = serde_json::from_str::<serde_json::Value>(&body).expect("overview");
+    assert_eq!(retention["retention"]["keepLatest"].as_f64(), Some(5.0));
+    assert_eq!(retention["retention"]["maxAgeDays"].as_f64(), Some(42.0));
+    let (status, _, response) = call(
+        &base,
+        "POST",
+        "/api/connect/start",
+        &auth,
+        r#"{"provider":"openai"}"#,
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    let flow: serde_json::Value = serde_json::from_str(&response).expect("authorization flow");
+    let finish =
+        serde_json::json!({"flowId":flow["flowId"], "code":"http://127.0.0.1:1/not-a-callback"})
+            .to_string();
+    let (status, _, response) =
+        call(&peer_base, "POST", "/api/connect/finish", &auth, &finish).await;
+    assert_eq!(status, 400, "{response}");
+    assert!(
+        response.contains("callback URL"),
+        "peer must validate the shared flow: {response}"
+    );
+    let (status, _, response) = call(&base, "POST", "/api/connect/finish", &auth, &finish).await;
+    assert_eq!(status, 400, "{response}");
+    assert!(
+        response.contains("unknown or expired"),
+        "peer must consume the shared flow: {response}"
+    );
+    let (status, _, response) = call(&peer_base, "GET", "/api/nodes", &auth, "").await;
+    assert_eq!(status, 200, "{response}");
+    let report: serde_json::Value = serde_json::from_str(&response).expect("node report");
+    let nodes = report["nodes"].as_array().expect("nodes");
+    assert!(
+        nodes
+            .iter()
+            .any(|n| n["id"] == health["nodeId"] && n["self"] == false)
+    );
+    assert_eq!(nodes.iter().filter(|n| n["self"] == true).count(), 1);
+    let seen = nodes
+        .iter()
+        .find(|n| n["id"] == health["nodeId"])
+        .expect("first node in peer report")["seenAt"]
+        .as_i64()
+        .expect("boot heartbeat");
+    let heartbeat = tokio::spawn({
+        let peer_base = peer_base.clone();
+        let cookie = cookie.clone();
+        let node = health["nodeId"].clone();
+        async move {
+            tokio::time::timeout(Duration::from_secs(13), async {
+                loop {
+                    let (status, _, response) =
+                        call(&peer_base, "GET", "/api/nodes", &[("cookie", &cookie)], "").await;
+                    assert_eq!(status, 200, "{response}");
+                    let report: serde_json::Value =
+                        serde_json::from_str(&response).expect("node report");
+                    if report["nodes"]
+                        .as_array()
+                        .expect("node rows")
+                        .iter()
+                        .any(|n| {
+                            n["id"] == node && n["seenAt"].as_i64().is_some_and(|at| at > seen)
+                        })
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            })
+            .await
+            .expect("cluster heartbeat advances after boot");
+        }
+    });
+    let (status, _, response) = call(
+        &peer_base,
+        "GET",
+        "/api/requests/no-such-request/body",
+        &auth,
+        "",
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    let body: serde_json::Value = serde_json::from_str(&response).expect("body JSON");
+    assert_eq!(body["detailState"], "none");
+    let (status, _, response) = call(&base, "GET", "/api/settings", &auth, "").await;
+    assert_eq!(status, 200, "{response}");
+    let mut settings: serde_json::Value = serde_json::from_str(&response).expect("settings JSON");
+    settings["settings"]["bodyLoggingEnabled"] = serde_json::json!(true);
+    let (status, _, response) = call(
+        &base,
+        "PUT",
+        "/api/settings",
+        &auth,
+        &settings["settings"].to_string(),
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    let api_secret = "d4-private-upstream-key";
+    let upstream_port = upstream_with_key(Some(api_secret)).await;
+    let create = serde_json::json!({"provider":"custom", "apiKey":api_secret,
+        "endpointId":format!("d4-{}", std::process::id()), "endpointLabel":"D4 stub",
+        "origin":format!("http://127.0.0.1:{upstream_port}"), "protocol":"chat_completions"})
+    .to_string();
+    let (status, _, response) = call(&base, "POST", "/api/credentials", &auth, &create).await;
+    assert_eq!(status, 200, "{response}");
+    assert!(!response.contains(api_secret));
+    let credential: serde_json::Value = serde_json::from_str(&response).expect("credential JSON");
+    let id = credential["credential"]["id"]
+        .as_str()
+        .expect("credential id");
+    let (status, _, response) = call(&peer_base, "GET", "/api/catalog", &auth, "").await;
+    assert_eq!(status, 200, "{response}");
+    let catalog: serde_json::Value = serde_json::from_str(&response).expect("provider catalog");
+    assert!(
+        catalog["providers"]
+            .as_array()
+            .expect("providers")
+            .iter()
+            .any(|p| p["id"] == "custom")
+    );
+    assert!(!response.contains(api_secret));
+    let (status, _, response) = call(&peer_base, "GET", "/api/credentials", &auth, "").await;
+    assert_eq!(status, 200, "{response}");
+    assert!(response.contains(id));
+    assert!(!response.contains(api_secret));
+    let credential_route = format!("/api/credentials/{id}");
+    let (status, _, response) = call(
+        &base,
+        "PATCH",
+        &credential_route,
+        &auth,
+        r#"{"label":"D4 renamed credential"}"#,
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    let (status, _, response) = call(&peer_base, "GET", "/api/credentials", &auth, "").await;
+    assert_eq!(status, 200, "{response}");
+    let rows: serde_json::Value = serde_json::from_str(&response).expect("credentials JSON");
+    assert!(
+        rows["credentials"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .any(|row| row["id"] == id && row["label"] == "D4 renamed credential")
+    );
+    let model_id = format!("d4-model-{}", std::process::id());
+    let model = serde_json::json!({"id": model_id, "strategy":"priority", "isAlias":false, "targets":[{
+        "provider":"custom", "endpointId":format!("d4-{}", std::process::id()), "model":"mock-c3-d0",
+        "tier":1,"weight":1,"costPerMTok":{"input":1,"output":2},
+        "capabilities":{"tools":true,"images":true,"reasoning":true}
+    }]}).to_string();
+    let (status, _, response) = call(
+        &base,
+        "PUT",
+        &format!("/api/models/{model_id}"),
+        &auth,
+        &model,
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    let (status, _, response) = call(&peer_base, "GET", "/api/models", &auth, "").await;
+    assert_eq!(status, 200, "{response}");
+    assert!(response.contains(&model_id));
+    let (status, _, response) = call(
+        &peer_base,
+        "POST",
+        &format!("/api/models/{model_id}/dry-run"),
+        &auth,
+        r#"{"tools":true}"#,
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    let ranking: serde_json::Value = serde_json::from_str(&response).expect("dry-run ranking");
+    assert_eq!(ranking["candidates"][0]["credentialId"], id);
+    assert!(!response.contains(api_secret));
+    let (status, _, response) = call(
+        &base,
+        "POST",
+        "/api/keys",
+        &auth,
+        r#"{"label":"D4 joint limit","limits":{"requests":{"1m":1}}}"#,
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    let api_key: serde_json::Value = serde_json::from_str(&response).expect("API key JSON");
+    let bearer = format!("Bearer {}", api_key["key"].as_str().expect("raw key"));
+    let inference_auth = [("authorization", bearer.as_str())];
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let (a, _, body_a) = call(&base, "GET", "/v1/models", &inference_auth, "").await;
+            let (b, _, body_b) = call(&peer_base, "GET", "/v1/models", &inference_auth, "").await;
+            if a == 200 && b == 200 && body_a.contains(&model_id) && body_b.contains(&model_id) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("routing backstop publishes both snapshots within a second");
+    let chat = serde_json::json!({"model": model_id, "messages":[{"role":"user","content":"hi"}]})
+        .to_string();
+    let (status, _, response) = call(
+        &peer_base,
+        "POST",
+        "/v1/chat/completions",
+        &inference_auth,
+        &chat,
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    assert!(response.contains("lorem ipsum"));
+    let success: serde_json::Value = serde_json::from_str(&response).expect("stub response");
+    let request_id = success["id"].as_str().expect("request ID");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let (status, _, response) = call(
+                &base,
+                "GET",
+                &format!("/api/requests/{request_id}/body"),
+                &auth,
+                "",
+            )
+            .await;
+            assert_eq!(status, 200, "{response}");
+            let value: serde_json::Value = serde_json::from_str(&response).expect("body JSON");
+            if !value["artifact"].is_null() && value["detailState"] != "none" {
+                assert!(response.contains("lorem ipsum") && !response.contains(api_secret));
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("peer reads persisted body capture");
+    let (status, _, response) = call(
+        &base,
+        "POST",
+        "/v1/chat/completions",
+        &inference_auth,
+        &chat,
+    )
+    .await;
+    assert_eq!(status, 429, "{response}");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let (status, _, response) = call(
+                &peer_base,
+                "GET",
+                &format!("/api/logs?model={model_id}&limit=1"),
+                &auth,
+                "",
+            )
+            .await;
+            assert_eq!(status, 200, "{response}");
+            let page: serde_json::Value = serde_json::from_str(&response).expect("log page");
+            if let Some(cursor) = page["nextCursor"].as_str() {
+                let newest = &page["logs"][0];
+                assert_eq!(newest["requestedModel"], model_id);
+                let (s, _, older) = call(
+                    &peer_base,
+                    "GET",
+                    &format!("/api/logs?model={model_id}&limit=1&cursor={cursor}"),
+                    &auth,
+                    "",
+                )
+                .await;
+                assert_eq!(s, 200, "{older}");
+                let older: serde_json::Value = serde_json::from_str(&older).expect("next page");
+                assert_ne!(newest["id"], older["logs"][0]["id"]);
+                assert_eq!(older["logs"][0]["requestedModel"], model_id);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("Postgres writer publishes two log rows");
+    let key_id = api_key["id"].as_str().expect("id");
+    let (status, _, response) = call(
+        &peer_base,
+        "GET",
+        &format!("/api/usage?apiKeyId={key_id}&groupBy=requestedModel"),
+        &auth,
+        "",
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    let usage: serde_json::Value = serde_json::from_str(&response).expect("usage JSON");
+    assert_eq!(usage["rows"][0]["key"], model_id);
+    assert_eq!(usage["rows"][0]["requests"], 2);
+    assert_eq!(usage["rows"][0]["errors"], 1);
+    let (status, _, response) = call(
+        &peer_base,
+        "GET",
+        &format!("/api/logs/export?apiKeyId={key_id}&since=0&until=2000000000000&format=jsonl"),
+        &auth,
+        "",
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    assert_eq!(response.lines().count(), 2);
+    let client_login = serde_json::json!({"key": api_key["key"]}).to_string();
+    let (status, headers, response) =
+        call(&base, "POST", "/api/client/login", &[], &client_login).await;
+    assert_eq!(status, 200, "{response}");
+    let client_cookie = format!(
+        "omni_admin={}",
+        token_of(&set_cookie(&headers).expect("client cookie"))
+    );
+    let (status, _, response) = call(
+        &peer_base,
+        "GET",
+        "/api/client/summary",
+        &[("cookie", &client_cookie)],
+        "",
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    let summary: serde_json::Value = serde_json::from_str(&response).expect("client summary");
+    assert_eq!(summary["id"], key_id);
+    assert_eq!(summary["dayOffsetMinutes"], 0);
+    assert_eq!(summary["limitUsage"][0]["used"], 2);
+    let (status, _, response) = call(
+        &peer_base,
+        "GET",
+        "/api/client/logs?apiKeyId=ignored",
+        &[("cookie", &client_cookie)],
+        "",
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    let scoped: serde_json::Value = serde_json::from_str(&response).expect("client logs");
+    let logs = scoped["logs"].as_array().expect("rows");
+    assert_eq!(logs.len(), 2);
+    assert!(
+        logs.iter()
+            .all(|row| row["requestedModel"] == model_id && row.get("credentialId").is_none())
+    );
+    let omni_store::Store::Postgres(pg) = store.as_ref() else {
+        unreachable!()
+    };
+    let observed = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_millis(),
+    )
+    .expect("epoch millis");
+    let window = serde_json::json!({"windowType":"daily","used":5,"limit":20,"resetsAt":observed+3_600_000,"windowMs":86_400_000});
+    omni_control::quota_ops::save_postgres(pg, id, &[window], observed)
+        .await
+        .expect("persistent observation");
+    for (route, rows) in [
+        ("/api/client/quota", "accounts"),
+        ("/api/client/quota/history", "samples"),
+    ] {
+        let (status, _, response) =
+            call(&peer_base, "GET", route, &[("cookie", &client_cookie)], "").await;
+        assert_eq!(status, 200, "{response}");
+        let quota: serde_json::Value = serde_json::from_str(&response).expect("quota JSON");
+        let row = quota[rows]
+            .as_array()
+            .expect("quota rows")
+            .iter()
+            .find(|row| row["credentialId"] == id)
+            .expect("peer reads provider observation");
+        assert_eq!(row["usedRatio"].as_f64(), Some(0.25));
+        assert!(row.get("limit").is_none() && row.get("used").is_none());
+    }
+    let failing_model = format!("{model_id}-unavailable");
+    let failing_config = model
+        .replace(&model_id, &failing_model)
+        .replace("mock-c3-d0", "mock-unavailable");
+    let (status, _, response) = call(
+        &base,
+        "PUT",
+        &format!("/api/models/{failing_model}"),
+        &auth,
+        &failing_config,
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    let (status, _, response) = call(
+        &base,
+        "POST",
+        "/api/keys",
+        &auth,
+        r#"{"label":"D4 health fixture"}"#,
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    let key: serde_json::Value = serde_json::from_str(&response).expect("health fixture key");
+    let header = format!("Bearer {}", key["key"].as_str().expect("raw key"));
+    let request_auth = [("authorization", header.as_str())];
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let (a, b) = tokio::join!(
+                call(&base, "GET", "/v1/models", &request_auth, ""),
+                call(&peer_base, "GET", "/v1/models", &request_auth, "")
+            );
+            if a.2.contains(&failing_model) && b.2.contains(&failing_model) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("both snapshots include the failing model");
+    let chat = chat.replace(&model_id, &failing_model);
+    let (a, b) = tokio::join!(
+        call(&base, "POST", "/v1/chat/completions", &request_auth, &chat),
+        call(
+            &peer_base,
+            "POST",
+            "/v1/chat/completions",
+            &request_auth,
+            &chat
+        )
+    );
+    assert!(a.0 >= 500 && b.0 >= 500);
+    let omni_store::Store::Postgres(pg) = store.as_ref() else {
+        unreachable!()
+    };
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let rows = pg.list_health().await.expect("PG health read");
+            if rows.iter().any(|r| {
+                r.credential_id == id
+                    && r.model == "mock-unavailable"
+                    && r.consecutive_failures == 2
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("both replicas' health mutations accumulate");
+    let (status, _, response) = call(&peer_base, "GET", "/api/credentials/health", &auth, "").await;
+    assert_eq!(status, 200, "{response}");
+    let report: serde_json::Value = serde_json::from_str(&response).expect("health response");
+    assert!(
+        report["health"]
+            .as_array()
+            .expect("health rows")
+            .iter()
+            .any(|r| r["credentialId"] == id && r["consecutiveFailures"] == 2)
+    );
+    let (status, _, response) = call(
+        &peer_base,
+        "GET",
+        &format!("/api/credentials/quota/history?credentialId={id}"),
+        &auth,
+        "",
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    let report: serde_json::Value =
+        serde_json::from_str(&response).expect("quota history response");
+    assert_eq!(report["samples"][0]["used"], 5.0);
+    assert_eq!(report["gatewayRates"][0]["credentialId"], id);
+    use omni_coord::Coord as _;
+    let coord = omni_coord::redis::RedisCoord::connect(&redis, Default::default())
+        .await
+        .expect("probe fixture coord");
+    let probe_key = format!("probe:{}", omni_router::health_key(id, "mock-c3-d0"));
+    assert_eq!(
+        coord
+            .gauge_acquire(&probe_key, 10_000, Some("d4-other-attempt"))
+            .await
+            .expect("hold on another replica"),
+        0
+    );
+    pg.update_health(id, "mock-c3-d0", &|row| {
+        let mut row = row.unwrap_or_else(|| omni_router::blank_health(id, "mock-c3-d0"));
+        row.breaker_state = omni_store::BreakerState::HalfOpen;
+        row
+    })
+    .await
+    .expect("seed half-open pair");
+    let probe_model = format!("{model_id}-probe");
+    let model = model.replace(&model_id, &probe_model);
+    let (status, _, response) = call(
+        &base,
+        "PUT",
+        &format!("/api/models/{probe_model}"),
+        &auth,
+        &model,
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if call(&peer_base, "GET", "/v1/models", &request_auth, "")
+                .await
+                .2
+                .contains(&probe_model)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("peer snapshot includes half-open target");
+    let probe_chat = chat.replace(&failing_model, &probe_model);
+    let (status, _, response) = call(
+        &peer_base,
+        "POST",
+        "/v1/chat/completions",
+        &request_auth,
+        &probe_chat,
+    )
+    .await;
+    assert_eq!(status, 503, "held probe must not reach stub: {response}");
+    coord
+        .gauge_release(&probe_key, Some("d4-other-attempt"))
+        .await
+        .expect("release peer hold");
+    let (status, _, response) = call(
+        &peer_base,
+        "POST",
+        "/v1/chat/completions",
+        &request_auth,
+        &probe_chat,
+    )
+    .await;
+    assert_eq!(status, 200, "released probe reaches stub: {response}");
+    let busy_model = format!("{model_id}-busy");
+    let model = model
+        .replace(&probe_model, &busy_model)
+        .replace("mock-c3-d0", "mock-c40-d50");
+    let (status, _, response) = call(
+        &base,
+        "PUT",
+        &format!("/api/models/{busy_model}"),
+        &auth,
+        &model,
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if call(&base, "GET", "/v1/models", &request_auth, "")
+                .await
+                .2
+                .contains(&busy_model)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("busy model published");
+    let balanced_model = format!("{model_id}-balanced");
+    let mut balanced: serde_json::Value = serde_json::from_str(&model).expect("busy model JSON");
+    balanced["id"] = serde_json::json!(balanced_model);
+    balanced["strategy"] = serde_json::json!("roundRobin");
+    let mut idle_target = balanced["targets"][0].clone();
+    idle_target["model"] = serde_json::json!("mock-c1-d0");
+    balanced["targets"]
+        .as_array_mut()
+        .expect("targets")
+        .push(idle_target);
+    let (status, _, body) = call(
+        &base,
+        "PUT",
+        &format!("/api/models/{balanced_model}"),
+        &auth,
+        &balanced.to_string(),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let balanced_chat = chat.replace(&failing_model, &balanced_model);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !call(&peer_base, "GET", "/v1/models", &request_auth, "")
+            .await
+            .2
+            .contains(&balanced_model)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("peer sees balanced model");
+    let busy_chat = chat.replace(&failing_model, &busy_model);
+    let request = call(
+        &base,
+        "POST",
+        "/v1/chat/completions",
+        &request_auth,
+        &busy_chat,
+    );
+    let view = omni_cluster_limit::load::LoadView::new();
+    let opts = omni_cluster_limit::load::LoadOptions::default();
+    let key = omni_router::health_key(id, "mock-c40-d50");
+    let observe_load = async {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                omni_cluster_limit::load::refresh(
+                    coord.remote(),
+                    &view,
+                    &omni_coord::system_clock(),
+                    &opts,
+                )
+                .await;
+                if view.remote().get(&key) == Some(&1.0) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("fleet load reader sees in-flight HTTP attempt");
+        // The standalone publisher and peer refresh on independent ticks.
+        // Allow a refresh while the first provider still has ~2s of work.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let (status, _, response) = call(
+            &peer_base,
+            "POST",
+            "/v1/chat/completions",
+            &request_auth,
+            &balanced_chat,
+        )
+        .await;
+        assert_eq!(status, 200, "{response}");
+        let body: serde_json::Value = serde_json::from_str(&response).expect("balanced response");
+        assert_eq!(
+            body["usage"]["completion_tokens"], 2,
+            "peer must select the idle target"
+        );
+    };
+    let ((status, _, response), ()) = tokio::join!(request, observe_load);
+    assert_eq!(status, 200, "{response}");
+    let (status, _, metrics) = call(
+        &base,
+        "GET",
+        "/metrics",
+        &[("authorization", "Bearer d4-private-metrics")],
+        "",
+    )
+    .await;
+    assert_eq!(status, 200, "{metrics}");
+    let counter = |name: &str| {
+        metrics
+            .lines()
+            .find_map(|l| l.strip_prefix(name)?.strip_prefix(' ')?.parse::<u64>().ok())
+    };
+    assert!(counter("omni_cluster_limiter_redis_calls_total").is_some_and(|n| n >= 1));
+    assert!(counter("omni_cluster_load_publishes_total").is_some_and(|n| n >= 1));
+    assert_eq!(
+        counter("omni_cluster_limiter_local_admissions_total"),
+        Some(0)
+    );
+    let (routing_tx, mut routing_rx) = tokio::sync::mpsc::channel(16);
+    let _routing_watch = omni_coord::Coord::subscribe(
+        &coord,
+        "routing",
+        std::sync::Arc::new(move |_, raw| {
+            if let Ok(message) = serde_json::from_str::<serde_json::Value>(raw) {
+                drop(routing_tx.try_send(message));
+            }
+        }),
+    );
+    let mut peer_socket = cluster_socket(&peer_base, &cookie).await;
+    assert_eq!(
+        cluster_subscribe(&mut peer_socket, "res:keys", None).await["type"],
+        "ack"
+    );
+    let (status, _, response) = call(
+        &base,
+        "PUT",
+        &format!("/api/keys/{key_id}/limits"),
+        &auth,
+        r#"{"limits":{"concurrency":1}}"#,
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    let edited: serde_json::Value = serde_json::from_str(&response).expect("edited key");
+    let event = cluster_frame(&mut peer_socket).await;
+    assert_eq!(event["type"], "event");
+    assert_eq!(event["topic"], "res:keys");
+    assert!(event.get("seq").is_none());
+    drop(peer_socket);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while let Some(event) = routing_rx.recv().await {
+            if event["change"]["type"] == "key" && event["change"]["id"] == key_id {
+                assert_eq!(event["from"], health["nodeId"]);
+                assert_eq!(event["change"].as_object().expect("identity only").len(), 2);
+                return;
+            }
+        }
+        panic!("routing receiver closed");
+    })
+    .await
+    .expect("committed key edit published identity without credentials or hashes");
+    // Complement the real Hub-to-Hub publisher test with the actual HTTP
+    // upgrade, fanout and client reconnect/replay path. Use an isolated topic
+    // so no global console capture env needs to change in this test process.
+    let topic = format!(
+        "stream:console:{}",
+        health["nodeId"].as_str().expect("node")
+    );
+    coord
+        .remote()
+        .publish(
+            "broadcast",
+            &serde_json::json!({
+                "kind":"declare", "topic":topic, "nodeId": health["nodeId"]
+            })
+            .to_string(),
+        )
+        .await
+        .expect("declare test console topic");
+    let mut sockets = [
+        cluster_socket(&base, &cookie).await,
+        cluster_socket(&peer_base, &cookie).await,
+    ];
+    for socket in &mut sockets {
+        assert_eq!(cluster_subscribe(socket, &topic, None).await["type"], "ack");
+    }
+    let sequence = format!("seq:{topic}");
+    for line in ["fixture line one", "fixture line two"] {
+        let seq = coord
+            .remote()
+            .publish_sequenced(
+                "broadcast",
+                &serde_json::json!({
+                    "kind":"stream", "topic":topic,"payload":{"lines":[line]}
+                })
+                .to_string(),
+                &sequence,
+            )
+            .await
+            .expect("publish fixture line");
+        for socket in &mut sockets {
+            let frame = cluster_frame(socket).await;
+            assert_eq!(frame["topic"], topic);
+            assert_eq!(frame["seq"], seq);
+            assert_eq!(frame["payload"]["lines"][0], line);
+        }
+    }
+    drop(sockets);
+    let mut reconnected = cluster_socket(&peer_base, &cookie).await;
+    assert_eq!(
+        cluster_subscribe(&mut reconnected, &topic, Some(1)).await["type"],
+        "ack"
+    );
+    let replay = cluster_frame(&mut reconnected).await;
+    assert_eq!(replay["seq"], 2);
+    assert_eq!(replay["payload"]["lines"][0], "fixture line two");
+    drop(reconnected);
+    coord.shutdown().await;
+    assert_eq!(edited["limitUsage"][0]["dimension"], "concurrency");
+    let (status, _, response) =
+        call(&base, "DELETE", &format!("/api/keys/{key_id}"), &auth, "").await;
+    assert_eq!(status, 200, "{response}");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if call(&peer_base, "GET", "/v1/models", &inference_auth, "")
+                .await
+                .0
+                == 401
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("revocation reaches peer within one second");
+    let (status, _, response) = call(&peer_base, "GET", "/api/console?node=all", &auth, "").await;
+    assert_eq!(status, 200, "{response}");
+    let console: serde_json::Value = serde_json::from_str(&response).expect("console response");
+    assert!(
+        console.get("unreachable").is_none_or(|v| v
+            .as_array()
+            .is_some_and(|ids| !ids.contains(&health["nodeId"]))),
+        "{response}"
+    );
+    let node = health["nodeId"].as_str().expect("node id");
+    let (status, _, response) = call(
+        &peer_base,
+        "GET",
+        &format!("/api/console?node={node}"),
+        &auth,
+        "",
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    let addressed: serde_json::Value = serde_json::from_str(&response).expect("remote console");
+    assert_ne!(addressed["source"], "fleet");
+
+    heartbeat.await.expect("node heartbeat check");
+    // Keep a real response body and its shared slot open while shutting down.
+    // A short grace deadline must produce one PG 499 before writer shutdown,
+    // then release the slot so the surviving node can admit the same key.
+    let (status, _, response) = call(
+        &peer_base,
+        "POST",
+        "/api/keys",
+        &auth,
+        r#"{"label":"D4 drain fixture","limits":{"concurrency":1,"tokens":{"5h":10000}}}"#,
+    )
+    .await;
+    assert_eq!(status, 200, "{response}");
+    let drain_key: serde_json::Value = serde_json::from_str(&response).expect("drain key");
+    let drain_id = drain_key["id"].as_str().expect("drain key id");
+    let drain_auth = format!("Bearer {}", drain_key["key"].as_str().expect("raw key"));
+    let stream = serde_json::json!({"model": busy_model,"stream":true,
+        "messages":[{"role":"user","content":"private drain fixture"}]})
+    .to_string();
+    let mut in_flight = TcpStream::connect(&base).await.expect("open stream");
+    in_flight.write_all(format!("POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nAuthorization: {drain_auth}\r\nContent-Length: {}\r\n\r\n{stream}", stream.len()).as_bytes()).await.expect("submit stream");
+    let mut head = Vec::new();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !head.ends_with(b"\r\n\r\n") {
+            head.push(in_flight.read_u8().await.expect("stream head"));
+            assert!(head.len() < 8192);
+        }
+    })
+    .await
+    .expect("warm inference head");
+    assert!(head.starts_with(b"HTTP/1.1 200"), "{head:?}");
+    let (status, _, response) = call(
+        &peer_base,
+        "POST",
+        "/v1/chat/completions",
+        &[("authorization", &drain_auth)],
+        &stream,
+    )
+    .await;
+    assert_eq!(status, 429, "should share held slot: {response}");
+
+    running.shutdown();
+    running.wait().await.expect("ordered cluster shutdown");
+    drop(in_flight);
+    let rows = pg
+        .client()
+        .await
+        .expect("drain verification")
+        .query(
+            "SELECT state,status FROM request_logs WHERE api_key_id=$1 AND node_id=$2",
+            &[&drain_id, &node],
+        )
+        .await
+        .expect("persisted drain rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get::<_, &str>(0), "done");
+    assert_eq!(rows[0].get::<_, i32>(1), 499);
+    let coord = omni_coord::RedisCoord::connect(&redis, Default::default())
+        .await
+        .expect("observe warm bucket");
+    let bucket = format!("lim:{drain_id}:5h");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs_f64()
+        * 1000.0;
+    let counts = || async {
+        coord
+            .remote()
+            .buckets_sum(&bucket, 60_000.0, 18_000_000.0, now)
+            .await
+            .expect("read Redis")
+            .expect("already seeded")
+    };
+    let before = counts().await;
+    let pending = format!("d4-boot-recover-{drain_id}");
+    pg.client().await.expect("insert fixture").execute("INSERT INTO request_logs (id,at,api_key_id,requested_model,status,duration_ms,state,node_id,input_tokens) VALUES ($1,$2,$3,$4,0,0,'pending','dead-fixture',17)", &[&pending, &observed, &drain_id, &busy_model]).await.expect("abandoned pending row");
+    let replacement = start(config, Options::default())
+        .await
+        .expect("replacement boot");
+    let after = counts().await;
+    assert_eq!(
+        after.requests,
+        before.requests + 1.0,
+        "boot recovery must debit an existing seed exactly once"
+    );
+    assert_eq!(after.tokens, before.tokens + 17.0);
+    replacement.shutdown();
+    replacement.wait().await.expect("replacement drain");
+    coord.shutdown().await;
+    let (status, _, response) = call(
+        &peer_base,
+        "POST",
+        "/v1/chat/completions",
+        &[("authorization", &drain_auth)],
+        &stream,
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "shutdown must release the shared slot: {response}"
+    );
+    let (status, _, response) = call(&peer_base, "DELETE", &credential_route, &auth, "").await;
+    assert_eq!(status, 200, "{response}");
+    let (status, _, response) = call(&peer_base, "GET", "/api/credentials", &auth, "").await;
+    assert_eq!(status, 200, "{response}");
+    let rows: serde_json::Value = serde_json::from_str(&response).expect("credential list");
+    assert!(
+        rows["credentials"]
+            .as_array()
+            .expect("credential rows")
+            .iter()
+            .all(|row| row["id"] != id)
+    );
+    let (status, _, _) = call(&peer_base, "POST", "/api/logout", &auth, "").await;
+    assert_eq!(status, 200);
+    let (status, _, _) = call(&peer_base, "GET", "/api/nodes", &auth, "").await;
+    assert_eq!(status, 401);
+    peer.shutdown();
+    peer.wait().await.expect("peer drain");
 }
 
 #[tokio::test]
@@ -1608,7 +2786,8 @@ async fn metrics_route_is_token_gated_and_records_completions() {
         "text/plain; version=0.0.4; charset=utf-8".into()
     )));
     assert!(
-        body.ends_with("omni_build_info{version=\"1.2.3\"} 1\n"),
+        body.lines()
+            .any(|line| line == "omni_build_info{version=\"1.2.3\"} 1"),
         "{body}"
     );
     assert!(!body.contains("omni_requests_total"));
@@ -1642,6 +2821,17 @@ async fn metrics_route_is_token_gated_and_records_completions() {
     );
     assert!(body.contains("omni_upstream_duration_seconds_count{provider=\"custom\"} 1\n"));
     assert!(body.contains("omni_ttft_seconds_count{provider=\"custom\",model=\"mock-c1-d0\"} 1\n"));
+    for name in [
+        "terminal_dropped",
+        "optional_dropped",
+        "failed_batches",
+        "sink_dropped",
+    ] {
+        assert!(
+            body.contains(&format!("omni_request_log_writer_{name}_total 0\n")),
+            "{body}"
+        );
+    }
     // `localCounts()` is empty once the slot is released, and no scrape set
     // the gauge while it was held: TS registers no `omni_inflight` series.
     assert!(!body.contains("omni_inflight"), "{body}");
@@ -1835,6 +3025,66 @@ fn token_of(cookie: &str) -> String {
         .and_then(|r| r.split(';').next())
         .expect("token")
         .to_owned()
+}
+
+#[tokio::test]
+async fn sqlite_console_selectors_merge_self_and_never_fall_back_for_other_node() {
+    let g = boot().await;
+    let (status, headers, body) = call(
+        &g.base,
+        "POST",
+        "/api/setup",
+        &[],
+        r#"{"password":"correct-horse-battery"}"#,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let cookie = format!(
+        "omni_admin={}",
+        token_of(&set_cookie(&headers).expect("cookie"))
+    );
+    let auth = [("cookie", cookie.as_str())];
+    let (_, _, body) = call(&g.base, "GET", "/health", &[], "").await;
+    let health: serde_json::Value = serde_json::from_str(&body).expect("health");
+    let node = health["nodeId"].as_str().expect("node id");
+    let (status, _, local) = call(&g.base, "GET", "/api/console", &auth, "").await;
+    assert_eq!(status, 200, "{local}");
+    for path in [
+        "/api/console?node=".to_string(),
+        format!("/api/console?node={node}"),
+    ] {
+        let (status, _, body) = call(&g.base, "GET", &path, &auth, "").await;
+        assert_eq!((status, body.as_str()), (200, local.as_str()));
+    }
+    let (status, _, body) = call(
+        &g.base,
+        "GET",
+        "/api/console?node=missing-d4-node",
+        &auth,
+        "",
+    )
+    .await;
+    assert_eq!(status, 504, "must not return local data: {body}");
+    let (status, _, body) = call(&g.base, "GET", "/api/console?node=all", &auth, "").await;
+    assert_eq!(status, 200, "{body}");
+    let all: serde_json::Value = serde_json::from_str(&body).expect("fleet");
+    assert!(all.get("unreachable").is_none(), "{all}");
+    let local: serde_json::Value = serde_json::from_str(&local).expect("local");
+    assert_eq!(
+        all["source"],
+        if local["source"] == "none" {
+            "none"
+        } else {
+            "fleet"
+        }
+    );
+    assert!(
+        all["lines"]
+            .as_array()
+            .expect("lines")
+            .iter()
+            .all(|l| l["nodeId"] == node)
+    );
 }
 
 #[tokio::test]

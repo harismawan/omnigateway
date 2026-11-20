@@ -19,6 +19,76 @@ const HOUR_MS: i64 = 3_600_000;
 /// `NODE_GRACE_MS`.
 const NODE_GRACE_MS: i64 = 60_000;
 
+/// Authoritative primary snapshot for distributed limiter seeds. Unlike the
+/// operator rollup reader, every result uses the exact same completed-row set.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClusterSeedRead {
+    pub snapshot: String,
+    pub rows: Vec<(i64, Counts)>,
+    pub ranges: Vec<(i64, i64, i64)>,
+}
+
+impl super::PgStore {
+    /// Snapshot is fixed first. Integer `at` compared to a fractional boundary
+    /// uses the mathematical ceiling, never a truncating timestamp conversion.
+    pub async fn cluster_seed_read(
+        &self,
+        api_key_id: &str,
+        since_ms: f64,
+        grain_ms: i64,
+        model: Option<&str>,
+    ) -> Result<ClusterSeedRead, StoreError> {
+        if !since_ms.is_finite() || since_ms.abs() > 9_007_199_254_740_991.0 || grain_ms <= 0 {
+            return Err(StoreError::Writer(
+                "invalid cluster seed boundary or grain".into(),
+            ));
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let since = since_ms.ceil() as i64;
+        let mut client = self.client().await?;
+        let tx = client
+            .build_transaction()
+            .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
+            .read_only(true)
+            .start()
+            .await?;
+        let snapshot = tx
+            .query_one("SELECT pg_current_snapshot()::text", &[])
+            .await?
+            .try_get(0)?;
+        // Counts and ranges share one GROUP BY over precisely the same rows.
+        // Numeric floor also preserves negative timestamp bucket semantics.
+        let rows = tx
+            .query(
+                "SELECT (floor(at::numeric / $1::bigint) * $1)::bigint,
+                    COUNT(*)::float8,
+                    COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens
+                                 + cache_write_tokens), 0)::float8,
+                    COALESCE(SUM(cost_usd), 0)::float8, MIN(at), MAX(at)
+               FROM request_logs
+              WHERE api_key_id = $2 AND state = 'done' AND at >= $3
+                AND ($4::text IS NULL OR requested_model = $4)
+              GROUP BY 1 ORDER BY 1",
+                &[&grain_ms, &api_key_id, &since, &model],
+            )
+            .await?;
+        let mut result = ClusterSeedRead {
+            snapshot,
+            rows: Vec::with_capacity(rows.len()),
+            ranges: Vec::with_capacity(rows.len()),
+        };
+        for row in &rows {
+            let bucket = row.try_get(0)?;
+            result.rows.push((bucket, counts(row, 1)?));
+            result
+                .ranges
+                .push((bucket, row.try_get(4)?, row.try_get(5)?));
+        }
+        tx.commit().await?;
+        Ok(result)
+    }
+}
+
 fn counts(r: &tokio_postgres::Row, from: usize) -> Result<Counts, StoreError> {
     Ok(Counts {
         requests: r.try_get(from)?,
@@ -251,12 +321,12 @@ pub(crate) async fn sweep_pending(
         &[&(now - 86_400_000)],
     )
     .await?;
-    pending_interruptions(c, node_id, now).await
+    pending_interruptions(c, Some(node_id), now).await
 }
 
 pub(crate) async fn pending_interruptions(
     c: &impl GenericClient,
-    node_id: &str,
+    boot_node_id: Option<&str>,
     now: i64,
 ) -> Result<Vec<RequestLog>, StoreError> {
     let rows = query_rows(
@@ -269,7 +339,7 @@ pub(crate) async fn pending_interruptions(
            FROM request_logs
           WHERE state = 'pending'
             AND (node_id = $1 OR node_id NOT IN (SELECT id FROM nodes WHERE seen_at > $2))",
-        &[&node_id, &(now - NODE_GRACE_MS)],
+        &[&boot_node_id, &(now - NODE_GRACE_MS)],
     )
     .await?;
     rows.iter()

@@ -38,12 +38,16 @@ pub fn shallow(v: &JsValue) -> Value {
     }
 }
 pub fn read(store: &SqliteStore) -> Result<JsValue, String> {
-    use omni_store::settings::{default_settings_json, settings_json};
     let raw = omni_store::settings::operator_raw(store.connection()).map_err(|e| e.to_string())?;
+    Ok(decode(raw.as_deref()))
+}
+
+pub(crate) fn decode(raw: Option<&str>) -> JsValue {
+    use omni_store::settings::{default_settings_json, settings_json};
     let defaults = JsValue::from(&default_settings_json());
-    let Some(raw) = raw else { return Ok(defaults) };
-    let Ok(stored) = crate::operator_json::parse(&raw) else {
-        return Ok(defaults);
+    let Some(raw) = raw else { return defaults };
+    let Ok(stored) = crate::operator_json::parse(raw) else {
+        return defaults;
     };
     let mut projection = serde_json::Map::new();
     if let JsValue::Object(fields) = &stored {
@@ -109,11 +113,18 @@ pub fn read(store: &SqliteStore) -> Result<JsValue, String> {
         };
         set(&mut out, key, value);
     }
-    Ok(out)
+    out
 }
 pub fn write(store: &SqliteStore, patch: &Value, original: &JsValue) -> Result<JsValue, String> {
     // TS putSettings reads again after validation, then merges the patch.
-    let mut next = read(store)?;
+    let next = merge(read(store)?, patch, original);
+    let raw = jsjson::stringify(&next).expect("settings");
+    omni_store::settings::write_operator_raw(store.connection(), &raw)
+        .map_err(|e| e.to_string())?;
+    Ok(next)
+}
+
+pub(crate) fn merge(mut next: JsValue, patch: &Value, original: &JsValue) -> JsValue {
     for (k, v) in patch.as_object().expect("validated patch") {
         if k == "weights" {
             let mut weights = get(&next, k).expect("weights").clone();
@@ -131,10 +142,7 @@ pub fn write(store: &SqliteStore, patch: &Value, original: &JsValue) -> Result<J
             set(&mut next, k, value);
         }
     }
-    let raw = jsjson::stringify(&next).expect("settings");
-    omni_store::settings::write_operator_raw(store.connection(), &raw)
-        .map_err(|e| e.to_string())?;
-    Ok(next)
+    next
 }
 
 pub fn trim_units(mut units: &[u16]) -> &[u16] {

@@ -89,6 +89,14 @@ impl Host for GatewayHost {
             let id = id.to_owned();
             let windows = windows.to_vec();
             let now = self.now();
+            if let Some(pg) = self.control.postgres() {
+                omni_control::quota_ops::save_postgres(pg, &id, &windows, now)
+                    .await
+                    .map_err(|_| internal())?;
+                self.refresh
+                    .routing_committed(crate::routing::RoutingChange::Quota { id });
+                return Ok(());
+            }
             self.control
                 .run({
                     let holder = self.holder.clone();
@@ -109,6 +117,16 @@ impl Host for GatewayHost {
                 .map_err(|_| internal())
         })
     }
+    fn fresh_windows<'a>(&'a self, id: &'a str, started: i64) -> Task<'a, Option<usize>> {
+        Box::pin(async move {
+            let Some(pg) = self.control.postgres() else {
+                return Ok(None);
+            };
+            pg.fresh_quota_windows(id, started)
+                .await
+                .map_err(|_| internal())
+        })
+    }
     fn now(&self) -> i64 {
         (self.refresh.now)()
     }
@@ -117,6 +135,7 @@ pub fn start(
     quota: Arc<Quota>,
     hub: Arc<crate::stream_transport::Hub>,
     interval: f64,
+    lease: Option<(Arc<dyn omni_coord::Coord>, String)>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     if interval <= 0.0 {
         return None;
@@ -127,6 +146,13 @@ pub fn start(
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             ticks.tick().await;
+            if let Some((coord, node)) = &lease
+                && !coord
+                    .lease_acquire("quota-poll", node, (interval as u64).saturating_mul(2))
+                    .await
+            {
+                continue;
+            }
             drop(quota.poll().await);
             hub.invalidate("res:quota", None);
         }
@@ -164,6 +190,19 @@ pub async fn serve(
     if operation == "history" {
         crate::api::require_reader(req.headers(), &app.admin).await?;
         let query = req.uri().query().unwrap_or("").to_owned();
+        if app.control.postgres().is_some() {
+            let reader = app.control.reader().await?;
+            let pg = reader.postgres().ok_or_else(ApiError::internal)?;
+            return Ok(json_ok(
+                omni_control::quota_ops::history_postgres(
+                    pg,
+                    &query,
+                    crate::clock::now_ms() as f64,
+                )
+                .await
+                .map_err(crate::admin_routes::failure)?,
+            ));
+        }
         return Ok(json_ok(
             app.control
                 .run(move |s| {
@@ -240,6 +279,160 @@ pub async fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn postgres_quota_probe_persists_and_publishes_after_the_shared_lock() {
+        use omni_coord::Coord as _;
+        use omni_providers::http::{
+            Headers, HttpClient, HttpError, HttpRequest, HttpResponse, ResponseBody,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        struct Stub(AtomicUsize);
+        impl HttpClient for Stub {
+            fn send(
+                &self,
+                req: HttpRequest,
+            ) -> std::pin::Pin<Box<dyn Future<Output = Result<HttpResponse, HttpError>> + Send + '_>>
+            {
+                Box::pin(async move {
+                    assert!(req.url.ends_with("/usage"));
+                    self.0.fetch_add(1, SeqCst);
+                    Ok(HttpResponse { status: 200, headers: Headers::new(), body: ResponseBody::from_chunks(vec![
+                        r#"{"rate_limit":{"primary_window":{"used_percent":25,"reset_at":1893456000,"limit_window_seconds":18000}}}"#.into(),
+                    ]) })
+                })
+            }
+        }
+
+        let (Ok(pg_url), Ok(redis_url)) = (
+            std::env::var("OMNI_TEST_DATABASE_URL"),
+            std::env::var("OMNI_TEST_REDIS_URL"),
+        ) else {
+            assert_ne!(std::env::var("OMNI_TEST_REQUIRE_PG").as_deref(), Ok("1"));
+            return;
+        };
+        let pg = omni_store::pg::PgStore::open(omni_store::pg::PgConfig::new(pg_url), 0)
+            .await
+            .expect("primary");
+        let id = crate::clock::uuid_v4();
+        let key = omni_crypto::field::derive_key("fixture");
+        pg.save_oauth(
+            &key,
+            &omni_store::credentials::OAuthCredential {
+                id: &id,
+                provider: "openai",
+                label: &id,
+                provider_data: "{}",
+                account_email: None,
+                tokens: &omni_store::credentials::TokenUpdate {
+                    access_token: Some("fixture".into()),
+                    refresh_token: None,
+                    api_key: None,
+                    id_token: None,
+                    expires_at: None,
+                    updated_at: crate::clock::now_ms(),
+                },
+                reconnect: false,
+            },
+        )
+        .await
+        .expect("encrypted quota credential");
+        let a = Arc::new(
+            omni_coord::RedisCoord::connect(&redis_url, Default::default())
+                .await
+                .expect("coord A"),
+        );
+        let b = Arc::new(
+            omni_coord::RedisCoord::connect(&redis_url, Default::default())
+                .await
+                .expect("coord B"),
+        );
+        let backend = Arc::new(omni_store::Store::Postgres(pg.clone()));
+        let holder = Arc::new(
+            omni_gateway_core::snapshot::SnapshotHolder::build_from(
+                backend.clone(),
+                key.clone(),
+                0.0,
+            )
+            .await
+            .expect("routing snapshot"),
+        );
+        let (route, sub, task) = crate::routing::Routing::start(
+            b.clone(),
+            crate::clock::uuid_v4(),
+            backend.clone(),
+            holder.clone(),
+        );
+        let stub = Arc::new(Stub(AtomicUsize::new(0)));
+        let mut refresh =
+            crate::refresh::Refresher::new(backend, key, stub.clone(), crate::clock::now_ms);
+        refresh.routing = Some(route);
+        let quota = Quota::coordinated(
+            Arc::new(GatewayHost {
+                completed: None,
+                refresh: Arc::new(refresh),
+                control: crate::admin_routes::ControlStore::from_postgres(pg.clone()),
+                holder: None,
+            }),
+            b.clone(),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let watch = a.subscribe(
+            "routing",
+            Arc::new(move |_, raw| {
+                if let Ok(frame) = serde_json::from_str::<Value>(raw) {
+                    drop(tx.try_send(frame));
+                }
+            }),
+        );
+        let guard = a
+            .lock(
+                &format!("quota:probe:{id}"),
+                60_000,
+                std::time::Duration::ZERO,
+            )
+            .await
+            .expect("peer lock");
+        let probe = quota.refresh(Some(&id));
+        tokio::pin!(probe);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut probe)
+                .await
+                .is_err()
+        );
+        assert_eq!(stub.0.load(SeqCst), 0);
+        a.unlock(guard).await;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(3), &mut probe)
+            .await
+            .expect("released lock")
+            .expect("real host probe");
+        assert_eq!(result["outcomes"][0]["kind"], "refreshed");
+        assert_eq!(stub.0.load(SeqCst), 1);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let frame = rx.recv().await.expect("routing subscription");
+                if frame["change"]["id"] == id {
+                    assert_eq!(
+                        frame["change"],
+                        serde_json::json!({"type":"quota", "id":id})
+                    );
+                    let windows = pg.quota_for(&id).await.expect("committed quota");
+                    assert_eq!(windows.len(), 1);
+                    assert_eq!(windows[0].used, 25.0);
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("identity-only committed publication");
+        drop((watch, sub));
+        task.abort();
+        drop(task.await);
+        quota.drain().await;
+        a.shutdown().await;
+        b.shutdown().await;
+    }
+
     #[tokio::test]
     async fn quota_host_uses_registered_owner_after_restore() {
         use omni_control::quota_runtime::Host;
