@@ -507,15 +507,38 @@ pub fn dispatch_with_options(
     req: Request,
     options: DispatchOptions,
 ) -> Dispatched {
+    dispatch_paced(deps, req, options, None)
+}
+
+#[derive(Debug)]
+pub(crate) struct RoutePacing {
+    pub(crate) first: Option<omni_store::writer::RouteSlot>,
+    pub(crate) reservation_deadline: tokio::time::Instant,
+    pub(crate) dispatch_deadline: Option<tokio::time::Instant>,
+}
+
+pub(crate) fn request_deadline(settings: &omni_store::Settings) -> Option<tokio::time::Instant> {
+    (settings.request_deadline_ms != 0.0).then(|| {
+        #[allow(clippy::cast_sign_loss)]
+        let ms = settings.request_deadline_ms.max(0.0) as u64;
+        tokio::time::Instant::now() + Duration::from_millis(ms)
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+pub(crate) fn dispatch_paced(
+    deps: Arc<Deps>,
+    req: Request,
+    options: DispatchOptions,
+    pacing: Option<RoutePacing>,
+) -> Dispatched {
     let started_at = (deps.now)();
     deps.health.reconcile(&deps.holder);
     let snapshot = deps.holder.load();
     let settings = snapshot.routing.settings.clone();
-    let deadline = (settings.request_deadline_ms != 0.0).then(|| {
-        #[allow(clippy::cast_sign_loss)]
-        let ms = settings.request_deadline_ms.max(0.0) as u64;
-        tokio::time::Instant::now() + Duration::from_millis(ms)
-    });
+    let deadline = pacing
+        .as_ref()
+        .map_or_else(|| request_deadline(&settings), |p| p.dispatch_deadline);
     let request_id = req.request_id.clone();
     let mut base = RequestLog::new(request_id.clone(), started_at, 0);
     base.requested_model = req.request.model.clone();
@@ -651,6 +674,7 @@ pub fn dispatch_with_options(
         started_at,
         deadline,
         on_route: options.on_route,
+        pacing,
     });
     Dispatched {
         events,
@@ -671,6 +695,7 @@ struct RunState {
     started_at: i64,
     deadline: Option<tokio::time::Instant>,
     on_route: bool,
+    pacing: Option<RoutePacing>,
 }
 
 /// Awaits `f` unless the deadline passes first.
@@ -765,18 +790,15 @@ fn run(mut s: RunState) -> EventsStream {
             // `onRoute`: the pending row on the first attempt, a route update on each failover.
             // A refusal is counted in the writer's `dropped` and warned about
             // by the writer task, rate-limited; never a line per request.
-            if s.on_route && began {
-                deps.writer.send(LogEvent::Route {
+            if s.on_route {
+                let event = if began { LogEvent::Route {
                     id: rid.clone(),
                     target: RouteTarget {
                         provider: c.target.provider.clone(),
                         model: c.target.model.clone(),
                         credential_id: c.credential.id.clone(),
                     },
-                });
-            } else if s.on_route {
-                began = true;
-                deps.writer.send(LogEvent::Begin(PendingLog {
+                } } else { LogEvent::Begin(PendingLog {
                     id: rid.clone(),
                     at: s.req.route_started_at,
                     api_key_id: s.req.api_key_id.clone(),
@@ -784,7 +806,26 @@ fn run(mut s: RunState) -> EventsStream {
                     resolved_provider: Some(c.target.provider.clone()),
                     resolved_model: Some(c.target.model.clone()),
                     credential_id: Some(c.credential.id.clone()),
-                }));
+                }) };
+                let queued = if let Some(pacing) = &mut s.pacing {
+                    if let Some(first) = pacing.first.take() {
+                        deps.writer.enqueue_route(Some(first), event)
+                    } else {
+                        let deadline = s.deadline.map_or(pacing.reservation_deadline, |at| at.min(pacing.reservation_deadline));
+                        Box::pin(deps.writer.send_route(event, deadline)).await
+                    }
+                } else {
+                    deps.writer.send(event);
+                    Ok(())
+                };
+                if let Err(reason) = queued {
+                    let ttft = lock(&log).ttft_ms;
+                    slot.release(ttft);
+                    deps.telemetry.record_writer_refusal(reason.into());
+                    yield Err(GatewayError::new(ErrorCode::Overloaded, crate::screening::WRITER_OVERLOAD).gateway_authored());
+                    return;
+                }
+                began = true;
             }
             tracing::debug!(requestId = %rid, provider = %c.target.provider, model = %c.target.model,
                 credentialId = %c.credential.id, attempt = i + 1, "attempt started");

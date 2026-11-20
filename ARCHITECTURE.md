@@ -1000,9 +1000,13 @@ the primary. The same settings determine reservation size and screening;
 the warm path still reads only the replica snapshot. A full wait queue,
 deadline, or closed writer returns the surface's overload response without
 dispatch or a completion row. Hyper need not notice a disconnect before
-reading the body, so the deadline bounds retention in that case. `Begin`
-and `Route` can shed first; every admitted request can enqueue its `Finish`
-without waiting, including on cancellation. The writer commits log and rollups
+reading the body, so the deadline bounds retention in that case. Inference
+`Begin`/`Route` producers take a separate queue slot before attempting upstream;
+the first slot is taken before limiter admission and the response head, and
+later routes use the remaining wait/dispatch budget. A bounded wait shares the
+same waiter cap as terminal admission. A refusal can return HTTP 503 before
+headers, or a stream error after headers. Every admitted request can enqueue
+its `Finish` without waiting, including on cancellation. The writer commits log and rollups
 atomically before handing off a debit with that transaction's top-level xid8.
 A failed write still hands off a debit, without an xid. PG retains a batch when
 the commit consumer is full; shutdown drains writer, consumer, limiter, then

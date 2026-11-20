@@ -200,6 +200,10 @@ struct Counters {
     refused: AtomicU64,
     sink_dropped: AtomicU64,
     seeds_dropped: AtomicU64,
+    route_waits: AtomicU64,
+    route_wait_ns: AtomicU64,
+    route_refused: AtomicU64,
+    route_cancelled: AtomicU64,
 }
 
 impl Counters {
@@ -222,6 +226,10 @@ impl Counters {
             refused: AtomicU64::new(0),
             sink_dropped: AtomicU64::new(0),
             seeds_dropped: AtomicU64::new(0),
+            route_waits: AtomicU64::new(0),
+            route_wait_ns: AtomicU64::new(0),
+            route_refused: AtomicU64::new(0),
+            route_cancelled: AtomicU64::new(0),
         }
     }
 
@@ -301,10 +309,33 @@ struct Queued {
     item: Item,
     /// The barrier epoch an event was published in; `None` for a seed or a
     /// barrier.
-    epoch: Option<u64>,
+    epoch: Option<QueueEpoch>,
     // PG counts both enqueued entries and pre-admission reservations against
     // one budget. Receiving the entry returns its credit.
     _credit: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+/// One word including its Option niche: zero is vacant, low bit marks the
+/// paced lane, and the remaining bits hold the barrier epoch plus one.
+#[derive(Debug, Clone, Copy)]
+struct QueueEpoch(std::num::NonZeroU64);
+
+impl QueueEpoch {
+    fn new(epoch: u64, paced: bool) -> Self {
+        let bits = epoch
+            .checked_add(1)
+            .and_then(|n| n.checked_mul(2))
+            .expect("queue epoch exhausted");
+        Self(std::num::NonZeroU64::new(bits | u64::from(paced)).expect("nonzero queue epoch"))
+    }
+
+    fn number(self) -> u64 {
+        (self.0.get() >> 1) - 1
+    }
+
+    fn paced(self) -> bool {
+        self.0.get() & 1 != 0
+    }
 }
 
 /// The bytes one queue slot takes (the [`WriterConfig::capacity`] docs).
@@ -381,11 +412,39 @@ pub struct WriterHandle {
     counters: Arc<Counters>,
     terminal: Option<Arc<tokio::sync::Semaphore>>,
     waiters: Option<Arc<tokio::sync::Semaphore>>,
+    routes: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 /// A Postgres terminal slot acquired before starting work. Its send never
 /// waits, including from a cancelled request's destructor.
 pub struct FinishSlot(tokio::sync::OwnedSemaphorePermit);
+
+/// A separate credit for a pending or route event, never a terminal credit.
+#[derive(Debug)]
+pub struct RouteSlot {
+    credit: tokio::sync::OwnedSemaphorePermit,
+    lane: tokio::sync::OwnedSemaphorePermit,
+}
+
+struct RouteWait<'a> {
+    counters: &'a Counters,
+    started: Instant,
+    settled: bool,
+}
+
+impl Drop for RouteWait<'_> {
+    fn drop(&mut self) {
+        let c = self.counters;
+        c.route_waits.fetch_add(1, Ordering::Relaxed);
+        c.route_wait_ns.fetch_add(
+            u64::try_from(self.started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        if !self.settled {
+            c.route_cancelled.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum ReserveError {
@@ -460,6 +519,135 @@ impl<const N: usize> FinishReservation<N> {
 pub const FINISH_WAIT: Duration = Duration::from_secs(4);
 
 impl WriterHandle {
+    /// Reserve and enqueue an optional event in one operation.
+    pub async fn send_route(
+        &self,
+        event: super::events::LogEvent,
+        deadline: Instant,
+    ) -> Result<(), ReserveError> {
+        let slot = self.reserve_route(deadline).await?;
+        self.enqueue_route(slot, event)
+    }
+
+    /// Acquire one optional queue entry. The independent lane limits optional
+    /// backlog to at most one batch, leaving the existing terminal credits
+    /// untouched. The caller already owns its finish reservation.
+    pub async fn reserve_route(
+        &self,
+        deadline: Instant,
+    ) -> Result<Option<RouteSlot>, ReserveError> {
+        let (Some(routes), Some(credits)) = (&self.routes, &self.terminal) else {
+            return Ok(None);
+        };
+        let mut waited = None;
+        let acquire = async {
+            if self.postgres_closed() {
+                return Err(ReserveError::Closed);
+            }
+            if let Ok(lane) = routes.clone().try_acquire_owned()
+                && let Ok(credit) = credits.clone().try_acquire_owned()
+            {
+                return Ok(RouteSlot { credit, lane });
+            }
+            waited = Some(RouteWait {
+                counters: &self.counters,
+                started: Instant::now(),
+                settled: false,
+            });
+            if Instant::now() >= deadline {
+                return Err(ReserveError::Deadline);
+            }
+            let _turn = self.finish_waiter()?;
+            tokio::time::timeout_at(deadline, async {
+                let lane = routes
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| ReserveError::Closed)?;
+                let credit = credits
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| ReserveError::Closed)?;
+                if self.postgres_closed() {
+                    return Err(ReserveError::Closed);
+                }
+                if Instant::now() >= deadline {
+                    return Err(ReserveError::Deadline);
+                }
+                Ok(RouteSlot { credit, lane })
+            })
+            .await
+            .map_err(|_| ReserveError::Deadline)?
+        };
+        let result = acquire.await;
+        if let Some(waited) = &mut waited {
+            waited.settled = true;
+        }
+        if result.is_err() {
+            self.counters.route_refused.fetch_add(1, Ordering::Relaxed);
+        }
+        result.map(Some)
+    }
+
+    /// Files a paced Begin/Route immediately once its separate slot is owned.
+    pub fn enqueue_route(
+        &self,
+        slot: Option<RouteSlot>,
+        event: super::events::LogEvent,
+    ) -> Result<(), ReserveError> {
+        assert!(matches!(
+            event,
+            super::events::LogEvent::Begin(_) | super::events::LogEvent::Route { .. }
+        ));
+        let Some(RouteSlot { credit, lane }) = slot else {
+            assert!(
+                self.routes.is_none(),
+                "PG route requires its own reservation"
+            );
+            self.send(event);
+            return Ok(());
+        };
+        let c = &self.counters;
+        let entered = c.epochs.enter();
+        let ok = self
+            .tx
+            .try_send(Queued {
+                at: Instant::now(),
+                item: Item::Event(event.into()),
+                epoch: Some(QueueEpoch::new(entered.0, true)),
+                _credit: Some(credit),
+            })
+            .is_ok();
+        if ok {
+            // The receiver returns this permit when it dequeues the item.
+            lane.forget();
+            c.enqueued.fetch_add(1, Ordering::Relaxed);
+        } else {
+            c.dropped.fetch_add(1, Ordering::Relaxed);
+            c.optional_dropped.fetch_add(1, Ordering::Relaxed);
+            c.route_refused.fetch_add(1, Ordering::Relaxed);
+        }
+        c.epochs.leave(entered, !ok);
+        if ok {
+            Ok(())
+        } else {
+            Err(ReserveError::Closed)
+        }
+    }
+
+    /// Wait count, cumulative nanoseconds, refused and cancelled waits.
+    pub fn route_pacing(&self) -> Option<[u64; 4]> {
+        self.routes.as_ref()?;
+        let c = &self.counters;
+        Some([
+            c.route_waits.load(Ordering::Relaxed),
+            c.route_wait_ns.load(Ordering::Relaxed),
+            c.route_refused.load(Ordering::Relaxed),
+            c.route_cancelled.load(Ordering::Relaxed),
+        ])
+    }
+
     /// Reserve the entire request's terminal row set atomically, before
     /// taking admission. Dropping a pending reservation or unused slots
     /// returns the credits. SQLite needs no reservation.
@@ -526,7 +714,7 @@ impl WriterHandle {
             .try_send(Queued {
                 at: Instant::now(),
                 item: Item::Event(super::events::LogEvent::Finish(log).into()),
-                epoch: Some(entered.0),
+                epoch: Some(QueueEpoch::new(entered.0, false)),
                 _credit: Some(permit),
             })
             .is_ok();
@@ -619,7 +807,7 @@ impl WriterHandle {
                 .try_send(Queued {
                     at: Instant::now(),
                     item: Item::Event(event),
-                    epoch: Some(entered.0),
+                    epoch: Some(QueueEpoch::new(entered.0, false)),
                     _credit: credit,
                 })
                 .is_ok()
@@ -851,6 +1039,7 @@ impl Writer {
             stop,
             config,
             Arc::clone(&counters),
+            None,
         ));
         Ok(Self {
             handle: WriterHandle {
@@ -858,6 +1047,7 @@ impl Writer {
                 counters,
                 terminal: None,
                 waiters: None,
+                routes: None,
             },
             shutdown: Some(shutdown),
             task,
@@ -880,6 +1070,9 @@ impl Writer {
         let (shutdown, stop) = oneshot::channel();
         let counters = Arc::new(Counters::new());
         let terminal = Arc::new(tokio::sync::Semaphore::new(capacity));
+        let routes = Arc::new(tokio::sync::Semaphore::new(
+            config.max_batch.max(1).min((capacity / 8).max(1)),
+        ));
         // One waiting HTTP request per default-sized writer batch of credits
         // (32 by default). Waiters hold connections, not just queue entries.
         let waiters = Arc::new(tokio::sync::Semaphore::new(
@@ -887,10 +1080,20 @@ impl Writer {
         ));
         let task = tokio::spawn({
             let terminal = terminal.clone();
+            let routes = routes.clone();
             let counters = counters.clone();
             async move {
-                let result = run(Backend::Postgres(store), rx, stop, config, counters).await;
+                let result = run(
+                    Backend::Postgres(store),
+                    rx,
+                    stop,
+                    config,
+                    counters,
+                    Some(routes.clone()),
+                )
+                .await;
                 terminal.close();
+                routes.close();
                 result
             }
         });
@@ -900,6 +1103,7 @@ impl Writer {
                 counters,
                 terminal: Some(terminal),
                 waiters: Some(waiters),
+                routes: Some(routes),
             },
             shutdown: Some(shutdown),
             task,
@@ -939,6 +1143,9 @@ impl Writer {
         if let Some(credits) = &self.handle.terminal {
             credits.close();
         }
+        if let Some(routes) = &self.handle.routes {
+            routes.close();
+        }
         let task = &mut self.task;
         let ended = task.await;
         if let Some(c) = self.checkpointer.take() {
@@ -957,6 +1164,9 @@ impl Drop for Writer {
     fn drop(&mut self) {
         if let Some(credits) = &self.handle.terminal {
             credits.close();
+        }
+        if let Some(routes) = &self.handle.routes {
+            routes.close();
         }
         if let Some(c) = self.checkpointer.take() {
             c.stop.store(true, Ordering::Relaxed);
@@ -1359,9 +1569,19 @@ async fn flush_watching(
 }
 
 /// Sorts one channel item into the batch or the barriers waiting on it.
-fn take(q: Queued, batch: &mut Vec<Tagged>, barriers: &mut Vec<Pending>) {
+fn take(
+    q: Queued,
+    batch: &mut Vec<Tagged>,
+    barriers: &mut Vec<Pending>,
+    routes: Option<&tokio::sync::Semaphore>,
+) {
     match q.item {
-        Item::Event(e) => batch.push((e, q.epoch)),
+        Item::Event(e) => {
+            if q.epoch.is_some_and(QueueEpoch::paced) {
+                routes.expect("PG pacing lane").add_permits(1);
+            }
+            batch.push((e, q.epoch.map(QueueEpoch::number)));
+        }
         Item::Barrier(b) => barriers.push(b),
         Item::Fence(fence) => {
             let (reply, _) = oneshot::channel();
@@ -1527,6 +1747,7 @@ async fn run(
     mut stop: oneshot::Receiver<()>,
     config: WriterConfig,
     counters: Arc<Counters>,
+    routes: Option<Arc<tokio::sync::Semaphore>>,
 ) -> Result<(), StoreError> {
     let max_batch = config.max_batch.max(1);
     let mut sink = Sink {
@@ -1569,7 +1790,7 @@ async fn run(
         let mut batch: Vec<Tagged> = Vec::with_capacity(max_batch);
         // Barriers end the batch they land in and are answered after it.
         let mut barriers = Vec::new();
-        take(first, &mut batch, &mut barriers);
+        take(first, &mut batch, &mut barriers, routes.as_deref());
         let mut stopping = false;
         // A seed ends collection like a barrier: flush preceding commits and
         // perform the ordered read immediately, without the ordinary batch
@@ -1579,7 +1800,7 @@ async fn run(
             && !matches!(batch.last(), Some((WriteEvent::Seed(_), _)))
         {
             if let Ok(e) = rx.try_recv() {
-                take(e, &mut batch, &mut barriers);
+                take(e, &mut batch, &mut barriers, routes.as_deref());
                 continue;
             }
             tokio::select! {
@@ -1587,7 +1808,7 @@ async fn run(
                 _ = &mut stop => { stopping = true; break; }
                 () = sleep_until(deadline) => break,
                 e = rx.recv() => match e {
-                    Some(e) => take(e, &mut batch, &mut barriers),
+                    Some(e) => take(e, &mut batch, &mut barriers, routes.as_deref()),
                     None => break,
                 },
                 _ = warn_tick.tick() => warner.check(&counters),
@@ -1612,7 +1833,7 @@ async fn run(
         let mut ended = false;
         while batch.len() < max_batch && barriers.is_empty() {
             match rx.recv().await {
-                Some(e) => take(e, &mut batch, &mut barriers),
+                Some(e) => take(e, &mut batch, &mut barriers, routes.as_deref()),
                 None => {
                     ended = true;
                     break;

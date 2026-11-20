@@ -26,6 +26,101 @@ const TABLES: [&str; 4] = [
 const T0: i64 = 1_794_007_800_000;
 
 #[tokio::test]
+async fn healthy_pg_paces_optional_events_without_spending_the_finish_credit() {
+    use omni_store::writer::ReserveError;
+    use tokio::time::Instant;
+    let Some(base) = base_url("healthy_pg_paces_optional_events") else {
+        return;
+    };
+    let db = TestDb::create(&base, "paced_optional").await;
+    let store = prepare(&db, 0).await;
+    let mut c = db.client().await;
+    let locked = c.transaction().await.expect("lock transaction");
+    locked
+        .batch_execute("LOCK TABLE request_logs IN ACCESS EXCLUSIVE MODE")
+        .await
+        .expect("stall writer");
+    let pid = locked
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await
+        .expect("pid")
+        .get(0);
+    let writer = Writer::spawn_postgres(
+        store,
+        WriterConfig {
+            capacity: 8,
+            ..config(0, 1)
+        },
+    )
+    .expect("writer");
+    let h = writer.handle();
+    let [blocker, finish] = h
+        .reserve_finishes::<2>()
+        .await
+        .expect("terminal credits")
+        .into_slots();
+    assert!(h.finish(blocker, done("blocker", T0, Some("key-1"), "m", 1)));
+    wait_for_blocked(&db, pid, "WITH changed AS (INSERT INTO request_logs").await;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    h.send_route(pending("queued", T0, Some("key-1"), "m"), deadline)
+        .await
+        .expect("first queue entry");
+    let mut parked = Box::pin(h.send_route(pending("next", T0, Some("key-1"), "m"), deadline));
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(parked.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    drop(parked);
+    assert!(matches!(
+        h.send_route(
+            pending("expired", T0, None, "m"),
+            Instant::now() + Duration::from_millis(30)
+        )
+        .await,
+        Err(ReserveError::Deadline)
+    ));
+    let mut waiting = Box::pin(h.send_route(pending("wake", T0, Some("key-1"), "m"), deadline));
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(waiting.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    assert!(h.finish(finish, done("queued", T0, Some("key-1"), "m", 1)));
+    locked.commit().await.expect("unblock writer");
+    waiting.await.expect("dequeue wakes waiter");
+    h.flush()
+        .await
+        .expect("drain the wake event before pinning the lane");
+    let held = h.reserve_route(deadline).await.expect("hold route slot");
+    let mut closing = Box::pin(h.send_route(pending("closed", T0, None, "m"), deadline));
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(closing.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    let (stats, refused) = tokio::join!(writer.close(), closing);
+    let stats = stats.expect("drain");
+    drop(held);
+    assert_eq!((stats.terminal_dropped, stats.optional_dropped), (0, 0));
+    assert!(matches!(refused, Err(ReserveError::Closed)));
+    let [waits, nanos, refused, cancelled] = h.route_pacing().expect("PG pacing counters");
+    assert_eq!((waits, refused, cancelled), (4, 2, 1));
+    assert!(nanos >= 30_000_000);
+    let names = c
+        .query("SELECT id FROM request_logs ORDER BY id", &[])
+        .await
+        .expect("rows");
+    assert_eq!(
+        names
+            .iter()
+            .map(|r| r.get::<_, String>(0))
+            .collect::<Vec<_>>(),
+        ["blocker", "queued", "wake"]
+    );
+}
+
+#[tokio::test]
 async fn healthy_postgres_retains_finish_when_optional_queue_is_full() {
     let Some(base) = base_url("healthy_postgres_retains_finish_when_optional_queue_is_full") else {
         return;

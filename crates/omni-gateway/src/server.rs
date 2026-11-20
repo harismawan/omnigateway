@@ -715,6 +715,17 @@ fn metrics(app: &App, req: &Request<Incoming>) -> Response<Body> {
                 .expect("writing to a String cannot fail");
         }
     }
+    if let Some(values) = app.deps.writer.route_pacing() {
+        use std::fmt::Write as _;
+        for (suffix, value) in ["waits", "wait_nanoseconds", "refused", "cancelled"]
+            .into_iter()
+            .zip(values)
+        {
+            let name = format!("omni_request_log_writer_route_{suffix}_total");
+            writeln!(text, "# TYPE {name} counter\n{name} {value}")
+                .expect("writing to a String cannot fail");
+        }
+    }
     append_writer_refusals(&mut text, &app.deps.telemetry);
     append_cluster_metrics(&mut text, app);
     let mut res = Response::new(full(text));
@@ -1184,8 +1195,8 @@ async fn prepare_proxy(
     app: &App,
     req: &Request<Incoming>,
     mut auth: ProxyAuth,
+    deadline: tokio::time::Instant,
 ) -> Result<PreparedProxy, GatewayError> {
-    let deadline = tokio::time::Instant::now() + omni_store::writer::FINISH_WAIT;
     let mut wait = ReservationWait::default();
     loop {
         let (judge, smart) = screens(&auth, wait.settings.as_deref());
@@ -1250,12 +1261,13 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
     if !app.cluster {
         preseed_miss(&app, &auth, missed, started_at);
     }
+    let reservation_deadline = tokio::time::Instant::now() + omni_store::writer::FINISH_WAIT;
     let PreparedProxy {
         auth,
         slots: [slot, judge_slot, check_slot],
         smart,
         screening_settings,
-    } = match prepare_proxy(&app, &req, auth).await {
+    } = match prepare_proxy(&app, &req, auth, reservation_deadline).await {
         Ok(prepared) => prepared,
         Err(e) => return error_response(dialect, &e, &[]),
     };
@@ -1348,6 +1360,32 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
             fin.model_unencodable = true;
             return Err(omni_dialects::ingress::lone_surrogate_model_error());
         }
+        // Reserve the first attempt's pending slot before admission/heads.
+        // This allows an ordinary HTTP 503 without spending quota on refusal.
+        // The slot is independent of Finish and drops if no attempt runs.
+        let mut pacing = if app.cluster {
+            let dispatch_deadline = dispatch::request_deadline(&snapshot.routing.settings);
+            let deadline =
+                dispatch_deadline.map_or(reservation_deadline, |at| at.min(reservation_deadline));
+            let first = match app.deps.writer.reserve_route(deadline).await {
+                Ok(slot) if !app.deps.writer.postgres_closed() => slot,
+                Ok(_) => {
+                    fin.abandon_before_admission();
+                    return Err(writer_overload(&app, WriterRefusal::Closed));
+                }
+                Err(e) => {
+                    fin.abandon_before_admission();
+                    return Err(writer_overload(&app, e.into()));
+                }
+            };
+            Some(dispatch::RoutePacing {
+                first,
+                reservation_deadline,
+                dispatch_deadline,
+            })
+        } else {
+            None
+        };
         admission_at = if app.cluster { now() } else { started_at };
         #[allow(clippy::cast_precision_loss)]
         match app
@@ -1404,7 +1442,7 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
                 app.limiter
                     .record_override(&key.id, &key.limits, classifier);
             }
-            crate::screening::screen_first(
+            crate::screening::screen_first_paced(
                 request_deps,
                 dreq,
                 key.guardrail_policy.clone(),
@@ -1412,9 +1450,15 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
                 sname,
                 [judge_slot, check_slot],
                 screening_settings,
+                pacing.take(),
             )
         } else {
-            dispatch::dispatch(request_deps, dreq)
+            dispatch::dispatch_paced(
+                request_deps,
+                dreq,
+                dispatch::DispatchOptions::default(),
+                pacing,
+            )
         };
         let response_deadline = dispatched.deadline;
         fin.outcome = Some(dispatched.log.clone());
@@ -1764,6 +1808,55 @@ mod reservation_tests {
                 .any(|line| line == "omni_request_log_writer_credits_in_use 0")
         );
         no_work(&server.app, &store).await;
+        server.shutdown();
+        server.wait().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pg_route_pacing_uses_dispatch_deadline_before_sse_headers() {
+        let Some((mut cfg, store)) = fixture_config().await else {
+            return;
+        };
+        let mut settings = omni_store::settings::default_settings_json();
+        settings["requestDeadlineMs"] = 80.into();
+        store.client().await.unwrap().execute(
+            "INSERT INTO settings (key,value) VALUES ('settings',$1) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value",
+            &[&settings.to_string()],
+        ).await.unwrap();
+        cfg.port = 0;
+        let server = crate::start(
+            cfg,
+            crate::Options {
+                writer_capacity: Some(3),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let writer = &server.app.deps.writer;
+        let held = writer
+            .reserve_route(tokio::time::Instant::now() + Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert!(held.is_some());
+        let mut client = tokio::net::TcpStream::connect(server.addr).await.unwrap();
+        let body = r#"{"model":"unconfigured","messages":[{"role":"user","content":"hello"}],"stream":true}"#;
+        client.write_all(format!("POST {CHAT} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {KEY}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        let (status, body) = reply(client, Duration::from_secs(1)).await;
+        assert_eq!(status, 503, "{body}");
+        assert_eq!(
+            body["error"]["message"],
+            "request log writer is busy or unavailable"
+        );
+        assert_reservation_refusals(server.addr, 0, 1, 0).await;
+        let metrics = reservation_metrics(server.addr).await;
+        assert!(
+            metrics
+                .lines()
+                .any(|line| line == "omni_request_log_writer_route_refused_total 1")
+        );
+        no_work(&server.app, &store).await;
+        drop(held);
         server.shutdown();
         server.wait().await.unwrap();
     }

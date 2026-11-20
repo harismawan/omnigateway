@@ -849,6 +849,11 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
             if bench_accounting {
                 use std::sync::atomic::Ordering::Relaxed;
                 let writer = writer_handle.stats();
+                if let Some([waits, nanos, refused, cancelled]) = writer_handle.route_pacing() {
+                    tracing::warn!(
+                        "benchmark writer pacing after drain routeWaits={waits} routeWaitNs={nanos} routeRefused={refused} routeCancelled={cancelled}"
+                    );
+                }
                 let m = cluster.metrics();
                 // The harness captures warn and above. The formatter drops
                 // nonstandard fields, so put these fixed counters in the

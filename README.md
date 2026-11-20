@@ -425,6 +425,9 @@ counts these refusals by `reason` (`closed`, `cap`, `deadline`). `revalidation` 
 The cluster-only `omni_request_log_writer_queued` and `omni_request_log_writer_credits_in_use`
 gauges distinguish queued entries from the total budget in use, which also includes reservations.
 The gauges are sampled independently and exclude batches already dequeued for persistence.
+Rust paces Postgres `Begin`/`Route` events before an upstream attempt, with a
+separate queue slot from `Finish`. `/metrics` exports `omni_request_log_writer_route_*_total`
+for waits, cumulative wait nanoseconds, refusals, and cancellations.
 
 ## Configuration
 

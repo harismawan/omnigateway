@@ -154,9 +154,10 @@ pub async fn judge(
         return (Some(writer_overload()), Vec::new());
     };
     let [slot] = reservation.into_slots();
-    judge_with_model(deps, req, policy, local_classifier, None, slot, None).await
+    judge_with_model(deps, req, policy, local_classifier, None, slot, None, None).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn judge_with_model(
     deps: Arc<Deps>,
     req: &Request,
@@ -165,6 +166,7 @@ async fn judge_with_model(
     model_override: Option<Option<String>>,
     slot: Option<omni_store::writer::FinishSlot>,
     primary: Option<&omni_store::Settings>,
+    pacing: Option<&mut dispatch::RoutePacing>,
 ) -> (Option<Refusal>, Vec<String>) {
     let snapshot = deps.holder.load();
     let settings = primary.unwrap_or(&snapshot.routing.settings);
@@ -220,7 +222,8 @@ async fn judge_with_model(
     let verdict = if let Some(cached) = cached {
         Some(cached)
     } else {
-        let dispatched = dispatch::dispatch_with_options(
+        let paced = pacing.is_some();
+        let dispatched = dispatch::dispatch_paced(
             judge_deps(&deps, escapes),
             Request {
                 request: serde_json::from_value(classifier_request(model, policy, &judged))
@@ -234,6 +237,11 @@ async fn judge_with_model(
                 local_only,
                 on_route: true,
             },
+            pacing.map(|p| dispatch::RoutePacing {
+                first: p.first.take(),
+                reservation_deadline: p.reservation_deadline,
+                dispatch_deadline: p.dispatch_deadline,
+            }),
         );
         let mut row = JudgeRow {
             deps: deps.clone(),
@@ -244,7 +252,11 @@ async fn judge_with_model(
         };
         let (_, verdict, status, error) =
             classify(dispatched, key.clone(), settings.guardrail_timeout_ms, true).await;
+        let overloaded = paced && error.as_deref() == Some(ErrorCode::Overloaded.as_str());
         row.result = Some((status, error));
+        if overloaded {
+            return (Some(writer_overload()), Vec::new());
+        }
         if let Some(verdict) = verdict {
             locked(judge_cache()).set(key, verdict.into(), (deps.now)());
         }
@@ -308,12 +320,35 @@ fn unavailable() -> SmartDecision {
 /// The SSE head can therefore be sent while classification is still pending.
 pub fn screen_first(
     deps: Arc<Deps>,
+    req: Request,
+    policy: Option<String>,
+    smart: bool,
+    surface: &'static str,
+    [judge_slot, check_slot]: [Option<omni_store::writer::FinishSlot>; 2],
+    primary: Option<Arc<omni_store::Settings>>,
+) -> dispatch::Dispatched {
+    screen_first_paced(
+        deps,
+        req,
+        policy,
+        smart,
+        surface,
+        [judge_slot, check_slot],
+        primary,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn screen_first_paced(
+    deps: Arc<Deps>,
     mut req: Request,
     policy: Option<String>,
     smart: bool,
     surface: &'static str,
     [judge_slot, check_slot]: [Option<omni_store::writer::FinishSlot>; 2],
     primary: Option<Arc<omni_store::Settings>>,
+    mut pacing: Option<dispatch::RoutePacing>,
 ) -> dispatch::Dispatched {
     let guardrail_model = primary.as_deref().map_or_else(
         || deps.holder.load().routing.settings.guardrail_model.clone(),
@@ -340,7 +375,7 @@ pub fn screen_first(
             SmartDecision::Proceed { local_model, classifier, notes } => (local_model, classifier, notes),
         };
         if let Some(policy) = policy {
-            let (refusal, judge_notes) = judge_with_model(deps.clone(), &req, &policy, classifier, smart.then_some(guardrail_model), judge_slot, primary.as_deref()).await;
+            let (refusal, judge_notes) = judge_with_model(deps.clone(), &req, &policy, classifier, smart.then_some(guardrail_model), judge_slot, primary.as_deref(), pacing.as_mut()).await;
             notes.extend(judge_notes);
             if let Some(refusal) = refusal {
             let mut refused = dispatch::refused(&deps, &req, &refusal, surface);
@@ -355,7 +390,7 @@ pub fn screen_first(
         // genuine reroute relabels, while both paths enforce local dispatch.
         let reroute = local_model.as_ref().filter(|model| **model != client_model);
         if let Some(model) = &local_model { req.request.model.clone_from(model); }
-        let mut inner = dispatch::dispatch_with_options(deps, req, DispatchOptions { local_only: local_model.is_some(), ..DispatchOptions::default() });
+        let mut inner = dispatch::dispatch_paced(deps, req, DispatchOptions { local_only: local_model.is_some(), ..DispatchOptions::default() }, pacing);
         while let Some(mut event) = inner.events.next().await {
             if let (Some(model), Ok(StreamEvent::Start { model: start_model, .. })) = (&reroute, &mut event) {
                 *start_model = model.as_str().into();

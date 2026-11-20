@@ -340,6 +340,10 @@ impl Tracing {
         lock(&self.traces).get(request_id).cloned()
     }
 
+    pub(crate) fn abandon(&self, request_id: &str) {
+        lock(&self.traces).remove(request_id);
+    }
+
     pub fn finish(&self, log: &omni_store::writer::RequestLog) {
         let Some(trace) = lock(&self.traces).remove(&log.id) else {
             return;

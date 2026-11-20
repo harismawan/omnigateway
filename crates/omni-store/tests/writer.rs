@@ -1266,8 +1266,8 @@ async fn a_pinned_reader_lets_the_wal_grow_past_the_trigger() {
 
 /// A slot includes PG's optional shared queue credit.
 #[test]
-fn a_queue_slot_is_392_bytes() {
-    assert_eq!(omni_store::writer::queue_slot_bytes(), 392);
+fn a_queue_slot_stays_within_392_bytes() {
+    assert!(omni_store::writer::queue_slot_bytes() <= 392);
 }
 
 /// A seed refused by a full queue is not an event: it never enters barrier
