@@ -52,26 +52,14 @@ assert(
   readdirSync(root).every((name) => /^\d+\.json$/.test(name)),
   "help must not create installation files",
 );
-let unavailable = 0;
-for (const name of Object.keys(COMMANDS)) {
-  if (
-    name.startsWith("keys ") ||
-    name.startsWith("setup ") ||
-    name === "admin set-password" ||
-    name === "status" ||
-    name === "db stats" ||
-    name === "db snapshots" ||
-    name === "db backup" ||
-    name === "db vacuum" ||
-    name === "db clear-bodies" ||
-    name === "db restore" ||
-    name === "db migrate" ||
-    name.startsWith("settings ") ||
-    (name.startsWith("models ") && name !== "models dry-run") ||
-    name.startsWith("plugin ")
-  )
-    continue;
-  const p = goldenSpawn([bin, "--root", root, ...name.split(" ")], {
+let implemented = 0;
+let unsupported = 0;
+const probe = "--omni-help-dispatch-probe";
+for (const [name, command] of Object.entries(COMMANDS)) {
+  // E4 and its predecessors implemented every registered non-plugin command.
+  // Reach the real argument parser, but never launch a service or mutate state.
+  const plugin = name.startsWith("plugin ");
+  const p = goldenSpawn([bin, "--root", root, ...name.split(" "), probe], {
     cwd: root,
     stdout: "pipe",
     stderr: "pipe",
@@ -79,12 +67,20 @@ for (const name of Object.keys(COMMANDS)) {
   assert.equal(await new Response(p.stdout).text(), "");
   assert.equal(
     await new Response(p.stderr).text(),
-    `${name} is not yet available in the Rust CLI\n`,
+    plugin
+      ? "plugins are not supported in this release\n"
+      : `Unknown option '${probe}'. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- "${probe}"\nusage: omni ${command.usage}\n`,
+    name,
   );
-  assert.equal(await p.exited, 1);
-  unavailable++;
+  assert.equal(await p.exited, plugin ? 1 : 2, name);
+  if (plugin) unsupported++;
+  else implemented++;
 }
+assert(
+  readdirSync(root).every((name) => /^\d+\.json$/.test(name)),
+  "dispatch probes must not create installation files",
+);
 console.log(`PASS ${cases.length} help/resolution comparisons (${root})`);
-console.log(`PASS ${unavailable} explicit unavailable handlers`);
+console.log(`PASS ${implemented} implemented dispatches and ${unsupported} plugin refusals`);
 
 await verifyGoldenExits("help");
