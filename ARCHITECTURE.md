@@ -993,7 +993,9 @@ poll repairs missed publications. Health mutations serialize against the stored
 row, while fleet load is published and read in the background every 100 ms.
 PG inference reserves bounded terminal queue capacity before admission. The waiter cap
 is one per default-sized batch of queue credits (32 by default), and its 4 s
-deadline also covers revalidation against the primary. A full wait queue,
+deadline also covers revalidation of the key and screening settings against
+the primary. The same settings determine reservation size and screening;
+the warm path still reads only the replica snapshot. A full wait queue,
 deadline, or closed writer returns the surface's overload response without
 dispatch or a completion row. Hyper need not notice a disconnect before
 reading the body, so the deadline bounds retention in that case. `Begin`

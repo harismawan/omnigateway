@@ -1063,33 +1063,44 @@ fn writer_overload() -> GatewayError {
     GatewayError::new(ErrorCode::Overloaded, crate::screening::WRITER_OVERLOAD).gateway_authored()
 }
 
-fn screens(auth: &ProxyAuth) -> (bool, bool) {
+fn screens(auth: &ProxyAuth, primary: Option<&omni_store::Settings>) -> (bool, bool) {
     auth.as_ref().map_or((false, false), |(key, snapshot)| {
+        let settings = primary.unwrap_or(&snapshot.routing.settings);
         (
             key.guardrail_policy.is_some(),
-            key.smart_routing && snapshot.routing.settings.smart_router_enabled,
+            key.smart_routing && settings.smart_router_enabled,
         )
     })
 }
 
 /// A wait can outlive a policy or key publication. Read the primary only
 /// on this slow path; a lagging peer snapshot is not enough to find a revoke.
-async fn revalidate_waiter(app: &App, req: &Request<Incoming>) -> ProxyAuth {
+async fn revalidate_waiter(
+    app: &App,
+    req: &Request<Incoming>,
+) -> Result<(AuthenticatedKey, Arc<GatewaySnapshot>, omni_store::Settings), GatewayError> {
     let authorization = header(req, "authorization");
     let x_api_key = header(req, "x-api-key");
     let chosen = api_key_header(authorization.as_deref(), x_api_key.as_deref())?;
     let Some(raw) = omni_gateway_core::snapshot::extract_token(chosen) else {
         return Err(GatewaySnapshot::refuse_unknown());
     };
-    let row = app
-        .deps
-        .refresher
-        .store
+    let store = &app.deps.refresher.store;
+    let row = store
         .find_api_key_entry(&omni_crypto::apikey::hash(raw))
         .await
         .map_err(|_| writer_overload())?;
+    // Read the small settings row instead of forcing a snapshot rebuild.
+    // Neither a publication nor the poll need have caught up to this commit.
+    let settings = store.get_settings().await.map_err(|_| writer_overload())?;
     let key = GatewaySnapshot::authenticate_read(row, (app.deps.now)())?;
-    Ok((key, app.deps.holder.load()))
+    Ok((key, app.deps.holder.load(), settings))
+}
+
+#[derive(Default)]
+struct ReservationWait<'a> {
+    turn: Option<omni_store::writer::FinishWaiter<'a>>,
+    settings: Option<Arc<omni_store::Settings>>,
 }
 
 async fn reserve_proxy<'a, const N: usize>(
@@ -1097,7 +1108,7 @@ async fn reserve_proxy<'a, const N: usize>(
     req: &Request<Incoming>,
     mut auth: ProxyAuth,
     deadline: tokio::time::Instant,
-    turn: &mut Option<omni_store::writer::FinishWaiter<'a>>,
+    wait: &mut ReservationWait<'a>,
 ) -> Result<(ProxyAuth, [Option<omni_store::writer::FinishSlot>; N]), GatewayError> {
     use omni_store::writer::ReserveError;
     let writer = &app.deps.writer;
@@ -1105,23 +1116,25 @@ async fn reserve_proxy<'a, const N: usize>(
         Ok(reservation) => reservation,
         Err(ReserveError::Full) => {
             drop(auth);
-            if turn.is_none() {
-                *turn = Some(writer.finish_waiter().map_err(|_| writer_overload())?);
+            if wait.turn.is_none() {
+                wait.turn = Some(writer.finish_waiter().map_err(|_| writer_overload())?);
             }
-            let reservation = turn
+            let reservation = wait
+                .turn
                 .as_ref()
                 .expect("waiting turn")
                 .reserve::<N>(deadline)
                 .await
                 .map_err(|_| writer_overload())?;
-            auth = Ok(
+            let (key, snapshot, settings) =
                 tokio::time::timeout_at(deadline, revalidate_waiter(app, req))
                     .await
-                    .map_err(|_| writer_overload())??,
-            );
+                    .map_err(|_| writer_overload())??;
             if writer.postgres_closed() || tokio::time::Instant::now() >= deadline {
                 return Err(writer_overload());
             }
+            auth = Ok((key, snapshot));
+            wait.settings = Some(Arc::new(settings));
             reservation
         }
         Err(_) => return Err(writer_overload()),
@@ -1129,45 +1142,53 @@ async fn reserve_proxy<'a, const N: usize>(
     Ok((auth, slots.into_slots()))
 }
 
+struct PreparedProxy {
+    auth: ProxyAuth,
+    slots: FinishSlots,
+    smart: bool,
+    screening_settings: Option<Arc<omni_store::Settings>>,
+}
+
 async fn prepare_proxy(
     app: &App,
     req: &Request<Incoming>,
     mut auth: ProxyAuth,
-) -> Result<(ProxyAuth, FinishSlots, bool), GatewayError> {
+) -> Result<PreparedProxy, GatewayError> {
     let deadline = tokio::time::Instant::now() + omni_store::writer::FINISH_WAIT;
-    let mut turn = None;
+    let mut wait = ReservationWait::default();
     loop {
-        let (judge, smart) = screens(&auth);
+        let (judge, smart) = screens(&auth, wait.settings.as_deref());
         let (next, slots, count) = match (judge, smart) {
             (true, true) => {
-                let (next, slots) = reserve_proxy::<3>(app, req, auth, deadline, &mut turn).await?;
+                let (next, slots) = reserve_proxy::<3>(app, req, auth, deadline, &mut wait).await?;
                 (next, slots, 3)
             }
             (false, false) => {
                 let (next, [slot]) =
-                    reserve_proxy::<1>(app, req, auth, deadline, &mut turn).await?;
+                    reserve_proxy::<1>(app, req, auth, deadline, &mut wait).await?;
                 (next, [slot, None, None], 1)
             }
             _ => {
                 let (next, [slot, screen]) =
-                    reserve_proxy::<2>(app, req, auth, deadline, &mut turn).await?;
+                    reserve_proxy::<2>(app, req, auth, deadline, &mut wait).await?;
                 (next, [slot, screen, None], 2)
             }
         };
-        let (judge, smart) = screens(&next);
+        let (judge, smart) = screens(&next, wait.settings.as_deref());
         let needed = 1 + usize::from(judge) + usize::from(smart);
         if needed <= count {
             let [main, second, third] = slots;
-            return Ok((
-                next,
-                match (judge, smart) {
+            return Ok(PreparedProxy {
+                auth: next,
+                slots: match (judge, smart) {
                     (true, true) => [main, second, third],
                     (true, false) => [main, second, None],
                     (false, true) => [main, None, second],
                     (false, false) => [main, None, None],
                 },
                 smart,
-            ));
+                screening_settings: wait.settings,
+            });
         }
         // Policy now needs more rows. Return the partial set before trying
         // for the whole set, without starting a new wait budget.
@@ -1196,8 +1217,12 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
     if !app.cluster {
         preseed_miss(&app, &auth, missed, started_at);
     }
-    let (auth, [slot, judge_slot, check_slot], smart) = match prepare_proxy(&app, &req, auth).await
-    {
+    let PreparedProxy {
+        auth,
+        slots: [slot, judge_slot, check_slot],
+        smart,
+        screening_settings,
+    } = match prepare_proxy(&app, &req, auth).await {
         Ok(prepared) => prepared,
         Err(e) => return error_response(dialect, &e, &[]),
     };
@@ -1335,18 +1360,15 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
             },
         );
         let dispatched = if smart || key.guardrail_policy.is_some() {
-            if let Some(classifier) = &app.deps.holder.load().routing.settings.guardrail_model {
+            let snapshot = app.deps.holder.load();
+            let settings = screening_settings
+                .as_deref()
+                .unwrap_or(&snapshot.routing.settings);
+            if let Some(classifier) = &settings.guardrail_model {
                 app.limiter
                     .record_override(&key.id, &key.limits, classifier);
             }
-            if let Some(classifier) = &app
-                .deps
-                .holder
-                .load()
-                .routing
-                .settings
-                .smart_router_classifier_model
-            {
+            if let Some(classifier) = &settings.smart_router_classifier_model {
                 app.limiter
                     .record_override(&key.id, &key.limits, classifier);
             }
@@ -1357,6 +1379,7 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
                 smart,
                 sname,
                 [judge_slot, check_slot],
+                screening_settings,
             )
         } else {
             dispatch::dispatch(request_deps, dreq)
@@ -1545,7 +1568,8 @@ mod reservation_tests {
     const KEY: &str = "sk-omni-fix2-local-test";
     const CHAT: &str = "/v1/chat/completions";
 
-    async fn fixture() -> Option<(crate::Running, omni_store::pg::PgStore)> {
+    async fn fixture_config() -> Option<(omni_gateway_core::config::Config, omni_store::pg::PgStore)>
+    {
         let (Ok(pg), Ok(redis)) = (
             std::env::var("OMNI_TEST_DATABASE_URL"),
             std::env::var("OMNI_TEST_REDIS_URL"),
@@ -1585,6 +1609,11 @@ mod reservation_tests {
         .collect();
         let mut cfg = omni_gateway_core::config::load_config(&env, || 0).unwrap();
         cfg.port = 0;
+        Some((cfg, store))
+    }
+
+    async fn fixture() -> Option<(crate::Running, omni_store::pg::PgStore)> {
+        let (cfg, store) = fixture_config().await?;
         let running = crate::start(
             cfg,
             crate::Options {
@@ -1812,6 +1841,81 @@ mod reservation_tests {
             .await
             .unwrap();
         assert_eq!(row.get::<_, i64>(0), 1);
+    }
+
+    #[tokio::test]
+    async fn pg_reservation_obeys_fleet_screening_enabled_by_a_peer_during_the_wait() {
+        let Some((cfg, store)) = fixture_config().await else {
+            return;
+        };
+        store
+            .client()
+            .await
+            .unwrap()
+            .execute("UPDATE api_keys SET smart_routing=true", &[])
+            .await
+            .unwrap();
+        let server = crate::start(
+            cfg.clone(),
+            crate::Options {
+                writer_capacity: Some(3),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let peer = crate::start(cfg, crate::Options::default()).await.unwrap();
+        let password = "private-fix3-admin-password";
+        peer.app.admin.set_password(password).await.unwrap();
+        let token = peer.app.admin.login(password).await.unwrap().unwrap();
+
+        // Keep the waiting replica stale even if the test crosses a poll tick.
+        server.snapshot_refresh.0.abort();
+        server.snapshot_refresh.1.as_ref().unwrap().abort();
+        let writer = &server.app.deps.writer;
+        let held = writer.reserve_finishes::<3>().await.unwrap();
+        let waiting = request(server.addr, CHAT).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !matches!(
+                writer.finish_waiter(),
+                Err(omni_store::writer::ReserveError::Full)
+            ) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("inference holds the only waiter turn");
+
+        let mut admin = tokio::net::TcpStream::connect(peer.addr).await.unwrap();
+        let mut settings = omni_store::settings::default_settings_json();
+        settings["smartRouterEnabled"] = serde_json::Value::Bool(true);
+        let body = settings.to_string();
+        admin.write_all(format!("PUT /api/settings HTTP/1.1\r\nHost: localhost\r\nCookie: omni_admin={token}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+        let (status, body) = reply(admin, Duration::from_secs(1)).await;
+        assert_eq!(status, 200, "{body}");
+        assert!(store.get_settings().await.unwrap().smart_router_enabled);
+        assert!(
+            !server
+                .app
+                .deps
+                .holder
+                .load()
+                .routing
+                .settings
+                .smart_router_enabled
+        );
+
+        drop(held);
+        let (status, body) = reply(waiting, Duration::from_secs(2)).await;
+        assert_eq!(status, 500, "{body}");
+        assert_eq!(
+            body["error"]["message"],
+            "confidential routing is not configured"
+        );
+        server.shutdown();
+        peer.shutdown();
+        server.wait().await.unwrap();
+        peer.wait().await.unwrap();
     }
 
     #[tokio::test]

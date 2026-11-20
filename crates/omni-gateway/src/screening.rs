@@ -154,7 +154,7 @@ pub async fn judge(
         return (Some(writer_overload()), Vec::new());
     };
     let [slot] = reservation.into_slots();
-    judge_with_model(deps, req, policy, local_classifier, None, slot).await
+    judge_with_model(deps, req, policy, local_classifier, None, slot, None).await
 }
 
 async fn judge_with_model(
@@ -164,9 +164,10 @@ async fn judge_with_model(
     local_classifier: Option<String>,
     model_override: Option<Option<String>>,
     slot: Option<omni_store::writer::FinishSlot>,
+    primary: Option<&omni_store::Settings>,
 ) -> (Option<Refusal>, Vec<String>) {
     let snapshot = deps.holder.load();
-    let settings = &snapshot.routing.settings;
+    let settings = primary.unwrap_or(&snapshot.routing.settings);
     let local_only = local_classifier.is_some();
     let Some(model) = local_classifier.as_ref().or(model_override
         .as_ref()
@@ -312,8 +313,12 @@ pub fn screen_first(
     smart: bool,
     surface: &'static str,
     [judge_slot, check_slot]: [Option<omni_store::writer::FinishSlot>; 2],
+    primary: Option<Arc<omni_store::Settings>>,
 ) -> dispatch::Dispatched {
-    let guardrail_model = deps.holder.load().routing.settings.guardrail_model.clone();
+    let guardrail_model = primary.as_deref().map_or_else(
+        || deps.holder.load().routing.settings.guardrail_model.clone(),
+        |settings| settings.guardrail_model.clone(),
+    );
     let own = Arc::new(Mutex::new(RequestLog::new(
         req.request_id.clone(),
         req.route_started_at,
@@ -322,7 +327,7 @@ pub fn screen_first(
     locked(&own).requested_model = req.request.model.clone();
     let log = own.clone();
     let events = Box::pin(async_stream::stream! {
-        let decision = if smart { check_with_slot(deps.clone(), &req, check_slot).await } else {
+        let decision = if smart { check_with_slot(deps.clone(), &req, check_slot, primary.as_deref()).await } else {
             SmartDecision::Proceed { local_model: None, classifier: None, notes: Vec::new() }
         };
         let (local_model, classifier, mut notes) = match decision {
@@ -335,7 +340,7 @@ pub fn screen_first(
             SmartDecision::Proceed { local_model, classifier, notes } => (local_model, classifier, notes),
         };
         if let Some(policy) = policy {
-            let (refusal, judge_notes) = judge_with_model(deps.clone(), &req, &policy, classifier, smart.then_some(guardrail_model), judge_slot).await;
+            let (refusal, judge_notes) = judge_with_model(deps.clone(), &req, &policy, classifier, smart.then_some(guardrail_model), judge_slot, primary.as_deref()).await;
             notes.extend(judge_notes);
             if let Some(refusal) = refusal {
             let mut refused = dispatch::refused(&deps, &req, &refusal, surface);
@@ -419,16 +424,17 @@ pub async fn check_confidentiality(deps: Arc<Deps>, req: &Request) -> SmartDecis
         return SmartDecision::Refused(writer_overload());
     };
     let [slot] = reservation.into_slots();
-    check_with_slot(deps, req, slot).await
+    check_with_slot(deps, req, slot, None).await
 }
 
 async fn check_with_slot(
     deps: Arc<Deps>,
     req: &Request,
     slot: Option<omni_store::writer::FinishSlot>,
+    primary: Option<&omni_store::Settings>,
 ) -> SmartDecision {
     let snapshot = deps.holder.load();
-    let settings = &snapshot.routing.settings;
+    let settings = primary.unwrap_or(&snapshot.routing.settings);
     let (Some(classifier), Some(local)) = (
         settings.smart_router_classifier_model.as_deref(),
         settings.smart_router_local_model.as_deref(),

@@ -173,6 +173,8 @@ pub struct Running {
     task: tokio::task::JoinHandle<Result<(), String>>,
     #[cfg(test)]
     app: Arc<server::App>,
+    #[cfg(test)]
+    snapshot_refresh: (tokio::task::AbortHandle, Option<tokio::task::AbortHandle>),
 }
 
 impl std::fmt::Debug for Running {
@@ -724,6 +726,11 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
     let idle = options.idle_timeout;
     #[cfg(test)]
     let test_app = app.clone();
+    #[cfg(test)]
+    let snapshot_refresh = (
+        refresher.abort_handle(),
+        routing_bus.as_ref().map(|(_, _, task)| task.abort_handle()),
+    );
     let task = tokio::spawn(async move {
         let (drain, _) = tokio::sync::watch::channel(false);
         let builder = http1_builder(idle);
@@ -891,6 +898,8 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         task,
         #[cfg(test)]
         app: test_app,
+        #[cfg(test)]
+        snapshot_refresh,
     })
 }
 
