@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use omni_gateway_core::ratelimit::Admission;
 use omni_ir::error::GatewayError;
-use omni_store::writer::{LogEvent, RequestLog, WriterHandle};
+use omni_store::writer::{FinishSlot, RequestLog, WriterHandle};
 
 use crate::dispatch::report_rejection;
 
@@ -30,6 +30,7 @@ enum Phase {
 pub struct Finisher {
     pub capture: Option<crate::body_capture::CaptureCompletion>,
     writer: WriterHandle,
+    pub slot: Option<FinishSlot>,
     /// `telemetry.record` after the row is handed to the writer.
     telemetry: Option<Arc<crate::telemetry::Telemetry>>,
     request_id: String,
@@ -73,6 +74,7 @@ impl Finisher {
         Self {
             capture: None,
             writer,
+            slot: None,
             telemetry: None,
             request_id,
             started_at,
@@ -116,6 +118,12 @@ impl Finisher {
         self.phase = Phase::Streaming;
     }
 
+    /// The writer closed after we reserved, but before we admitted work.
+    pub fn abandon_before_admission(&mut self) {
+        debug_assert!(self.admission.is_none() && self.outcome.is_none());
+        self.done = true;
+    }
+
     /// `outcome?.log() ?? newCompletedRequestLog(...)`.
     fn current(&self) -> RequestLog {
         match &self.outcome {
@@ -135,9 +143,14 @@ impl Finisher {
         }
         log.api_key_id = self.key_id.clone();
         log.model_unencodable = self.model_unencodable;
-        // A refused row is counted in the writer's `dropped`, which the
-        // writer task warns about at most once per interval. No line here:
-        // one per request is a flood exactly when the writer is behind.
+        // If Begin was shed (or dispatch failed before Begin), PG inserts
+        // this row directly. Its timestamp must still be the HTTP arrival,
+        // not the post-reservation dispatch clock carried by the outcome.
+        if self.slot.is_some() {
+            log.at = self.started_at;
+        }
+        // PG acquired its terminal credit before admission, including for
+        // this destructor path. There is no capacity wait with a slot held.
         // Telemetry is recorded whether or not the writer took the row, as
         // TS records after an append that may have failed.
         if let Some(t) = &self.telemetry {
@@ -155,13 +168,13 @@ impl Finisher {
                 ));
             }
             let writer = self.writer.clone();
-            self.writer.send(LogEvent::Finish(log.clone()));
+            self.writer.finish(self.slot.take(), log.clone());
             self.writer.completion_callback(async move {
                 writer.after_completions().await;
                 capture.persist(&log).await;
             });
         } else {
-            self.writer.send(LogEvent::Finish(log));
+            self.writer.finish(self.slot.take(), log);
         }
     }
 

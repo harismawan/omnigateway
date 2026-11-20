@@ -304,8 +304,8 @@ pub fn split_sequenced(payload: &str) -> Option<(u64, &str)> {
 /// `{"from": <nodeId>, "change": <RoutingChange>}`.
 pub const ROUTING_TOPIC: &str = "routing";
 
-/// A local-only topic dispatched each time the shared channel is
-/// (re)subscribed, so state that lives only in fan-out can be asked for again.
+/// A local-only topic dispatched once per usable shared-channel subscription,
+/// with the publish path ready so fan-out state can be requested again.
 pub const RECONNECTED_TOPIC: &str = "coord:reconnected";
 
 /// The envelope of a `routing` message, as TS `app.ts` writes it.

@@ -6,7 +6,18 @@ use omni_ir::jsjson::{JsValue, stringify};
 use omni_store::SqliteStore;
 
 pub fn read_request_body(store: &SqliteStore, key: &FieldKey, id: &str) -> Result<String, Failure> {
-    let read = store.get_body(key, id)?;
+    render(store.get_body(key, id)?, id)
+}
+
+pub async fn read_request_body_postgres(
+    store: &omni_store::pg::PgStore,
+    key: &FieldKey,
+    id: &str,
+) -> Result<String, Failure> {
+    render(store.get_body(key, id).await?, id)
+}
+
+fn render(read: Option<omni_store::pg::bodies::BodyRead>, id: &str) -> Result<String, Failure> {
     let (request_id, state, truncated, size, at, artifact) = match read {
         None => (
             JsValue::String(id.encode_utf16().collect()),

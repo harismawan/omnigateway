@@ -56,6 +56,13 @@ pub fn page_encoding(
 }
 
 pub type ExportPage = (Vec<JsValue>, Option<(Value, Value)>);
+pub(crate) fn escape_like(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
 pub fn export_page(store: &SqliteStore, q: &Query, csv: bool) -> Result<ExportPage, StoreError> {
     let mut clauses = Vec::new();
     let mut bindings = Vec::new();
@@ -91,13 +98,7 @@ pub fn export_page(store: &SqliteStore, q: &Query, csv: bool) -> Result<ExportPa
         ("", &q.model),
     ] {
         if let Some(value) = value {
-            let escaped = format!(
-                "%{}%",
-                value
-                    .replace('\\', "\\\\")
-                    .replace('%', "\\%")
-                    .replace('_', "\\_")
-            );
+            let escaped = format!("%{}%", escape_like(value));
             if column.is_empty() {
                 clauses.push(
                     "(requested_model LIKE ? ESCAPE '\\' OR resolved_model LIKE ? ESCAPE '\\')"

@@ -199,6 +199,9 @@ impl From<BreakerTransition> for WriteEvent {
 /// these, in commit order (TS: "row first, then the debit").
 #[derive(Debug, Clone, PartialEq)]
 pub struct Completion {
+    /// Canonical top-level xid8 of the PG completing transaction. SQLite
+    /// and unpersisted fallback debits have no PG visibility identity.
+    pub commit_id: Option<String>,
     /// The request id (`request_logs.id`).
     pub id: String,
     pub api_key_id: Option<String>,

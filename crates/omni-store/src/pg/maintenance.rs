@@ -1,13 +1,81 @@
 //! Frozen Postgres retention; raw deletion and boundary-hour rebuild are atomic.
 use crate::StoreError;
 
+pub struct DatabaseStats {
+    pub bytes: i64,
+    pub page_size: i32,
+    pub schema_version: i64,
+}
+
+pub struct TableStats {
+    pub name: String,
+    pub bytes: i64,
+    pub rows: i64,
+    pub dead_rows: i64,
+}
+
 impl super::PgStore {
+    pub async fn database_stats(&self) -> Result<DatabaseStats, StoreError> {
+        let row = self
+            .client()
+            .await?
+            .query_one(
+                "SELECT pg_database_size(current_database()), current_setting('block_size')::int,
+                    COALESCE((SELECT MAX(id)::bigint FROM migrations), 0)",
+                &[],
+            )
+            .await?;
+        Ok(DatabaseStats {
+            bytes: row.try_get(0)?,
+            page_size: row.try_get(1)?,
+            schema_version: row.try_get(2)?,
+        })
+    }
+
+    pub async fn database_tables(&self) -> Result<Vec<TableStats>, StoreError> {
+        self.client()
+            .await?
+            .query(
+                "SELECT c.relname::text AS name, pg_total_relation_size(c.oid) AS bytes,
+                    GREATEST(c.reltuples, 0)::bigint, COALESCE(s.n_dead_tup, 0)
+               FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+               LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
+              WHERE c.relkind = 'r' AND n.nspname = current_schema()
+              ORDER BY bytes DESC, name",
+                &[],
+            )
+            .await?
+            .iter()
+            .map(|r| {
+                Ok(TableStats {
+                    name: r.try_get(0)?,
+                    bytes: r.try_get(1)?,
+                    rows: r.try_get(2)?,
+                    dead_rows: r.try_get(3)?,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn live_nodes(&self, now: i64) -> Result<Vec<(String, i64)>, StoreError> {
+        self.client()
+            .await?
+            .query(
+                "SELECT id, seen_at FROM nodes WHERE seen_at > $1 ORDER BY seen_at DESC",
+                &[&now.saturating_sub(60_000)],
+            )
+            .await?
+            .iter()
+            .map(|row| Ok((row.try_get(0)?, row.try_get(1)?)))
+            .collect()
+    }
+
     pub async fn pending_interruptions(
         &self,
-        node: &str,
+        boot_node: Option<&str>,
         now: i64,
     ) -> Result<Vec<crate::writer::RequestLog>, StoreError> {
-        super::usage::pending_interruptions(&self.client().await?, node, now).await
+        super::usage::pending_interruptions(&self.client().await?, boot_node, now).await
     }
     pub async fn heartbeat(&self, node: &str, now: i64) -> Result<(), StoreError> {
         let c = self.client().await?;

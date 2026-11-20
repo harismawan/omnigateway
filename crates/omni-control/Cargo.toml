@@ -16,6 +16,7 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 omni-ir = { path = "../omni-ir" }
 omni-router = { path = "../omni-router" }
 omni-crypto = { path = "../omni-crypto" }
+omni-coord = { path = "../omni-coord" }
 omni-store = { path = "../omni-store" }
 omni-ratelimit = { path = "../omni-ratelimit" }
 serde_json.workspace = true

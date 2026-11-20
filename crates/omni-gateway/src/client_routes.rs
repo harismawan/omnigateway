@@ -12,6 +12,13 @@ pub async fn history(app: &App, req: Request<Incoming>) -> Result<Response<Body>
     let raw = req.uri().query().unwrap_or_default().to_owned();
     let reader = app.control.reader().await?;
     let now = crate::clock::now_ms() as f64;
+    if let Some(pg) = reader.postgres() {
+        return Ok(api::json_ok(
+            omni_control::client_quota::history_postgres(pg, &raw, now)
+                .await
+                .map_err(crate::admin_routes::failure)?,
+        ));
+    }
     Ok(api::json_ok(
         reader
             .run(move |s| omni_control::client_quota::history(s, &raw, now))
@@ -23,6 +30,13 @@ pub async fn quota(app: &App, req: Request<Incoming>) -> Result<Response<Body>, 
     api::require_client(req.headers(), &app.admin).await?;
     let reader = app.control.reader().await?;
     let now = crate::clock::now_ms() as f64;
+    if let Some(pg) = reader.postgres() {
+        return Ok(api::json_ok(
+            omni_control::client_quota::accounts_postgres(pg, now)
+                .await
+                .map_err(crate::admin_routes::failure)?,
+        ));
+    }
     Ok(api::json_ok(
         reader
             .run(move |s| omni_control::client_quota::accounts(s, now))
@@ -35,6 +49,13 @@ pub async fn usage(app: &App, req: Request<Incoming>) -> Result<Response<Body>, 
     let raw = req.uri().query().unwrap_or_default().to_owned();
     let reader = app.control.reader().await?;
     let now = crate::clock::now_ms() as f64;
+    if let Some(pg) = reader.postgres() {
+        return Ok(api::json_ok(
+            omni_control::reports::usage_postgres(pg, &raw, now, Some(&id))
+                .await
+                .map_err(crate::admin_routes::failure)?,
+        ));
+    }
     Ok(api::json_ok(
         reader
             .run(move |s| omni_control::reports::client_usage(s, &raw, now, &id))
@@ -46,6 +67,13 @@ pub async fn logs(app: &App, req: Request<Incoming>) -> Result<Response<Body>, A
     let id = api::require_client(req.headers(), &app.admin).await?;
     let raw = req.uri().query().unwrap_or_default().to_owned();
     let reader = app.control.reader().await?;
+    if let Some(pg) = reader.postgres() {
+        return Ok(api::json_ok(
+            omni_control::logs::client_page_postgres(pg, &raw, &id)
+                .await
+                .map_err(crate::admin_routes::failure)?,
+        ));
+    }
     Ok(api::json_ok(
         reader
             .run(move |s| omni_control::logs::client_page(s, &raw, &id))
@@ -58,6 +86,13 @@ pub async fn summary(app: &App, req: Request<Incoming>) -> Result<Response<Body>
     let reader = app.control.reader().await?;
     let offset = app.day_offset_minutes;
     let now = crate::clock::now_ms();
+    if let Some(pg) = reader.postgres() {
+        return Ok(api::json_ok(
+            omni_control::api::client_summary_postgres(pg, &id, now, offset)
+                .await
+                .map_err(crate::admin_routes::failure)?,
+        ));
+    }
     Ok(api::json_ok(
         reader
             .run(move |s| omni_control::api::client_summary(s, &id, now, offset))

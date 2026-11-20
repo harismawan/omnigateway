@@ -282,12 +282,70 @@ fn health_value(s: &SqliteStore, now: i64, cli: bool) -> Result<JsValue> {
             ));
         }
     }
+    Ok(health_response(
+        health,
+        quota,
+        quota_json,
+        last_used,
+        now,
+        settings.quota_poll_interval_ms,
+    ))
+}
+
+pub async fn health_postgres(pg: &omni_store::pg::PgStore, now: i64) -> Result<String> {
+    pg_rows(pg, None).await?;
+    let health = pg
+        .list_health()
+        .await?
+        .iter()
+        .map(|r| {
+            JsValue::from(
+                &serde_json::json!({"credentialId":r.credential_id,"model":r.model,
+            "breakerState":r.breaker_state,"consecutiveFailures":r.consecutive_failures,
+            "openedAt":r.opened_at,"rateLimitedUntil":r.rate_limited_until}),
+            )
+        })
+        .collect();
+    let quota = pg.list_quota().await?;
+    let quota_json = quota
+        .iter()
+        .map(|r| JsValue::from(&serde_json::json!(r)))
+        .collect();
+    let last_used = pg
+        .last_used_by_credential()
+        .await?
+        .into_iter()
+        .map(|(id, at)| {
+            (
+                id.encode_utf16().collect(),
+                JsValue::from(&serde_json::Value::from(at)),
+            )
+        })
+        .collect();
+    Ok(stringify(&health_response(
+        health,
+        quota,
+        quota_json,
+        last_used,
+        now,
+        pg.get_settings().await?.quota_poll_interval_ms,
+    )))
+}
+
+fn health_response(
+    health: Vec<JsValue>,
+    quota: Vec<omni_store::QuotaWindow>,
+    quota_json: Vec<JsValue>,
+    last_used: Vec<(Vec<u16>, JsValue)>,
+    now: i64,
+    poll: f64,
+) -> JsValue {
     let burn = quota
         .iter()
         .zip(&quota_json)
         .map(|(q, raw)| {
-            let stale = q.observed_at <= 0.0
-                || now as f64 - q.observed_at > settings.quota_poll_interval_ms.max(60_000.0) * 3.0;
+            let stale =
+                q.observed_at <= 0.0 || now as f64 - q.observed_at > poll.max(60_000.0) * 3.0;
             let rolled = q.resets_at.is_some_and(|r| r <= now as f64);
             let start = if stale {
                 None
@@ -403,12 +461,12 @@ fn health_value(s: &SqliteStore, now: i64, cli: bool) -> Result<JsValue> {
             ])
         })
         .collect();
-    Ok(obj(vec![
+    obj(vec![
         ("health", JsValue::Array(health)),
         ("quota", JsValue::Array(quota_json)),
         ("burn", JsValue::Array(burn)),
         ("lastUsed", JsValue::Object(last_used)),
-    ]))
+    ])
 }
 /// Raw quota projection for CLI status, without health/burn/last-used reads.
 /// Like listQuota in frozen TS, unrelated request logs cannot affect this read.
@@ -471,6 +529,46 @@ fn patch_with(
     now: i64,
     cli: bool,
 ) -> Result<()> {
+    let mutation = parse_patch(body)?;
+    let existing = if id.is_some() {
+        if cli {
+            cli_rows_for(s, id)
+                .map_err(Failure::internal)?
+                .into_iter()
+                .next()
+        } else {
+            rows(s, id)?.into_iter().next()
+        }
+    } else {
+        None
+    };
+    let existing = existing.ok_or_else(|| Failure::bad("no such credential"))?;
+    if mutation.is_empty() {
+        return Ok(());
+    }
+    s.connection().execute("UPDATE credentials SET label=COALESCE(?1,label),enabled=COALESCE(?2,enabled),tier=COALESCE(?3,tier),weight=COALESCE(?4,weight),disabled_reason=CASE WHEN ?2 IS NULL THEN disabled_reason WHEN ?2=1 THEN NULL ELSE 'manual' END,disabled_at=CASE WHEN ?2 IS NULL THEN disabled_at WHEN ?2=1 THEN NULL ELSE ?5 END,updated_at=?5 WHERE id=?6", rusqlite::params![mutation.label, mutation.enabled, mutation.tier.map(crate::cli_cell::bind_number), mutation.weight.map(crate::cli_cell::bind_number), now, id]).map_err(Failure::internal)?;
+    log_enabled(id, &existing, mutation.enabled);
+    Ok(())
+}
+
+pub async fn patch_postgres(
+    pg: &omni_store::pg::PgStore,
+    id: Option<&str>,
+    body: &JsValue,
+    now: i64,
+) -> Result<()> {
+    let mutation = parse_patch(body)?;
+    let id = id.ok_or_else(|| Failure::bad("no such credential"))?;
+    let existing = pg_rows(pg, Some(id))
+        .await?
+        .pop()
+        .ok_or_else(|| Failure::bad("no such credential"))?;
+    pg.patch_credential(Some(id), &mutation, now).await?;
+    log_enabled(Some(id), &existing, mutation.enabled);
+    Ok(())
+}
+
+fn parse_patch(body: &JsValue) -> Result<omni_store::credentials::CredentialPatch> {
     let opt = |z| Z::Opt(Box::new(z));
     let schema = Z::Obj {
         shape: vec![
@@ -509,25 +607,9 @@ fn patch_with(
             "tier: Too small: expected number to be >=1",
         ))
     })?;
-    let existing = if id.is_some() {
-        if cli {
-            cli_rows_for(s, id)
-                .map_err(Failure::internal)?
-                .into_iter()
-                .next()
-        } else {
-            rows(s, id)?.into_iter().next()
-        }
-    } else {
-        None
-    };
-    let existing = existing.ok_or_else(|| Failure::bad("no such credential"))?;
     let JsValue::Object(fields) = &patch else {
         unreachable!()
     };
-    if fields.is_empty() {
-        return Ok(());
-    }
     let mut mutation = omni_store::credentials::CredentialPatch::default();
     for (k, v) in fields {
         let k = String::from_utf16_lossy(k);
@@ -539,11 +621,14 @@ fn patch_with(
             _ => unreachable!(),
         }
     }
-    s.connection().execute("UPDATE credentials SET label=COALESCE(?1,label),enabled=COALESCE(?2,enabled),tier=COALESCE(?3,tier),weight=COALESCE(?4,weight),disabled_reason=CASE WHEN ?2 IS NULL THEN disabled_reason WHEN ?2=1 THEN NULL ELSE 'manual' END,disabled_at=CASE WHEN ?2 IS NULL THEN disabled_at WHEN ?2=1 THEN NULL ELSE ?5 END,updated_at=?5 WHERE id=?6", rusqlite::params![mutation.label, mutation.enabled, mutation.tier.map(crate::cli_cell::bind_number), mutation.weight.map(crate::cli_cell::bind_number), now, id]).map_err(Failure::internal)?;
-    if let Some(enabled) = mutation.enabled
-        && get(&existing, "enabled") != Some(&JsValue::Bool(enabled))
+    Ok(mutation)
+}
+
+fn log_enabled(id: Option<&str>, existing: &JsValue, enabled: Option<bool>) {
+    if let Some(enabled) = enabled
+        && get(existing, "enabled") != Some(&JsValue::Bool(enabled))
     {
-        let provider = match get(&existing, "provider") {
+        let provider = match get(existing, "provider") {
             Some(JsValue::String(u)) => String::from_utf16_lossy(u),
             _ => String::new(),
         };
@@ -558,7 +643,6 @@ fn patch_with(
             }
         );
     }
-    Ok(())
 }
 fn required(body: &JsValue, name: &str) -> Result<Vec<u16>> {
     if let Some(JsValue::String(u)) = get(body, name) {
@@ -592,6 +676,48 @@ fn create_with(
     now: i64,
     cli: bool,
 ) -> Result<String> {
+    let input = parse_create(body)?;
+    if input.provider == "custom" {
+        let existing = if cli {
+            cli_rows(s).map_err(Failure::internal)?
+        } else {
+            rows(s, None)?
+        };
+        check_endpoint(&input.data, existing, cli)?;
+    }
+    let id = omni_crypto::codex::uuid_v4_from(&omni_crypto::apikey::generate());
+    omni_store::credentials::create_api_key(s.connection(), key, &input.columns(&id, now))?;
+    let row = rows(s, Some(&id))?.remove(0);
+    Ok(created(&id, input, row))
+}
+
+struct CredentialInput {
+    provider: String,
+    label: Vec<u16>,
+    label_text: String,
+    secret: String,
+    data: JsValue,
+    data_text: String,
+}
+
+impl CredentialInput {
+    fn columns<'a>(
+        &'a self,
+        id: &'a str,
+        now: i64,
+    ) -> omni_store::credentials::ApiKeyCredential<'a> {
+        omni_store::credentials::ApiKeyCredential {
+            id,
+            provider: &self.provider,
+            label: &self.label_text,
+            provider_data: &self.data_text,
+            api_key: &self.secret,
+            now,
+        }
+    }
+}
+
+fn parse_create(body: &JsValue) -> Result<CredentialInput> {
     if !matches!(body, JsValue::Object(_) | JsValue::Array(_)) {
         return Err(Failure::bad("credential body is required"));
     }
@@ -657,65 +783,107 @@ fn create_with(
             ("basePath", text(url.path().trim_end_matches('/'))),
             ("protocol", protocol),
         ]);
-        for row in if cli {
-            cli_rows(s).map_err(Failure::internal)?
-        } else {
-            rows(s, None)?
-        } {
-            if get(&row, "provider") != Some(&text("custom")) {
-                continue;
-            }
-            let undefined = JsValue::Undefined;
-            let old = get(&row, "providerData").unwrap_or(&undefined);
-            if matches!(old, JsValue::Null) {
-                return Err(Failure::internal(if cli {
-                    "null is not an object (evaluating 'credential.providerData.endpointId')"
-                } else {
-                    "null provider data"
-                }));
-            }
-            if get(old, "endpointId") == get(&data, "endpointId")
-                && ["endpointLabel", "origin", "basePath", "protocol"]
-                    .iter()
-                    .any(|k| {
-                        let v = get(old, k);
-                        if *k == "basePath" && !matches!(v, Some(JsValue::String(_))) {
-                            get(&data, k) != Some(&text(""))
-                        } else {
-                            v != get(&data, k)
-                        }
-                    })
-            {
-                return Err(Failure {
-                    code: Some("CONFLICT"),
-                    message: "endpointId: metadata conflicts with existing endpoint".into(),
-                });
-            }
+    }
+    Ok(CredentialInput {
+        provider,
+        label_text: String::from_utf16_lossy(&label),
+        label,
+        secret: String::from_utf16_lossy(&secret),
+        data_text: stringify(&data),
+        data,
+    })
+}
+
+fn check_endpoint(data: &JsValue, rows: Vec<JsValue>, cli: bool) -> Result<()> {
+    for row in rows {
+        if get(&row, "provider") != Some(&text("custom")) {
+            continue;
+        }
+        let undefined = JsValue::Undefined;
+        let old = get(&row, "providerData").unwrap_or(&undefined);
+        if matches!(old, JsValue::Null) {
+            return Err(Failure::internal(if cli {
+                "null is not an object (evaluating 'credential.providerData.endpointId')"
+            } else {
+                "null provider data"
+            }));
+        }
+        if get(old, "endpointId") == get(data, "endpointId")
+            && ["endpointLabel", "origin", "basePath", "protocol"]
+                .iter()
+                .any(|k| {
+                    let v = get(old, k);
+                    if *k == "basePath" && !matches!(v, Some(JsValue::String(_))) {
+                        get(data, k) != Some(&text(""))
+                    } else {
+                        v != get(data, k)
+                    }
+                })
+        {
+            return Err(Failure {
+                code: Some("CONFLICT"),
+                message: "endpointId: metadata conflicts with existing endpoint".into(),
+            });
         }
     }
-    let id = omni_crypto::codex::uuid_v4_from(&omni_crypto::apikey::generate());
-    omni_store::credentials::create_api_key(
-        s.connection(),
-        key,
-        &omni_store::credentials::ApiKeyCredential {
-            id: &id,
-            provider: &provider,
-            label: &String::from_utf16_lossy(&label),
-            provider_data: &stringify(&data),
-            api_key: &String::from_utf16_lossy(&secret),
-            now,
-        },
-    )?;
-    let mut row = rows(s, Some(&id))?.remove(0);
+    Ok(())
+}
+
+fn created(id: &str, input: CredentialInput, mut row: JsValue) -> String {
     if let JsValue::Object(fields) = &mut row {
         for (k, v) in fields {
             if k.iter().copied().eq("label".encode_utf16()) {
-                *v = JsValue::String(label.clone());
+                *v = JsValue::String(input.label.clone());
             } else if k.iter().copied().eq("tokenVersion".encode_utf16()) {
                 *v = JsValue::Number(0.0);
             }
         }
     }
-    tracing::info!(credentialId = id, provider, "credential added");
-    Ok(stringify(&obj(vec![("credential", row)])))
+    tracing::info!(
+        credentialId = id,
+        provider = input.provider,
+        "credential added"
+    );
+    stringify(&obj(vec![("credential", row)]))
+}
+
+pub(crate) async fn pg_rows(
+    pg: &omni_store::pg::PgStore,
+    id: Option<&str>,
+) -> Result<Vec<JsValue>> {
+    pg.credential_metadata(id)
+        .await?
+        .iter()
+        .map(|raw| {
+            omni_ir::jsjson::parse_js(raw)
+                .map_err(|_| Failure::internal("invalid credential metadata"))
+        })
+        .collect()
+}
+
+pub async fn list_postgres(pg: &omni_store::pg::PgStore) -> Result<String> {
+    Ok(stringify(&obj(vec![(
+        "credentials",
+        JsValue::Array(pg_rows(pg, None).await?),
+    )])))
+}
+
+pub async fn create_postgres(
+    pg: &omni_store::pg::PgStore,
+    key: &omni_crypto::field::FieldKey,
+    body: &JsValue,
+    now: i64,
+) -> Result<(String, String)> {
+    let input = parse_create(body)?;
+    if input.provider == "custom" {
+        check_endpoint(&input.data, pg_rows(pg, None).await?, false)?;
+    }
+    let id = omni_crypto::codex::uuid_v4_from(&omni_crypto::apikey::generate());
+    pg.create_api_key_credential(key, &input.columns(&id, now))
+        .await?;
+    let row = pg_rows(pg, Some(&id))
+        .await?
+        .pop()
+        .ok_or_else(|| Failure::internal("credential write not found"))?;
+    Ok((id.clone(), created(&id, input, row)))
 }

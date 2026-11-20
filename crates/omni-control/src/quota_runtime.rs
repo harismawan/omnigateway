@@ -24,6 +24,9 @@ pub trait Host: Send + Sync + 'static {
         request: omni_providers::quota::QuotaRequest,
     ) -> Task<'_, (u16, String)>;
     fn save<'a>(&'a self, id: &'a str, windows: &'a [Value]) -> Task<'a, ()>;
+    fn fresh_windows<'a>(&'a self, _id: &'a str, _started: i64) -> Task<'a, Option<usize>> {
+        Box::pin(async { Ok(None) })
+    }
     fn now(&self) -> i64;
 }
 type Flight = tokio::sync::watch::Sender<Option<Value>>;
@@ -36,6 +39,7 @@ struct State {
 }
 pub struct Quota {
     host: Arc<dyn Host>,
+    coord: Option<Arc<dyn omni_coord::Coord>>,
     state: Mutex<State>,
 }
 fn err(code: ErrorCode, message: &str) -> GatewayError {
@@ -43,8 +47,15 @@ fn err(code: ErrorCode, message: &str) -> GatewayError {
 }
 impl Quota {
     pub fn new(host: Arc<dyn Host>) -> Arc<Self> {
+        Self::with_coord(host, None)
+    }
+    pub fn coordinated(host: Arc<dyn Host>, coord: Arc<dyn omni_coord::Coord>) -> Arc<Self> {
+        Self::with_coord(host, Some(coord))
+    }
+    fn with_coord(host: Arc<dyn Host>, coord: Option<Arc<dyn omni_coord::Coord>>) -> Arc<Self> {
         Arc::new(Self {
             host,
+            coord,
             state: Mutex::default(),
         })
     }
@@ -136,6 +147,87 @@ impl Quota {
         }
         Ok(windows.len())
     }
+
+    async fn cooling(&self, id: &str) -> bool {
+        let Some(coord) = &self.coord else {
+            return false;
+        };
+        match coord.kv_get(&format!("quota:cooldown:{id}")).await {
+            Ok(v) => v.is_some(),
+            Err(_) => {
+                tracing::warn!(
+                    credentialId = id,
+                    coordFallback = true,
+                    "quota cooldown read unavailable"
+                );
+                false
+            }
+        }
+    }
+
+    async fn probe_outcome(&self, c: &Credential) -> Value {
+        match self.probe(c).await {
+            Ok(0) => json!({"kind":"noData","credentialId":c.id}),
+            Ok(n) => json!({"kind":"refreshed","credentialId":c.id,"windows":n}),
+            Err(e) => {
+                if e.code == ErrorCode::RateLimit {
+                    self.state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .cooldown
+                        .insert(c.id.clone(), self.host.now() + 180_000);
+                    if let Some(coord) = &self.coord
+                        && coord
+                            .kv_set(&format!("quota:cooldown:{}", c.id), "1", 180_000)
+                            .await
+                            .is_err()
+                    {
+                        tracing::warn!(credentialId = %c.id, coordFallback = true, "quota cooldown write unavailable");
+                    }
+                }
+                tracing::warn!(provider=%c.provider,credentialId=%c.id,code=e.code.as_str(),"quota probe failed");
+                json!({"kind":"failed","credentialId":c.id,"code":e.code.as_str()})
+            }
+        }
+    }
+
+    async fn coordinated_probe(
+        &self,
+        coord: &dyn omni_coord::Coord,
+        c: &Credential,
+        started: i64,
+    ) -> Value {
+        let cooldown = || json!({"kind":"cooldown","credentialId":c.id});
+        if self.cooling(&c.id).await {
+            return cooldown();
+        }
+        match omni_coord::with_lock(
+            coord,
+            &format!("quota:probe:{}", c.id),
+            60_000,
+            std::time::Duration::from_secs(30),
+            || async {
+                if self.cooling(&c.id).await {
+                    return cooldown();
+                }
+                match self.host.fresh_windows(&c.id, started).await {
+                    Ok(Some(windows)) => {
+                        json!({"kind":"coalesced","credentialId":c.id,"windows":windows})
+                    }
+                    Ok(None) => self.probe_outcome(c).await,
+                    Err(_) => json!({"kind":"failed","credentialId":c.id,"code":"INTERNAL"}),
+                }
+            },
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                tracing::warn!(credentialId = %c.id, coordFallback = true, "quota probe lock unavailable");
+                self.probe_outcome(c).await
+            }
+        }
+    }
     async fn attempt(self: &Arc<Self>, c: Credential) -> Value {
         let owned_id = c.id.clone();
         let id = &owned_id;
@@ -169,23 +261,14 @@ impl Quota {
         };
         if owner {
             let this = self.clone();
+            let started = self.host.now();
             tokio::spawn(async move {
                 let lock = this.lock(&c.id);
                 let _guard = lock.lock().await;
-                let outcome = match this.probe(&c).await {
-                    Ok(0) => json!({"kind":"noData","credentialId":c.id}),
-                    Ok(n) => json!({"kind":"refreshed","credentialId":c.id,"windows":n}),
-                    Err(e) => {
-                        if e.code == ErrorCode::RateLimit {
-                            this.state
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .cooldown
-                                .insert(c.id.clone(), this.host.now() + 180000);
-                        }
-                        tracing::warn!(provider=%c.provider,credentialId=%c.id,code=e.code.as_str(),"quota probe failed");
-                        json!({"kind":"failed","credentialId":c.id,"code":e.code.as_str()})
-                    }
+                let outcome = if let Some(coord) = &this.coord {
+                    this.coordinated_probe(coord.as_ref(), &c, started).await
+                } else {
+                    this.probe_outcome(&c).await
                 };
                 if let Some(tx) = this
                     .state
@@ -341,7 +424,27 @@ impl Quota {
         let c = self.account(id, true).await?;
         let lock = self.lock(&c.id);
         let _guard = lock.lock().await;
-        let listed = self.list_for(&c).await?;
+        if let Some(coord) = &self.coord {
+            // Unlike a poll, spending a credit must not fail open.
+            return omni_coord::with_lock(
+                coord.as_ref(),
+                &format!("quota:probe:{}", c.id),
+                60_000,
+                std::time::Duration::from_secs(30),
+                || self.redeem_locked(&c, credit),
+            )
+            .await
+            .map_err(|_| err(ErrorCode::Overloaded, "quota probe lock unavailable"))?;
+        }
+        self.redeem_locked(&c, credit).await
+    }
+
+    async fn redeem_locked(
+        &self,
+        c: &Credential,
+        credit: Option<&str>,
+    ) -> Result<Value, GatewayError> {
+        let listed = self.list_for(c).await?;
         let mut credits = listed["credits"].as_array().cloned().unwrap_or_default();
         credits.retain(|c| c["status"] == "available");
         credits.sort_by(|a, b| {
@@ -370,7 +473,7 @@ impl Quota {
             json!({"credit_id":credit,"redeem_request_id":request_id})
         } else {
             let profile = self
-                .wire(&c, "profile", &data, Value::Null)
+                .wire(c, "profile", &data, Value::Null)
                 .await?
                 .unwrap_or(Value::Null);
             let org = profile["organization"]["uuid"]
@@ -389,7 +492,7 @@ impl Quota {
             json!({"program":"cedar_ember","grant_id":grant,"request_id":request_id})
         };
         let result = self
-            .wire(&c, "redeem", &data, body)
+            .wire(c, "redeem", &data, body)
             .await?
             .unwrap_or(Value::Null);
         let windows = omni_providers::quota::redeemed(&c.provider, &result).map_err(|m| {
@@ -399,7 +502,7 @@ impl Quota {
                 message,
             )
         })?;
-        let refreshed = self.probe(&c).await.is_ok_and(|n| n > 0);
+        let refreshed = self.probe(c).await.is_ok_and(|n| n > 0);
         Ok(
             json!({"credentialId":c.id,"creditId":credit,"windowsReset":windows,"quotaRefreshed":refreshed}),
         )
@@ -494,6 +597,46 @@ mod tests {
         assert_eq!(host.writes.load(Ordering::SeqCst), 1);
         quota.drain().await;
     }
+    #[tokio::test]
+    async fn another_runtime_honors_a_shared_quota_cooldown() {
+        let (_root, host, _) = fixture();
+        let coord = Arc::new(omni_coord::MemoryCoord::new(Arc::new(|| 1000.0)));
+        let first = Quota::coordinated(host.clone(), coord.clone());
+        let second = Quota::coordinated(host.clone(), coord);
+        host.status.store(429, Ordering::SeqCst);
+        assert_eq!(
+            first.refresh(Some("c")).await.unwrap()["outcomes"][0]["code"],
+            "RATE_LIMIT"
+        );
+        assert_eq!(
+            second.refresh(Some("c")).await.unwrap()["outcomes"][0]["kind"],
+            "cooldown"
+        );
+        assert_eq!(host.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn redeem_cannot_spend_while_a_peer_owns_the_probe_lock() {
+        let (_root, host, _) = fixture();
+        let coord: Arc<dyn omni_coord::Coord> =
+            Arc::new(omni_coord::MemoryCoord::new(Arc::new(|| 1000.0)));
+        let token = coord
+            .lock("quota:probe:c", 60_000, std::time::Duration::ZERO)
+            .await
+            .unwrap();
+        let runtime = Quota::coordinated(host.clone(), coord.clone());
+        let redeem = runtime.redeem("c", Some("credit"));
+        tokio::pin!(redeem);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), &mut redeem)
+                .await
+                .is_err()
+        );
+        assert_eq!(host.calls.load(Ordering::SeqCst), 0);
+        coord.unlock(token).await;
+        assert_eq!(redeem.await.unwrap()["creditId"], "credit");
+    }
+
     #[tokio::test]
     async fn quota_429_cools_only_probe_and_expires_without_credential_mutation() {
         let (_root, host, quota) = fixture();

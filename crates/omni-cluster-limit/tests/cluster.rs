@@ -255,7 +255,7 @@ async fn seed_lock_contention() {
         Arc::clone(&c),
         usage.clone(),
         ClusterLimiterOptions {
-            seed_lock_ms: 600,
+            seed_lock_ms: 2_000,
             ..opts(&clock)
         },
     );
@@ -271,9 +271,30 @@ async fn seed_lock_contention() {
         .await
         .expect("set");
     let a = l.admit("k", &lim, "fast", T0).await.expect("admit");
+    assert_eq!(
+        a.unseeded,
+        vec![
+            ("k".into(), omni_ratelimit::Window::H5),
+            ("k".into(), omni_ratelimit::Window::W1)
+        ],
+        "{:?}",
+        l.metrics()
+    );
     drop(a);
-    sleep_ms(200).await;
     // The 1w seed was not contended and is in; the 5h one waits.
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while l.metrics().seeds_installed.load(Ordering::SeqCst) == 0 {
+            sleep_ms(5).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "uncontended 1w seed installed before 5h mutex release: {:?}; coordinator faults={}",
+            l.metrics(),
+            c.faults()
+        )
+    });
     assert_eq!(l.metrics().seeds_installed.load(Ordering::SeqCst), 1);
     // The holder installs a complete picture under its lock, then releases.
     let installed = install_5h(&c, "k", "other", "1:1:", T0 - 5.0 * HOUR).await;

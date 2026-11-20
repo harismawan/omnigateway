@@ -128,6 +128,53 @@ pub trait SessionKv: Send + Sync {
     fn del_prefix<'a>(&'a self, prefix: &'a str) -> KvFuture<'a, ()>;
 }
 
+/// Same hashed session names, JSON values and TTLs through the selected Coord.
+pub struct CoordKv {
+    coord: Arc<dyn omni_coord::Coord>,
+}
+
+impl CoordKv {
+    pub fn new(coord: Arc<dyn omni_coord::Coord>) -> Self {
+        Self { coord }
+    }
+}
+
+impl SessionKv for CoordKv {
+    fn set<'a>(&'a self, key: &'a str, value: &'a str, ttl_ms: i64) -> KvFuture<'a, ()> {
+        Box::pin(async move {
+            let ttl = u64::try_from(ttl_ms).map_err(|_| KvError("invalid session TTL".into()))?;
+            self.coord
+                .kv_set(key, value, ttl)
+                .await
+                .map_err(|e| KvError(e.to_string()))
+        })
+    }
+    fn get<'a>(&'a self, key: &'a str) -> KvFuture<'a, Option<String>> {
+        Box::pin(async move {
+            self.coord
+                .kv_get(key)
+                .await
+                .map_err(|e| KvError(e.to_string()))
+        })
+    }
+    fn del<'a>(&'a self, key: &'a str) -> KvFuture<'a, ()> {
+        Box::pin(async move {
+            self.coord
+                .kv_del(key)
+                .await
+                .map_err(|e| KvError(e.to_string()))
+        })
+    }
+    fn del_prefix<'a>(&'a self, prefix: &'a str) -> KvFuture<'a, ()> {
+        Box::pin(async move {
+            self.coord
+                .kv_del_prefix(prefix)
+                .await
+                .map_err(|e| KvError(e.to_string()))
+        })
+    }
+}
+
 pub type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 
 /// `memoryCoord().kv`: in-process, expiring against the injected clock.
@@ -273,12 +320,18 @@ impl From<admin_password::PasswordError> for AuthError {
 
 /// `AdminAuth`.
 pub struct AdminAuth {
-    store: Arc<Mutex<SqliteStore>>,
+    store: AuthStore,
     kv: Arc<dyn SessionKv>,
     now: Clock,
     ttl_ms: i64,
     /// Running Argon2 jobs (19 MiB each), one per CPU; see [`Self::hashing`].
     hashing: Arc<tokio::sync::Semaphore>,
+}
+
+#[derive(Clone)]
+enum AuthStore {
+    Sqlite(Arc<Mutex<SqliteStore>>),
+    Backend(Arc<omni_store::Store>),
 }
 
 impl std::fmt::Debug for AdminAuth {
@@ -291,9 +344,27 @@ impl std::fmt::Debug for AdminAuth {
 
 impl AdminAuth {
     pub fn new(store: SqliteStore, kv: Arc<dyn SessionKv>, now: Clock, ttl_ms: i64) -> Self {
+        Self::with_backend(
+            AuthStore::Sqlite(omni_store::lifecycle::shared(store)),
+            kv,
+            now,
+            ttl_ms,
+        )
+    }
+
+    pub fn from_backend(
+        store: Arc<omni_store::Store>,
+        kv: Arc<dyn SessionKv>,
+        now: Clock,
+        ttl_ms: i64,
+    ) -> Self {
+        Self::with_backend(AuthStore::Backend(store), kv, now, ttl_ms)
+    }
+
+    fn with_backend(store: AuthStore, kv: Arc<dyn SessionKv>, now: Clock, ttl_ms: i64) -> Self {
         let cpus = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
         Self {
-            store: omni_store::lifecycle::shared(store),
+            store,
             kv,
             now,
             ttl_ms,
@@ -324,6 +395,11 @@ impl AdminAuth {
         f: impl FnOnce(&SqliteStore) -> Result<T, AuthError> + Send + 'static,
     ) -> Result<T, AuthError> {
         let store = self.store.clone();
+        let AuthStore::Sqlite(store) = store else {
+            return Err(AuthError::Internal(
+                "SQLite-only auth operation on PG".into(),
+            ));
+        };
         tokio::task::spawn_blocking(move || {
             let _runtime_access = omni_store::lifecycle::access();
             let guard = store
@@ -333,6 +409,26 @@ impl AdminAuth {
         })
         .await
         .map_err(|e| AuthError::Internal(e.to_string()))?
+    }
+
+    async fn password_hash(&self, which: Which) -> Result<Option<String>, AuthError> {
+        match &self.store {
+            AuthStore::Backend(store) => Ok(store
+                .password_hash(match which {
+                    Which::Admin => admin_password::ADMIN_HASH_KEY,
+                    Which::Viewer => admin_password::VIEWER_HASH_KEY,
+                })
+                .await?),
+            AuthStore::Sqlite(_) => {
+                self.with_store(move |s| {
+                    Ok(match which {
+                        Which::Admin => admin_password::admin_hash(s)?,
+                        Which::Viewer => admin_password::viewer_hash(s)?,
+                    })
+                })
+                .await
+            }
+        }
     }
 
     /// CPU-heavy work (Argon2) on the blocking pool, at most one job per
@@ -404,19 +500,22 @@ impl AdminAuth {
 
     /// `isConfigured`.
     pub async fn is_configured(&self) -> Result<bool, AuthError> {
-        self.with_store(|s| Ok(admin_password::admin_hash(s)?.is_some()))
-            .await
+        Ok(self.password_hash(Which::Admin).await?.is_some())
     }
 
     /// `isViewerConfigured`.
     pub async fn is_viewer_configured(&self) -> Result<bool, AuthError> {
-        self.with_store(|s| Ok(admin_password::viewer_hash(s)?.is_some()))
-            .await
+        Ok(self.password_hash(Which::Viewer).await?.is_some())
     }
 
     /// `setInitialPassword`: whether this call created the admin password.
     pub async fn set_initial_password(&self, password: &str) -> Result<bool, AuthError> {
         let hash = self.hash_new(Which::Admin, password).await?;
+        if let AuthStore::Backend(store) = &self.store {
+            return Ok(store
+                .password_hash_set_if_absent(admin_password::ADMIN_HASH_KEY, &hash)
+                .await?);
+        }
         self.with_store(move |s| Ok(admin_password::set_admin_hash_if_absent(s, &hash)?))
             .await
     }
@@ -425,8 +524,14 @@ impl AdminAuth {
     /// session of every kind ended.
     pub async fn set_password(&self, password: &str) -> Result<(), AuthError> {
         let hash = self.hash_new(Which::Admin, password).await?;
-        self.with_store(move |s| Ok(admin_password::set_admin_hash(s, &hash)?))
-            .await?;
+        if let AuthStore::Backend(store) = &self.store {
+            store
+                .password_hash_set(admin_password::ADMIN_HASH_KEY, Some(&hash))
+                .await?;
+        } else {
+            self.with_store(move |s| Ok(admin_password::set_admin_hash(s, &hash)?))
+                .await?;
+        }
         self.kv.del_prefix(omni_crypto::session::PREFIX).await?;
         Ok(())
     }
@@ -435,9 +540,7 @@ impl AdminAuth {
     /// answers the same whether `current` was right), then `current`.
     pub async fn change_password(&self, current: &str, next: &str) -> Result<bool, AuthError> {
         admin_password::check_length(Which::Admin, next)?;
-        let stored = self
-            .with_store(|s| Ok(admin_password::admin_hash(s)?))
-            .await?;
+        let stored = self.password_hash(Which::Admin).await?;
         if !self.matches(stored, current).await? {
             return Ok(false);
         }
@@ -447,9 +550,7 @@ impl AdminAuth {
 
     /// `login`: an admin session, or `None` for a wrong or unset password.
     pub async fn login(&self, password: &str) -> Result<Option<String>, AuthError> {
-        let stored = self
-            .with_store(|s| Ok(admin_password::admin_hash(s)?))
-            .await?;
+        let stored = self.password_hash(Which::Admin).await?;
         if !self.matches(stored, password).await? {
             return Ok(None);
         }
@@ -463,16 +564,20 @@ impl AdminAuth {
             None => None,
             Some(p) => Some(self.hash_new(Which::Viewer, p).await?),
         };
-        self.with_store(move |s| Ok(admin_password::set_viewer_hash(s, hash.as_deref())?))
-            .await?;
+        if let AuthStore::Backend(store) = &self.store {
+            store
+                .password_hash_set(admin_password::VIEWER_HASH_KEY, hash.as_deref())
+                .await?;
+        } else {
+            self.with_store(move |s| Ok(admin_password::set_viewer_hash(s, hash.as_deref())?))
+                .await?;
+        }
         self.invalidate_kind(Kind::Viewer).await
     }
 
     /// `loginViewer`.
     pub async fn login_viewer(&self, password: &str) -> Result<Option<String>, AuthError> {
-        let stored = self
-            .with_store(|s| Ok(admin_password::viewer_hash(s)?))
-            .await?;
+        let stored = self.password_hash(Which::Viewer).await?;
         if !self.matches(stored, password).await? {
             return Ok(None);
         }
@@ -483,6 +588,19 @@ impl AdminAuth {
     pub async fn login_client(&self, raw_key: &str) -> Result<Option<String>, AuthError> {
         let hash = omni_crypto::apikey::hash(raw_key);
         let now = (self.now)();
+        if let AuthStore::Backend(store) = &self.store {
+            return match store
+                .find_api_key_by_hash(&hash)
+                .await?
+                .filter(|k| k.usable(now))
+            {
+                None => Ok(None),
+                Some(key) => Ok(Some(
+                    self.issue(&Principal::Client { api_key_id: key.id })
+                        .await?,
+                )),
+            };
+        }
         let id = self
             .with_store(move |s| {
                 Ok(omni_store::keys::find_by_hash(s.connection(), &hash)?
@@ -521,9 +639,15 @@ impl AdminAuth {
             let id = api_key_id.clone();
             #[allow(clippy::cast_possible_truncation)]
             let now = now as i64;
-            let usable = self
-                .with_store(move |s| Ok(admin_password::client_key_usable(s, &id, now)?))
-                .await?;
+            let usable = if let AuthStore::Backend(store) = &self.store {
+                store
+                    .get_operator_key(&id)
+                    .await?
+                    .is_some_and(|key| key.usable(now))
+            } else {
+                self.with_store(move |s| Ok(admin_password::client_key_usable(s, &id, now)?))
+                    .await?
+            };
             if !usable {
                 self.kv.del(&key).await?;
                 return Ok(None);

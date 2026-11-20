@@ -199,37 +199,49 @@ fn read_scope(
     now: i64,
     out: &mut Vec<JsValue>,
 ) -> Result<()> {
-    fn set(v: Option<&JsValue>) -> Option<&JsValue> {
-        v.filter(|v| !matches!(v, JsValue::Null))
-    }
     let model_text = model.map(utf8);
-    let mut sums: Vec<(&str, omni_ratelimit::buckets::Counts)> = Vec::new();
-    // `configuredWindows`: insertion order of first need, dimension-major.
-    for dimension in ["requests", "tokens", "spend"] {
-        let Some(windows) = get(scope, dimension) else {
-            continue;
-        };
-        for (window, ms) in WINDOWS {
-            if set(get(windows, window)).is_some() && !sums.iter().any(|(w, _)| *w == window) {
-                sums.push((
-                    window,
-                    omni_store::usage::sum_since(
-                        store.connection(),
-                        id,
-                        now - ms,
-                        model_text.as_deref(),
-                    )?,
-                ));
-            }
-        }
-    }
+    let sums = configured_windows(scope)
+        .map(|(w, ms)| {
+            Ok((
+                w,
+                omni_store::usage::sum_since(
+                    store.connection(),
+                    id,
+                    now - ms,
+                    model_text.as_deref(),
+                )?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    render_scope(scope, model, &sums, out);
+    Ok(())
+}
+
+fn configured_windows(scope: &JsValue) -> impl Iterator<Item = (&'static str, i64)> + '_ {
+    WINDOWS.into_iter().filter(|(w, _)| {
+        ["requests", "tokens", "spend"]
+            .into_iter()
+            .any(|d| configured(get(scope, d).and_then(|v| get(v, w))).is_some())
+    })
+}
+
+fn configured(v: Option<&JsValue>) -> Option<&JsValue> {
+    v.filter(|v| !matches!(v, JsValue::Null))
+}
+
+fn render_scope(
+    scope: &JsValue,
+    model: Option<&[u16]>,
+    sums: &[(&str, omni_ratelimit::buckets::Counts)],
+    out: &mut Vec<JsValue>,
+) {
     let model_value = model.map_or(JsValue::Null, |m| JsValue::String(m.to_vec()));
     for dimension in ["requests", "tokens", "spend"] {
         let Some(windows) = get(scope, dimension) else {
             continue;
         };
         for (window, _) in WINDOWS {
-            let Some(limit) = set(get(windows, window)) else {
+            let Some(limit) = configured(get(windows, window)) else {
                 continue;
             };
             let sum = &sums.iter().find(|(w, _)| *w == window).expect("summed").1;
@@ -247,7 +259,7 @@ fn read_scope(
             ]));
         }
     }
-    if let Some(limit) = set(get(scope, "concurrency")) {
+    if let Some(limit) = configured(get(scope, "concurrency")) {
         out.push(object(vec![
             ("dimension", text("concurrency")),
             ("window", JsValue::Null),
@@ -256,7 +268,6 @@ fn read_scope(
             ("model", model_value),
         ]));
     }
-    Ok(())
 }
 
 /// `readLimitUsage`: the key-wide readings, then each override's in JS
@@ -301,6 +312,10 @@ pub fn lossy(v: &JsValue) -> serde_json::Value {
 /// `toSummary`.
 fn summary(store: &SqliteStore, k: KeyRow, now: i64) -> Result<JsValue> {
     let usage = limit_usage(store, &k.id, &k.limits, now)?;
+    Ok(render_summary(k, usage))
+}
+
+fn render_summary(k: KeyRow, usage: Vec<JsValue>) -> JsValue {
     let opt_text = |v: Option<String>| v.map_or(JsValue::Null, |s| text(&s));
     let mut out = object(vec![
         ("id", text(&k.id)),
@@ -321,7 +336,95 @@ fn summary(store: &SqliteStore, k: KeyRow, now: i64) -> Result<JsValue> {
             crate::settings_value::set(&mut out, &String::from_utf16_lossy(name), value.clone());
         }
     }
-    Ok(out)
+    out
+}
+
+async fn pg_key_rows(pg: &omni_store::pg::PgStore, id: Option<&str>) -> Result<Vec<KeyRow>> {
+    pg.operator_keys(id)
+        .await?
+        .into_iter()
+        .map(|row| {
+            let key = row.key;
+            let allowlist = row
+                .allowlist_json
+                .as_deref()
+                .map(|raw| parse_allowlist(raw, &key.id))
+                .transpose()?
+                .unwrap_or(JsValue::Null);
+            let limits = stored_limits(&row.limits_json);
+            if matches!(limits, JsValue::Null) {
+                tracing::error!(apiKeyId = %key.id, "api key limits unreadable");
+            }
+            Ok(KeyRow {
+                cells: JsValue::Null,
+                id: key.id,
+                label: key.label,
+                prefix: key.prefix,
+                allowlist,
+                limits,
+                body_logging_opt_out: key.body_logging_opt_out,
+                created_at: row.created_at,
+                revoked_at: row.revoked_at,
+                expires_at: row.expires_at,
+                guardrail_policy: key.guardrail_policy,
+                smart_routing: key.smart_routing,
+            })
+        })
+        .collect()
+}
+
+async fn pg_summary(pg: &omni_store::pg::PgStore, row: KeyRow, now: i64) -> Result<JsValue> {
+    let mut usage = Vec::new();
+    let models = match get(&row.limits, "models") {
+        Some(JsValue::Object(models)) => js_order(models)
+            .into_iter()
+            .map(|i| (Some(models[i].0.as_slice()), &models[i].1))
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+    for (model, scope) in std::iter::once((None, &row.limits)).chain(models) {
+        let model_text = model.map(utf8);
+        let mut sums = Vec::new();
+        for (window, ms) in configured_windows(scope) {
+            sums.push((
+                window,
+                pg.sum_since(&row.id, now - ms, model_text.as_deref())
+                    .await?,
+            ));
+        }
+        render_scope(scope, model, &sums, &mut usage);
+    }
+    Ok(render_summary(row, usage))
+}
+
+pub async fn client_summary_postgres(
+    pg: &omni_store::pg::PgStore,
+    id: &str,
+    now: i64,
+    offset: i64,
+) -> Result<String> {
+    let row = pg_key_rows(pg, Some(id))
+        .await?
+        .pop()
+        .ok_or_else(|| Failure {
+            code: Some("AUTH"),
+            message: "no such api key".into(),
+        })?;
+    let mut summary = pg_summary(pg, row, now).await?;
+    crate::settings_value::set(
+        &mut summary,
+        "dayOffsetMinutes",
+        JsValue::from(&serde_json::Value::from(offset)),
+    );
+    Ok(stringify(&summary).expect("summary"))
+}
+
+pub async fn list_keys_postgres(pg: &omni_store::pg::PgStore, now: i64) -> Result<String> {
+    let mut keys = Vec::new();
+    for row in pg_key_rows(pg, None).await? {
+        keys.push(pg_summary(pg, row, now).await?);
+    }
+    Ok(stringify(&object(vec![("keys", JsValue::Array(keys))])).expect("keys"))
 }
 
 /// JS own-key order: canonical array indices ascending, then insertion.
@@ -453,51 +556,101 @@ pub fn list_keys(store: &SqliteStore, now: i64) -> Result<String> {
 /// `POST /api/keys`: `createKey(store, body)`; the only response that
 /// carries the raw key.
 pub fn create_key(store: &SqliteStore, body: &JsValue, now: i64) -> Result<String> {
-    let parsed = crate::body_schema::parse_or_throw(&crate::body_schema::key_create(), body)
-        .map_err(Failure::bad)?;
-    let f = |k: &str| get(&parsed, k).expect("defaulted");
-    let label = string_of(f("label")).expect("string").to_vec();
-    let raw = omni_crypto::apikey::generate();
-    // Independent CSPRNG material for the public UUID; never derived from the key.
-    let id = omni_crypto::codex::uuid_v4_from(&omni_crypto::apikey::generate());
-    let prefix = omni_crypto::apikey::prefix(&raw);
-    let allowlist = match f("modelAllowlist") {
-        JsValue::Null => None,
-        v => Some(stringify(v).expect("allowlist")),
-    };
-    let limits = stringify(f("limits")).expect("limits");
-    let label_text = utf8(&label);
-    let policy = string_of(f("guardrailPolicy")).map(utf8);
-    #[allow(clippy::cast_possible_truncation)]
-    let expires = match f("expiresAt") {
-        JsValue::Number(n) => Some(*n as i64),
-        _ => None,
-    };
-    omni_store::keys::create_columns(
-        store.connection(),
-        &omni_store::keys::NewKeyColumns {
-            id: &id,
-            label: &label_text,
-            prefix: &prefix,
-            hash: &omni_crypto::apikey::hash(&raw),
-            model_allowlist: allowlist.as_deref(),
-            limits: &limits,
-            body_logging_opt_out: f("bodyLoggingOptOut") == &JsValue::Bool(true),
-            created_at: now,
-            expires_at: expires,
-            guardrail_policy: policy.as_deref(),
+    let key = NewKey::parse(body)?;
+    omni_store::keys::create_columns(store.connection(), &key.columns(now))?;
+    Ok(key.render())
+}
+
+pub async fn create_key_postgres(
+    pg: &omni_store::pg::PgStore,
+    body: &JsValue,
+    now: i64,
+) -> Result<(String, String)> {
+    let key = NewKey::parse(body)?;
+    pg.create_key_columns(&key.columns(now)).await?;
+    Ok((key.id.clone(), key.render()))
+}
+
+struct NewKey {
+    id: String,
+    label: Vec<u16>,
+    label_text: String,
+    raw: String,
+    hash: String,
+    prefix: String,
+    allowlist: Option<String>,
+    limits: String,
+    opt_out: bool,
+    expires: Option<i64>,
+    policy: Option<String>,
+    smart_routing: bool,
+}
+
+impl NewKey {
+    fn parse(body: &JsValue) -> Result<Self> {
+        let parsed = crate::body_schema::parse_or_throw(&crate::body_schema::key_create(), body)
+            .map_err(Failure::bad)?;
+        let f = |k: &str| get(&parsed, k).expect("defaulted");
+        let label = string_of(f("label")).expect("string").to_vec();
+        let raw = omni_crypto::apikey::generate();
+        // Independent CSPRNG material for the public UUID; never derived from the key.
+        let id = omni_crypto::codex::uuid_v4_from(&omni_crypto::apikey::generate());
+        let prefix = omni_crypto::apikey::prefix(&raw);
+        let allowlist = match f("modelAllowlist") {
+            JsValue::Null => None,
+            v => Some(stringify(v).expect("allowlist")),
+        };
+        let limits = stringify(f("limits")).expect("limits");
+        let label_text = utf8(&label);
+        let policy = string_of(f("guardrailPolicy")).map(utf8);
+        #[allow(clippy::cast_possible_truncation)]
+        let expires = match f("expiresAt") {
+            JsValue::Number(n) => Some(*n as i64),
+            _ => None,
+        };
+        Ok(Self {
+            id,
+            label,
+            label_text,
+            hash: omni_crypto::apikey::hash(&raw),
+            raw,
+            prefix,
+            allowlist,
+            limits,
+            opt_out: f("bodyLoggingOptOut") == &JsValue::Bool(true),
+            expires,
+            policy,
             smart_routing: f("smartRouting") == &JsValue::Bool(true),
-        },
-    )?;
-    // `{ id, label: created.label, prefix, key }`: `created` is the input
-    // spread, so the label is the parsed string, lone surrogates and all.
-    Ok(stringify(&object(vec![
-        ("id", text(&id)),
-        ("label", JsValue::String(label)),
-        ("prefix", text(&prefix)),
-        ("key", text(&raw)),
-    ]))
-    .expect("created"))
+        })
+    }
+
+    fn columns(&self, now: i64) -> omni_store::keys::NewKeyColumns<'_> {
+        omni_store::keys::NewKeyColumns {
+            id: &self.id,
+            label: &self.label_text,
+            prefix: &self.prefix,
+            hash: &self.hash,
+            model_allowlist: self.allowlist.as_deref(),
+            limits: &self.limits,
+            body_logging_opt_out: self.opt_out,
+            created_at: now,
+            expires_at: self.expires,
+            guardrail_policy: self.policy.as_deref(),
+            smart_routing: self.smart_routing,
+        }
+    }
+
+    fn render(self) -> String {
+        // `{ id, label: created.label, prefix, key }`: `created` is the input
+        // spread, so the label is the parsed string, lone surrogates and all.
+        stringify(&object(vec![
+            ("id", text(&self.id)),
+            ("label", JsValue::String(self.label)),
+            ("prefix", text(&self.prefix)),
+            ("key", text(&self.raw)),
+        ]))
+        .expect("created")
+    }
 }
 
 /// Which field a `PUT /api/keys/:id/<edit>` replaces.
@@ -510,6 +663,73 @@ pub enum KeyEdit {
     SmartRouting,
 }
 
+fn parse_key_edit(edit: KeyEdit, body: &JsValue) -> Result<JsValue> {
+    use crate::body_schema as s;
+    let (schema, name) = match edit {
+        KeyEdit::Limits => (s::key_limits(), "limits"),
+        KeyEdit::Models => (s::key_models(), "modelAllowlist"),
+        KeyEdit::Expiry => (s::key_expiry(), "expiresAt"),
+        KeyEdit::Guardrail => (s::key_guardrail(), "policy"),
+        KeyEdit::SmartRouting => (s::key_smart_routing(), "enabled"),
+    };
+    let parsed = s::parse_or_throw(&schema, body).map_err(Failure::bad)?;
+    Ok(get(&parsed, name).expect("required").clone())
+}
+
+pub async fn edit_key_postgres(
+    pg: &omni_store::pg::PgStore,
+    id: Option<&str>,
+    edit: KeyEdit,
+    body: &JsValue,
+    now: i64,
+) -> Result<String> {
+    use omni_store::keys::KeyEdit as E;
+    let value = parse_key_edit(edit, body)?;
+    let id = id.ok_or_else(|| Failure::bad("no such api key"))?;
+    let mut row = pg_key_rows(pg, Some(id))
+        .await?
+        .pop()
+        .ok_or_else(|| Failure::bad("no such api key"))?;
+    let mut rendered_override = None;
+    match edit {
+        KeyEdit::Limits => {
+            pg.edit_key(id, E::Limits(&stringify(&value).expect("limits")))
+                .await?;
+            row.limits = value;
+        }
+        KeyEdit::Models => {
+            let encoded =
+                (!matches!(value, JsValue::Null)).then(|| stringify(&value).expect("allowlist"));
+            pg.edit_key(id, E::Models(encoded.as_deref())).await?;
+            row.allowlist = value;
+        }
+        KeyEdit::Expiry => {
+            #[allow(clippy::cast_possible_truncation)]
+            let at = match &value {
+                JsValue::Number(n) => Some(*n as i64),
+                _ => None,
+            };
+            pg.edit_key(id, E::Expiry(at)).await?;
+            rendered_override = Some(("expiresAt", value));
+        }
+        KeyEdit::Guardrail => {
+            let policy = string_of(&value).map(utf8);
+            pg.edit_key(id, E::Guardrail(policy.as_deref())).await?;
+            rendered_override = Some(("guardrailPolicy", value));
+        }
+        KeyEdit::SmartRouting => {
+            let on = value == JsValue::Bool(true);
+            pg.edit_key(id, E::SmartRouting(on)).await?;
+            row.smart_routing = on;
+        }
+    }
+    let mut summary = pg_summary(pg, row, now).await?;
+    if let Some((name, value)) = rendered_override {
+        crate::settings_value::set(&mut summary, name, value);
+    }
+    Ok(stringify(&summary).expect("summary"))
+}
+
 /// `setKeyLimits` / `setKeyModels` / `setKeyExpiry` / `setKeyGuardrail` /
 /// `setKeySmartRouting`: validate, refuse an unknown id before writing,
 /// write, and answer `toSummary({ ...key, <field>: parsed })`.
@@ -520,16 +740,7 @@ pub fn edit_key(
     body: &JsValue,
     now: i64,
 ) -> Result<String> {
-    use crate::body_schema as s;
-    let (schema, name) = match edit {
-        KeyEdit::Limits => (s::key_limits(), "limits"),
-        KeyEdit::Models => (s::key_models(), "modelAllowlist"),
-        KeyEdit::Expiry => (s::key_expiry(), "expiresAt"),
-        KeyEdit::Guardrail => (s::key_guardrail(), "policy"),
-        KeyEdit::SmartRouting => (s::key_smart_routing(), "enabled"),
-    };
-    let parsed = s::parse_or_throw(&schema, body).map_err(Failure::bad)?;
-    let value = get(&parsed, name).expect("required").clone();
+    let value = parse_key_edit(edit, body)?;
     // `store.keys.get(id)`: `toKey` on the row, which throws where
     // `JSON.parse(model_allowlist)` does.
     let Some(id) = id else {
@@ -613,6 +824,23 @@ pub fn list_models(store: &SqliteStore) -> Result<String> {
     Ok(stringify(&object(vec![("models", JsValue::Array(models))])).expect("models"))
 }
 
+pub async fn list_models_postgres(pg: &omni_store::pg::PgStore) -> Result<String> {
+    let models = crate::models::pg_rows(pg)
+        .await
+        .map_err(Failure::internal)?;
+    Ok(stringify(&object(vec![("models", JsValue::Array(models))])).expect("models"))
+}
+
+pub async fn put_model_postgres(
+    pg: &omni_store::pg::PgStore,
+    id: Option<&str>,
+    body: &JsValue,
+) -> Result<()> {
+    crate::models::put_postgres(pg, id, body)
+        .await
+        .map_err(Failure::from_control)
+}
+
 /// `PUT /api/models/:id`: `putModel(store, id, body)`. `id` is `None` where
 /// the path parameter does not decode (Elysia hands the handler `null`),
 /// which no body's id can match.
@@ -645,6 +873,29 @@ pub fn put_settings(store: &SqliteStore, body: &JsValue) -> Result<()> {
     crate::settings::put(store, body)
         .map(|_| ())
         .map_err(Failure::from_control)
+}
+
+pub async fn settings_postgres(pg: &omni_store::pg::PgStore) -> Result<JsValue> {
+    Ok(crate::settings_value::decode(
+        pg.operator_settings_raw().await?.as_deref(),
+    ))
+}
+
+pub async fn put_settings_postgres(pg: &omni_store::pg::PgStore, body: &JsValue) -> Result<()> {
+    let patch = crate::settings::parse_patch(body).map_err(Failure::from_control)?;
+    merge_settings_postgres(pg, &patch, body).await
+}
+
+/// Internal settings patch from a control operation that validated its own schema.
+pub async fn merge_settings_postgres(
+    pg: &omni_store::pg::PgStore,
+    patch: &serde_json::Value,
+    original: &JsValue,
+) -> Result<()> {
+    let settings = crate::settings_value::merge(settings_postgres(pg).await?, patch, original);
+    pg.write_operator_settings_raw(&stringify(&settings).expect("settings"))
+        .await?;
+    Ok(())
 }
 
 /// `GET /api/settings`' body: the settings, the two boot facts, whether a
@@ -799,8 +1050,15 @@ pub type Account = (String, JsValue);
 /// provider and parsed `provider_data`, every row (a row that does not
 /// parse fails the route, as `JSON.parse` throws in TS).
 pub fn accounts(store: &SqliteStore) -> Result<Vec<Account>> {
-    crate::credentials::rows(store, None)?
-        .into_iter()
+    project_accounts(crate::credentials::rows(store, None)?)
+}
+
+pub async fn accounts_postgres(pg: &omni_store::pg::PgStore) -> Result<Vec<Account>> {
+    project_accounts(crate::credentials::pg_rows(pg, None).await?)
+}
+
+fn project_accounts(rows: Vec<JsValue>) -> Result<Vec<Account>> {
+    rows.into_iter()
         .filter_map(|credential| {
             // Catalog membership uses strict equality against string provider ids.
             // Other SQLite classes cannot contribute models to any provider.
@@ -963,11 +1221,26 @@ pub fn smart_router_models(
 ) -> Result<(&'static str, &'static str)> {
     accounts(store)?;
     let models = crate::models::list(store).map_err(Failure::internal)?;
+    smart_states(settings, &models)
+}
+
+pub async fn smart_router_models_postgres(
+    pg: &omni_store::pg::PgStore,
+    settings: &JsValue,
+) -> Result<(&'static str, &'static str)> {
+    accounts_postgres(pg).await?;
+    let models = crate::models::pg_rows(pg)
+        .await
+        .map_err(Failure::internal)?;
+    smart_states(settings, &models)
+}
+
+fn smart_states(settings: &JsValue, models: &[JsValue]) -> Result<(&'static str, &'static str)> {
     let state = |key: &str| -> Result<&'static str> {
         let Some(JsValue::String(name)) = get(settings, key) else {
             return Ok("unset");
         };
-        model_state(name, &models)
+        model_state(name, models)
     };
     Ok((
         state("smartRouterClassifierModel")?,

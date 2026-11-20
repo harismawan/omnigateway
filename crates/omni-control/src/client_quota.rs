@@ -153,9 +153,22 @@ fn validate_sort(mut keys: Vec<&[SortKey; 3]>) -> Result<(), Failure> {
 /// Account history retains at most 50,001 raw samples and writes one row at a
 /// time. No projected sample value tree is retained alongside the raw page.
 pub fn history(store: &omni_store::SqliteStore, query: &str, now: f64) -> Result<String, Failure> {
-    const MAX_SAMPLES: usize = 50_000;
-    let settings = store.get_settings()?;
-    let oldest = (now - settings.log_retention_days * 86_400_000.0).max(now - 16.0 * 86_400_000.0);
+    let (since, until) = history_range(query, now, store.get_settings()?.log_retention_days);
+    let compact = omni_store::quota::list_compact_quota_samples(
+        store.connection(),
+        since,
+        until,
+        MAX_SAMPLES + 1,
+    )?;
+    crate::credentials::validate_client_metadata(store)?;
+    let accounts = omni_store::credentials::client_quota_accounts(store.connection())?;
+    history_project(&compact, &accounts)
+}
+
+const MAX_SAMPLES: usize = 50_000;
+
+fn history_range(query: &str, now: f64, retention: f64) -> (f64, f64) {
+    let oldest = (now - retention * 86_400_000.0).max(now - 16.0 * 86_400_000.0);
     let pairs = url::form_urlencoded::parse(query.as_bytes()).collect::<Vec<_>>();
     let optional = |key: &str, fallback: f64| {
         pairs
@@ -171,14 +184,16 @@ pub fn history(store: &omni_store::SqliteStore, query: &str, now: f64) -> Result
                 }
             })
     };
-    let since = optional("since", oldest).max(oldest);
-    let until = optional("until", now).min(now);
-    let compact = omni_store::quota::list_compact_quota_samples(
-        store.connection(),
-        since,
-        until,
-        MAX_SAMPLES + 1,
-    )?;
+    (
+        optional("since", oldest).max(oldest),
+        optional("until", now).min(now),
+    )
+}
+
+fn history_project(
+    compact: &omni_store::quota::CompactSamples,
+    accounts: &[Vec<Value>],
+) -> Result<String, Failure> {
     let mut cell_order = (0..compact.cells.len()).collect::<Vec<_>>();
     cell_order.sort_by(|a, b| history_compare_cells(&compact.cells[*a], &compact.cells[*b]));
     let mut ranks = vec![0; compact.cells.len()];
@@ -192,7 +207,7 @@ pub fn history(store: &omni_store::SqliteStore, query: &str, now: f64) -> Result
         }
         ranks[*id] = rank;
     }
-    let mut sample_order = history_sample_order(&compact, &ranks);
+    let mut sample_order = history_sample_order(compact, &ranks);
     let truncated = sample_order.len() > MAX_SAMPLES;
     sample_order.truncate(MAX_SAMPLES);
     let samples = sample_order
@@ -210,8 +225,6 @@ pub fn history(store: &omni_store::SqliteStore, query: &str, now: f64) -> Result
             ]
         })
         .collect::<Vec<_>>();
-    crate::credentials::validate_client_metadata(store)?;
-    let accounts = omni_store::credentials::client_quota_accounts(store.connection())?;
     let mut rows = Vec::new();
     let mut distinct = std::collections::HashMap::new();
     let mut keys = Vec::new();
@@ -482,6 +495,15 @@ pub fn accounts(store: &omni_store::SqliteStore, now: f64) -> Result<String, Fai
     let accounts = omni_store::credentials::client_quota_accounts(store.connection())?;
     let windows = omni_store::quota::client_windows(store.connection())?;
     let poll = store.get_settings()?.quota_poll_interval_ms;
+    accounts_project(&accounts, windows, now, poll)
+}
+
+fn accounts_project(
+    accounts: &[Vec<Value>],
+    windows: Vec<Vec<Value>>,
+    now: f64,
+    poll: f64,
+) -> Result<String, Failure> {
     let mut rows = Vec::new();
     for w in windows {
         let Some(c) = accounts.iter().rev().find(|c| same_id(&c[0], &w[0])) else {
@@ -588,6 +610,81 @@ pub fn accounts(store: &omni_store::SqliteStore, now: f64) -> Result<String, Fai
         JsValue::Array(rows.into_iter().map(|(_, v)| v).collect()),
     )]))
     .unwrap_or_default())
+}
+
+async fn pg_accounts(pg: &omni_store::pg::PgStore) -> Result<Vec<Vec<Value>>, Failure> {
+    crate::credentials::pg_rows(pg, None)
+        .await?
+        .iter()
+        .map(|row| {
+            let cell = |name| match crate::settings_value::get(row, name) {
+                Some(JsValue::String(u)) => Ok(Value::Text(String::from_utf16_lossy(u))),
+                _ => Err(Failure::internal("invalid quota account")),
+            };
+            Ok(vec![cell("id")?, cell("label")?, cell("provider")?])
+        })
+        .collect()
+}
+
+fn pg_window(w: &omni_store::QuotaWindow) -> [Value; 5] {
+    let opt = |v: Option<f64>| v.map_or(Value::Null, Value::Real);
+    [
+        Value::Real(w.used),
+        opt(w.limit),
+        opt(w.resets_at),
+        Value::Real(w.observed_at),
+        opt(w.window_ms),
+    ]
+}
+
+pub async fn accounts_postgres(pg: &omni_store::pg::PgStore, now: f64) -> Result<String, Failure> {
+    let accounts = pg_accounts(pg).await?;
+    let windows = pg
+        .list_quota()
+        .await?
+        .into_iter()
+        .map(|w| {
+            [
+                Value::Text(w.credential_id.clone()),
+                Value::Text(w.window_type.as_str().to_owned()),
+            ]
+            .into_iter()
+            .chain(pg_window(&w))
+            .collect()
+        })
+        .collect();
+    accounts_project(
+        &accounts,
+        windows,
+        now,
+        pg.get_settings().await?.quota_poll_interval_ms,
+    )
+}
+
+pub async fn history_postgres(
+    pg: &omni_store::pg::PgStore,
+    query: &str,
+    now: f64,
+) -> Result<String, Failure> {
+    let (since, until) = history_range(query, now, pg.get_settings().await?.log_retention_days);
+    let mut compact = omni_store::quota::CompactSamples {
+        cells: Vec::new(),
+        series: Vec::new(),
+        values: Vec::new(),
+    };
+    let mut cells = std::collections::HashMap::new();
+    for w in pg.quota_samples(since, until, None).await? {
+        let series = [&w.credential_id[..], w.window_type.as_str()].map(|part| {
+            *cells.entry(part.to_owned()).or_insert_with(|| {
+                let i = compact.cells.len();
+                compact.cells.push(Value::Text(part.to_owned()));
+                i
+            })
+        });
+        compact.series.push(series);
+        compact.values.push(pg_window(&w));
+    }
+    history_project(&compact, &pg_accounts(pg).await?)
 }
 
 #[cfg(test)]

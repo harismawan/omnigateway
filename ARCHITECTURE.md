@@ -984,6 +984,33 @@ design spec's History section.
 it, through a `valkey` service), and `test/cluster/sharedCoord.test.ts` runs the two-replica suite
 over two **separate** Redis coordinators — which is what two pods actually hold.
 
+**Rust gateway.** `crates/omni-gateway` selects one bounded Postgres primary pool
+per replica in cluster mode; there is no SQLite shadow. A warm request uses its
+in-memory routing snapshot. Committed key, credential, quota, and health changes
+publish row identities (never keys or secrets) on `routing`; the receiving
+worker reads current primary state and patches its snapshot. A 500 ms version
+poll repairs missed publications. Health mutations serialize against the stored
+row, while fleet load is published and read in the background every 100 ms.
+PG inference reserves bounded terminal queue capacity before admission. The waiter cap
+is one per default-sized batch of queue credits (32 by default), and its 4 s
+deadline also covers revalidation of the key and screening settings against
+the primary. The same settings determine reservation size and screening;
+the warm path still reads only the replica snapshot. A full wait queue,
+deadline, or closed writer returns the surface's overload response without
+dispatch or a completion row. Hyper need not notice a disconnect before
+reading the body, so the deadline bounds retention in that case. `Begin`
+and `Route` can shed first; every admitted request can enqueue its `Finish`
+without waiting, including on cancellation. The writer commits log and rollups
+atomically before handing off a debit with that transaction's top-level xid8.
+A failed write still hands off a debit, without an xid. PG retains a batch when
+the commit consumer is full; shutdown drains writer, consumer, limiter, then
+coordinator, in that order. See the
+[offline bucket sweep](docs/rust-cluster-cutover.md) for a lineage change.
+
+Console reads address a process in both Rust modes. `node=all` merges the
+store's live nodes (only the local node in SQLite), tags lines, and shares one
+deadline across remote publication and replies, including queued fanout.
+
 **The store.** `OMNI_CLUSTER_MODE=true` selects `packages/store/src/postgres/` at
 `OMNI_DATABASE_URL`, a second implementation of the same `Store` interface over `Bun.SQL`.
 Every replica must use the same fixed `OMNI_DAY_OFFSET_MINUTES` so one instant has one

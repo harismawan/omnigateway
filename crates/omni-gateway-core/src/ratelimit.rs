@@ -386,6 +386,7 @@ pub struct Admission {
     /// response headers render `after_this_request` of it.
     pub headroom: HeadroomByDimension,
     slots: Option<(Arc<RateLimiter>, Vec<String>)>,
+    cluster: Option<omni_cluster_limit::Admission>,
 }
 
 impl Admission {
@@ -393,11 +394,15 @@ impl Admission {
         Self {
             headroom: HeadroomByDimension::default(),
             slots: None,
+            cluster: None,
         }
     }
 
     /// Frees the gauge slots. Idempotent.
     pub fn release(&mut self) {
+        if let Some(mut admission) = self.cluster.take() {
+            admission.release();
+        }
         if let Some((limiter, subjects)) = self.slots.take() {
             let mut st = limiter.lock();
             for s in subjects {
@@ -421,6 +426,7 @@ impl Drop for Admission {
 /// The limiter. Share it as `Arc<RateLimiter>`.
 #[derive(Default)]
 pub struct RateLimiter {
+    pub(crate) cluster: Option<omni_cluster_limit::ClusterLimiter>,
     state: Mutex<State>,
     pub(crate) wake: tokio::sync::Notify,
 }
@@ -432,6 +438,55 @@ impl std::fmt::Debug for RateLimiter {
 }
 
 impl RateLimiter {
+    pub fn with_cluster(cluster: omni_cluster_limit::ClusterLimiter) -> Arc<Self> {
+        Arc::new(Self {
+            cluster: Some(cluster),
+            ..Self::default()
+        })
+    }
+
+    pub fn cluster_metrics(&self) -> Option<&omni_cluster_limit::Metrics> {
+        self.cluster
+            .as_ref()
+            .map(omni_cluster_limit::ClusterLimiter::metrics)
+    }
+
+    pub async fn admit_selected(
+        self: &Arc<Self>,
+        key: &str,
+        limits: &LimitConfig,
+        model: &str,
+        now: f64,
+    ) -> Result<Admission, RateLimitExceeded> {
+        let Some(cluster) = &self.cluster else {
+            return self.admit(key, limits, model, now);
+        };
+        cluster
+            .admit(key, limits, model, now)
+            .await
+            .map(|admission| Admission {
+                headroom: admission.headroom,
+                slots: None,
+                cluster: Some(admission),
+            })
+            .map_err(cluster_refusal)
+    }
+
+    pub async fn consume_selected(
+        &self,
+        key: &str,
+        limits: &LimitConfig,
+        model: &str,
+        now: f64,
+    ) -> Result<(), RateLimitExceeded> {
+        match &self.cluster {
+            Some(cluster) => cluster
+                .consume(key, limits, model, now)
+                .await
+                .map_err(cluster_refusal),
+            None => self.consume(key, limits, model, now),
+        }
+    }
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
@@ -486,6 +541,7 @@ impl RateLimiter {
         let decision = result?;
         Ok(Admission {
             headroom: decision.headroom,
+            cluster: None,
             slots: Some((self.clone(), subjects.into_iter().map(|s| s.id).collect())),
         })
     }
@@ -597,6 +653,10 @@ impl RateLimiter {
     /// `recordOverride`: a model's override limits, for a completion this
     /// process debits without admitting (the guardrail's classifier).
     pub fn record_override(&self, key_id: &str, limits: &LimitConfig, model: &str) {
+        if let Some(cluster) = &self.cluster {
+            cluster.record_override(key_id, limits, model);
+            return;
+        }
         if let Some(o) = limits.model_override(model) {
             self.lock()
                 .limits
@@ -652,6 +712,10 @@ impl RateLimiter {
     /// Pre-seeds a key at boot, or when it first enters the snapshot: the
     /// key-wide subject and every model override with a long window.
     pub fn preseed(&self, key_id: &str, limits: &LimitConfig, now: f64) {
+        if let Some(cluster) = &self.cluster {
+            cluster.preseed(key_id, limits);
+            return;
+        }
         self.prepare(key_id, limits, "", now);
         for model in limits.models.iter().flat_map(|m| m.keys()) {
             self.prepare(key_id, limits, model, now);
@@ -677,5 +741,13 @@ impl RateLimiter {
                     .get(&s.id)
                     .is_some_and(|windows| windows.iter().all(|w| w.buckets.is_seeded()))
             })
+    }
+}
+
+fn cluster_refusal(refusal: omni_cluster_limit::RateLimitExceeded) -> RateLimitExceeded {
+    RateLimitExceeded {
+        retry_after_ms: refusal.retry_after_ms,
+        headroom: refusal.headroom,
+        violation: refusal.violation,
     }
 }

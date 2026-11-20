@@ -65,13 +65,19 @@ struct Inner {
 
 struct Core {
     holder: Arc<SnapshotHolder>,
-    store: Arc<Mutex<SqliteStore>>,
+    store: MissStore,
     config: MissConfig,
     inner: Mutex<Inner>,
     budget: Arc<Semaphore>,
     reads: AtomicU64,
     in_flight: AtomicUsize,
     peak: AtomicUsize,
+}
+
+#[derive(Clone)]
+enum MissStore {
+    Sqlite(Arc<Mutex<SqliteStore>>),
+    Backend(Arc<omni_store::Store>),
 }
 
 impl Core {
@@ -142,6 +148,18 @@ impl MissResolver {
         store: Arc<Mutex<SqliteStore>>,
         config: MissConfig,
     ) -> Self {
+        Self::with_store(holder, MissStore::Sqlite(store), config)
+    }
+
+    pub fn from_backend(
+        holder: Arc<SnapshotHolder>,
+        store: Arc<omni_store::Store>,
+        config: MissConfig,
+    ) -> Self {
+        Self::with_store(holder, MissStore::Backend(store), config)
+    }
+
+    fn with_store(holder: Arc<SnapshotHolder>, store: MissStore, config: MissConfig) -> Self {
         Self {
             core: Arc::new(Core {
                 holder,
@@ -240,11 +258,21 @@ fn start_read(
     let read_hash = hash.clone();
     // A found key is published into the snapshot: the shutdown drain waits.
     let job = holder.publication_job();
+    let runtime = tokio::runtime::Handle::current();
     let read = tokio::task::spawn_blocking(move || {
         let _access = omni_store::lifecycle::access();
         let _job = job;
-        let store = store.lock().unwrap_or_else(PoisonError::into_inner);
-        holder.lookup_miss(&store, &read_hash)
+        match store {
+            MissStore::Sqlite(store) => {
+                let store = store.lock().unwrap_or_else(PoisonError::into_inner);
+                holder.lookup_miss(&store, &read_hash)
+            }
+            MissStore::Backend(store) => holder.lookup_miss_read(
+                &read_hash,
+                || runtime.block_on(store.find_api_key_entry(&read_hash)),
+                || {},
+            ),
+        }
     });
     tokio::spawn(async move {
         let result = match read.await {

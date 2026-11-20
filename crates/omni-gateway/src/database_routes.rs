@@ -121,23 +121,111 @@ fn dir_bytes(path: &std::path::Path) -> u64 {
         .sum()
 }
 
+fn parse_retention(body: &omni_ir::jsjson::JsValue) -> Result<Value, String> {
+    use omni_control::body_schema::{Z, parse_or_throw};
+    let positive = |max| Z::Num {
+        int: true,
+        positive: true,
+        max: Some(max),
+    };
+    let schema = Z::Obj {
+        shape: vec![
+            ("keepLatest", positive(100.0)),
+            ("maxAgeDays", positive(3650.0)),
+        ],
+        strict: true,
+        refine: None,
+    };
+    Ok(omni_control::api::lossy(&parse_or_throw(&schema, body)?))
+}
+
+fn retention_patch(policy: &Value) -> Value {
+    json!({"snapshotKeepLatest":policy["keepLatest"],"snapshotMaxAgeDays":policy["maxAgeDays"]})
+}
+
+fn retention_policy(settings: &omni_ir::jsjson::JsValue) -> Value {
+    let setting = |key| {
+        omni_control::settings_value::get(settings, key)
+            .map(omni_control::settings_value::shallow)
+            .unwrap_or(Value::Null)
+    };
+    json!({"keepLatest":setting("snapshotKeepLatest"),"maxAgeDays":setting("snapshotMaxAgeDays")})
+}
+
+async fn postgres(
+    pg: &omni_store::pg::PgStore,
+    route: Route,
+    retention: Option<Value>,
+) -> Result<Value, Failure> {
+    match route {
+        Route::Overview => {
+            let stats = async { pg.database_stats().await.map_err(Failure::from) };
+            let tables = async { pg.database_tables().await.map_err(Failure::from) };
+            let (stats, tables, settings) =
+                tokio::try_join!(stats, tables, omni_control::api::settings_postgres(pg))?;
+            let page_size = i64::from(stats.page_size);
+            let pages = stats.bytes.div_euclid(page_size)
+                + i64::from(stats.bytes.rem_euclid(page_size) != 0);
+            let bodies = tables
+                .iter()
+                .find(|t| t.name == "request_bodies")
+                .map_or(0, |t| t.bytes);
+            let tables: Vec<_> = tables
+                .into_iter()
+                .map(
+                    |t| json!({"name":t.name,"bytes":t.bytes,"rows":t.rows,"deadRows":t.dead_rows}),
+                )
+                .collect();
+            Ok(
+                json!({"engine":"postgres","location":pg.database_path(),"stats":{"pageSize":page_size,"pageCount":pages,"freelistCount":0,"schemaVersion":stats.schema_version},"logicalBytes":page_size*pages,"freePageBytes":0,"tables":tables,"retention":retention_policy(&settings),"fileBytes":0,"walBytes":0,"bodiesBytes":bodies,"freeDiskBytes":null,"snapshots":{"count":0,"totalBytes":0,"latestAt":null}}),
+            )
+        }
+        Route::Bodies => {
+            #[allow(clippy::cast_precision_loss)]
+            let cutoff = crate::clock::now_ms() as f64;
+            let removed = pg.prune_bodies(cutoff).await?;
+            // PG stores the artifacts inline; there are no orphan files.
+            Ok(json!({"ok":true,"removed":removed,"orphans":0}))
+        }
+        Route::Retention => {
+            let value = retention.ok_or_else(|| failure("missing retention".into()))?;
+            let patch = retention_patch(&value);
+            omni_control::api::merge_settings_postgres(
+                pg,
+                &patch,
+                &omni_ir::jsjson::JsValue::from(&patch),
+            )
+            .await?;
+            Ok(value)
+        }
+        Route::Snapshots => Ok(json!({"snapshots":[]})),
+        Route::Download(_) | Route::Delete(_) => {
+            Err(failure("BAD_REQUEST: no such snapshot".into()))
+        }
+        Route::Vacuum | Route::Create => Err(failure(
+            "BAD_REQUEST: not available on a Postgres store; use pg_dump".into(),
+        )),
+    }
+}
+
 pub async fn serve(
     app: &Arc<App>,
     route: Route,
     req: Request<Incoming>,
 ) -> Result<Response<Body>, ApiError> {
     require_admin(req.headers(), &app.admin).await?;
-    if app.cluster && matches!(route, Route::Vacuum | Route::Create) {
-        return Err(ApiError::gateway(
-            omni_ir::error::ErrorCode::BadRequest,
-            "not available on a Postgres store; use pg_dump",
-        ));
-    }
     let retention = if route == Route::Retention {
-        Some(read_json(req, app.idle_timeout).await?)
+        let body = read_json(req, app.idle_timeout).await?;
+        Some(parse_retention(&body).map_err(|e| crate::admin_routes::failure(failure(e)))?)
     } else {
         None
     };
+    if let Some(pg) = app.control.postgres() {
+        let result = postgres(pg, route, retention)
+            .await
+            .map_err(crate::admin_routes::failure)?;
+        return Ok(json_ok(result.to_string()));
+    }
     let result = app
         .control
         .run(move |store| {
@@ -186,39 +274,13 @@ pub async fn serve(
                     }
                     Route::Retention => {
                         let body = retention.as_ref().ok_or("missing retention")?;
-                        use omni_control::body_schema::{Z, parse_or_throw};
-                        let schema = Z::Obj {
-                            shape: vec![
-                                (
-                                    "keepLatest",
-                                    Z::Num {
-                                        int: true,
-                                        positive: true,
-                                        max: Some(100.0),
-                                    },
-                                ),
-                                (
-                                    "maxAgeDays",
-                                    Z::Num {
-                                        int: true,
-                                        positive: true,
-                                        max: Some(3650.0),
-                                    },
-                                ),
-                            ],
-                            strict: true,
-                            refine: None,
-                        };
-                        let value = omni_control::api::lossy(&parse_or_throw(&schema, body)?);
-                        let keep = &value["keepLatest"];
-                        let age = &value["maxAgeDays"];
                         let settings = omni_control::settings_value::read(store)?;
                         omni_control::settings_value::write(
                             store,
-                            &json!({"snapshotKeepLatest":keep,"snapshotMaxAgeDays":age}),
+                            &retention_patch(body),
                             &settings,
                         )?;
-                        Ok(json!({"keepLatest":keep,"maxAgeDays":age}))
+                        Ok(body.clone())
                     }
                     Route::Overview => overview(store),
                 }
@@ -286,14 +348,9 @@ fn overview(store: &omni_store::SqliteStore) -> Result<Value, String> {
     let mut statement = conn.prepare("SELECT m.tbl_name AS name,SUM(s.pgsize) AS bytes,SUM(CASE WHEN s.pagetype = 'leaf' AND s.name = m.tbl_name THEN s.ncell ELSE 0 END) AS rows FROM dbstat s JOIN sqlite_master m ON m.name = s.name WHERE m.tbl_name NOT LIKE 'sqlite_%' GROUP BY m.tbl_name ORDER BY bytes DESC,name").map_err(|e|e.to_string())?;
     let tables = statement.query_map([], |r| Ok(json!({"name":r.get::<_,String>(0)?,"bytes":r.get::<_,i64>(1)?,"rows":r.get::<_,i64>(2)?,"deadRows":null}))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
     let settings = omni_control::settings_value::read(store)?;
-    let setting = |key| {
-        omni_control::settings_value::get(&settings, key)
-            .map(omni_control::settings_value::shallow)
-            .unwrap_or(Value::Null)
-    };
     let snaps = snapshots(path);
     let free_disk = db::RestoreFiles::free_bytes(&mut db::LocalRestoreFiles, dir);
     Ok(
-        json!({"engine":"sqlite","location":path,"stats":{"pageSize":page_size,"pageCount":pages,"freelistCount":free,"schemaVersion":version},"logicalBytes":page_size*pages,"freePageBytes":page_size*free,"tables":tables,"retention":{"keepLatest":setting("snapshotKeepLatest"),"maxAgeDays":setting("snapshotMaxAgeDays")},"fileBytes":size(path),"walBytes":size(&std::path::PathBuf::from(format!("{}-wal",path.display()))),"bodiesBytes":dir_bytes(&dir.join("request_bodies")),"freeDiskBytes":free_disk,"snapshots":{"count":snaps.len(),"totalBytes":snaps.iter().filter_map(|s|s["sizeBytes"].as_u64()).sum::<u64>(),"latestAt":snaps.first().map(|s|s["createdAt"].clone())}}),
+        json!({"engine":"sqlite","location":path,"stats":{"pageSize":page_size,"pageCount":pages,"freelistCount":free,"schemaVersion":version},"logicalBytes":page_size*pages,"freePageBytes":page_size*free,"tables":tables,"retention":retention_policy(&settings),"fileBytes":size(path),"walBytes":size(&std::path::PathBuf::from(format!("{}-wal",path.display()))),"bodiesBytes":dir_bytes(&dir.join("request_bodies")),"freeDiskBytes":free_disk,"snapshots":{"count":snaps.len(),"totalBytes":snaps.iter().filter_map(|s|s["sizeBytes"].as_u64()).sum::<u64>(),"latestAt":snaps.first().map(|s|s["createdAt"].clone())}}),
     )
 }
