@@ -212,6 +212,9 @@ async fn no_response_commands_stay_charged_and_cannot_break_release_order() {
 /// retained while the server is stalled.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_eval_fallback_is_validated_and_charged() {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
     let _serial = SERIAL.lock().await;
     let Some(base) = redis_base() else { return };
     let db = fresh_db(&base).await;
@@ -220,50 +223,69 @@ async fn the_eval_fallback_is_validated_and_charged() {
         Box::leak(format!("--{}\nreturn 1", "x".repeat(2 * 1024 * 1024)).into_boxed_str());
     let huge = CoordScript::new("HUGE", huge);
     // 600 KiB: under the request cap, so admitted, but charged in full.
-    let big: &'static str =
-        Box::leak(format!("--{}\nreturn 1", "y".repeat(600 * 1024)).into_boxed_str());
+    // Use a fresh digest even when a previous run populated the script cache.
+    let big: &'static str = Box::leak(
+        format!(
+            "--{}{}\nreturn 1",
+            common::unique("fallback"),
+            "y".repeat(600 * 1024)
+        )
+        .into_boxed_str(),
+    );
     let big = CoordScript::new("BIG", big);
     let coord = RedisCoord::connect(
         &db.url,
         RedisCoordOptions {
             queue_bytes: 4 * 1024 * 1024,
             release_reserve_bytes: 1024 * 1024,
+            heartbeat: Duration::from_secs(60),
             ..opts(3_000)
         },
     )
     .await
     .expect("connect");
     let remote = coord.remote().clone();
-    assert_eq!(remote.eval(&huge, &[], &[]).await, Err(Fault::TooLarge));
-    assert_eq!(remote.outstanding_bytes(), 0);
+    // A zero counter alone can precede the listener's startup PING. Since
+    // nothing else has used this command connection, Valkey seeing PING
+    // followed by zero bytes here proves the probe has already settled.
+    let mut inspector = common::admin(&base).await;
+    let selected_db = format!("db={}", db.index);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let clients: String = redis::cmd("CLIENT")
+                .arg("LIST")
+                .arg("TYPE")
+                .arg("NORMAL")
+                .query_async(&mut inspector)
+                .await
+                .expect("inspect Valkey clients");
+            let ping_seen = clients.lines().any(|line| {
+                let mut fields = line.split_whitespace();
+                fields.clone().any(|f| f == selected_db) && fields.any(|f| f == "cmd=ping")
+            });
+            if ping_seen && remote.outstanding_bytes() == 0 {
+                break;
+            }
+            sleep_ms(1).await;
+        }
+    })
+    .await
+    .expect("startup PING completed");
 
-    // Stall the server; submit BIG calls until the budget refuses one.
+    // Hold writes before checking the refusal and throughout admission.
     let spinning = stall(&db.url).await;
+    assert_eq!(remote.eval(&huge, &[], &[]).await, Err(Fault::TooLarge));
+    assert_eq!(remote.outstanding_bytes(), 0, "oversized EVAL was charged");
+
+    // Submit BIG calls until the budget refuses one.
     let mut held = Vec::new();
     let refused = loop {
-        let r = remote.clone();
-        let s = big.clone();
-        let before = remote.outstanding_bytes();
-        let mut call = tokio::spawn(async move { r.eval(&s, &[], &[]).await });
-        // Classified by what is observed, never by a timer: finished
-        // (refused) or charged (accepted, waiting out the stall). A 2 ms
-        // sleep used to count a call not yet scheduled as accepted.
-        let observe = Instant::now() + Duration::from_secs(2);
-        let finished = loop {
-            if call.is_finished() {
-                break true;
-            }
-            if remote.outstanding_bytes() > before {
-                break false;
-            }
-            assert!(
-                Instant::now() < observe,
-                "a call neither finished nor was charged"
-            );
-            tokio::task::yield_now().await;
-        };
-        if finished {
-            break (&mut call).await.expect("task");
+        let mut call = Box::pin(remote.eval(&big, &[], &[]));
+        // Admission is synchronous on first poll. An accepted EVALSHA is
+        // held by CLIENT PAUSE WRITE; an unrelated PING can change the
+        // counters but cannot change this call's outcome.
+        if let Poll::Ready(out) = call.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+            break out;
         }
         held.push(call);
         assert!(
@@ -272,6 +294,7 @@ async fn the_eval_fallback_is_validated_and_charged() {
         );
     };
     assert_eq!(refused, Err(Fault::Saturated));
+    assert!(!held.is_empty(), "the byte budget admitted no fallbacks");
     // Each accepted call is charged at least its fallback source.
     assert!(
         remote.outstanding_bytes() >= held.len() * 600 * 1024,
@@ -287,12 +310,12 @@ async fn the_eval_fallback_is_validated_and_charged() {
     spinning.end().await;
     for h in held {
         // Not loaded at connect (not in `extra_scripts`): NOSCRIPT, then EVAL.
-        assert_eq!(h.await.expect("task"), Ok(redis::Value::Int(1)));
+        assert_eq!(h.await, Ok(redis::Value::Int(1)));
     }
     assert_eq!(
         remote.outstanding_bytes(),
         0,
-        "every charge refunded after the retry"
+        "every charge refunded before returning from the retries"
     );
     coord.close();
 }
