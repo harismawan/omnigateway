@@ -20,7 +20,7 @@ fn rotation_is_encrypted_atomic_and_version_guarded() {
         refresh_token: Some("refresh-one".into()),
         api_key: None,
         id_token: None,
-        expires_at: Some(1234),
+        expires_at: Some(1234.0),
         updated_at: 42,
     };
     assert!(update_tokens(conn, &key, "c", &update, 0).unwrap());
@@ -38,7 +38,7 @@ fn rotation_is_encrypted_atomic_and_version_guarded() {
     assert!(!update_tokens(conn, &key, "c", &loser, 0).unwrap());
     let current = store.list_credentials(&key).unwrap().remove(0);
     assert_eq!(current.secrets.access_token.as_deref(), Some("access-one"));
-    assert_eq!(current.expires_at, Some(1234));
+    assert_eq!(current.expires_at, Some(1234.0));
     assert_eq!(current.updated_at, 42);
     assert!(!update_tokens(conn, &key, "gone", &update, 0).unwrap());
     assert!(update_tokens(conn, &key, "c", &loser, 1).unwrap());
@@ -63,7 +63,7 @@ async fn postgres_competing_rotations_have_one_winner() {
         refresh_token: Some("rotated".into()),
         api_key: None,
         id_token: None,
-        expires_at: Some(1234),
+        expires_at: Some(1234.0),
         updated_at: 42,
     };
     let second = TokenUpdate {
@@ -83,7 +83,7 @@ async fn postgres_competing_rotations_have_one_winner() {
         Some(if a { "first" } else { "second" })
     );
     assert_eq!(current.secrets.refresh_token.as_deref(), Some("rotated"));
-    assert_eq!(current.expires_at, Some(1234));
+    assert_eq!(current.expires_at, Some(1234.0));
     assert!(!store.update_tokens(&key, "gone", &first, 0).await.unwrap());
     store
         .refresh_metadata("c", Some("rotated@example.com".into()), 88)

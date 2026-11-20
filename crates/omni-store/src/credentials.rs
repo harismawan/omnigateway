@@ -68,8 +68,8 @@ pub struct Credential {
     pub enabled: bool,
     pub tier: f64,
     pub weight: f64,
-    /// Epoch ms, or `None` when the token does not expire.
-    pub expires_at: Option<i64>,
+    /// Epoch ms as a JS number, or `None` when the token does not expire.
+    pub expires_at: Option<f64>,
     pub account_email: Option<String>,
     /// Provider-specific durable state; an open record in TS.
     pub provider_data: serde_json::Value,
@@ -182,7 +182,7 @@ pub struct TokenUpdate {
     pub refresh_token: Option<String>,
     pub api_key: Option<String>,
     pub id_token: Option<String>,
-    pub expires_at: Option<i64>,
+    pub expires_at: Option<f64>,
     pub updated_at: i64,
 }
 
@@ -253,7 +253,7 @@ fn to_credential(r: &Row<'_>, key: &FieldKey) -> Result<Credential, StoreError> 
         enabled: row::flag(r, "enabled")?,
         tier: row::number(r, T, "tier")?,
         weight: row::number(r, T, "weight")?,
-        expires_at: row::opt_integer(r, T, "expires_at")?,
+        expires_at: row::opt_number(r, T, "expires_at")?,
         account_email: row::opt_text(r, T, "account_email")?,
         provider_data: omni_ir::js::parse_json(&raw)
             .ok_or_else(|| StoreError::Corrupt("invalid provider data".into()))?,

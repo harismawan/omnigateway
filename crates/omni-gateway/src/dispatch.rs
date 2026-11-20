@@ -801,9 +801,10 @@ fn run(mut s: RunState) -> EventsStream {
             let mut closed_at_commit = false;
             let mut auth_refresh_retried = false;
             let mut retry_secrets: Option<omni_store::CredentialSecrets> = None;
-            let attempt_now = now();
+            #[allow(clippy::cast_precision_loss)]
+            let attempt_now = now() as f64;
             let preemptive_refresh_required = c.credential.auth_type == AuthType::OAuth
-                && c.credential.expires_at.is_some_and(|at| at.saturating_sub(REFRESH_LEAD_MS) <= attempt_now);
+                && c.credential.expires_at.is_some_and(|at| at - REFRESH_LEAD_MS as f64 <= attempt_now);
 
             if c.target.provider != omni_providers::custom::ID && c.target.provider != "anthropic" && c.target.provider != "openai" && c.target.provider != "antigravity" {
                 let ttft = lock(&log).ttft_ms;

@@ -327,7 +327,10 @@ fn to_credential(r: &Row, key: &FieldKey) -> Result<Credential, StoreError> {
         enabled: r.try_get("enabled")?,
         tier: f64::from(r.try_get::<_, i32>("tier")?),
         weight: r.try_get("weight")?,
-        expires_at: r.try_get("expires_at")?,
+        // Frozen numOrNull reads the BIGINT as a JS number.
+        expires_at: r
+            .try_get::<_, Option<i64>>("expires_at")?
+            .map(|at| at as f64),
         account_email: r.try_get("account_email")?,
         provider_data: omni_ir::js::parse_json(&provider_data)
             .ok_or_else(|| StoreError::Corrupt("invalid provider data".into()))?,

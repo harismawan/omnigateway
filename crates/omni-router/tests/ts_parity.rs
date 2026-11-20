@@ -67,7 +67,11 @@ fn scenario(rng: &mut Rng) -> Scenario {
         c.tier = (1 + rng.below(3)) as f64;
         c.weight = *rng.pick(&[1.0, 0.5, 2.0, 3.0]);
         if rng.chance(20) {
-            c.expires_at = Some(if rng.chance(50) { 999_000 } else { 2_000_000 });
+            c.expires_at = Some(if rng.chance(50) {
+                999_000.0
+            } else {
+                2_000_000.0
+            });
             c.has_refresh_token = rng.chance(50);
         }
         if rng.chance(15) {

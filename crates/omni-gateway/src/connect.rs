@@ -424,7 +424,7 @@ async fn complete(
             .id_token
             .as_ref()
             .map(|s| String::from_utf16_lossy(s)),
-        expires_at: crate::refresh::persisted_expiry(result.expires_at),
+        expires_at: result.expires_at,
         updated_at: (host.now)(),
     };
     let email = result
@@ -555,6 +555,185 @@ async fn antigravity_exchange(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ExpiryEndpoint(&'static str);
+
+    impl ExpiryEndpoint {
+        fn response(&self) -> omni_providers::http::HttpResponse {
+            use omni_providers::http::{Headers, HttpResponse, ResponseBody};
+            HttpResponse {
+                status: 200,
+                headers: Headers::new(),
+                body: ResponseBody::from_bytes(format!(
+                    r#"{{"access_token":"fixture","refresh_token":"refresh","expires_in":{}}}"#,
+                    self.0
+                )),
+            }
+        }
+    }
+
+    impl omni_providers::http::HttpClient for ExpiryEndpoint {
+        fn send(
+            &self,
+            _: omni_providers::http::HttpRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = std::result::Result<
+                            omni_providers::http::HttpResponse,
+                            omni_providers::http::HttpError,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(async { Ok(self.response()) })
+        }
+    }
+
+    struct ExpiryCase {
+        seconds: &'static str,
+        now: fn() -> i64,
+        expiry: f64,
+        expired_at_one: bool,
+    }
+
+    async fn check_sqlite_expiry(case: ExpiryCase) {
+        use omni_gateway_core::snapshot::SnapshotHolder;
+        use omni_store::{Store, StoreConfig};
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("db");
+        let key = omni_crypto::field::derive_key("test-key");
+        let store = Arc::new(
+            Store::open(StoreConfig::Sqlite { path: path.clone() }, 0)
+                .await
+                .expect("store"),
+        );
+        let host = Arc::new(crate::refresh::Refresher::new(
+            store.clone(),
+            key.clone(),
+            Arc::new(ExpiryEndpoint(case.seconds)),
+            case.now,
+        ));
+        let holder = Arc::new(
+            SnapshotHolder::build_from(store.clone(), key.clone(), 1.0)
+                .await
+                .expect("snapshot"),
+        );
+        let flow = parse_js(r#"{"provider":"anthropic","label":"fixture","pending":{"verifier":"v","challenge":"c","state":"s","redirectUri":""}}"#).expect("flow");
+        let id = complete(host.clone(), holder.clone(), flow, "code#s")
+            .await
+            .expect("connect");
+        let connected = &holder.load().routing.credentials[0];
+        assert_eq!(connected.id, id);
+        assert_eq!(connected.token_version, 0);
+        assert_eq!(connected.expires_at, Some(case.expiry));
+
+        host.refresh(connected).await.expect("rotate");
+        holder
+            .refresh_credential(store.clone(), id.clone())
+            .await
+            .expect("publish rotation");
+        let rotated = &holder.load().routing.credentials[0];
+        assert_eq!(rotated.token_version, 1);
+        assert_eq!(rotated.expires_at, Some(case.expiry));
+
+        let db = omni_store::SqliteStore::open(&path, 0).expect("sqlite");
+        let cell: (String, f64) = db
+            .connection()
+            .query_row(
+                "SELECT typeof(expires_at), expires_at FROM credentials WHERE id=?",
+                [&id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("read raw expiry");
+        assert_eq!(cell, ("real".into(), case.expiry));
+        db.connection()
+            .execute(
+                "UPDATE credentials SET refresh_token=NULL WHERE id=?",
+                [&id],
+            )
+            .expect("remove refresh token");
+        holder
+            .refresh_credential(store.clone(), id.clone())
+            .await
+            .expect("publish unrefreshable credential");
+        let snapshot = holder.load();
+        assert_eq!(snapshot.routing.credentials.len(), 1);
+        let model = omni_store::VirtualModel {
+            id: "fixture".into(), strategy: omni_store::Strategy::Priority, is_alias: false,
+            targets: vec![serde_json::from_str(r#"{"provider":"anthropic","model":"claude","tier":1,"weight":1,"costPerMTok":{"input":0,"output":0},"capabilities":{"tools":true,"images":true,"reasoning":true}}"#).expect("target")],
+        };
+        let request = serde_json::from_str(r#"{"model":"fixture","messages":[],"stream":false}"#)
+            .expect("request");
+        let ranked = omni_router::eligible(&omni_router::RankInput {
+            request: &request,
+            model: &model,
+            snapshot: &snapshot.routing,
+            now: 1.0,
+            rand: 0.0,
+            load: None,
+            recent: None,
+            providers: None,
+        });
+        assert_eq!(ranked.pairs.len(), usize::from(!case.expired_at_one));
+        if case.expired_at_one {
+            assert_eq!(ranked.excluded[0].reason, "expired");
+        }
+        let sweeper = Arc::new(crate::refresh::Refresher::new(
+            store,
+            key,
+            Arc::new(ExpiryEndpoint(case.seconds)),
+            || 1,
+        ));
+        let sweep = sweeper.sweep(Some(&holder)).await.expect("sweep");
+        assert_eq!(sweep.refreshed, 0);
+        assert_eq!(sweep.touched, usize::from(case.expired_at_one));
+        assert_eq!(
+            holder.load().routing.credentials[0].enabled,
+            !case.expired_at_one
+        );
+    }
+
+    #[tokio::test]
+    async fn expiry_fraction_survives_connect_refresh_and_routing() {
+        check_sqlite_expiry(ExpiryCase {
+            seconds: "0.0015",
+            now: || 0,
+            expiry: 1.5,
+            expired_at_one: false,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn expiry_infinities_survive_connect_refresh_and_routing() {
+        check_sqlite_expiry(ExpiryCase {
+            seconds: "1e309",
+            now: || 0,
+            expiry: f64::INFINITY,
+            expired_at_one: false,
+        })
+        .await;
+        check_sqlite_expiry(ExpiryCase {
+            seconds: "-1e309",
+            now: || 0,
+            expiry: f64::NEG_INFINITY,
+            expired_at_one: true,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn expiry_a15_survives_connect_refresh_and_routing() {
+        check_sqlite_expiry(ExpiryCase {
+            seconds: "1e21",
+            now: || 1_794_700_000_000,
+            expiry: 1.000_000_000_001_794_7e24,
+            expired_at_one: false,
+        })
+        .await;
+    }
     #[test]
     fn connect_callback_matches_generated_catalog() {
         let catalog: serde_json::Value =

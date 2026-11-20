@@ -394,11 +394,13 @@ impl PgStore {
     ) -> Result<(), StoreError> {
         let sealed = input.tokens.sealed(key);
         let client = self.client().await?;
+        // Bun sends JS numbers on the float8 path. Let PG assign to BIGINT:
+        // it rounds the fraction and rejects non-finite or out-of-range values.
         if input.reconnect {
-            client.execute("UPDATE credentials SET access_token=$1,refresh_token=$2,api_key=$3,id_token=$4,expires_at=$5,updated_at=$6,token_version=token_version+1 WHERE id=$7", &[&sealed[0],&sealed[1],&sealed[2],&sealed[3],&input.tokens.expires_at,&input.tokens.updated_at,&input.id]).await?;
+            client.execute("UPDATE credentials SET access_token=$1,refresh_token=$2,api_key=$3,id_token=$4,expires_at=$5::float8::bigint,updated_at=$6,token_version=token_version+1 WHERE id=$7", &[&sealed[0],&sealed[1],&sealed[2],&sealed[3],&input.tokens.expires_at,&input.tokens.updated_at,&input.id]).await?;
             client.execute("UPDATE credentials SET enabled=true,disabled_reason=NULL,disabled_at=NULL,account_email=$1,provider_data=$2 WHERE id=$3", &[&input.account_email,&input.provider_data,&input.id]).await?;
         } else {
-            client.execute("INSERT INTO credentials(id,provider,label,auth_type,enabled,tier,weight,provider_data,account_email,access_token,refresh_token,api_key,id_token,expires_at,created_at,updated_at) VALUES ($1,$2,$3,'oauth',true,1,1,$4,$5,$6,$7,$8,$9,$10,$11,$11)", &[&input.id,&input.provider,&input.label,&input.provider_data,&input.account_email,&sealed[0],&sealed[1],&sealed[2],&sealed[3],&input.tokens.expires_at,&input.tokens.updated_at]).await?;
+            client.execute("INSERT INTO credentials(id,provider,label,auth_type,enabled,tier,weight,provider_data,account_email,access_token,refresh_token,api_key,id_token,expires_at,created_at,updated_at) VALUES ($1,$2,$3,'oauth',true,1,1,$4,$5,$6,$7,$8,$9,$10::float8::bigint,$11,$11)", &[&input.id,&input.provider,&input.label,&input.provider_data,&input.account_email,&sealed[0],&sealed[1],&sealed[2],&sealed[3],&input.tokens.expires_at,&input.tokens.updated_at]).await?;
         }
         Ok(())
     }
@@ -437,7 +439,7 @@ impl PgStore {
     ) -> Result<bool, StoreError> {
         let sealed = update.sealed(key);
         Ok(self.client().await?.execute(
-            "UPDATE credentials SET access_token=$1, refresh_token=$2, api_key=$3, id_token=$4, expires_at=$5, updated_at=$6, token_version=token_version+1 WHERE id=$7 AND token_version=$8::bigint",
+            "UPDATE credentials SET access_token=$1, refresh_token=$2, api_key=$3, id_token=$4, expires_at=$5::float8::bigint, updated_at=$6, token_version=token_version+1 WHERE id=$7 AND token_version=$8::bigint",
             &[&sealed[0], &sealed[1], &sealed[2], &sealed[3], &update.expires_at, &update.updated_at, &id, &expected_version],
         ).await? > 0)
     }

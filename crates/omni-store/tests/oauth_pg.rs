@@ -6,6 +6,134 @@ use omni_store::{
     credentials::{OAuthCredential, TokenUpdate},
 };
 
+mod common;
+
+#[tokio::test]
+async fn parked_expiry_writes_match_frozen_postgres() {
+    use common::pg::{TestDb, base_url};
+    let Some(base) = base_url("parked_expiry_writes_match_frozen_postgres") else {
+        return;
+    };
+    let db = TestDb::create(&base, "expiry").await;
+    let pg = omni_store::pg::PgStore::open(omni_store::pg::PgConfig::new(db.url.clone()), 0)
+        .await
+        .unwrap();
+    let store = Store::Postgres(pg);
+    let client = db.client().await;
+    let key = derive_key("local-oauth-pg-fixture");
+
+    fn assert_range_error(error: omni_store::StoreError) {
+        let omni_store::StoreError::Postgres(error) = error else {
+            panic!("expected frozen PG server refusal, got {error}");
+        };
+        let error = error.as_db_error().expect("server error");
+        assert_eq!(
+            error.code(),
+            &tokio_postgres::error::SqlState::NUMERIC_VALUE_OUT_OF_RANGE
+        );
+        assert_eq!(error.message(), "bigint out of range");
+    }
+
+    for (id, expiry, stored) in [
+        ("fraction", 1.5, Some(2_i64)),
+        ("nan", f64::NAN, None),
+        ("positive-inf", f64::INFINITY, None),
+        ("negative-inf", f64::NEG_INFINITY, None),
+        ("a15", 1.000_000_000_001_794_7e24, None),
+    ] {
+        let mut tokens = TokenUpdate {
+            access_token: Some("new-access".into()),
+            refresh_token: Some("new-refresh".into()),
+            api_key: None,
+            id_token: None,
+            expires_at: Some(expiry),
+            updated_at: 100,
+        };
+        let input = OAuthCredential {
+            id,
+            provider: "anthropic",
+            label: id,
+            provider_data: "{}",
+            account_email: None,
+            tokens: &tokens,
+            reconnect: false,
+        };
+        let result = store.save_oauth(&key, &input).await;
+        let row = store.credential(&key, id).await.unwrap();
+        if stored.is_some() {
+            result.unwrap();
+            let row = row.unwrap();
+            assert_eq!(row.expires_at, Some(2.0));
+            assert_eq!(row.token_version, 0);
+        } else {
+            assert_range_error(result.unwrap_err());
+            assert!(row.is_none());
+            let original = TokenUpdate {
+                access_token: Some("old-access".into()),
+                expires_at: None,
+                ..tokens.clone()
+            };
+            store
+                .save_oauth(
+                    &key,
+                    &OAuthCredential {
+                        tokens: &original,
+                        ..input
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        tokens.access_token = Some("rotated".into());
+        let before = store.credential(&key, id).await.unwrap().unwrap();
+        let result = store.update_tokens(&key, id, &tokens, 0).await;
+        let row = store.credential(&key, id).await.unwrap().unwrap();
+        if stored.is_some() {
+            assert!(result.unwrap());
+            assert_eq!(row.expires_at, Some(2.0));
+            assert_eq!(row.token_version, 1);
+            assert_eq!(row.secrets.access_token.as_deref(), Some("rotated"));
+        } else {
+            assert_range_error(result.unwrap_err());
+            assert_eq!(row, before);
+        }
+        let raw: Option<i64> = client
+            .query_one("SELECT expires_at FROM credentials WHERE id=$1", &[&id])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(raw, stored, "{id}");
+
+        tokens.access_token = Some("reconnected".into());
+        let result = store
+            .save_oauth(
+                &key,
+                &OAuthCredential {
+                    id,
+                    provider: "anthropic",
+                    label: id,
+                    provider_data: r#"{"reconnected":true}"#,
+                    account_email: None,
+                    tokens: &tokens,
+                    reconnect: true,
+                },
+            )
+            .await;
+        let after = store.credential(&key, id).await.unwrap().unwrap();
+        if stored.is_some() {
+            result.unwrap();
+            assert_eq!(after.expires_at, Some(2.0));
+            assert_eq!(after.token_version, 2);
+            assert_eq!(after.secrets.access_token.as_deref(), Some("reconnected"));
+            assert_eq!(after.provider_data["reconnected"], true);
+        } else {
+            assert_range_error(result.unwrap_err());
+            assert_eq!(after, row);
+        }
+    }
+}
+
 #[tokio::test]
 async fn oauth_create_reconnect_and_refresh_cas_postgres() {
     let Ok(url) = std::env::var("OMNI_TEST_DATABASE_URL") else {
@@ -28,7 +156,7 @@ async fn oauth_create_reconnect_and_refresh_cas_postgres() {
         refresh_token: Some("refresh".into()),
         api_key: None,
         id_token: Some("id-token".into()),
-        expires_at: Some(10000),
+        expires_at: Some(10000.0),
         updated_at: 100,
     };
     for reconnect in [false, true] {

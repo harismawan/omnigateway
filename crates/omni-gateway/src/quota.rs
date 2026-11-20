@@ -30,8 +30,11 @@ impl Host for GatewayHost {
     fn token<'a>(&'a self, c: &'a omni_store::Credential) -> Task<'a, Option<String>> {
         Box::pin(async move {
             if c.has_refresh_token
-                && c.expires_at
-                    .is_some_and(|e| e.saturating_sub(300000) <= self.now())
+                && c.expires_at.is_some_and(|at| {
+                    #[allow(clippy::cast_precision_loss)]
+                    let now = self.now() as f64;
+                    at - 300_000.0 <= now
+                })
             {
                 return Ok(self
                     .refresh

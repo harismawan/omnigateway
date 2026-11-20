@@ -166,10 +166,9 @@ pub fn serves_target(target: &Target, account: &Credential) -> bool {
 }
 
 /// `credentialExpired`: an OAuth token past expiry with no way to refresh.
-#[allow(clippy::cast_precision_loss)]
 fn credential_expired(c: &Credential, now: f64) -> bool {
     c.auth_type == AuthType::OAuth
-        && c.expires_at.is_some_and(|at| at as f64 <= now)
+        && c.expires_at.is_some_and(|at| at <= now)
         && !c.has_refresh_token
 }
 
