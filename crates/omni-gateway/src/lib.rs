@@ -705,7 +705,7 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
         static_root,
         admin,
         base_url_https: api::base_url_is_https(&config.base_url),
-        control,
+        control: control.with_base_url(&config.base_url),
         credential_key: key.clone(),
         connect: Arc::new(
             redis

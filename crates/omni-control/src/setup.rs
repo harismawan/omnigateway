@@ -150,6 +150,27 @@ pub fn describe_models(models: &[V], credentials: &[V]) -> Result<Vec<ModelDescr
 /// Build the reader's JSON response. The caller authenticates before running
 /// this operation; no input or store lookup can supply a live key to it.
 pub fn agent_setup(store: &SqliteStore, base_url: &str, query: &str) -> Result<String, Failure> {
+    let (client, mapping) = reader_mapping(query)?;
+    let models = crate::models::list(store).map_err(Failure::bad)?;
+    let credentials = crate::credentials::setup_rows(store).map_err(|e| Failure::bad(e.message))?;
+    setup_files(base_url, client, &mapping, &models, &credentials)
+}
+
+/// Same reader response for the cluster backend, using its operator metadata.
+pub async fn agent_setup_postgres(
+    pg: &omni_store::pg::PgStore,
+    base_url: &str,
+    query: &str,
+) -> Result<String, Failure> {
+    let (client, mapping) = reader_mapping(query)?;
+    let models = crate::models::pg_rows(pg).await.map_err(Failure::bad)?;
+    let credentials = crate::credentials::pg_rows(pg, None)
+        .await
+        .map_err(|e| Failure::bad(e.message))?;
+    setup_files(base_url, client, &mapping, &models, &credentials)
+}
+
+fn reader_mapping(query: &str) -> Result<(SetupClient, [String; SLOTS.len()]), Failure> {
     let mut client = SetupClient::Claude;
     let mut mapping = SLOTS.map(|_| String::new());
     for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
@@ -170,11 +191,19 @@ pub fn agent_setup(store: &SqliteStore, base_url: &str, query: &str) -> Result<S
         )));
     }
 
-    let models = crate::models::list(store).map_err(Failure::bad)?;
-    let credentials = crate::credentials::setup_rows(store).map_err(|e| Failure::bad(e.message))?;
-    let described = describe_models(&models, &credentials).map_err(Failure::bad)?;
+    Ok((client, mapping))
+}
+
+fn setup_files(
+    base_url: &str,
+    client: SetupClient,
+    mapping: &[String; SLOTS.len()],
+    models: &[V],
+    credentials: &[V],
+) -> Result<String, Failure> {
+    let described = describe_models(models, credentials).map_err(Failure::bad)?;
     let contents =
-        render(client, &described, base_url, &mapping, None, None).map_err(Failure::bad)?;
+        render(client, &described, base_url, mapping, None, None).map_err(Failure::bad)?;
     Ok(to_string(&serde_json::json!({
         "client": client.name(),
         "files": [{"path": client.path(), "contents": contents}],
