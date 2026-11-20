@@ -271,7 +271,14 @@ impl PgStore {
             .read_only(true)
             .start()
             .await?;
-        let data = rows::snapshot(&tx, key).await?;
+        let data = SnapshotData {
+            api_keys: rows::list_key_entries(&tx).await?,
+            credentials: rows::snapshot_credentials(&tx, key).await?,
+            health: rows::list_health(&tx).await?,
+            models: rows::list_models(&tx).await?,
+            quota: rows::list_quota(&tx).await?,
+            settings: rows::get_settings(&tx).await?,
+        };
         tx.commit().await?;
         Ok(data)
     }
