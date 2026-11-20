@@ -152,7 +152,7 @@ fn fragmented_tool_depth_is_enforced_by_both_public_decoders() {
                         ..
                     } = e
                     {
-                        reconstructed.push_str(partial);
+                        reconstructed.push_str(partial.as_utf8().expect("fixture arguments"));
                     }
                 }
             }

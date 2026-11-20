@@ -39,7 +39,9 @@ fn fragmented_arguments_collect_clone_render_drop_on_small_stack() {
                             .map(|part| StreamEvent::BlockDelta {
                                 index: 0,
                                 delta: Delta::ToolJson {
-                                    partial: String::from_utf8(part.to_vec()).expect("ASCII"),
+                                    partial: String::from_utf8(part.to_vec())
+                                        .expect("ASCII")
+                                        .into(),
                                 },
                             }),
                     );

@@ -2,15 +2,14 @@
 
 use std::collections::{HashMap, HashSet};
 
-use omni_ir::deep::Owned;
 use omni_ir::error::ErrorCode;
-use omni_ir::jsjson::{Spread, write_number, write_spread, write_value};
-use omni_ir::request::ContentBlock;
+use omni_ir::jsjson::{JsValue, Spread, write_js_spread, write_number, write_value};
 use omni_ir::stream::{
-    CollectedResponse, ContentBlockStart, Delta, StopReason, StreamEvent, Usage,
+    CollectedBlock, CollectedResponse, ContentBlockStart, Delta, StopReason, StreamEvent, Usage,
 };
+use omni_ir::text::Text;
 use omni_ratelimit::HeadroomByDimension;
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 
 use super::{Obj, begin_frame, end_frame, js_string, reported};
 
@@ -48,8 +47,8 @@ pub fn error_type(code: ErrorCode) -> &'static str {
 fn write_usage(u: &Usage, out: &mut String) {
     let mut o = Obj::new(out);
     o.num("input_tokens", u.input_tokens)
-        .num("output_tokens", u.output_tokens)
-        .num("cache_read_input_tokens", u.cache_read_tokens)
+        .value("output_tokens", &u.client_output())
+        .value("cache_read_input_tokens", &u.client_cache_read())
         .num("cache_creation_input_tokens", u.cache_write_tokens);
     o.close();
 }
@@ -64,16 +63,16 @@ fn safeguard(vendor: Option<&Map<String, Value>>) -> Option<&Value> {
 
 /// `{ ...data, type }` as a value, for the buffered body (built once per
 /// block, not per delta).
-fn with_type_last(data: &Map<String, Value>, t: &str) -> Value {
-    let mut m = omni_ir::deep::clone_map(data);
-    omni_ir::deep::insert(&mut m, "type".into(), Value::String(t.into()));
-    Value::Object(m)
+fn with_type_last(data: &JsValue, t: &str) -> JsValue {
+    let mut data = data.clone();
+    data.put("type".encode_utf16().collect(), t.into());
+    data
 }
 
 /// `anthropicStream`, one event at a time.
 pub struct AnthropicStream {
     request_id: String,
-    model: String,
+    model: Text,
     suppressed: HashSet<u32>,
     out_index: HashMap<u32, u32>,
     next_out_index: u32,
@@ -83,7 +82,7 @@ impl AnthropicStream {
     pub fn new(request_id: &str) -> AnthropicStream {
         AnthropicStream {
             request_id: request_id.to_string(),
-            model: String::new(),
+            model: Text::default(),
             suppressed: HashSet::new(),
             out_index: HashMap::new(),
             next_out_index: 0,
@@ -108,7 +107,7 @@ impl AnthropicStream {
                 out.push_str(r#"{"type":"message_start","message":{"id":"#);
                 omni_ir::jsjson::write_str(&self.request_id, out);
                 out.push_str(r#","type":"message","role":"assistant","model":"#);
-                omni_ir::jsjson::write_str(&self.model, out);
+                self.model.write_json(out);
                 out.push_str(
                     r#","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#,
                 );
@@ -135,10 +134,10 @@ impl AnthropicStream {
                     }
                     ContentBlockStart::ProviderNative {
                         block_type, data, ..
-                    } => write_spread(data, "type", block_type, Spread::KeyLast, out),
+                    } => write_js_spread(data, "type", block_type, Spread::KeyLast, out),
                     ContentBlockStart::ToolUse { id, name } => {
                         let mut o = Obj::new(out);
-                        o.str("type", "tool_use").str("id", id).str("name", name);
+                        o.str("type", "tool_use").text("id", id).text("name", name);
                         o.raw("input", "{}");
                         o.close();
                     }
@@ -158,28 +157,28 @@ impl AnthropicStream {
                     Delta::Text { text } => {
                         Obj::new(out)
                             .str("type", "text_delta")
-                            .str("text", text)
+                            .text("text", text)
                             .close_ref();
                     }
                     Delta::Thinking { text } => {
                         Obj::new(out)
                             .str("type", "thinking_delta")
-                            .str("thinking", text)
+                            .text("thinking", text)
                             .close_ref();
                     }
                     Delta::ThinkingSignature { signature } => {
                         Obj::new(out)
                             .str("type", "signature_delta")
-                            .str("signature", signature)
+                            .text("signature", signature)
                             .close_ref();
                     }
                     Delta::ProviderNative {
                         delta_type, data, ..
-                    } => write_spread(data, "type", delta_type, Spread::KeyFirst, out),
+                    } => write_js_spread(data, "type", delta_type, Spread::KeyFirst, out),
                     Delta::ToolJson { partial } | Delta::ProviderNativeJson { partial, .. } => {
                         Obj::new(out)
                             .str("type", "input_json_delta")
-                            .str("partial_json", partial)
+                            .text("partial_json", partial)
                             .close_ref();
                     }
                 }
@@ -222,7 +221,7 @@ impl AnthropicStream {
                 out.push_str(r#"{"type":"error","error":"#);
                 Obj::new(out)
                     .str("type", error_type(*code))
-                    .str("message", message)
+                    .text("message", message)
                     .close_ref();
                 out.push('}');
                 end_frame(out);
@@ -231,84 +230,81 @@ impl AnthropicStream {
     }
 }
 
-fn usage_value(u: &Usage) -> Value {
-    let n = omni_ir::stream::number;
-    json!({
-        "input_tokens": n(u.input_tokens),
-        "output_tokens": n(u.output_tokens),
-        "cache_read_input_tokens": n(u.cache_read_tokens),
-        "cache_creation_input_tokens": n(u.cache_write_tokens),
-    })
+fn usage_value(u: &Usage) -> JsValue {
+    JsValue::object([
+        ("input_tokens", u.input_tokens.into()),
+        ("output_tokens", u.client_output()),
+        ("cache_read_input_tokens", u.client_cache_read()),
+        ("cache_creation_input_tokens", u.cache_write_tokens.into()),
+    ])
 }
 
 /// `anthropicResponse`.
-/// The body holds client payloads (tool inputs, native blocks), so it is
-/// returned as a [`Owned`] that drops iteratively.
-pub fn response(collected: &CollectedResponse, request_id: &str) -> Owned {
-    Owned(response_value(collected, request_id))
-}
-
-fn response_value(collected: &CollectedResponse, request_id: &str) -> Value {
-    let mut m = Map::new();
-    if let Some(v) = safeguard(collected.vendor.as_ref()) {
-        omni_ir::deep::insert(&mut m, "safeguard_results".into(), omni_ir::deep::clone(v));
-    }
-    omni_ir::deep::insert(&mut m, "id".into(), request_id.into());
-    omni_ir::deep::insert(&mut m, "type".into(), "message".into());
-    omni_ir::deep::insert(&mut m, "role".into(), "assistant".into());
-    omni_ir::deep::insert(&mut m, "model".into(), collected.model.as_str().into());
-    let content: Vec<Value> = collected
+pub fn response(collected: &CollectedResponse, request_id: &str) -> JsValue {
+    let content = collected
         .content
         .iter()
-        .filter(|b| match b {
-            ContentBlock::Thinking(t) => t.signature.as_deref().is_some_and(|s| !s.is_empty()),
-            _ => true,
-        })
-        .map(|b| match b {
-            ContentBlock::Text(t) => {
-                let mut o = Map::new();
-                omni_ir::deep::insert(&mut o, "type".into(), "text".into());
-                omni_ir::deep::insert(&mut o, "text".into(), t.text.as_str().into());
-                if let Some(c) = &t.citations {
-                    omni_ir::deep::insert(
-                        &mut o,
-                        "citations".into(),
-                        Value::Array(c.iter().map(omni_ir::deep::clone).collect()),
-                    );
-                }
-                Value::Object(o)
+        .filter_map(|b| match b {
+            CollectedBlock::Text { text, citations } => Some(JsValue::object([
+                ("type", "text".into()),
+                ("text", text.into()),
+                (
+                    "citations",
+                    if citations.is_empty() {
+                        JsValue::Undefined
+                    } else {
+                        JsValue::Array(citations.clone())
+                    },
+                ),
+            ])),
+            CollectedBlock::Thinking { text, signature } => {
+                signature.as_ref().filter(|s| !s.is_empty()).map(|s| {
+                    JsValue::object([
+                        ("type", "thinking".into()),
+                        ("thinking", text.into()),
+                        ("signature", s.into()),
+                    ])
+                })
             }
-            ContentBlock::Thinking(t) => json!({
-                "type": "thinking",
-                "thinking": t.text,
-                "signature": t.signature,
-            }),
-            ContentBlock::ToolUse(t) => {
-                let mut o = Map::new();
-                omni_ir::deep::insert(&mut o, "type".into(), "tool_use".into());
-                omni_ir::deep::insert(&mut o, "id".into(), t.id.as_str().into());
-                omni_ir::deep::insert(&mut o, "name".into(), t.name.as_str().into());
-                omni_ir::deep::insert(&mut o, "input".into(), omni_ir::deep::clone(&t.input));
-                Value::Object(o)
-            }
-            ContentBlock::ProviderNative(n) => with_type_last(&n.data, &n.block_type),
-            _ => json!({ "type": "text", "text": "" }),
+            CollectedBlock::ToolUse { id, name, input } => Some(JsValue::object([
+                ("type", "tool_use".into()),
+                ("id", id.into()),
+                ("name", name.into()),
+                ("input", input.clone()),
+            ])),
+            CollectedBlock::ProviderNative {
+                data, block_type, ..
+            } => Some(with_type_last(data, block_type)),
         })
         .collect();
-    omni_ir::deep::insert(&mut m, "content".into(), Value::Array(content));
-    omni_ir::deep::insert(
-        &mut m,
-        "stop_reason".into(),
-        stop_reason(collected.stop_reason).into(),
-    );
-    omni_ir::deep::insert(&mut m, "stop_sequence".into(), Value::Null);
-    omni_ir::deep::insert(&mut m, "usage".into(), usage_value(&collected.usage));
-    Value::Object(m)
+    JsValue::object([
+        (
+            "safeguard_results",
+            safeguard(collected.vendor.as_ref()).map_or(JsValue::Undefined, JsValue::from),
+        ),
+        ("id", request_id.into()),
+        ("type", "message".into()),
+        ("role", "assistant".into()),
+        ("model", (&collected.model).into()),
+        ("content", JsValue::Array(content)),
+        ("stop_reason", stop_reason(collected.stop_reason).into()),
+        ("stop_sequence", JsValue::Null),
+        ("usage", usage_value(&collected.usage)),
+    ])
 }
 
 /// `anthropicErrorBody`.
-pub fn error_body(code: ErrorCode, message: &str) -> Value {
-    json!({ "type": "error", "error": { "type": error_type(code), "message": message } })
+pub fn error_body(code: ErrorCode, message: &Text) -> JsValue {
+    JsValue::object([
+        ("type", "error".into()),
+        (
+            "error",
+            JsValue::object([
+                ("type", error_type(code).into()),
+                ("message", message.into()),
+            ]),
+        ),
+    ])
 }
 
 /// `rfc3339`: whole seconds, rounded up, as `toISOString().slice(0, 19) + "Z"`.

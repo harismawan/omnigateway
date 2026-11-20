@@ -7,12 +7,12 @@ use crate::{
 use omni_ir::{
     deep,
     error::ErrorCode,
-    js::{self, nullish_or, prop},
+    jsjson::{self, JsValue as Value},
     stream::{
         ContentBlockStart, Delta, NativeFold, StopReason, StreamEvent, usage_from_prompt_total,
     },
+    text::Text,
 };
-use serde_json::{Map, Value, json};
 use std::collections::VecDeque;
 const KNOWN: &[&str] = &[
     "keepalive",
@@ -44,9 +44,9 @@ const KNOWN: &[&str] = &[
 ];
 pub struct OpenAiDecoder {
     native: bool,
-    indices: Vec<String>,
+    indices: Vec<Text>,
     // Only primitives can match a later JSON payload under JS SameValueZero.
-    owns: Vec<String>,
+    owns: Vec<Value>,
     tool: bool,
     terminal: bool,
 }
@@ -65,7 +65,9 @@ impl OpenAiDecoder {
         output: Option<&Value>,
         content: Option<&Value>,
     ) -> Result<u32, DecodeError> {
-        let key = format!("{}:{}", string(output)?, string(content)?);
+        // The frozen index key is a template string, not a two-part tuple.
+        let mut key = string(output)?.surrounded("", ":");
+        key.push(&string(content)?);
         if let Some(i) = self.indices.iter().position(|k| k == &key) {
             return Ok(i as u32);
         }
@@ -73,30 +75,31 @@ impl OpenAiDecoder {
         Ok((self.indices.len() - 1) as u32)
     }
 }
-fn string(v: Option<&Value>) -> Result<String, DecodeError> {
-    js::try_to_string(v).map_err(|_| DecodeError::Throw("JavaScript coercion threw"))
+fn prop<'a>(value: Option<&'a Value>, key: &str) -> Option<&'a Value> {
+    value.and_then(|v| v.get(key))
+}
+fn nullish_or<'a>(a: Option<&'a Value>, b: Option<&'a Value>) -> Option<&'a Value> {
+    a.filter(|v| !v.is_null()).or(b)
+}
+fn string(v: Option<&Value>) -> Result<Text, DecodeError> {
+    jsjson::coerce_text(v).map_err(|_| DecodeError::Throw("JavaScript coercion threw"))
 }
 fn index_value(v: Option<&Value>) -> Option<&Value> {
     nullish_or(v, None)
 }
-fn key(v: Option<&Value>) -> Option<String> {
+fn key(v: Option<&Value>) -> Option<Value> {
     match index_value(v) {
-        None => Some("n:0".into()),
+        None => Some(0.0.into()),
         Some(Value::Array(_) | Value::Object(_)) => None,
-        Some(Value::Number(_)) => Some(format!("n:{}", js::to_string(v))),
-        Some(v) => Some(format!(
-            "{}:{}",
-            if v.is_string() { "s" } else { "b" },
-            js::to_string(Some(v))
-        )),
+        Some(v) => Some(v.clone()),
     }
 }
-fn text(v: Option<&Value>) -> Result<String, DecodeError> {
+fn text(v: Option<&Value>) -> Result<Text, DecodeError> {
     nullish_or(v, None)
         .map(|v| string(Some(v)))
-        .unwrap_or_else(|| Ok(String::new()))
+        .unwrap_or_else(|| Ok(Text::default()))
 }
-fn error(out: &mut VecDeque<StreamEvent>, message: String) {
+fn error(out: &mut VecDeque<StreamEvent>, message: Text) {
     out.push_back(StreamEvent::Error {
         code: ErrorCode::Upstream,
         message,
@@ -115,7 +118,7 @@ impl StreamDecoder for OpenAiDecoder {
         if !KNOWN.contains(&msg.event.as_str()) {
             error(
                 out,
-                format!("unrecognized OpenAI stream event \"{}\"", msg.event),
+                format!("unrecognized OpenAI stream event \"{}\"", msg.event).into(),
             );
             return Ok(Flow::Stop);
         }
@@ -124,15 +127,14 @@ impl StreamDecoder for OpenAiDecoder {
             return Err(DecodeError::Throw("upstream JSON exceeds depth 40000"));
         }
         deep::scope_for_bound(depth, |_| {
-            let Ok(parsed) = deep::parse(&msg.data) else {
+            let Ok(parsed) = jsjson::parse_bounded(&msg.data, depth) else {
                 return Ok(Flow::Continue);
             };
-            let owned = deep::Owned(parsed);
-            if !owned.0.is_object() && !owned.0.is_array() {
+            if !parsed.is_object() && !parsed.is_array() {
                 return Ok(Flow::Continue);
             }
-            let d = Some(&owned.0);
-            let zero = Value::from(0);
+            let d = Some(&parsed);
+            let zero = Value::from(0.0);
             let output = Some(index_value(prop(d, "output_index")).unwrap_or(&zero));
             let content = Some(index_value(prop(d, "content_index")).unwrap_or(&zero));
             let item = prop(d, "item");
@@ -145,7 +147,8 @@ impl StreamDecoder for OpenAiDecoder {
                     });
                 }
                 "response.output_item.added" => {
-                    let kind = prop(item, "type").and_then(Value::as_str);
+                    let kind = prop(item, "type").and_then(Value::as_text);
+                    let kind = kind.as_ref().and_then(Text::as_utf8);
                     if matches!(kind, Some("reasoning" | "function_call")) {
                         if let Some(k) = key(output)
                             && !self.owns.contains(&k)
@@ -163,7 +166,7 @@ impl StreamDecoder for OpenAiDecoder {
                             ContentBlockStart::ProviderNative {
                                 provider: "openai".into(),
                                 block_type: "reasoning".into(),
-                                data: Map::new(),
+                                data: Value::Object(Vec::new()),
                             }
                         } else {
                             ContentBlockStart::Thinking { signed: None }
@@ -172,7 +175,9 @@ impl StreamDecoder for OpenAiDecoder {
                     }
                 }
                 "response.content_part.added" => {
-                    if prop(prop(d, "part"), "type").and_then(Value::as_str) == Some("output_text")
+                    if prop(prop(d, "part"), "type")
+                        .and_then(Value::as_text)
+                        .is_some_and(|t| t == "output_text")
                     {
                         out.push_back(StreamEvent::BlockStart {
                             index: self.index(output, content)?,
@@ -198,8 +203,7 @@ impl StreamDecoder for OpenAiDecoder {
                     let index = self.index(output, Some(&zero))?;
                     let t = text(prop(d, "delta"))?;
                     let delta = if self.native {
-                        let mut data = Map::new();
-                        deep::insert(&mut data, "text".into(), json!(t));
+                        let data = Value::object([("text", (&t).into())]);
                         Delta::ProviderNative {
                             provider: "openai".into(),
                             delta_type: "reasoning_summary_text.delta".into(),
@@ -221,12 +225,14 @@ impl StreamDecoder for OpenAiDecoder {
                         self.owns.remove(at);
                         let index = self.index(output, Some(&zero))?;
                         if self.native
-                            && prop(item, "type").and_then(Value::as_str) == Some("reasoning")
+                            && prop(item, "type")
+                                .and_then(Value::as_text)
+                                .is_some_and(|t| t == "reasoning")
                         {
                             let data = item
-                                .and_then(Value::as_object)
-                                .map(deep::clone_map)
-                                .unwrap_or_default();
+                                .filter(|v| v.is_object())
+                                .cloned()
+                                .unwrap_or_else(|| Value::Object(Vec::new()));
                             out.push_back(StreamEvent::BlockDelta {
                                 index,
                                 delta: Delta::ProviderNative {
@@ -245,23 +251,27 @@ impl StreamDecoder for OpenAiDecoder {
                     let r = prop(d, "response");
                     let reason = prop(prop(r, "incomplete_details"), "reason");
                     let status = prop(r, "status");
-                    let stop = match reason.and_then(Value::as_str) {
+                    let reason_text = reason.and_then(Value::as_text);
+                    let stop = match reason_text.as_ref().and_then(Text::as_utf8) {
                         Some("max_output_tokens") => StopReason::MaxTokens,
                         Some("content_filter") => StopReason::ContentFilter,
                         _ => {
                             if reason.is_some()
                                 || msg.event == "response.incomplete"
-                                || status.is_some_and(|s| s.as_str() != Some("completed"))
+                                || status
+                                    .is_some_and(|s| !s.as_text().is_some_and(|t| t == "completed"))
                             {
                                 let message = if reason.is_some() {
-                                    format!(
-                                        "unrecognized OpenAI incomplete reason \"{}\"",
-                                        string(reason)?
+                                    string(reason)?.surrounded(
+                                        "unrecognized OpenAI incomplete reason \"",
+                                        "\"",
                                     )
-                                } else if status.is_some_and(|s| s.as_str() != Some("incomplete")) {
-                                    format!(
-                                        "OpenAI reported terminal response status \"{}\"",
-                                        string(status)?
+                                } else if status.is_some_and(|s| {
+                                    !s.as_text().is_some_and(|t| t == "incomplete")
+                                }) {
+                                    string(status)?.surrounded(
+                                        "OpenAI reported terminal response status \"",
+                                        "\"",
                                     )
                                 } else {
                                     "OpenAI reported the response incomplete without a reason"
@@ -278,22 +288,29 @@ impl StreamDecoder for OpenAiDecoder {
                         }
                     };
                     let u = prop(r, "usage");
-                    let n = |v| js::to_number(nullish_or(v, None).or(Some(&zero)));
-                    // Frozen usageFromPromptTotal subtracts input and cache counts;
-                    // output_tokens is forwarded raw (its representation is parked X1).
                     let checked = |v| {
-                        js::try_to_number(nullish_or(v, None).or(Some(&zero)))
+                        jsjson::coerce_number(nullish_or(v, None).or(Some(&zero)))
                             .map_err(|_| DecodeError::Throw("JavaScript coercion threw"))
                     };
-                    let usage = usage_from_prompt_total(
-                        checked(prop(u, "input_tokens"))?,
-                        n(prop(u, "output_tokens")),
-                        checked(nullish_or(
+                    let output = nullish_or(prop(u, "output_tokens"), Some(&zero)).unwrap_or(&zero);
+                    let cached = nullish_or(
+                        nullish_or(
                             prop(prop(u, "input_tokens_details"), "cached_tokens"),
                             prop(prop(u, "prompt_tokens_details"), "cached_tokens"),
-                        ))?,
+                        ),
+                        Some(&zero),
+                    )
+                    .unwrap_or(&zero);
+                    let mut usage = usage_from_prompt_total(
+                        checked(prop(u, "input_tokens"))?,
+                        jsjson::coerce_number(Some(output)).unwrap_or(f64::NAN),
+                        checked(Some(cached))?,
                         0.0,
                     );
+                    usage.raw_output_tokens =
+                        output.as_f64().is_none().then(|| Box::new(output.clone()));
+                    usage.raw_cache_read_tokens =
+                        cached.as_f64().is_none().then(|| Box::new(cached.clone()));
                     out.push_back(StreamEvent::End {
                         stop_reason: stop,
                         usage,
@@ -304,12 +321,12 @@ impl StreamDecoder for OpenAiDecoder {
                     self.terminal = true;
                     let e = nullish_or(prop(prop(d, "response"), "error"), prop(d, "error"));
                     let raw = string(nullish_or(prop(e, "code"), prop(e, "type")))?;
-                    let code = match raw.as_str() {
-                        "rate_limit_exceeded" => ErrorCode::RateLimit,
-                        "insufficient_quota" => ErrorCode::QuotaExhausted,
-                        "invalid_api_key" => ErrorCode::Auth,
-                        "context_length_exceeded" => ErrorCode::BadRequest,
-                        "content_policy_violation" => ErrorCode::ContentFilter,
+                    let code = match raw.as_utf8() {
+                        Some("rate_limit_exceeded") => ErrorCode::RateLimit,
+                        Some("insufficient_quota") => ErrorCode::QuotaExhausted,
+                        Some("invalid_api_key") => ErrorCode::Auth,
+                        Some("context_length_exceeded") => ErrorCode::BadRequest,
+                        Some("content_policy_violation") => ErrorCode::ContentFilter,
                         _ => ErrorCode::Upstream,
                     };
                     out.push_back(StreamEvent::Error {

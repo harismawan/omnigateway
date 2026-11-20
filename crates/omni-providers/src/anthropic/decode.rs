@@ -5,9 +5,11 @@ use crate::{
 };
 use omni_ir::{
     error::ErrorCode,
+    jsjson::{self, JsValue as Value},
     stream::{ContentBlockStart, Delta, NativeFold, StopReason, StreamEvent, Usage},
+    text::Text,
 };
-use serde_json::{Map, Value};
+use serde_json::Map;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 pub struct AnthropicDecoder {
@@ -15,7 +17,7 @@ pub struct AnthropicDecoder {
     reason: StopReason,
     terminal: bool,
     native: HashSet<u32>,
-    vendor: Option<Map<String, Value>>,
+    vendor: Option<Map<String, serde_json::Value>>,
     /// Wire alias to original client tool name.
     pub uncloak: HashMap<String, String>,
 }
@@ -35,13 +37,13 @@ pub fn is_fingerprint_message(message: &str) -> bool {
     let lower = message.to_lowercase();
     lower.contains("out of extra usage") || lower.contains("draw from extra usage")
 }
-fn text(v: &Value) -> String {
-    v.as_str().unwrap_or("").into()
+fn text(v: &Value) -> Text {
+    v.as_text().unwrap_or_default()
 }
-fn name(v: Option<&Value>) -> Result<String, DecodeError> {
-    omni_ir::js::try_to_string(v).map_err(|_| DecodeError::Throw("JavaScript coercion threw"))
+fn name(v: Option<&Value>) -> Result<Text, DecodeError> {
+    jsjson::coerce_text(v).map_err(|_| DecodeError::Throw("JavaScript coercion threw"))
 }
-fn protocol(out: &mut VecDeque<StreamEvent>, message: String) -> Flow {
+fn protocol(out: &mut VecDeque<StreamEvent>, message: Text) -> Flow {
     out.push_back(StreamEvent::Error {
         code: ErrorCode::Upstream,
         message,
@@ -80,10 +82,14 @@ impl AnthropicDecoder {
             omni_ir::deep::insert(
                 &mut verdict,
                 "safeguard_results".into(),
-                omni_ir::deep::clone(v),
+                omni_ir::deep::parse(&jsjson::render(v)).unwrap_or(serde_json::Value::Null),
             );
             let mut vendor = Map::new();
-            omni_ir::deep::insert(&mut vendor, "anthropic".into(), Value::Object(verdict));
+            omni_ir::deep::insert(
+                &mut vendor,
+                "anthropic".into(),
+                serde_json::Value::Object(verdict),
+            );
             if let Some(old) = self.vendor.replace(vendor) {
                 omni_ir::deep::drop_map(old);
             }
@@ -123,8 +129,8 @@ impl AnthropicDecoder {
         out: &mut VecDeque<StreamEvent>,
         bound: usize,
     ) -> Result<Flow, DecodeError> {
-        let d = match omni_ir::deep::parse_bounded(&msg.data, bound) {
-            Ok(v) => omni_ir::deep::Owned(v),
+        let d = match jsjson::parse_bounded(&msg.data, bound) {
+            Ok(v) => v,
             Err(omni_ir::deep::ParseError::Syntax) => return Ok(Flow::Continue),
             Err(omni_ir::deep::ParseError::TooDeep) => {
                 return Err(DecodeError::Gateway(omni_ir::error::GatewayError::new(
@@ -133,11 +139,13 @@ impl AnthropicDecoder {
                 )));
             }
         };
-        let d = &d.0;
         if !d.is_object() && !d.is_array() {
             return Ok(Flow::Continue);
         }
-        let index = d["index"].as_u64().unwrap_or(0) as u32;
+        let index = d["index"]
+            .as_f64()
+            .filter(|n| *n >= 0.0 && *n < u64::MAX as f64 && n.fract() == 0.0)
+            .map_or(0, |n| n as u64 as u32);
         match msg.event.as_str() {
             "message_start" => {
                 let m = &d["message"];
@@ -154,16 +162,17 @@ impl AnthropicDecoder {
                     id: m
                         .get("id")
                         .filter(|v| !v.is_null())
-                        .map_or_else(|| Ok(String::new()), |v| name(Some(v)))?,
+                        .map_or_else(|| Ok(Text::default()), |v| name(Some(v)))?,
                     model: m
                         .get("model")
                         .filter(|v| !v.is_null())
-                        .map_or_else(|| Ok(String::new()), |v| name(Some(v)))?,
+                        .map_or_else(|| Ok(Text::default()), |v| name(Some(v)))?,
                 });
             }
             "content_block_start" => {
                 let b = &d["content_block"];
-                let block = match b["type"].as_str().unwrap_or("") {
+                let kind = text(&b["type"]);
+                let block = match kind.as_utf8().unwrap_or("") {
                     "text" => ContentBlockStart::Text,
                     "thinking" => ContentBlockStart::Thinking { signed: Some(true) },
                     "tool_use" => {
@@ -171,29 +180,28 @@ impl AnthropicDecoder {
                         let n = name(b.get("name"))?;
                         ContentBlockStart::ToolUse {
                             id,
-                            name: self.uncloak.get(&n).cloned().unwrap_or(n),
+                            name: n
+                                .as_utf8()
+                                .and_then(|s| self.uncloak.get(s))
+                                .map(Text::from)
+                                .unwrap_or(n),
                         }
                     }
                     t if NATIVE.contains(&t) => {
                         self.native.insert(index);
-                        let mut data = b
-                            .as_object()
-                            .map(omni_ir::deep::clone_map)
-                            .unwrap_or_default();
-                        data.shift_remove("type");
+                        let mut data = b.clone().into_object();
+                        data.retain(|(k, _)| !"type".encode_utf16().eq(k.iter().copied()));
                         ContentBlockStart::ProviderNative {
                             provider: "anthropic".into(),
                             block_type: t.into(),
-                            data,
+                            data: Value::Object(data),
                         }
                     }
                     _ => {
                         return Ok(protocol(
                             out,
-                            format!(
-                                "unrecognized Anthropic content block type \"{}\"",
-                                name(b.get("type"))?
-                            ),
+                            name(b.get("type"))?
+                                .surrounded("unrecognized Anthropic content block type \"", "\""),
                         ));
                     }
                 };
@@ -201,7 +209,8 @@ impl AnthropicDecoder {
             }
             "content_block_delta" => {
                 let delta = &d["delta"];
-                let dt = delta["type"].as_str().unwrap_or("");
+                let kind = text(&delta["type"]);
+                let dt = kind.as_utf8().unwrap_or("");
                 let mapped = match dt {
                     "text_delta" => Delta::Text {
                         text: text(&delta["text"]),
@@ -228,18 +237,14 @@ impl AnthropicDecoder {
                         }
                     }
                     "citations_delta" | "compaction_delta" => {
-                        let mut data = Map::new();
+                        let mut data = Value::Object(Vec::new());
                         for key in if dt == "citations_delta" {
                             &["citation"][..]
                         } else {
                             &["content", "encrypted_content"][..]
                         } {
-                            if let Some(v) = delta.get(*key) {
-                                omni_ir::deep::insert(
-                                    &mut data,
-                                    (*key).into(),
-                                    omni_ir::deep::clone(v),
-                                );
+                            if let Some(v) = delta.get(key) {
+                                data.put(key.encode_utf16().collect(), v.clone());
                             }
                         }
                         Delta::ProviderNative {
@@ -256,10 +261,8 @@ impl AnthropicDecoder {
                     _ => {
                         return Ok(protocol(
                             out,
-                            format!(
-                                "unrecognized Anthropic content block delta \"{}\"",
-                                name(delta.get("type"))?
-                            ),
+                            name(delta.get("type"))?
+                                .surrounded("unrecognized Anthropic content block delta \"", "\""),
                         ));
                     }
                 };
@@ -276,20 +279,20 @@ impl AnthropicDecoder {
                 self.safeguards(if d["delta"].get("safeguard_results").is_some() {
                     &d["delta"]
                 } else {
-                    d
+                    &d
                 });
-                if let Some(reason) = d["delta"]["stop_reason"].as_str() {
-                    self.reason = match reason {
-                        "end_turn" => StopReason::EndTurn,
-                        "max_tokens" => StopReason::MaxTokens,
-                        "stop_sequence" => StopReason::StopSequence,
-                        "tool_use" => StopReason::ToolUse,
-                        "refusal" => StopReason::ContentFilter,
-                        "pause_turn" => StopReason::PauseTurn,
+                if let Some(reason) = d["delta"]["stop_reason"].as_text() {
+                    self.reason = match reason.as_utf8() {
+                        Some("end_turn") => StopReason::EndTurn,
+                        Some("max_tokens") => StopReason::MaxTokens,
+                        Some("stop_sequence") => StopReason::StopSequence,
+                        Some("tool_use") => StopReason::ToolUse,
+                        Some("refusal") => StopReason::ContentFilter,
+                        Some("pause_turn") => StopReason::PauseTurn,
                         _ => {
                             return Ok(protocol(
                                 out,
-                                format!("unrecognized Anthropic stop reason \"{reason}\""),
+                                reason.surrounded("unrecognized Anthropic stop reason \"", "\""),
                             ));
                         }
                     };
@@ -302,11 +305,11 @@ impl AnthropicDecoder {
                     .unwrap_or(self.usage.output_tokens);
             }
             "message_stop" => {
-                self.safeguards(d);
+                self.safeguards(&d);
                 self.terminal = true;
                 out.push_back(StreamEvent::End {
                     stop_reason: self.reason,
-                    usage: self.usage,
+                    usage: self.usage.clone(),
                     vendor: self.vendor.as_ref().map(omni_ir::deep::clone_map),
                 });
             }
@@ -317,14 +320,16 @@ impl AnthropicDecoder {
                     .get("message")
                     .filter(|v| !v.is_null())
                     .map_or_else(|| Ok("upstream error".into()), |v| name(Some(v)))?;
-                let code = if t == "invalid_request_error" && is_fingerprint_message(&message) {
+                let code = if t == "invalid_request_error"
+                    && is_fingerprint_message(&message.to_utf8_lossy())
+                {
                     ErrorCode::FingerprintRefused
                 } else {
-                    match t.as_str() {
-                        "overloaded_error" => ErrorCode::Overloaded,
-                        "rate_limit_error" => ErrorCode::RateLimit,
-                        "authentication_error" | "permission_error" => ErrorCode::Auth,
-                        "invalid_request_error" => ErrorCode::BadRequest,
+                    match t.as_utf8() {
+                        Some("overloaded_error") => ErrorCode::Overloaded,
+                        Some("rate_limit_error") => ErrorCode::RateLimit,
+                        Some("authentication_error" | "permission_error") => ErrorCode::Auth,
+                        Some("invalid_request_error") => ErrorCode::BadRequest,
                         _ => ErrorCode::Upstream,
                     }
                 };
@@ -338,7 +343,7 @@ impl AnthropicDecoder {
             _ => {
                 return Ok(protocol(
                     out,
-                    format!("unrecognized Anthropic stream event \"{}\"", msg.event),
+                    format!("unrecognized Anthropic stream event \"{}\"", msg.event).into(),
                 ));
             }
         }

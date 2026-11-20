@@ -16,10 +16,10 @@
 //! vendor bags) go through `jsjson::write_value`.
 
 use omni_ir::error::{ErrorCode, GatewayError};
-use omni_ir::jsjson::{write_number, write_str};
+use omni_ir::jsjson::{JsValue, write_js_value, write_number, write_str};
 use omni_ir::stream::StreamEvent;
+use omni_ir::text::Text;
 use omni_ratelimit::{Headroom, HeadroomByDimension};
-use serde_json::Value;
 
 pub mod anthropic;
 pub mod openai;
@@ -39,11 +39,12 @@ pub enum Dialect {
 
 impl Dialect {
     /// The dialect's error body for `code` (`*ErrorBody`).
-    pub fn error_body(self, code: ErrorCode, message: &str) -> Value {
+    pub fn error_body(self, code: ErrorCode, message: impl Into<Text>) -> JsValue {
+        let message = message.into();
         match self {
-            Dialect::Anthropic => anthropic::error_body(code, message),
-            Dialect::OpenAi => openai::error_body(code, message),
-            Dialect::Responses => responses::error_body(code, message),
+            Dialect::Anthropic => anthropic::error_body(code, &message),
+            Dialect::OpenAi => openai::error_body(code, &message),
+            Dialect::Responses => responses::error_body(code, &message),
         }
     }
 
@@ -146,6 +147,16 @@ impl<'a> Obj<'a> {
     pub(crate) fn str(&mut self, k: &str, v: &str) -> &mut Self {
         let out = self.key(k);
         write_str(v, out);
+        self
+    }
+
+    pub(crate) fn text(&mut self, k: &str, v: &Text) -> &mut Self {
+        v.write_json(self.key(k));
+        self
+    }
+
+    pub(crate) fn value(&mut self, k: &str, v: &JsValue) -> &mut Self {
+        write_js_value(v, self.key(k));
         self
     }
 

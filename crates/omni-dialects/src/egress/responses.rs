@@ -2,15 +2,13 @@
 
 use std::collections::HashSet;
 
-use omni_ir::deep::Owned;
 use omni_ir::error::ErrorCode;
-use omni_ir::jsjson::{write_number, write_str, write_value};
-use omni_ir::request::ContentBlock;
+use omni_ir::jsjson::{JsValue, write_js_value, write_number, write_str};
 use omni_ir::stream::{
-    CollectedResponse, ContentBlockStart, Delta, NativeFold, StopReason, StreamEvent, Usage,
-    number, prompt_tokens,
+    CollectedBlock, CollectedResponse, ContentBlockStart, Delta, NativeFold, StopReason,
+    StreamEvent, Usage,
 };
-use serde_json::{Map, Value, json};
+use omni_ir::text::Text;
 
 use super::openai::error_type;
 use super::{begin_frame, end_frame};
@@ -27,15 +25,22 @@ fn status(s: StopReason) -> (&'static str, Option<&'static str>) {
     }
 }
 
-fn usage_value(u: &Usage) -> Value {
-    let input = prompt_tokens(u);
-    json!({
-        "input_tokens": number(input),
-        "input_tokens_details": { "cached_tokens": number(u.cache_read_tokens) },
-        "output_tokens": number(u.output_tokens),
-        "output_tokens_details": { "reasoning_tokens": 0 },
-        "total_tokens": number(input + u.output_tokens),
-    })
+fn usage_value(u: &Usage) -> JsValue {
+    let input = u.client_prompt();
+    let total = u.client_total(&input);
+    JsValue::object([
+        ("input_tokens", input),
+        (
+            "input_tokens_details",
+            JsValue::object([("cached_tokens", u.client_cache_read())]),
+        ),
+        ("output_tokens", u.client_output()),
+        (
+            "output_tokens_details",
+            JsValue::object([("reasoning_tokens", 0.0.into())]),
+        ),
+        ("total_tokens", total),
+    ])
 }
 
 /// `ResponsesRender`: what the route knows that the stream does not.
@@ -72,37 +77,21 @@ impl Kind {
 struct Item {
     ir_index: u32,
     output_index: u32,
-    id: String,
+    id: Text,
     kind: Kind,
-    text: String,
-    tool_name: String,
-    call_id: String,
+    text: Text,
+    tool_name: Text,
+    call_id: Text,
     /// A native item's `type`; its payload is `{ type, ...native }`.
     block_type: String,
-    native: Map<String, Value>,
-}
-
-impl Drop for Item {
-    fn drop(&mut self) {
-        omni_ir::deep::drop_map_in_place(&mut self.native);
-    }
+    native: JsValue,
 }
 
 /// `customToolInput`: the program inside `{"input": "<program>"}`, else raw.
-fn custom_tool_input(raw: &str) -> String {
-    omni_ir::deep::scope_for(raw, || {
-        let parsed = omni_ir::deep::parse(raw)
-            .ok()
-            .or_else(|| {
-                omni_ir::js::replace_lone_surrogates(raw)
-                    .and_then(|s| omni_ir::deep::parse(&s).ok())
-            })
-            .map(omni_ir::deep::Owned);
-        if let Some(Value::String(inner)) = parsed.as_ref().and_then(|v| v.get("input")) {
-            return inner.clone();
-        }
-        raw.to_string()
-    })
+fn custom_tool_input(raw: &Text) -> Text {
+    raw.with_json_source(|s| omni_ir::jsjson::parse_bounded(s, omni_ir::deep::depth_of(s)).ok())
+        .and_then(|parsed| parsed.get("input").and_then(JsValue::as_text))
+        .unwrap_or_else(|| raw.clone())
 }
 
 /// `renderItem`, written straight into `out`.
@@ -110,7 +99,7 @@ fn write_item(item: &Item, status: &str, out: &mut String) {
     let done = status == "completed";
     let head = |t: &str, out: &mut String| {
         out.push_str(r#"{"id":"#);
-        write_str(&item.id, out);
+        item.id.write_json(out);
         out.push_str(r#","type":"#);
         write_str(t, out);
         out.push_str(r#","status":"#);
@@ -122,7 +111,7 @@ fn write_item(item: &Item, status: &str, out: &mut String) {
             out.push_str(r#","role":"assistant","content":["#);
             if done {
                 out.push_str(r#"{"type":"output_text","text":"#);
-                write_str(&item.text, out);
+                item.text.write_json(out);
                 out.push_str(r#","annotations":[]}"#);
             }
             out.push_str("]}");
@@ -132,7 +121,7 @@ fn write_item(item: &Item, status: &str, out: &mut String) {
             out.push_str(r#","summary":["#);
             if done && !item.text.is_empty() {
                 out.push_str(r#"{"type":"summary_text","text":"#);
-                write_str(&item.text, out);
+                item.text.write_json(out);
                 out.push('}');
             }
             out.push_str("]}");
@@ -148,9 +137,9 @@ fn write_item(item: &Item, status: &str, out: &mut String) {
                 out,
             );
             out.push_str(r#","call_id":"#);
-            write_str(&item.call_id, out);
+            item.call_id.write_json(out);
             out.push_str(r#","name":"#);
-            write_str(&item.tool_name, out);
+            item.tool_name.write_json(out);
             out.push_str(if custom {
                 r#","input":"#
             } else {
@@ -158,13 +147,13 @@ fn write_item(item: &Item, status: &str, out: &mut String) {
             });
             match (done, custom) {
                 (false, _) => out.push_str(r#""""#),
-                (true, false) => write_str(&item.text, out),
-                (true, true) => write_str(&custom_tool_input(&item.text), out),
+                (true, false) => item.text.write_json(out),
+                (true, true) => custom_tool_input(&item.text).write_json(out),
             }
             out.push('}');
         }
         Kind::Native => {
-            omni_ir::jsjson::write_spread(
+            omni_ir::jsjson::write_js_spread(
                 &item.native,
                 "type",
                 &item.block_type,
@@ -176,22 +165,24 @@ fn write_item(item: &Item, status: &str, out: &mut String) {
 }
 
 /// `,"error":{"code":…,"message":…}`.
-fn write_failure(code: &str, message: &str, out: &mut String) {
+fn write_failure(code: &str, message: &Text, out: &mut String) {
     out.push_str(r#","error":{"code":"#);
     write_str(code, out);
     out.push_str(r#","message":"#);
-    write_str(message, out);
+    message.write_json(out);
     out.push('}');
 }
 
 /// `JSON.stringify(String(v ?? ""))`, without building the string for a
 /// string value. A non-string summary is a malformed upstream and rare, so
 /// that branch may allocate its `String()` form.
-fn write_js_string(v: Option<&Value>, out: &mut String) {
+fn write_js_string(v: Option<&JsValue>, out: &mut String) {
     match v {
-        None | Some(Value::Null) => out.push_str(r#""""#),
-        Some(Value::String(s)) => write_str(s, out),
-        some => write_str(&omni_ir::js::to_string(some), out),
+        None | Some(JsValue::Null) => out.push_str(r#""""#),
+        Some(JsValue::String(s)) => omni_ir::jsjson::write_utf16(s, out),
+        some => omni_ir::jsjson::coerce_text(some)
+            .unwrap_or_default()
+            .write_json(out),
     }
 }
 
@@ -200,13 +191,13 @@ enum Merge {
     /// Read from the borrowed event and copied.
     Borrowed,
     /// Taken out of an event the caller gave up.
-    Moved(Map<String, Value>),
+    Moved(JsValue),
 }
 
 /// `responsesStream`, one event at a time.
 pub struct ResponsesStream {
     render: ResponsesRender,
-    model: String,
+    model: Text,
     sequence: u64,
     terminated: bool,
     /// Every completed item's JSON, comma-separated: each item is encoded
@@ -228,9 +219,8 @@ impl Fields<'_> {
         self.out.push(':');
         self.out
     }
-    fn str(&mut self, k: &str, v: &str) -> &mut Self {
-        let out = self.key(k);
-        write_str(v, out);
+    fn text(&mut self, k: &str, v: &Text) -> &mut Self {
+        v.write_json(self.key(k));
         self
     }
     fn num(&mut self, k: &str, v: u32) -> &mut Self {
@@ -244,7 +234,7 @@ impl ResponsesStream {
     pub fn new(render: ResponsesRender) -> ResponsesStream {
         ResponsesStream {
             render,
-            model: String::new(),
+            model: Text::default(),
             sequence: 0,
             terminated: false,
             output: String::new(),
@@ -279,7 +269,7 @@ impl ResponsesStream {
         out.push_str(r#","status":"#);
         write_str(status, out);
         out.push_str(r#","model":"#);
-        write_str(&self.model, out);
+        self.model.write_json(out);
         out.push_str(r#","output":["#);
         out.push_str(&self.output);
         out.push(']');
@@ -312,30 +302,30 @@ impl ResponsesStream {
         &mut self,
         ir_index: u32,
         kind: Kind,
-        call_id: &str,
-        tool_name: &str,
+        call_id: &Text,
+        tool_name: &Text,
         block_type: &str,
-        native: Map<String, Value>,
+        native: JsValue,
     ) {
         let output_index = self.next_output_index;
         self.next_output_index += 1;
         let id = if call_id.is_empty() {
-            format!(
+            Text::from(format!(
                 "{}_{}_{output_index}",
                 kind.prefix(),
                 self.render.request_id
-            )
+            ))
         } else {
-            format!("{}_{call_id}", kind.prefix())
+            call_id.surrounded(&format!("{}_", kind.prefix()), "")
         };
         self.open = Some(Item {
             ir_index,
             output_index,
             id,
             kind,
-            text: String::new(),
-            tool_name: tool_name.to_string(),
-            call_id: call_id.to_string(),
+            text: Text::default(),
+            tool_name: tool_name.clone(),
+            call_id: call_id.clone(),
             block_type: block_type.to_string(),
             native,
         });
@@ -345,59 +335,59 @@ impl ResponsesStream {
         let Some(item) = self.open.take() else {
             return;
         };
-        let (id, oi) = (item.id.as_str(), item.output_index);
+        let (id, oi) = (&item.id, item.output_index);
         match item.kind {
             Kind::Message => {
                 self.frame("response.output_text.done", out, |f| {
-                    f.str("item_id", id)
+                    f.text("item_id", id)
                         .num("output_index", oi)
                         .num("content_index", 0);
-                    f.str("text", &item.text);
+                    f.text("text", &item.text);
                 });
                 self.frame("response.content_part.done", out, |f| {
-                    f.str("item_id", id)
+                    f.text("item_id", id)
                         .num("output_index", oi)
                         .num("content_index", 0);
                     let out = f.key("part");
                     out.push_str(r#"{"type":"output_text","text":"#);
-                    write_str(&item.text, out);
+                    item.text.write_json(out);
                     out.push_str(r#","annotations":[]}"#);
                 });
             }
             Kind::Reasoning => {
                 self.frame("response.reasoning_summary_text.done", out, |f| {
-                    f.str("item_id", id)
+                    f.text("item_id", id)
                         .num("output_index", oi)
                         .num("summary_index", 0);
-                    f.str("text", &item.text);
+                    f.text("text", &item.text);
                 });
                 self.frame("response.reasoning_summary_part.done", out, |f| {
-                    f.str("item_id", id)
+                    f.text("item_id", id)
                         .num("output_index", oi)
                         .num("summary_index", 0);
                     let out = f.key("part");
                     out.push_str(r#"{"type":"summary_text","text":"#);
-                    write_str(&item.text, out);
+                    item.text.write_json(out);
                     out.push('}');
                 });
             }
             Kind::FunctionCall => {
                 self.frame("response.function_call_arguments.done", out, |f| {
-                    f.str("item_id", id).num("output_index", oi);
-                    f.str("arguments", &item.text);
+                    f.text("item_id", id).num("output_index", oi);
+                    f.text("arguments", &item.text);
                 });
             }
             Kind::CustomToolCall => {
                 let input = custom_tool_input(&item.text);
                 self.frame("response.custom_tool_call_input.delta", out, |f| {
-                    f.str("item_id", id)
+                    f.text("item_id", id)
                         .num("output_index", oi)
-                        .str("delta", &input);
+                        .text("delta", &input);
                 });
                 self.frame("response.custom_tool_call_input.done", out, |f| {
-                    f.str("item_id", id)
+                    f.text("item_id", id)
                         .num("output_index", oi)
-                        .str("input", &input);
+                        .text("input", &input);
                 });
             }
             Kind::Native => {}
@@ -436,7 +426,7 @@ impl ResponsesStream {
                         ..
                     },
                 ..
-            } => Some(std::mem::take(data)),
+            } => Some(std::mem::replace(data, JsValue::Null)),
             _ => None,
         };
         match merge {
@@ -475,9 +465,9 @@ impl ResponsesStream {
                 Merge::Moved(moved) => moved.get("text"),
                 Merge::Borrowed => data.get("text"),
             };
-            let id = item.id.as_str();
+            let id = &item.id;
             self.frame("response.reasoning_summary_text.delta", out, |f| {
-                f.str("item_id", id)
+                f.text("item_id", id)
                     .num("output_index", oi)
                     .num("summary_index", 0);
                 write_js_string(text, f.key("delta"));
@@ -486,25 +476,17 @@ impl ResponsesStream {
         let mut item = item;
         if *fold == Some(NativeFold::Merge) {
             match merge {
-                Merge::Moved(moved) => {
-                    for (k, v) in moved {
-                        omni_ir::deep::insert(&mut item.native, k, v);
-                    }
-                }
+                Merge::Moved(moved) => item.native.extend_object(moved),
                 // A borrowed event has to be copied to be kept; `push_owned`
                 // moves it instead.
-                Merge::Borrowed => {
-                    for (k, v) in data {
-                        omni_ir::deep::insert(&mut item.native, k.clone(), omni_ir::deep::clone(v));
-                    }
-                }
+                Merge::Borrowed => item.native.extend_object(data.clone()),
             }
         }
         self.open = Some(item);
     }
 
     /// The open item's retained native payload (diagnostics and tests).
-    pub fn open_native(&self) -> Option<&Map<String, Value>> {
+    pub fn open_native(&self) -> Option<&JsValue> {
         self.open.as_ref().map(|o| &o.native)
     }
 
@@ -527,20 +509,25 @@ impl ResponsesStream {
                     return;
                 }
                 self.close_current(out);
+                let empty = Text::default();
+                let empty_object = || JsValue::Object(Vec::new());
                 match block {
                     ContentBlockStart::Text => {
-                        self.open_item(*index, Kind::Message, "", "", "", Map::new());
+                        self.open_item(*index, Kind::Message, &empty, &empty, "", empty_object());
                     }
                     ContentBlockStart::Thinking { .. } => {
-                        self.open_item(*index, Kind::Reasoning, "", "", "", Map::new());
+                        self.open_item(*index, Kind::Reasoning, &empty, &empty, "", empty_object());
                     }
                     ContentBlockStart::ToolUse { id, name } => {
-                        let kind = if self.render.custom_tool_names.contains(name) {
+                        let kind = if name
+                            .as_utf8()
+                            .is_some_and(|n| self.render.custom_tool_names.contains(n))
+                        {
                             Kind::CustomToolCall
                         } else {
                             Kind::FunctionCall
                         };
-                        self.open_item(*index, kind, id, name, "", Map::new());
+                        self.open_item(*index, kind, id, name, "", empty_object());
                     }
                     ContentBlockStart::ProviderNative {
                         block_type, data, ..
@@ -548,24 +535,24 @@ impl ResponsesStream {
                         self.open_item(
                             *index,
                             Kind::Native,
-                            "",
-                            "",
+                            &empty,
+                            &empty,
                             block_type,
-                            omni_ir::deep::clone_map(data),
+                            data.clone(),
                         );
                     }
                 }
                 let Some(item) = self.open.take() else {
                     return;
                 };
-                let (id, oi) = (item.id.as_str(), item.output_index);
+                let (id, oi) = (&item.id, item.output_index);
                 self.frame("response.output_item.added", out, |f| {
                     f.num("output_index", oi);
                     write_item(&item, "in_progress", f.key("item"));
                 });
                 match item.kind {
                     Kind::Message => self.frame("response.content_part.added", out, |f| {
-                        f.str("item_id", id)
+                        f.text("item_id", id)
                             .num("output_index", oi)
                             .num("content_index", 0);
                         f.key("part")
@@ -573,7 +560,7 @@ impl ResponsesStream {
                     }),
                     Kind::Reasoning => {
                         self.frame("response.reasoning_summary_part.added", out, |f| {
-                            f.str("item_id", id)
+                            f.text("item_id", id)
                                 .num("output_index", oi)
                                 .num("summary_index", 0);
                             f.key("part")
@@ -595,32 +582,32 @@ impl ResponsesStream {
                 let (oi, kind) = (item.output_index, item.kind);
                 match delta {
                     Delta::Text { text } if kind == Kind::Message => {
-                        item.text.push_str(text);
-                        let id = item.id.as_str();
+                        item.text.push(text);
+                        let id = &item.id;
                         self.frame("response.output_text.delta", out, |f| {
-                            f.str("item_id", id)
+                            f.text("item_id", id)
                                 .num("output_index", oi)
                                 .num("content_index", 0);
-                            f.str("delta", text);
+                            f.text("delta", text);
                         });
                     }
                     Delta::Thinking { text } if kind == Kind::Reasoning => {
-                        item.text.push_str(text);
-                        let id = item.id.as_str();
+                        item.text.push(text);
+                        let id = &item.id;
                         self.frame("response.reasoning_summary_text.delta", out, |f| {
-                            f.str("item_id", id)
+                            f.text("item_id", id)
                                 .num("output_index", oi)
                                 .num("summary_index", 0);
-                            f.str("delta", text);
+                            f.text("delta", text);
                         });
                     }
                     Delta::ToolJson { partial } => {
-                        item.text.push_str(partial);
+                        item.text.push(partial);
                         if kind == Kind::FunctionCall {
-                            let id = item.id.as_str();
+                            let id = &item.id;
                             self.frame("response.function_call_arguments.delta", out, |f| {
-                                f.str("item_id", id).num("output_index", oi);
-                                f.str("delta", partial);
+                                f.text("item_id", id).num("output_index", oi);
+                                f.text("delta", partial);
                             });
                         }
                     }
@@ -656,7 +643,7 @@ impl ResponsesStream {
                         out.push('}');
                     }
                     out.push_str(r#","usage":"#);
-                    write_value(&usage_value(usage), out);
+                    write_js_value(&usage_value(usage), out);
                 };
                 self.snapshot_frame(name, status, extra, out);
             }
@@ -676,7 +663,7 @@ impl ResponsesStream {
             let extra = |out: &mut String| {
                 write_failure(
                     "stream_disconnected",
-                    "stream closed before response.completed",
+                    &"stream closed before response.completed".into(),
                     out,
                 );
             };
@@ -689,17 +676,11 @@ impl ResponsesStream {
 }
 
 /// `responsesResponse`.
-/// The body holds client payloads (tool inputs, native blocks), so it is
-/// returned as a [`Owned`] that drops iteratively.
-pub fn response(collected: &CollectedResponse, render: &ResponsesRender) -> Owned {
-    Owned(response_value(collected, render))
-}
-
-fn response_value(collected: &CollectedResponse, render: &ResponsesRender) -> Value {
+pub fn response(collected: &CollectedResponse, render: &ResponsesRender) -> JsValue {
     let mut out = String::new();
     write_response(collected, render, &mut out);
-    // Our own output, so it parses; `Value` is the type the route renders.
-    omni_ir::deep::parse(&out).unwrap_or(Value::Null)
+    // Our own output, which can contain literal escaped surrogate units.
+    omni_ir::jsjson::parse_js(&out).expect("rendered Responses JSON")
 }
 
 /// `responsesResponse`, written as the bytes `JSON.stringify` produces.
@@ -713,54 +694,61 @@ pub(crate) fn write_response(
     s.model.clone_from(&collected.model);
     for (i, block) in collected.content.iter().enumerate() {
         let oi = u32::try_from(i).unwrap_or(u32::MAX);
-        let item = |kind, id: String, text: String, tool_name: &str, call_id: &str| Item {
+        let empty = Text::default();
+        let item = |kind, id: Text, text: Text, tool_name: &Text, call_id: &Text| Item {
             ir_index: oi,
             output_index: oi,
             id,
             kind,
             text,
-            tool_name: tool_name.to_string(),
-            call_id: call_id.to_string(),
+            tool_name: tool_name.clone(),
+            call_id: call_id.clone(),
             block_type: String::new(),
-            native: Map::new(),
+            native: JsValue::Object(Vec::new()),
         };
         let rendered = match block {
-            ContentBlock::Text(t) => item(
+            CollectedBlock::Text { text, .. } => item(
                 Kind::Message,
-                format!("msg_{rid}_{oi}"),
-                t.text.clone(),
-                "",
-                "",
+                format!("msg_{rid}_{oi}").into(),
+                text.clone(),
+                &empty,
+                &empty,
             ),
-            ContentBlock::Thinking(t) => item(
+            CollectedBlock::Thinking { text, .. } => item(
                 Kind::Reasoning,
-                format!("rs_{rid}_{oi}"),
-                t.text.clone(),
-                "",
-                "",
+                format!("rs_{rid}_{oi}").into(),
+                text.clone(),
+                &empty,
+                &empty,
             ),
-            ContentBlock::ToolUse(t) => {
-                let custom = render.custom_tool_names.contains(&t.name);
+            CollectedBlock::ToolUse { id, name, input } => {
+                let custom = name
+                    .as_utf8()
+                    .is_some_and(|name| render.custom_tool_names.contains(name));
                 item(
                     if custom {
                         Kind::CustomToolCall
                     } else {
                         Kind::FunctionCall
                     },
-                    format!("{}_{}", if custom { "ctc" } else { "fc" }, t.id),
-                    omni_ir::jsjson::to_string(&t.input),
-                    &t.name,
-                    &t.id,
+                    id.surrounded(if custom { "ctc_" } else { "fc_" }, ""),
+                    omni_ir::jsjson::render(input).into(),
+                    name,
+                    id,
                 )
             }
-            ContentBlock::ProviderNative(n) if n.provider == "openai" => {
+            CollectedBlock::ProviderNative {
+                provider,
+                data,
+                block_type,
+            } if provider == "openai" => {
                 if !s.output.is_empty() {
                     s.output.push(',');
                 }
-                omni_ir::jsjson::write_spread(
-                    &n.data,
+                omni_ir::jsjson::write_js_spread(
+                    data,
                     "type",
-                    &n.block_type,
+                    block_type,
                     omni_ir::jsjson::Spread::KeyFirst,
                     &mut s.output,
                 );
@@ -786,14 +774,22 @@ pub(crate) fn write_response(
                 out.push('}');
             }
             out.push_str(r#","usage":"#);
-            write_value(&usage_value(&collected.usage), out);
+            write_js_value(&usage_value(&collected.usage), out);
         },
         out,
     );
 }
 
 /// `responsesErrorBody`.
-pub fn error_body(code: ErrorCode, message: &str) -> Value {
+pub fn error_body(code: ErrorCode, message: &Text) -> JsValue {
     let (t, c) = error_type(code);
-    json!({ "error": { "type": t, "code": c, "message": message, "param": null } })
+    JsValue::object([(
+        "error",
+        JsValue::object([
+            ("type", t.into()),
+            ("code", c.into()),
+            ("message", message.into()),
+            ("param", JsValue::Null),
+        ]),
+    )])
 }

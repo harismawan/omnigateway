@@ -45,6 +45,7 @@ pub fn usage(v: &Value) -> Usage {
         cache_write_tokens: f(&v["cacheWriteTokens"]),
         cache_write_5m_tokens: v.get("cacheWrite5mTokens").map(f),
         cache_write_1h_tokens: v.get("cacheWrite1hTokens").map(f),
+        ..Usage::default()
     }
 }
 
@@ -81,7 +82,7 @@ pub fn event(v: &Value) -> StreamEvent {
                 "providerNative" => ContentBlockStart::ProviderNative {
                     provider: s(&b["provider"]).into(),
                     block_type: s(&b["blockType"]).into(),
-                    data: obj(&b["data"]),
+                    data: jsjson::JsValue::from(&b["data"]),
                 },
                 other => panic!("block {other}"),
             };
@@ -117,7 +118,7 @@ pub fn event(v: &Value) -> StreamEvent {
                         "citation" => NativeFold::Citation,
                         other => panic!("fold {other}"),
                     }),
-                    data: obj(&d["data"]),
+                    data: jsjson::JsValue::from(&d["data"]),
                 },
                 other => panic!("delta {other}"),
             };

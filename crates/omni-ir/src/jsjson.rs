@@ -20,10 +20,8 @@
 
 /// A JavaScript value, as far as `JSON.stringify` can observe one.
 ///
-/// Used by the conformance tests to model values `serde_json` cannot hold
-/// (`undefined`, lone surrogates); the gateway itself writes `serde_json`
-/// values. Conversion, `Clone` and `Drop` are stack-safe at any depth, like
-/// the rest of `crate::deep`.
+/// Conversion, `Clone` and `Drop` are stack-safe at any depth, like the rest
+/// of `crate::deep`.
 #[derive(Debug, PartialEq)]
 pub enum JsValue {
     Undefined,
@@ -50,15 +48,19 @@ impl From<&serde_json::Value> for JsValue {
             Value::Array(items) => {
                 crate::deep::grow(|| JsValue::Array(items.iter().map(JsValue::from).collect()))
             }
-            Value::Object(map) => crate::deep::grow(|| {
-                JsValue::Object(
-                    map.iter()
-                        .map(|(k, v)| (k.encode_utf16().collect(), JsValue::from(v)))
-                        .collect(),
-                )
-            }),
+            Value::Object(map) => object_from_serde(map),
         }
     }
+}
+
+pub fn object_from_serde(map: &serde_json::Map<String, serde_json::Value>) -> JsValue {
+    crate::deep::grow(|| {
+        JsValue::Object(
+            map.iter()
+                .map(|(k, v)| (k.encode_utf16().collect(), JsValue::from(v)))
+                .collect(),
+        )
+    })
 }
 
 impl Clone for JsValue {
@@ -107,6 +109,332 @@ impl Drop for JsValue {
 impl JsValue {
     fn is_container(&self) -> bool {
         matches!(self, JsValue::Array(_) | JsValue::Object(_))
+    }
+
+    pub fn as_array(&self) -> Option<&[Self]> {
+        match self {
+            Self::Array(items) => Some(items),
+            _ => None,
+        }
+    }
+
+    pub fn as_object(&self) -> Option<&[(Vec<u16>, Self)]> {
+        match self {
+            Self::Object(entries) => Some(entries),
+            _ => None,
+        }
+    }
+
+    pub fn get(&self, key: &str) -> Option<&Self> {
+        self.as_object()?
+            .iter()
+            .find_map(|(k, v)| key.encode_utf16().eq(k.iter().copied()).then_some(v))
+    }
+
+    pub fn as_text(&self) -> Option<crate::text::Text> {
+        match self {
+            Self::String(units) => Some(crate::text::Text::from_utf16(units.clone())),
+            _ => None,
+        }
+    }
+
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            Self::Number(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    pub fn is_null(&self) -> bool {
+        matches!(self, Self::Null)
+    }
+    pub fn is_array(&self) -> bool {
+        matches!(self, Self::Array(_))
+    }
+    pub fn is_object(&self) -> bool {
+        matches!(self, Self::Object(_))
+    }
+    pub fn is_string(&self) -> bool {
+        matches!(self, Self::String(_))
+    }
+
+    pub fn string_eq(&self, text: &str) -> bool {
+        matches!(self, Self::String(units) if text.encode_utf16().eq(units.iter().copied()))
+    }
+
+    pub fn object(entries: impl IntoIterator<Item = (&'static str, Self)>) -> Self {
+        Self::Object(
+            entries
+                .into_iter()
+                .map(|(key, value)| (key.encode_utf16().collect(), value))
+                .collect(),
+        )
+    }
+
+    pub fn into_object(mut self) -> Vec<(Vec<u16>, Self)> {
+        match &mut self {
+            Self::Object(entries) => std::mem::take(entries),
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn put(&mut self, key: Vec<u16>, value: Self) {
+        let Self::Object(entries) = self else {
+            return;
+        };
+        if let Some((_, slot)) = entries.iter_mut().find(|(k, _)| *k == key) {
+            *slot = value;
+        } else {
+            entries.push((key, value));
+        }
+    }
+
+    pub fn assign_entries(&mut self, source: &Self) {
+        let indexed = |i: usize| i.to_string().encode_utf16().collect();
+        let entries = match source {
+            Self::Object(o) => o
+                .iter()
+                .filter(|(k, _)| !"__proto__".encode_utf16().eq(k.iter().copied()))
+                .cloned()
+                .collect(),
+            Self::Array(a) => a
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(i, v)| (indexed(i), v))
+                .collect(),
+            Self::String(s) => s
+                .iter()
+                .enumerate()
+                .map(|(i, u)| (indexed(i), Self::String(vec![*u])))
+                .collect(),
+            _ => return,
+        };
+        self.extend_object(Self::Object(entries));
+    }
+
+    pub fn extend_object(&mut self, source: Self) {
+        if let Self::Object(entries) = self
+            && entries.is_empty()
+        {
+            *entries = source.into_object();
+        } else {
+            use std::collections::HashMap;
+            if let Self::Object(entries) = self {
+                let mut indices: HashMap<_, _> = entries
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (k, _))| (k.clone(), i))
+                    .collect();
+                for (k, v) in source.into_object() {
+                    match indices.entry(k) {
+                        std::collections::hash_map::Entry::Occupied(at) => entries[*at.get()].1 = v,
+                        std::collections::hash_map::Entry::Vacant(at) => {
+                            entries.push((at.key().clone(), v));
+                            at.insert(entries.len() - 1);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl From<&crate::text::Text> for JsValue {
+    fn from(text: &crate::text::Text) -> Self {
+        Self::String(text.to_utf16())
+    }
+}
+
+impl From<&str> for JsValue {
+    fn from(text: &str) -> Self {
+        Self::String(text.encode_utf16().collect())
+    }
+}
+
+impl From<f64> for JsValue {
+    fn from(n: f64) -> Self {
+        Self::Number(n)
+    }
+}
+
+impl std::ops::Index<&str> for JsValue {
+    type Output = Self;
+    fn index(&self, key: &str) -> &Self {
+        static NULL: JsValue = JsValue::Null;
+        self.get(key).unwrap_or(&NULL)
+    }
+}
+
+pub fn write_js_value(value: &JsValue, out: &mut String) {
+    if !write_js(value, out, None, 0) {
+        out.push_str("null");
+    }
+}
+
+/// UTF-8 JSON text even when the represented string contains lone units.
+pub fn render(value: &JsValue) -> String {
+    let mut out = String::new();
+    write_js_value(value, &mut out);
+    out
+}
+
+/// Writes the JS object spread without cloning its opaque children.
+pub fn write_js_spread(data: &JsValue, key: &str, value: &str, spread: Spread, out: &mut String) {
+    let key_units: Vec<_> = key.encode_utf16().collect();
+    let data = data.as_object().unwrap_or_default();
+    let found = data.iter().position(|(k, _)| *k == key_units);
+    let mut order: Vec<_> = data
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (k, _))| array_index_utf16(k).map(|n| (n, i)))
+        .collect();
+    if !order.is_empty() {
+        note_key_order_build();
+    }
+    order.sort_unstable();
+    out.push('{');
+    let mut first = true;
+    let mut pair = |k: &[u16], v: Option<&JsValue>| {
+        if v.is_some_and(is_skipped) {
+            return;
+        }
+        if !first {
+            out.push(',');
+        }
+        first = false;
+        write_utf16(k, out);
+        out.push(':');
+        if let Some(v) = v {
+            write_js_value(v, out);
+        } else {
+            write_str(value, out);
+        }
+    };
+    for (_, i) in order {
+        let (k, v) = &data[i];
+        pair(
+            k,
+            (spread != Spread::KeyLast || found != Some(i)).then_some(v),
+        );
+    }
+    if spread == Spread::KeyFirst {
+        pair(&key_units, found.map(|i| &data[i].1));
+    }
+    for (i, (k, v)) in data.iter().enumerate() {
+        if array_index_utf16(k).is_some() || (spread == Spread::KeyFirst && found == Some(i)) {
+            continue;
+        }
+        pair(
+            k,
+            (spread != Spread::KeyLast || found != Some(i)).then_some(v),
+        );
+    }
+    if spread == Spread::KeyLast && found.is_none() {
+        pair(&key_units, None);
+    }
+    out.push('}');
+}
+
+/// Explicit projection for APIs that only accept Unicode-scalar JSON.
+pub fn to_serde_lossy(value: &JsValue) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        JsValue::Undefined | JsValue::Function | JsValue::Null => Value::Null,
+        JsValue::Bool(b) => Value::Bool(*b),
+        JsValue::Number(n) => crate::stream::number(*n),
+        JsValue::String(s) => Value::String(String::from_utf16_lossy(s)),
+        JsValue::Array(a) => {
+            crate::deep::grow(|| Value::Array(a.iter().map(to_serde_lossy).collect()))
+        }
+        JsValue::Object(o) => crate::deep::grow(|| {
+            Value::Object(
+                o.iter()
+                    .filter(|(_, v)| !is_skipped(v))
+                    .map(|(k, v)| (String::from_utf16_lossy(k), to_serde_lossy(v)))
+                    .collect(),
+            )
+        }),
+    }
+}
+
+/// A lossless upstream parse under the same depth policy as `deep::parse`.
+pub fn parse_bounded(text: &str, depth: usize) -> Result<JsValue, crate::deep::ParseError> {
+    if depth > crate::deep::MAX_DEPTH {
+        return Err(crate::deep::ParseError::TooDeep);
+    }
+    parse_js(text).map_err(|_| crate::deep::ParseError::Syntax)
+}
+
+/// JS String()/Number() and `+` over JSON-derived values.
+pub fn coerce_text(value: Option<&JsValue>) -> Result<crate::text::Text, crate::js::Throws> {
+    use crate::text::Text;
+    Ok(match value {
+        None | Some(JsValue::Undefined) => "undefined".into(),
+        Some(JsValue::Null) => "null".into(),
+        Some(JsValue::Bool(b)) => if *b { "true" } else { "false" }.into(),
+        Some(JsValue::Number(n)) if n.is_nan() => "NaN".into(),
+        Some(JsValue::Number(n)) if n.is_infinite() => if n.is_sign_positive() {
+            "Infinity"
+        } else {
+            "-Infinity"
+        }
+        .into(),
+        Some(JsValue::Number(n)) => {
+            let mut s = String::new();
+            write_number(*n, &mut s);
+            s.into()
+        }
+        Some(JsValue::String(units)) => Text::from_utf16(units.clone()),
+        Some(JsValue::Array(items)) => crate::deep::grow(|| {
+            let mut text = Text::default();
+            let comma = Text::from(",");
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    text.push(&comma);
+                }
+                if !matches!(item, JsValue::Null | JsValue::Undefined) {
+                    text.push(&coerce_text(Some(item))?);
+                }
+            }
+            Ok(text)
+        })?,
+        Some(v @ JsValue::Object(_)) => {
+            if v.get("toString").is_some() {
+                return Err(crate::js::Throws);
+            }
+            "[object Object]".into()
+        }
+        Some(JsValue::Function) => return Err(crate::js::Throws),
+    })
+}
+
+pub fn coerce_number(value: Option<&JsValue>) -> Result<f64, crate::js::Throws> {
+    Ok(match value {
+        Some(JsValue::Null) => 0.0,
+        Some(JsValue::Bool(b)) => f64::from(*b),
+        Some(JsValue::Number(n)) => *n,
+        _ => coerce_text(value)?
+            .as_utf8()
+            .map_or(f64::NAN, crate::js::string_to_number),
+    })
+}
+
+pub fn add(left: &JsValue, right: &JsValue) -> Result<JsValue, crate::js::Throws> {
+    let primitive_string = |v: &JsValue| {
+        matches!(
+            v,
+            JsValue::String(_) | JsValue::Object(_) | JsValue::Array(_)
+        )
+    };
+    if primitive_string(left) || primitive_string(right) {
+        let mut left = coerce_text(Some(left))?;
+        left.push(&coerce_text(Some(right))?);
+        Ok(JsValue::from(&left))
+    } else {
+        Ok(JsValue::Number(
+            coerce_number(Some(left))? + coerce_number(Some(right))?,
+        ))
     }
 }
 
@@ -244,10 +572,33 @@ pub fn write_map(map: &serde_json::Map<String, serde_json::Value>, out: &mut Str
     write_object(map, out, None, 0);
 }
 
-/// `JSON.stringify(value)` for a parsed JSON value, as a new string.
-pub fn to_string(value: &serde_json::Value) -> String {
+/// Values that can write the gateway's client JSON byte contract.
+pub trait JsonOutput {
+    fn write_json(&self, out: &mut String);
+}
+
+impl JsonOutput for serde_json::Value {
+    fn write_json(&self, out: &mut String) {
+        write_value(self, out);
+    }
+}
+
+impl JsonOutput for crate::deep::Owned {
+    fn write_json(&self, out: &mut String) {
+        write_value(self, out);
+    }
+}
+
+impl JsonOutput for JsValue {
+    fn write_json(&self, out: &mut String) {
+        write_js_value(self, out);
+    }
+}
+
+/// `JSON.stringify(value)`, as a new string.
+pub fn to_string<T: JsonOutput>(value: &T) -> String {
     let mut out = String::with_capacity(128);
-    write_value(value, &mut out);
+    value.write_json(&mut out);
     out
 }
 
@@ -392,12 +743,16 @@ pub fn array_index(key: &str) -> Option<u32> {
 }
 
 fn array_index_utf16(key: &[u16]) -> Option<u32> {
-    let digits = u16::from(b'0')..=u16::from(b'9');
-    if key.iter().all(|u| digits.contains(u)) {
-        array_index(&String::from_utf16_lossy(key))
-    } else {
-        None
+    let zero = u16::from(b'0');
+    if key.is_empty() || key.len() > 10 || (key.len() > 1 && key[0] == zero) {
+        return None;
     }
+    let mut n = 0u32;
+    for &unit in key {
+        let digit = unit.checked_sub(zero).filter(|d| *d <= 9)?;
+        n = n.checked_mul(10)?.checked_add(u32::from(digit))?;
+    }
+    (n != u32::MAX).then_some(n)
 }
 
 /// Indices of `keys` in JS enumeration order.
@@ -489,13 +844,15 @@ fn write_js(value: &JsValue, out: &mut String, indent: Option<usize>, depth: usi
             out.push(']');
         }
         JsValue::Object(entries) => {
-            let order = enumeration_order(entries, |(k, _)| array_index_utf16(k));
+            let order = entries
+                .iter()
+                .any(|(k, _)| array_index_utf16(k).is_some())
+                .then(|| enumeration_order(entries, |(k, _)| array_index_utf16(k)));
             let mut wrote = false;
             out.push('{');
-            for position in order {
-                let (key, item) = &entries[position];
+            let mut pair = |(key, item): &(Vec<u16>, JsValue)| {
                 if is_skipped(item) {
-                    continue;
+                    return;
                 }
                 if wrote {
                     out.push(',');
@@ -508,6 +865,13 @@ fn write_js(value: &JsValue, out: &mut String, indent: Option<usize>, depth: usi
                     out.push(' ');
                 }
                 crate::deep::grow(|| write_js(item, out, indent, depth + 1));
+            };
+            if let Some(order) = order {
+                for i in order {
+                    pair(&entries[i]);
+                }
+            } else {
+                entries.iter().for_each(pair);
             }
             if wrote {
                 newline_indent(out, indent, depth);

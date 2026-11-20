@@ -126,6 +126,8 @@ impl fmt::Display for ErrorCode {
 pub struct GatewayError {
     pub code: ErrorCode,
     pub message: String,
+    /// Present only when the upstream message cannot be stored in `String`.
+    lossless_message: Option<Box<crate::text::Text>>,
     pub retryable: bool,
     /// Which upstream failed, when the failure came from one.
     pub provider: Option<String>,
@@ -143,6 +145,7 @@ impl GatewayError {
         GatewayError {
             code,
             message: message.into(),
+            lossless_message: None,
             retryable: code.retryable(),
             provider: None,
             upstream_status: None,
@@ -150,6 +153,22 @@ impl GatewayError {
             retry_after_ms: None,
             degradations: Vec::new(),
         }
+    }
+
+    pub fn from_text(code: ErrorCode, message: crate::text::Text) -> Self {
+        if let Some(text) = message.as_utf8() {
+            return Self::new(code, text);
+        }
+        let mut error = Self::new(code, message.to_utf8_lossy().into_owned());
+        error.lossless_message = Some(Box::new(message));
+        error
+    }
+
+    pub fn client_message(&self) -> crate::text::Text {
+        self.lossless_message
+            .as_deref()
+            .cloned()
+            .unwrap_or_else(|| self.message.as_str().into())
     }
 
     #[must_use]

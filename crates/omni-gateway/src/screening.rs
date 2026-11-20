@@ -358,7 +358,7 @@ pub fn screen_first(
         let mut inner = dispatch::dispatch_with_options(deps, req, DispatchOptions { local_only: local_model.is_some(), ..DispatchOptions::default() });
         while let Some(mut event) = inner.events.next().await {
             if let (Some(model), Ok(StreamEvent::Start { model: start_model, .. })) = (&reroute, &mut event) {
-                start_model.clone_from(model);
+                *start_model = model.as_str().into();
             }
             {
                 let mut current = locked(&log);
@@ -599,7 +599,19 @@ async fn classify(
             .any(|e| matches!(e, StreamEvent::Error { .. }))
     {
         omni_ir::stream::try_collect(events).ok().and_then(|r| {
-            let response = json!({"content": r.content, "stopReason": r.stop_reason.as_str()});
+            // The verdict parser reads only text; no native or tool payload
+            // crosses this scalar JSON boundary. A replacement character in
+            // a malformed classifier reply cannot match a bare verdict.
+            let mut text = omni_ir::text::Text::default();
+            for block in &r.content {
+                if let omni_ir::stream::CollectedBlock::Text { text: part, .. } = block {
+                    text.push(part);
+                }
+            }
+            let response = json!({
+                "content": [{"type": "text", "text": text.to_utf8_lossy()}],
+                "stopReason": r.stop_reason.as_str()
+            });
             if guardrail {
                 parse_verdict(&response)
             } else {

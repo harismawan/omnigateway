@@ -84,7 +84,6 @@ fn frozen_decoder_chunkings() {
 }
 
 #[test]
-#[ignore = "parked: roadmap X1 (non-numeric upstream usage counts)"]
 fn malformed_usage_matches_ts() {
     compare_decoder(true);
 }
@@ -103,7 +102,6 @@ fn compare_decoder_mode(malformed_usage: bool, codec: bool) {
 }
 
 #[test]
-#[ignore = "parked: roadmap X1 (upstream numbers beyond the double range)"]
 fn overflow_matches_ts() {
     compare_reference(false, false, true);
 }
@@ -243,7 +241,7 @@ fn compare_source(malformed_usage: bool, codec: bool, overflow: bool, review: bo
             .iter()
             .enumerate()
             {
-                let actual = omni_ir::jsjson::to_string(&value.0);
+                let actual = omni_ir::jsjson::to_string(value);
                 if actual != row["json"][j].as_str().expect("json") {
                     eprintln!(
                         "case {i} {} chunk {chunk} client {j}\nRust: {actual}\nTS: {}",

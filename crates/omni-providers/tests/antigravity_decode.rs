@@ -173,33 +173,27 @@ fn request_cloak_round_trip() {
     assert!(out.iter().any(|e|matches!(e,omni_ir::stream::StreamEvent::BlockStart{block:omni_ir::stream::ContentBlockStart::ToolUse{name,..},..} if name=="original / tool")));
 }
 #[test]
-#[ignore = "X1: lone UTF-16 units reject the whole frame"]
 fn x1_surrogate_positions_retained_red() {
     compare("X1/surrogate/");
 }
 #[test]
-#[ignore = "X1: even an ignored surrogate rejects the whole frame"]
 fn x1_ignored_field_retained_red() {
     compare("X1/surrogate/ignored");
 }
 #[test]
-#[ignore = "X1: number beyond double range"]
 fn x1_overflow_retained_red() {
     compare("X1/overflow");
 }
 #[test]
-#[ignore = "X1: surrogate finishReason rejects the frame before the non-retryable error"]
 fn x1_surrogate_finish_reason_retained_red() {
     compare("X1/surrogate/finishReason");
 }
 #[test]
-#[ignore = "X1: surrogate blockReason rejects the frame before contentFilter end"]
 fn x1_surrogate_block_reason_retained_red() {
     // Frozen's output is fully representable; blockReason itself is never emitted.
     compare("X1/surrogate/blockReason");
 }
 #[test]
-#[ignore = "X1: overflowing candidates.length rejects the frame before the non-retryable error"]
 fn x1_overflow_candidates_length_retained_red() {
     compare("X1/overflow/candidatesLength");
 }

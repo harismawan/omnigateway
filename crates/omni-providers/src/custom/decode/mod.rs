@@ -7,9 +7,9 @@
 //! One stated divergence: usage counts are coerced with `Number()`, where TS
 //! would carry a non-numeric `completion_tokens` through as-is.
 
-use omni_ir::js;
+use omni_ir::jsjson::{self, JsValue as Value};
 use omni_ir::stream::{Usage, usage_from_prompt_total};
-use serde_json::Value;
+use omni_ir::text::Text;
 
 use crate::codec::DecodeError;
 
@@ -64,7 +64,9 @@ pub(super) struct ArgumentDepth {
 }
 
 impl ArgumentDepth {
-    pub(super) fn push(&mut self, text: &str) -> Result<(), DecodeError> {
+    pub(super) fn push(&mut self, text: &Text) -> Result<(), DecodeError> {
+        // Only ASCII punctuation matters to this depth scanner.
+        let text = text.to_utf8_lossy();
         for b in text.bytes() {
             if self.quoted {
                 if self.escaped {
@@ -101,7 +103,7 @@ impl ArgumentDepth {
 pub(super) enum JsKey {
     /// The f64 bits, with `-0` folded into `0`.
     Number(u64),
-    String(String),
+    String(Text),
     Bool(bool),
     Null,
     Unique(u64),
@@ -114,13 +116,13 @@ impl KeyMint {
     pub(super) fn key(&mut self, v: &Value) -> JsKey {
         match v {
             Value::Number(n) => {
-                let f = js::number_value(n);
+                let f = *n;
                 JsKey::Number(if f == 0.0 { 0 } else { f.to_bits() })
             }
-            Value::String(s) => JsKey::String(s.clone()),
+            Value::String(s) => JsKey::String(Text::from_utf16(s.clone())),
             Value::Bool(b) => JsKey::Bool(*b),
             Value::Null => JsKey::Null,
-            Value::Array(_) | Value::Object(_) => {
+            _ => {
                 self.0 += 1;
                 JsKey::Unique(self.0)
             }
@@ -131,28 +133,24 @@ impl KeyMint {
 /// `x ?? 0` as a value, for keys and template strings.
 pub(super) fn or_zero(v: Option<&Value>) -> Value {
     match v {
-        None | Some(Value::Null) => Value::from(0),
-        Some(v) => omni_ir::deep::clone(v),
+        None | Some(Value::Null) => Value::from(0.0),
+        Some(v) => v.clone(),
     }
 }
 
 /// `JSON.parse` that keeps only what `typeof v === "object" && v !== null` keeps.
 pub(super) fn json_object(data: &str) -> Option<Value> {
-    omni_ir::deep::parse(data)
+    jsjson::parse_js(data)
         .ok()
-        .or_else(|| js::replace_lone_surrogates(data).and_then(|s| omni_ir::deep::parse(&s).ok()))
         .filter(|v| v.is_object() || v.is_array())
 }
 
 /// `x?.[0]`.
 pub(super) fn index0(v: Option<&Value>) -> Option<Value> {
     match v? {
-        Value::Array(items) => items.first().map(omni_ir::deep::clone),
-        Value::Object(map) => map.get("0").map(omni_ir::deep::clone),
-        Value::String(s) => s
-            .encode_utf16()
-            .next()
-            .map(|u| Value::String(String::from_utf16_lossy(&[u]))),
+        Value::Array(items) => items.first().cloned(),
+        v @ Value::Object(_) => v.get("0").cloned(),
+        Value::String(s) => s.first().map(|u| Value::String(vec![*u])),
         _ => None,
     }
 }
@@ -162,15 +160,35 @@ pub(super) fn index0(v: Option<&Value>) -> Option<Value> {
 pub(super) fn iterate(v: Option<&Value>) -> Result<Vec<Value>, DecodeError> {
     match v {
         None | Some(Value::Null) => Ok(Vec::new()),
-        Some(Value::Array(items)) => Ok(items.iter().map(omni_ir::deep::clone).collect()),
-        Some(Value::String(s)) => Ok(s.chars().map(|c| Value::String(c.to_string())).collect()),
+        Some(Value::Array(items)) => Ok(items.clone()),
+        Some(Value::String(s)) => Ok(char::decode_utf16(s.iter().copied())
+            .map(|v| match v {
+                Ok(ch) => Value::String(ch.encode_utf16(&mut [0; 2]).to_vec()),
+                Err(unit) => Value::String(vec![unit.unpaired_surrogate()]),
+            })
+            .collect()),
         Some(_) => Err(DecodeError::Throw("tool_calls is not iterable")),
     }
 }
 
 /// A non-empty string, or `None` (`typeof x === "string" && x.length > 0`).
-pub(super) fn nonempty(v: Option<&Value>) -> Option<&str> {
-    v.and_then(Value::as_str).filter(|s| !s.is_empty())
+pub(super) fn nonempty(v: Option<&Value>) -> Option<Text> {
+    v.and_then(Value::as_text).filter(|s| !s.is_empty())
+}
+
+fn prop<'a>(v: Option<&'a Value>, key: &str) -> Option<&'a Value> {
+    v.and_then(|v| v.get(key))
+}
+fn nullish_or<'a>(a: Option<&'a Value>, b: Option<&'a Value>) -> Option<&'a Value> {
+    a.filter(|v| !v.is_null()).or(b)
+}
+fn truthy(v: Option<&Value>) -> bool {
+    match v {
+        None | Some(Value::Null | Value::Undefined | Value::Bool(false)) => false,
+        Some(Value::Number(n)) => *n != 0.0 && !n.is_nan(),
+        Some(Value::String(s)) => !s.is_empty(),
+        _ => true,
+    }
 }
 
 /// `usageFromPromptTotal` over raw JSON counts, coerced as JS arithmetic does.
@@ -180,16 +198,16 @@ pub(super) fn usage_of(
     read: Option<&Value>,
     write: Option<&Value>,
 ) -> Result<Usage, DecodeError> {
-    let n = |v: Option<&Value>| js::to_number(Some(&or_zero(v)));
+    let n = |v: Option<&Value>| jsjson::coerce_number(Some(&or_zero(v))).unwrap_or(f64::NAN);
     let checked =
-        |v| js::try_to_number(v).map_err(|_| DecodeError::Throw("JavaScript coercion threw"));
-    let zero = Value::from(0);
-    let p = checked(js::nullish_or(prompt, Some(&zero)))?;
-    let r = checked(js::nullish_or(read, Some(&zero)))?;
-    let w = checked(js::nullish_or(write, Some(&zero)))?;
+        |v| jsjson::coerce_number(v).map_err(|_| DecodeError::Throw("JavaScript coercion threw"));
+    let zero = Value::from(0.0);
+    let p = checked(nullish_or(prompt, Some(&zero)))?;
+    let r = checked(nullish_or(read, Some(&zero)))?;
+    let w = checked(nullish_or(write, Some(&zero)))?;
     Ok(usage_from_prompt_total(p, n(output), r, w))
 }
 
-fn string(v: Option<&Value>) -> Result<String, DecodeError> {
-    js::try_to_string(v).map_err(|_| DecodeError::Throw("JavaScript coercion threw"))
+fn string(v: Option<&Value>) -> Result<Text, DecodeError> {
+    jsjson::coerce_text(v).map_err(|_| DecodeError::Throw("JavaScript coercion threw"))
 }

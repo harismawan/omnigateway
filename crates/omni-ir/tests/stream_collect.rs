@@ -1,8 +1,10 @@
 //! `collect()` parity, ported from `packages/ir/test/stream.test.ts`, plus the
 //! canonical JSON form the vector suites compare against.
 
-use omni_ir::request::{ContentBlock, TextBlock, ThinkingBlock, ToolUseBlock};
-use omni_ir::stream::{ContentBlockStart, Delta, StopReason, StreamEvent, Usage, collect};
+use omni_ir::jsjson::JsValue;
+use omni_ir::stream::{
+    CollectedBlock, ContentBlockStart, Delta, StopReason, StreamEvent, Usage, collect,
+};
 use serde_json::json;
 
 fn usage(input: f64, output: f64) -> Usage {
@@ -13,13 +15,12 @@ fn usage(input: f64, output: f64) -> Usage {
     }
 }
 
-fn tool_use(input: serde_json::Value) -> ContentBlock {
-    ContentBlock::ToolUse(ToolUseBlock {
+fn tool_use(input: serde_json::Value) -> CollectedBlock {
+    CollectedBlock::ToolUse {
         id: "t1".into(),
         name: "get".into(),
-        input,
-        cache_control: None,
-    })
+        input: JsValue::from(&input),
+    }
 }
 
 fn start() -> StreamEvent {
@@ -63,11 +64,10 @@ fn collect_assembles_text_deltas_into_one_block() {
     ]);
     assert_eq!(
         r.content,
-        vec![ContentBlock::Text(TextBlock {
+        vec![CollectedBlock::Text {
             text: "Hello".into(),
-            cache_control: None,
-            citations: None
-        })]
+            citations: Vec::new(),
+        }]
     );
     assert_eq!(r.stop_reason, StopReason::EndTurn);
     assert_eq!(r.usage, usage(10.0, 2.0));
@@ -130,10 +130,10 @@ fn collect_preserves_thinking_text_and_concatenates_signature() {
     ]);
     assert_eq!(
         r.content,
-        vec![ContentBlock::Thinking(ThinkingBlock {
+        vec![CollectedBlock::Thinking {
             text: "hmm".into(),
             signature: Some("sig123".into())
-        })]
+        }]
     );
 }
 
@@ -167,7 +167,7 @@ fn collect_orders_blocks_by_index_not_arrival() {
         .content
         .iter()
         .map(|b| match b {
-            ContentBlock::Text(t) => t.text.as_str(),
+            CollectedBlock::Text { text, .. } => text.as_utf8().expect("fixture text"),
             _ => "?",
         })
         .collect();
@@ -203,7 +203,7 @@ fn events_render_in_the_ts_shape() {
     let events = [
         StreamEvent::Start {
             id: "a".into(),
-            model: String::new(),
+            model: Default::default(),
         },
         StreamEvent::BlockStart {
             index: 0,

@@ -54,7 +54,7 @@ fn responses_coerced_arguments_match_scanned_text() {
                     ..
                 } = e
                 {
-                    emitted.push_str(partial);
+                    emitted.push_str(partial.as_utf8().expect("fixture text"));
                 }
             }
         }

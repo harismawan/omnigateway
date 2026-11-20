@@ -373,7 +373,7 @@ mod responses_probe {
                 StreamEvent::BlockDelta {
                     delta: Delta::Text { text: t },
                     ..
-                } => text.push_str(t),
+                } => text.push_str(t.as_utf8().expect("fixture delta is UTF-8")),
                 StreamEvent::End { .. } => return text,
                 _ => {}
             }

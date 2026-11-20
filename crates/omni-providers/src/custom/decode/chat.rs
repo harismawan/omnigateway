@@ -2,10 +2,10 @@
 
 use std::collections::{HashMap, VecDeque};
 
+use super::{nullish_or, prop, truthy};
 use omni_ir::error::ErrorCode;
-use omni_ir::js::{nullish_or, prop, truthy};
 use omni_ir::stream::{ContentBlockStart, Delta, StopReason, StreamEvent, Usage};
-use serde_json::Value;
+use omni_ir::{jsjson::JsValue as Value, text::Text};
 
 use super::{JsKey, KeyMint, index0, iterate, json_object, nonempty, or_zero, usage_of};
 use crate::codec::{DecodeError, Flow, StreamDecoder};
@@ -58,33 +58,65 @@ mod performance {
 }
 
 /// The reasoning text one chat delta carries: the first non-empty spelling.
-fn reasoning_text(delta: &DeltaView<'_>) -> String {
-    if let Some(r) = nonempty(delta.reasoning) {
-        return r.to_string();
+fn reasoning_text(delta: &DeltaView<'_>) -> Text {
+    if let Some(r) = delta.reasoning.and_then(Scalar::nonempty) {
+        return r;
     }
-    if let Some(r) = nonempty(delta.reasoning_content) {
-        return r.to_string();
+    if let Some(r) = delta.reasoning_content.and_then(Scalar::nonempty) {
+        return r;
     }
     let Some(Value::Array(details)) = delta.reasoning_details else {
-        return String::new();
+        return Text::default();
     };
-    let mut out = String::new();
+    let mut out = Text::default();
     for entry in details {
         let entry = Some(entry);
         if let Some(t) = nonempty(prop(entry, "text")) {
-            out.push_str(t);
+            out.push(&t);
         } else if let Some(s) = nonempty(prop(entry, "summary")) {
-            out.push_str(s);
+            out.push(&s);
         }
     }
     out
 }
 
+/// Typed chunks already have scalar UTF-8 strings. Generic chunks may need
+/// UTF-16 or JS coercion; leave those fields in their lossless carrier.
+#[derive(Clone, Copy)]
+pub(super) enum Scalar<'a> {
+    Utf8(&'a str),
+    Js(&'a Value),
+}
+
+impl Scalar<'_> {
+    fn as_text(self) -> Option<Text> {
+        match self {
+            Self::Utf8(s) => Some(s.into()),
+            Self::Js(v) => v.as_text(),
+        }
+    }
+
+    fn nonempty(self) -> Option<Text> {
+        match self {
+            Self::Utf8(s) => (!s.is_empty()).then(|| s.into()),
+            Self::Js(v) => nonempty(Some(v)),
+        }
+    }
+
+    fn start_text(self) -> Result<Text, DecodeError> {
+        match self {
+            Self::Utf8(s) => Ok(s.into()),
+            Self::Js(Value::Null) => Ok(Text::default()),
+            Self::Js(v) => super::string(Some(v)),
+        }
+    }
+}
+
 /// What the decoder reads off one chunk: each field as `d?.x` sees it
 /// (`None` for absent, `Some(Null)` for null), whichever way it was parsed.
 pub(super) struct ChunkView<'v> {
-    pub(super) id: Option<&'v Value>,
-    pub(super) model: Option<&'v Value>,
+    pub(super) id: Option<Scalar<'v>>,
+    pub(super) model: Option<Scalar<'v>>,
     pub(super) usage: Option<&'v Value>,
     /// `choices?.[0]`, when truthy.
     pub(super) choice: Option<ChoiceView<'v>>,
@@ -93,14 +125,14 @@ pub(super) struct ChunkView<'v> {
 pub(super) struct ChoiceView<'v> {
     /// `choice.delta`, null filtered out; all-`None` when it is not an object.
     pub(super) delta: DeltaView<'v>,
-    pub(super) finish_reason: Option<&'v Value>,
+    pub(super) finish_reason: Option<Scalar<'v>>,
 }
 
 #[derive(Default)]
 pub(super) struct DeltaView<'v> {
-    pub(super) content: Option<&'v Value>,
-    pub(super) reasoning: Option<&'v Value>,
-    pub(super) reasoning_content: Option<&'v Value>,
+    pub(super) content: Option<Scalar<'v>>,
+    pub(super) reasoning: Option<Scalar<'v>>,
+    pub(super) reasoning_content: Option<Scalar<'v>>,
     pub(super) reasoning_details: Option<&'v Value>,
     pub(super) tool_calls: Option<&'v Value>,
 }
@@ -108,9 +140,9 @@ pub(super) struct DeltaView<'v> {
 impl<'v> DeltaView<'v> {
     fn of(delta: Option<&'v Value>) -> Self {
         DeltaView {
-            content: prop(delta, "content"),
-            reasoning: prop(delta, "reasoning"),
-            reasoning_content: prop(delta, "reasoning_content"),
+            content: prop(delta, "content").map(Scalar::Js),
+            reasoning: prop(delta, "reasoning").map(Scalar::Js),
+            reasoning_content: prop(delta, "reasoning_content").map(Scalar::Js),
             reasoning_details: prop(delta, "reasoning_details"),
             tool_calls: prop(delta, "tool_calls"),
         }
@@ -189,13 +221,10 @@ impl ChatDecoder {
         let (id, model) = (d.id, d.model);
         if !self.started && (id.is_some() || model.is_some()) {
             self.started = true;
-            let text = |v: Option<&Value>| match v {
-                None | Some(Value::Null) => Ok(String::new()),
-                some => super::string(some),
-            };
+            let text = |v: Option<Scalar<'_>>| v.map(Scalar::start_text).transpose();
             out.push_back(StreamEvent::Start {
-                id: text(id)?,
-                model: text(model)?,
+                id: text(id)?.unwrap_or_default(),
+                model: text(model)?.unwrap_or_default(),
             });
         }
 
@@ -230,13 +259,11 @@ impl ChatDecoder {
             });
         }
 
-        if let Some(content) = nonempty(delta.content) {
+        if let Some(content) = delta.content.and_then(Scalar::nonempty) {
             let index = self.continue_or_open(Open::Text, out);
             out.push_back(StreamEvent::BlockDelta {
                 index,
-                delta: Delta::Text {
-                    text: content.to_string(),
-                },
+                delta: Delta::Text { text: content },
             });
         }
 
@@ -260,12 +287,12 @@ impl ChatDecoder {
                     }
                     let id = match prop(call, "id") {
                         None | Some(Value::Null) => {
-                            format!("call_{}", super::string(Some(&wire_index))?)
+                            super::string(Some(&wire_index))?.surrounded("call_", "")
                         }
                         some => super::string(some)?,
                     };
                     let name = match prop(function, "name") {
-                        None | Some(Value::Null) => String::new(),
+                        None | Some(Value::Null) => Text::default(),
                         some => super::string(some)?,
                     };
                     let index =
@@ -275,23 +302,22 @@ impl ChatDecoder {
                 }
             };
             if let Some(args) = nonempty(prop(function, "arguments")) {
-                self.argument_depth.entry(index).or_default().push(args)?;
+                self.argument_depth.entry(index).or_default().push(&args)?;
                 out.push_back(StreamEvent::BlockDelta {
                     index,
-                    delta: Delta::ToolJson {
-                        partial: args.to_string(),
-                    },
+                    delta: Delta::ToolJson { partial: args },
                 });
             }
         }
 
-        if let Some(Value::String(reason)) = choice.finish_reason {
-            match CHAT_FINISH.iter().find(|(k, _)| k == reason) {
+        if let Some(reason) = choice.finish_reason.and_then(Scalar::as_text) {
+            match CHAT_FINISH.iter().find(|(k, _)| reason == *k) {
                 Some((_, mapped)) => self.stop_reason = Some(*mapped),
                 None => {
                     out.push_back(StreamEvent::Error {
                         code: ErrorCode::Upstream,
-                        message: format!("unrecognized custom endpoint finish reason \"{reason}\""),
+                        message: reason
+                            .surrounded("unrecognized custom endpoint finish reason \"", "\""),
                         retryable: false,
                     });
                     return Ok(Flow::Stop);
@@ -322,7 +348,7 @@ impl StreamDecoder for ChatDecoder {
             }
             out.push_back(StreamEvent::End {
                 stop_reason: self.stop_reason.unwrap_or(StopReason::EndTurn),
-                usage: self.usage,
+                usage: self.usage.clone(),
                 vendor: None,
             });
             return Ok(Flow::Stop);
@@ -349,14 +375,14 @@ impl StreamDecoder for ChatDecoder {
             let d = Some(&d);
             let choice = index0(prop(d, "choices"));
             let view = ChunkView {
-                id: prop(d, "id"),
-                model: prop(d, "model"),
+                id: prop(d, "id").map(Scalar::Js),
+                model: prop(d, "model").map(Scalar::Js),
                 usage: prop(d, "usage"),
                 choice: truthy(choice.as_ref()).then(|| {
                     let choice = choice.as_ref();
                     ChoiceView {
                         delta: DeltaView::of(prop(choice, "delta").filter(|v| !v.is_null())),
-                        finish_reason: prop(choice, "finish_reason"),
+                        finish_reason: prop(choice, "finish_reason").map(Scalar::Js),
                     }
                 }),
             };

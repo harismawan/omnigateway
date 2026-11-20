@@ -122,7 +122,9 @@ async fn run(request: &ChatRequest, creds: Credentials, fake: &Fake) -> Value {
             let mut stream_error = Value::Null;
             while let Some(item) = result.events.next().await {
                 match item {
-                    Ok(ev) => events.push(ev.to_value()),
+                    // This older corpus projects its tagged UTF-16 strings
+                    // to scalar JSON via `normalize` on the expected side.
+                    Ok(ev) => events.push(omni_ir::jsjson::to_serde_lossy(&ev.to_value())),
                     Err(e) => {
                         stream_error = describe_error(&e);
                         break;

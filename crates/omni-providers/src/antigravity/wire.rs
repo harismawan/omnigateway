@@ -1,26 +1,33 @@
 //! Frozen Cloud Code request envelope, in JavaScript insertion order.
 use super::cloak::ToolCloak;
 use crate::response_format::{ResponseFormatRead, read_response_format};
-use omni_ir::{deep, js, request::*};
-use serde_json::{Map, Value, json};
+use omni_ir::{deep, js, jsjson::JsValue as Value, request::*, text::Text};
 use std::collections::{HashMap, HashSet};
 
-fn put(map: &mut Map<String, Value>, key: &str, value: Value) {
-    deep::insert(map, key.into(), value);
+macro_rules! json {
+    ($($tt:tt)+) => { Value::from(&serde_json::json!($($tt)+)) };
 }
 
-fn fingerprints(system: &str, note: &mut impl FnMut(String)) -> String {
+fn object() -> Value {
+    Value::Object(Vec::new())
+}
+
+fn put(map: &mut Value, key: &str, value: Value) {
+    map.put(key.encode_utf16().collect(), value);
+}
+
+fn fingerprints_text(system: &Text, note: &mut impl FnMut(String)) -> Text {
     // Split /(?:\r?\n){2,}/ without changing untouched line endings.
-    let bytes = system.as_bytes();
+    let bytes = system.to_utf16();
     let mut paragraphs = Vec::new();
     let (mut start, mut i) = (0, 0);
     while i < bytes.len() {
         let begin = i;
         let mut count = 0;
         loop {
-            if bytes.get(i) == Some(&b'\r') && bytes.get(i + 1) == Some(&b'\n') {
+            if bytes.get(i) == Some(&13) && bytes.get(i + 1) == Some(&10) {
                 i += 2;
-            } else if bytes.get(i) == Some(&b'\n') {
+            } else if bytes.get(i) == Some(&10) {
                 i += 1;
             } else {
                 break;
@@ -28,17 +35,19 @@ fn fingerprints(system: &str, note: &mut impl FnMut(String)) -> String {
             count += 1;
         }
         if count >= 2 {
-            paragraphs.push(&system[start..begin]);
+            paragraphs.push(&bytes[start..begin]);
             start = i;
         }
         if count == 0 {
             i += 1;
         }
     }
-    paragraphs.push(&system[start..]);
+    paragraphs.push(&bytes[start..]);
     let (mut preamble, mut billing) = (false, false);
     paragraphs.retain(|p| {
-        let text = js::trim(p);
+        let p = Text::from_utf16(p.to_vec());
+        let utf8 = p.to_utf8_lossy();
+        let text = js::trim(&utf8);
         if text == crate::anthropic::body::AGENT_PREAMBLE {
             preamble = true;
             false
@@ -50,7 +59,7 @@ fn fingerprints(system: &str, note: &mut impl FnMut(String)) -> String {
         }
     });
     if !preamble && !billing {
-        return system.into();
+        return system.clone();
     }
     if preamble {
         note("antigravity:agent-preamble-dropped".into());
@@ -58,7 +67,11 @@ fn fingerprints(system: &str, note: &mut impl FnMut(String)) -> String {
     if billing {
         note("antigravity:billing-header-dropped".into());
     }
-    paragraphs.join("\n\n")
+    Text::from_utf16(paragraphs.join(&[10u16, 10][..]))
+}
+
+fn at<'a>(value: Option<&'a Value>, key: &str, index: usize) -> Option<&'a Value> {
+    value?.get(key)?.as_array()?.get(index)
 }
 
 /// `toAntigravityWire`; callers serialize with `jsjson` and deep-drop the body.
@@ -69,6 +82,23 @@ pub fn to_wire(
     request_id: &str,
     cloak: &ToolCloak,
 ) -> Result<(Value, Vec<String>), crate::codec::BuildError> {
+    to_wire_source(req, None, model, &project.into(), &request_id.into(), cloak)
+}
+
+pub(super) fn to_wire_source(
+    req: &ChatRequest,
+    source: Option<&Value>,
+    model: &str,
+    project: &Text,
+    request_id: &Text,
+    cloak: &ToolCloak,
+) -> Result<(Value, Vec<String>), crate::codec::BuildError> {
+    let text = |value: Option<&Value>, key: &str, fallback: &str| {
+        value
+            .and_then(|v| v.get(key))
+            .and_then(Value::as_text)
+            .unwrap_or_else(|| fallback.into())
+    };
     let mut notes = Vec::new();
     let mut note = |s: String| {
         if !notes.contains(&s) {
@@ -76,13 +106,18 @@ pub fn to_wire(
         }
     };
     let mut names = HashMap::new();
-    for block in req.messages.iter().flat_map(|m| &m.content) {
-        if let ContentBlock::ToolUse(t) = block {
-            names.extend([(t.id.as_str(), t.name.as_str())]);
+    for (mi, message) in req.messages.iter().enumerate() {
+        let original = at(source, "messages", mi);
+        for (bi, block) in message.content.iter().enumerate() {
+            if let ContentBlock::ToolUse(t) = block {
+                let b = at(original, "content", bi);
+                names.insert(text(b, "id", &t.id), text(b, "name", &t.name));
+            }
         }
     }
     let mut contents: Vec<(&str, Vec<Value>)> = Vec::new();
-    for message in &req.messages {
+    for (mi, message) in req.messages.iter().enumerate() {
+        let original = at(source, "messages", mi);
         let mut parts = Vec::new();
         if message.role == Role::System {
             note("antigravity:system-turn-as-user".into());
@@ -92,12 +127,16 @@ pub fn to_wire(
         } else {
             "user"
         };
-        for block in &message.content {
+        for (bi, block) in message.content.iter().enumerate() {
+            let b = at(original, "content", bi);
             if block.cache_control().is_some() {
                 note("antigravity:cache-control-dropped".into());
             }
             match block {
-                ContentBlock::Text(t) => parts.push(json!({"text":t.text})),
+                ContentBlock::Text(t) => parts.push(Value::object([(
+                    "text",
+                    (&text(b, "text", &t.text)).into(),
+                )])),
                 ContentBlock::Image(t) => {
                     parts.push(json!({"inlineData":{"mimeType":t.media_type,"data":t.data}}))
                 }
@@ -106,23 +145,31 @@ pub fn to_wire(
                     note("antigravity:provider-native-block-dropped".into())
                 }
                 ContentBlock::ToolUse(t) => {
-                    let mut call = Map::new();
-                    put(&mut call, "name", json!(cloak.name(&t.name)));
-                    put(&mut call, "args", deep::clone(&t.input));
-                    let mut part = Map::new();
+                    let mut call = object();
+                    let name = cloak.wire_text(&text(b, "name", &t.name));
+                    put(&mut call, "name", (&name).into());
+                    put(
+                        &mut call,
+                        "args",
+                        b.and_then(|b| b.get("input"))
+                            .cloned()
+                            .unwrap_or_else(|| Value::from(&t.input)),
+                    );
+                    let mut part = object();
                     put(
                         &mut part,
                         "thoughtSignature",
                         json!("skip_thought_signature_validator"),
                     );
-                    put(&mut part, "functionCall", Value::Object(call));
-                    parts.push(Value::Object(part));
+                    put(&mut part, "functionCall", call);
+                    parts.push(part);
                 }
                 ContentBlock::ToolResult(t) => {
                     if t.native.is_some() {
                         note("antigravity:provider-native-block-dropped".into());
                     }
-                    let name = names.get(t.tool_use_id.as_str());
+                    let id = text(b, "toolUseId", &t.tool_use_id);
+                    let name = names.get(&id);
                     if name.is_none() {
                         note("antigravity:tool-result-unmatched".into());
                     }
@@ -136,7 +183,10 @@ pub fn to_wire(
                     if !files.text.is_empty() {
                         note("antigravity:tool-result-files-inlined".into());
                     }
-                    parts.push(json!({"functionResponse":{"name":cloak.name(name.copied().unwrap_or(&t.tool_use_id)),"response":{"output":crate::tool_result_files::with_file_text(&t.content,&files.text)}}}));
+                    parts.push(Value::object([("functionResponse", Value::object([
+                        ("name", (&cloak.wire_text(name.unwrap_or(&id))).into()),
+                        ("response", json!({"output":crate::tool_result_files::with_file_text(&t.content,&files.text)})),
+                    ]))]));
                     for image in t.images.iter().flatten() {
                         parts.push(
                             json!({"inlineData":{"mimeType":image.media_type,"data":image.data}}),
@@ -178,27 +228,42 @@ pub fn to_wire(
     let contents = contents
         .into_iter()
         .map(|(role, parts)| {
-            let mut m = Map::new();
+            let mut m = object();
             put(&mut m, "role", json!(role));
             put(&mut m, "parts", Value::Array(parts));
-            Value::Object(m)
+            m
         })
         .collect();
-    let mut request = Map::new();
+    let mut request = object();
     put(&mut request, "contents", Value::Array(contents));
-    if let Some(system) =
-        crate::system::system_text(req.system.as_deref(), "antigravity", &mut note)
-    {
-        let system = fingerprints(&system, &mut note);
-        if !js::trim(&system).is_empty() {
+    if let Some(blocks) = &req.system {
+        let mut system = Text::default();
+        let mut first = true;
+        for (i, block) in blocks.iter().enumerate() {
+            if let ContentBlock::Text(t) = block {
+                if !first {
+                    system.push(&"\n\n".into());
+                }
+                let b = at(source, "system", i);
+                system.push(&text(b, "text", &t.text));
+                first = false;
+            } else {
+                note(format!("antigravity:system-{}-dropped", block.type_name()));
+            }
+        }
+        let system = fingerprints_text(&system, &mut note);
+        if !js::trim(&system.to_utf8_lossy()).is_empty() {
             put(
                 &mut request,
                 "systemInstruction",
-                json!({"parts":[{"text":system}]}),
+                Value::object([(
+                    "parts",
+                    Value::Array(vec![Value::object([("text", (&system).into())])]),
+                )]),
             );
         }
     }
-    let mut config = Map::new();
+    let mut config = object();
     if let Some(max) = req.max_tokens {
         if max > 0.0 {
             put(&mut config, "maxOutputTokens", json!(max));
@@ -251,19 +316,18 @@ pub fn to_wire(
     }
     match read_response_format(req) {
         ResponseFormatRead::Readable(f) => {
-            let schema = deep::Owned(Value::Object(f.schema));
+            let schema = deep::Owned(serde_json::Value::Object(f.schema));
             let (pruned, notes) = match super::schema::try_prune(&schema) {
                 Ok(result) => result,
                 Err(error) => {
-                    deep::drop_map(request);
-                    deep::drop_map(config);
                     return Err(error);
                 }
             };
             for n in notes {
                 note(n);
             }
-            put(&mut config, "responseSchema", pruned);
+            let pruned = deep::Owned(pruned);
+            put(&mut config, "responseSchema", Value::from(&pruned.0));
             note("antigravity:response-format-translated".into());
         }
         ResponseFormatRead::TooDeep => note("antigravity:response-schema-too-deep".into()),
@@ -286,8 +350,8 @@ pub fn to_wire(
             json!((b + 1.0).min(65536.0)),
         );
     }
-    if !config.is_empty() {
-        put(&mut request, "generationConfig", Value::Object(config));
+    if config.as_object().is_some_and(|o| !o.is_empty()) {
+        put(&mut request, "generationConfig", config);
     }
     if let Some(tools) = &req.tools {
         if tools.iter().any(|t| !matches!(t, ToolDef::Portable(_))) {
@@ -295,13 +359,13 @@ pub fn to_wire(
         }
         let mut seen = HashSet::new();
         let mut named = Vec::new();
-        for tool in tools {
+        for (i, tool) in tools.iter().enumerate() {
             if let ToolDef::Portable(t) = tool {
-                let name = cloak.name(&t.name);
-                if seen.contains(name) {
+                let original = at(source, "tools", i);
+                let name = cloak.wire_text(&text(original, "name", &t.name));
+                if !seen.insert(name.clone()) {
                     note("antigravity:duplicate-tool-dropped".into());
                 } else {
-                    seen.extend([name]);
                     named.push((name, t));
                 }
             }
@@ -311,8 +375,8 @@ pub fn to_wire(
         }
         let mut declarations = Vec::new();
         for (name, t) in named {
-            let mut m = Map::new();
-            put(&mut m, "name", json!(name));
+            let mut m = object();
+            put(&mut m, "name", (&name).into());
             if let Some(d) = &t.description {
                 put(&mut m, "description", json!(d));
             }
@@ -321,21 +385,20 @@ pub fn to_wire(
                 Err(error) => {
                     // Earlier messages, response schemas and declarations may
                     // contain opaque client values at the full ingress depth.
-                    deep::drop_map(request);
-                    deep::drop(Value::Array(declarations));
                     return Err(error);
                 }
             };
             for n in notes {
                 note(n);
             }
-            put(&mut m, "parameters", schema);
-            declarations.push(Value::Object(m));
+            let schema = deep::Owned(schema);
+            put(&mut m, "parameters", Value::from(&schema.0));
+            declarations.push(m);
         }
         if !declarations.is_empty() {
-            let mut m = Map::new();
+            let mut m = object();
             put(&mut m, "functionDeclarations", Value::Array(declarations));
-            put(&mut request, "tools", Value::Array(vec![Value::Object(m)]));
+            put(&mut request, "tools", Value::Array(vec![m]));
         }
     }
     if let Some(choice) = &req.tool_choice {
@@ -344,26 +407,40 @@ pub fn to_wire(
             ToolChoice::Any => json!({"mode":"ANY"}),
             ToolChoice::None => json!({"mode":"NONE"}),
             ToolChoice::Tool { name } => {
-                json!({"mode":"ANY","allowedFunctionNames":[cloak.name(name)]})
+                let name = cloak.wire_text(&text(
+                    source.and_then(|v| v.get("toolChoice")),
+                    "name",
+                    name,
+                ));
+                Value::object([
+                    ("mode", "ANY".into()),
+                    ("allowedFunctionNames", Value::Array(vec![(&name).into()])),
+                ])
             }
         };
         put(
             &mut request,
             "toolConfig",
-            json!({"functionCallingConfig":config}),
+            Value::object([("functionCallingConfig", config)]),
         );
     }
-    js::object_assign(&mut request, req.vendor_value("antigravity"));
-    let mut body = Map::new();
-    for (k, v) in [
-        ("project", project),
-        ("requestId", request_id),
-        ("model", model),
-        ("userAgent", "antigravity"),
-        ("requestType", "agent"),
-    ] {
-        put(&mut body, k, json!(v));
+    if let Some(v) = source
+        .and_then(|v| v.get("vendor"))
+        .and_then(|v| v.get("antigravity"))
+    {
+        request.assign_entries(v);
+    } else if let Some(v) = req.vendor_value("antigravity") {
+        request.assign_entries(&Value::from(v));
     }
-    put(&mut body, "request", Value::Object(request));
-    Ok((Value::Object(body), notes))
+    Ok((
+        Value::object([
+            ("project", project.into()),
+            ("requestId", request_id.into()),
+            ("model", model.into()),
+            ("userAgent", "antigravity".into()),
+            ("requestType", "agent".into()),
+            ("request", request),
+        ]),
+        notes,
+    ))
 }
