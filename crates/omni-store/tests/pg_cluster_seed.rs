@@ -6,6 +6,75 @@ use omni_store::pg::{PgConfig, PgStore};
 use omni_store::writer::{Committed, LogEvent, RequestLog, WriterConfig};
 
 #[tokio::test]
+async fn snapshot_keeps_order_row_validation_and_query_failure() {
+    let Some(base) = base_url("snapshot_keeps_order_row_validation_and_query_failure") else {
+        return;
+    };
+    let db = TestDb::create(&base, "snapshot_contract").await;
+    let pg = PgStore::open(PgConfig::new(&db.url), 0)
+        .await
+        .expect("open");
+    let c = db.client().await;
+    c.batch_execute(
+        "INSERT INTO api_keys(id,label,prefix,hash,created_at,model_allowlist) VALUES
+           ('old','old','a','a',1,NULL),('bad','bad','c','c',2,'{'),('new','new','b','b',3,NULL);
+         INSERT INTO credentials(id,provider,label,auth_type,provider_data,created_at,updated_at) VALUES
+           ('z','custom','z','apiKey','{}',1,1),('bad','custom','bad','apiKey','{',1,1),
+           ('a','custom','a','apiKey','{}',1,1);
+         INSERT INTO credential_health(credential_id,model,consecutive_failures) VALUES('a','m',2);
+         INSERT INTO quota_windows(credential_id,window_type,starts_at,used) VALUES('a','5h',1,3);
+         INSERT INTO virtual_models(id,targets) VALUES('z','[]'),('bad','{'),('a','[]');
+         INSERT INTO settings(key,value) VALUES('settings','{\"quotaPollIntervalMs\":70000}');",
+    ).await.expect("seed all snapshot inputs");
+    let key = omni_crypto::field::derive_key("test-key");
+    let assert_snapshot = |s: omni_store::SnapshotData| {
+        assert_eq!(s.api_keys.len(), 3);
+        assert_eq!(s.api_keys[0].as_ref().expect("newest key").id, "new");
+        assert!(s.api_keys[1].is_err());
+        assert_eq!(s.api_keys[2].as_ref().expect("oldest key").id, "old");
+        assert_eq!(
+            s.credentials
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "z"]
+        );
+        assert_eq!(s.health.len(), 1);
+        assert_eq!(s.health[0].consecutive_failures, 2);
+        assert_eq!(s.quota.len(), 1);
+        assert!((s.quota[0].used - 3.0).abs() < f64::EPSILON);
+        assert_eq!(s.models.len(), 3);
+        assert_eq!(s.models[0].as_ref().expect("first model").id, "a");
+        assert!(s.models[1].is_err());
+        assert_eq!(s.models[2].as_ref().expect("last model").id, "z");
+        assert!((s.settings.quota_poll_interval_ms - 70_000.0).abs() < f64::EPSILON);
+    };
+    assert_snapshot(pg.snapshot_reads(&key).await.expect("snapshot"));
+    c.batch_execute("ALTER TABLE quota_windows RENAME TO quota_hidden")
+        .await
+        .expect("inject SQL failure");
+    // A fresh pool also exercises parse/execute ordering on cold boot.
+    let fresh = PgStore::open(PgConfig::new(&db.url), 0)
+        .await
+        .expect("cold pool");
+    let Err(omni_store::StoreError::Postgres(error)) = fresh.snapshot_reads(&key).await else {
+        panic!("a query failure must fail the whole snapshot");
+    };
+    assert_eq!(
+        error.code(),
+        Some(&tokio_postgres::error::SqlState::UNDEFINED_TABLE)
+    );
+    c.batch_execute("ALTER TABLE quota_hidden RENAME TO quota_windows")
+        .await
+        .expect("restore table");
+    assert_snapshot(
+        pg.snapshot_reads(&key)
+            .await
+            .expect("recover after failure"),
+    );
+}
+
+#[tokio::test]
 async fn shared_password_rows_use_atomic_first_setup_and_backend_reads() {
     let Some(base) = base_url("shared_password_rows_use_atomic_first_setup_and_backend_reads")
     else {

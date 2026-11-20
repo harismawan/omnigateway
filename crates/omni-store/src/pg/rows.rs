@@ -16,6 +16,39 @@ use deadpool_postgres::GenericClient;
 use omni_crypto::field::{FieldKey, decrypt};
 use tokio_postgres::Row;
 
+const KEY_ENTRIES: &str = "SELECT * FROM api_keys ORDER BY created_at DESC";
+const SNAPSHOT_CREDENTIALS: &str = "SELECT * FROM credentials ORDER BY tier, label";
+const HEALTH: &str = "SELECT * FROM credential_health";
+const QUOTA: &str = "SELECT * FROM quota_windows";
+const MODELS: &str = "SELECT * FROM virtual_models ORDER BY id";
+const RAW_SETTING: &str = "SELECT value FROM settings WHERE key = $1";
+
+pub(super) async fn snapshot(
+    tx: &deadpool_postgres::Transaction<'_>,
+    key: &FieldKey,
+) -> Result<crate::SnapshotData, StoreError> {
+    use tokio_postgres::types::Type;
+    // Typed extended queries submit Parse+Bind+Execute on the first poll,
+    // in this order. Pipelining prepare_cached instead can let a later
+    // Parse fail before an earlier Execute, hiding the original SQL error.
+    let (keys, credentials, health, models, quota, settings) = tokio::join!(biased;
+        tx.query_typed(KEY_ENTRIES, &[]),
+        tx.query_typed(SNAPSHOT_CREDENTIALS, &[]),
+        tx.query_typed(HEALTH, &[]),
+        tx.query_typed(MODELS, &[]),
+        tx.query_typed(QUOTA, &[]),
+        tx.query_typed(RAW_SETTING, &[(&"settings", Type::TEXT)]),
+    );
+    Ok(crate::SnapshotData {
+        api_keys: key_entries(&keys?)?,
+        credentials: snapshot_credential_rows(&credentials?, key),
+        health: health?.iter().map(to_health).collect::<Result<_, _>>()?,
+        models: model_rows(&models?)?,
+        quota: quota?.iter().map(to_quota).collect::<Result<_, _>>()?,
+        settings: decode_settings(raw_setting(&settings?)?),
+    })
+}
+
 #[allow(clippy::cast_precision_loss)]
 fn f(v: i64) -> f64 {
     v as f64
@@ -92,11 +125,11 @@ fn to_key_entry(r: &Row) -> Result<Result<ApiKey, keys::KeyRowError>, StoreError
 pub(crate) async fn list_key_entries(
     c: &impl GenericClient,
 ) -> Result<Vec<Result<ApiKey, keys::KeyRowError>>, StoreError> {
-    query_rows(c, "SELECT * FROM api_keys ORDER BY created_at DESC", &[])
-        .await?
-        .iter()
-        .map(to_key_entry)
-        .collect()
+    key_entries(&query_rows(c, KEY_ENTRIES, &[]).await?)
+}
+
+fn key_entries(rows: &[Row]) -> Result<Vec<Result<ApiKey, keys::KeyRowError>>, StoreError> {
+    rows.iter().map(to_key_entry).collect()
 }
 
 pub(crate) async fn find_key_entry(
@@ -364,19 +397,15 @@ pub(crate) async fn list_credentials(
 
 /// Routing refresh must not freeze unrelated accounts because one row is
 /// unreadable. Operator list/get retain their existing explicit error surface.
-pub(crate) async fn snapshot_credentials(
-    c: &impl GenericClient,
-    key: &FieldKey,
-) -> Result<Vec<Credential>, StoreError> {
-    let rows = query_rows(c, "SELECT * FROM credentials ORDER BY tier, label", &[]).await?;
+fn snapshot_credential_rows(rows: &[Row], key: &FieldKey) -> Vec<Credential> {
     let mut credentials = Vec::with_capacity(rows.len());
-    for row in &rows {
+    for row in rows {
         match to_credential(row, key) {
             Ok(credential) => credentials.push(credential),
             Err(_) => tracing::warn!("unreadable credential omitted from routing snapshot"),
         }
     }
-    Ok(credentials)
+    credentials
 }
 
 pub(crate) async fn credential(
@@ -394,7 +423,7 @@ pub(crate) async fn credential(
 pub(crate) async fn list_health(
     c: &impl GenericClient,
 ) -> Result<Vec<CredentialHealth>, StoreError> {
-    query_rows(c, "SELECT * FROM credential_health", &[])
+    query_rows(c, HEALTH, &[])
         .await?
         .iter()
         .map(to_health)
@@ -446,7 +475,7 @@ pub(crate) async fn operator_credentials(
 // --- quota ----------------------------------------------------------------
 
 pub(crate) async fn list_quota(c: &impl GenericClient) -> Result<Vec<QuotaWindow>, StoreError> {
-    query_rows(c, "SELECT * FROM quota_windows", &[])
+    query_rows(c, QUOTA, &[])
         .await?
         .iter()
         .map(to_quota)
@@ -487,9 +516,12 @@ fn to_quota(r: &Row) -> Result<QuotaWindow, StoreError> {
 pub(crate) async fn list_models(
     c: &impl GenericClient,
 ) -> Result<Vec<Result<VirtualModel, ModelRowError>>, StoreError> {
-    let rows = query_rows(c, "SELECT * FROM virtual_models ORDER BY id", &[]).await?;
+    model_rows(&query_rows(c, MODELS, &[]).await?)
+}
+
+fn model_rows(rows: &[Row]) -> Result<Vec<Result<VirtualModel, ModelRowError>>, StoreError> {
     let mut out = Vec::with_capacity(rows.len());
-    for r in &rows {
+    for r in rows {
         let id: String = r.try_get("id")?;
         let targets: String = r.try_get("targets")?;
         let strategy: String = r.try_get("strategy")?;
@@ -525,13 +557,11 @@ pub(crate) async fn read_raw_setting(
     c: &impl GenericClient,
     key: &str,
 ) -> Result<Option<String>, StoreError> {
-    Ok(
-        query_rows(c, "SELECT value FROM settings WHERE key = $1", &[&key])
-            .await?
-            .first()
-            .map(|r| r.try_get(0))
-            .transpose()?,
-    )
+    raw_setting(&query_rows(c, RAW_SETTING, &[&key]).await?)
+}
+
+fn raw_setting(rows: &[Row]) -> Result<Option<String>, StoreError> {
+    Ok(rows.first().map(|r| r.try_get(0)).transpose()?)
 }
 
 pub(crate) async fn write_raw_setting(
@@ -550,8 +580,11 @@ pub(crate) async fn write_raw_setting(
 }
 
 pub(crate) async fn get_settings(c: &impl GenericClient) -> Result<Settings, StoreError> {
-    let raw = read_raw_setting(c, "settings").await?;
-    Ok(Settings::from_json(settings::settings_json(raw.as_deref())))
+    Ok(decode_settings(read_raw_setting(c, "settings").await?))
+}
+
+fn decode_settings(raw: Option<String>) -> Settings {
+    Settings::from_json(settings::settings_json(raw.as_deref()))
 }
 
 #[cfg(test)]
