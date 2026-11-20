@@ -1204,6 +1204,8 @@ async fn prepare_proxy(
 #[allow(clippy::too_many_lines)]
 async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Response<Body> {
     let now = app.deps.now;
+    // The UUIDv7 timestamp must not be later than the logged arrival.
+    let request_id = crate::clock::request_id();
     let started_at = now();
     let dialect = dialect_of(surface);
     let sname = surface_name(surface);
@@ -1226,7 +1228,6 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
         Ok(prepared) => prepared,
         Err(e) => return error_response(dialect, &e, &[]),
     };
-    let request_id = crate::clock::request_id();
     let mut fin = Finisher::new(
         app.deps.writer.clone(),
         request_id.clone(),
