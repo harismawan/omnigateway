@@ -245,17 +245,37 @@ async fn the_eval_fallback_is_validated_and_charged() {
     .await
     .expect("connect");
     let remote = coord.remote().clone();
-    // Stall writes before checking the refusal so a mistakenly queued EVAL
-    // cannot complete and clear its charge while we wait. The startup PING
-    // can still finish: it is a read, independent of the EVAL budget check.
+    // A zero counter alone can precede the listener's startup PING. Since
+    // nothing else has used this command connection, Valkey seeing PING
+    // followed by zero bytes here proves the probe has already settled.
+    let mut inspector = common::admin(&base).await;
+    let selected_db = format!("db={}", db.index);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let clients: String = redis::cmd("CLIENT")
+                .arg("LIST")
+                .arg("TYPE")
+                .arg("NORMAL")
+                .query_async(&mut inspector)
+                .await
+                .expect("inspect Valkey clients");
+            let ping_seen = clients.lines().any(|line| {
+                let mut fields = line.split_whitespace();
+                fields.clone().any(|f| f == selected_db) && fields.any(|f| f == "cmd=ping")
+            });
+            if ping_seen && remote.outstanding_bytes() == 0 {
+                break;
+            }
+            sleep_ms(1).await;
+        }
+    })
+    .await
+    .expect("startup PING completed");
+
+    // Hold writes before checking the refusal and throughout admission.
     let spinning = stall(&db.url).await;
     assert_eq!(remote.eval(&huge, &[], &[]).await, Err(Fault::TooLarge));
-    observe_within(
-        Duration::from_secs(2),
-        "oversized EVAL retained no bytes",
-        || remote.outstanding_bytes() == 0,
-    )
-    .await;
+    assert_eq!(remote.outstanding_bytes(), 0, "oversized EVAL was charged");
 
     // Submit BIG calls until the budget refuses one.
     let mut held = Vec::new();
@@ -292,12 +312,11 @@ async fn the_eval_fallback_is_validated_and_charged() {
         // Not loaded at connect (not in `extra_scripts`): NOSCRIPT, then EVAL.
         assert_eq!(h.await, Ok(redis::Value::Int(1)));
     }
-    observe_within(
-        Duration::from_secs(2),
-        "every charge refunded after the retry",
-        || remote.outstanding_bytes() == 0,
-    )
-    .await;
+    assert_eq!(
+        remote.outstanding_bytes(),
+        0,
+        "every charge refunded before returning from the retries"
+    );
     coord.close();
 }
 
