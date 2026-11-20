@@ -13,7 +13,7 @@ workspace = true
 [dependencies]
 thiserror.workspace = true
 aes-gcm = "0.10"
-pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+ring = { version = "0.17.14", default-features = false }
 sha2 = "0.10"
 sha1 = "0.10"
 hmac = "0.12"
@@ -27,4 +27,5 @@ cbc = { version = "0.1", features = ["alloc"] }
 argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
 
 [dev-dependencies]
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 serde_json.workspace = true

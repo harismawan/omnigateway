@@ -25,6 +25,77 @@ fn s(value: &Value) -> &str {
 }
 
 #[test]
+fn field_key_matches_known_answers_and_the_previous_backend() {
+    for (secret, expected) in [
+        (
+            "vector-only-encryption-key-0123456789".to_owned(),
+            "42086c6ea2333710b90975728bbf6901b90ad1262a904b91eafc42a3d9b37fb5",
+        ),
+        (
+            "🔑 clé\0é".to_owned(),
+            "e73393abe1d79186384db65fe64457c064bf3b8812785d669ef39ff21acf2f8f",
+        ),
+        (
+            String::new(),
+            "208df4ea3b29121b57199f5dad46ce8f86359e7bb30c787c849ee22b5ac0dab0",
+        ),
+        (
+            "x".repeat(97),
+            "c2f8ad72dcac3f94516909446976ed363dea8fa769dab683ad4674c462f3ab9e",
+        ),
+    ] {
+        let mut previous = [0; 32];
+        pbkdf2::pbkdf2_hmac::<sha2::Sha256>(
+            secret.as_bytes(),
+            b"omnigateway-field-encryption-v1",
+            210_000,
+            &mut previous,
+        );
+        let derived = field::derive_key(&secret);
+        assert_eq!(derived.bytes(), &previous);
+        let hex = derived.bytes().iter().fold(String::new(), |mut hex, b| {
+            use std::fmt::Write as _;
+            write!(&mut hex, "{b:02x}").expect("write to String");
+            hex
+        });
+        assert_eq!(hex, expected);
+    }
+}
+
+#[test]
+#[ignore = "fixed-core release timing, not a correctness assertion"]
+fn field_key_backend_timing() {
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    let secret = "vector-only-encryption-key-0123456789";
+    let previous = || {
+        let mut bytes = [0; 32];
+        pbkdf2::pbkdf2_hmac::<sha2::Sha256>(
+            black_box(secret).as_bytes(),
+            b"omnigateway-field-encryption-v1",
+            210_000,
+            &mut bytes,
+        );
+        bytes
+    };
+    let candidate = || *field::derive_key(black_box(secret)).bytes();
+    assert_eq!(previous(), candidate());
+    for _ in 0..11 {
+        let start = Instant::now();
+        black_box(previous());
+        let serial = start.elapsed();
+        let start = Instant::now();
+        black_box(candidate());
+        eprintln!(
+            "kdf_sample previous_us={} candidate_us={}",
+            serial.as_micros(),
+            start.elapsed().as_micros()
+        );
+    }
+}
+
+#[test]
 fn field_encryption_decrypts_every_ts_ciphertext() {
     let all = vectors();
     let enc = &all["encryption"];
