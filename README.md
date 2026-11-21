@@ -154,7 +154,7 @@ stopped, and the message names the way back:
 
 ```bash
 npm i -g omnigateway@0.15.5
-omni db restore --root <root> db_<time>_preRust.sqlite
+omni db restore --root <root> --db <root>/omnigateway.db db_<time>_preRust.sqlite
 cp ~/.local/state/omnigateway/pre-rust/omnigateway.service ~/.config/systemd/user/
 systemctl --user daemon-reload && systemctl --user start omnigateway
 ```

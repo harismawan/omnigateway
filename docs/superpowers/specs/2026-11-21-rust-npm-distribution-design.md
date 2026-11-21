@@ -101,7 +101,11 @@ In bridge mode the migration runs **as** the service, not against it:
   written it records `failed-record` where it can, leaves the unit unchanged
   and the service stopped, and exits 0. Only then does the rewrite add one line
   after `ExecStart=`: `ExecStartPost=<binary> omni service migrate
-  --verify-start`. It reloads, releases the lock, and its **last** act is
+  --verify-start --record <state>/npm-migration.json --scope user|system`. The
+  hook names its record and scope, so the verifier never recomputes them from
+  an environment (`XDG_STATE_HOME`, `.env`) that may have changed since; a
+  hook without them, with a relative path, or whose scope disagrees with the
+  recorded handoff is refused. It reloads, releases the lock, and its **last** act is
   `systemctl restart --no-block omnigateway.service`; it exits 0. systemd stops
   the bridge and starts the binary as a plain `MainPID`; the bridge never
   spawns, relays signals to, or waits on the gateway. *(owner decision, fourth
@@ -117,9 +121,18 @@ In bridge mode the migration runs **as** the service, not against it:
   queued stop the unit ends failed and inactive); it exits 1 and the line
   stays, so a restart that the stop did not prevent is judged again, never
   trusted. A queued stop is not reported as a confirmed stop: the message
-  says to check `systemctl status` first. No record file, or a record with no
-  armed handoff, is a stale hook: exit 0. An armed handoff it cannot read (bad
-  JSON, missing fields, no `MAINPID`) fails closed: stop, exit 1.
+  says to check `systemctl status` first. No record file at the named path,
+  or a record with no armed handoff, is a stale hook: exit 0. A record it
+  cannot read (permissions, bad JSON, not an object, a `handoff` that is not
+  null and not a readable handoff) or no `MAINPID` fails closed: it queues a
+  stop of its own scope's unit as its last act (taken from its command line,
+  no unit file read) and exits 1; if the stop cannot be queued it says so.
+- **One record reader.** Every reader — bridge, migrate, refresh, verifier,
+  `doctor`/`status` banner — distinguishes absent, unreadable and valid. Over
+  an unreadable record nothing is judged, stopped or rewritten, and no outcome
+  overwrites it: `omni service migrate` reports `failed-record` and leaves the
+  file as it is, and the banner says the record cannot be read. The operator
+  inspects or removes it by hand.
 - An unverified handoff (`verifying`, e.g. a verifier that was killed) is an
   unresolved state like a failure: `omni doctor`/`status` announce it, its
   rollback is carried as `pendingFailure`, later runs keep the handoff, and
@@ -272,8 +285,11 @@ other-writable. Otherwise the tool prints the exact
    be confirmed, say so and give the stop command first), record `failed-*` —
    kept, with its backup and saved unit, until a later run sees the service
    running this binary — and print branch-specific rollback — no restore step when nothing
-   was written, `omni db restore --root <root> <id>` and copying the saved unit
-   back when it was. *(finding 4)*
+   was written, `omni db restore --root <root> --db <backed-up db> <id>` and
+   copying the saved unit back when it was. `--db` pins both the file the
+   restore replaces and the `snapshots/` directory beside it to the database
+   that was backed up, whatever `.env` says by then; the message also says to
+   point `OMNI_DB_PATH` back at it before starting. *(finding 4)*
 10. **Idempotent.** A unit already migrated takes the Rust→Rust path.
 
 ### Rust → Rust (later npm updates)

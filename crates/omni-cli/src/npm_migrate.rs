@@ -327,7 +327,7 @@ fn classify(text: &str, binary: &Path) -> Result<(Kind, PathBuf), String> {
     // The bridge's one-shot verifier is ours; the rest is the template.
     let text: String = text
         .split_inclusive('\n')
-        .filter(|l| l.trim_end() != verifier_line(binary))
+        .filter(|l| parse_verifier_line(l.trim_end_matches('\n'), binary).is_none())
         .collect();
     let text = text.as_str();
     let (root, exec) = template_shape(text)?;
@@ -510,8 +510,34 @@ fn record(paths: &Paths, now: i64, status: Status, extra: Value) -> Result<(), S
         e
     })
 }
+/// The migration record: `Ok(None)` when absent, `Err` when present but
+/// unreadable, unparseable, not an object, or holding a `handoff` that is
+/// neither null nor a readable handoff. Every reader uses this one rule.
+fn read_record_at(file: &Path) -> Result<Option<Value>, String> {
+    let text = match fs::read_to_string(file) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("cannot read {}: {e}", file.display())),
+    };
+    let value: Value =
+        serde_json::from_str(&text).map_err(|e| format!("cannot parse {}: {e}", file.display()))?;
+    if !value.is_object() {
+        return Err(format!("{} is not a migration record", file.display()));
+    }
+    if let Some(h) = value.get("handoff").filter(|h| !h.is_null())
+        && Handoff::read(h).is_none()
+    {
+        return Err(format!("{} holds an unreadable handoff", file.display()));
+    }
+    Ok(Some(value))
+}
+fn read_record(paths: &Paths) -> Result<Option<Value>, String> {
+    read_record_at(&paths.state.join(RECORD))
+}
+/// The record for callers that only add to it: an unreadable one reads as
+/// absent here, and [`outcome`] refuses to overwrite it.
 fn previous_record(paths: &Paths) -> Option<Value> {
-    serde_json::from_str(&fs::read_to_string(paths.state.join(RECORD)).ok()?).ok()
+    read_record(paths).ok().flatten()
 }
 
 /// The latest record as a failure summary, if it is one.
@@ -568,6 +594,19 @@ fn pending_failure(previous: Option<&Value>) -> Option<Value> {
 /// message keeps that rollback visible too.
 fn outcome(paths: &Paths, now: i64, status: Status, message: String, extra: Value) -> Outcome {
     let mut extra = extra;
+    // Never replace a record we cannot read: it may hold an armed handoff
+    // whose verifier would then see none and pass the next start unjudged.
+    if let Err(e) = read_record(paths) {
+        let message = format!(
+            "{e}; it is left untouched (it may hold an unverified migration). Fix or inspect it, then run omni service migrate.\nThis attempt: {message}"
+        );
+        eprintln!("{message}");
+        return Outcome {
+            status: Status::FailedRecord,
+            message,
+            persisted: false,
+        };
+    }
     let previous = previous_record(paths);
     let running = previous
         .as_ref()
@@ -632,11 +671,22 @@ fn sudo(scope: Scope) -> &'static str {
 /// Back to TS. `backup` is `None` when nothing was changed (no restore step);
 /// `saved` is the original unit to copy back when it was rewritten.
 fn rollback_steps(plan: &Plan, backup: Option<&str>, saved: Option<&Path>) -> String {
-    rollback_for(plan.unit.scope, &plan.root, &plan.unit.path, backup, saved)
+    rollback_for(
+        plan.unit.scope,
+        &plan.root,
+        &plan.db,
+        &plan.unit.path,
+        backup,
+        saved,
+    )
 }
+/// `db` is the database that was backed up: `--db` pins both the file the
+/// restore replaces and the `snapshots/` directory beside it, whatever
+/// `.env` says by the time the operator runs it.
 fn rollback_for(
     scope: Scope,
     root: &Path,
+    db: &Path,
     unit: &Path,
     backup: Option<&str>,
     saved: Option<&Path>,
@@ -645,8 +695,9 @@ fn rollback_for(
     let mut steps = vec![format!("{s}npm i -g omnigateway@{LAST_TS_VERSION}")];
     if let Some(backup) = backup {
         steps.push(format!(
-            "omni db restore --root {} {backup}",
-            root.display()
+            "omni db restore --root {} --db {} {backup}",
+            root.display(),
+            db.display()
         ));
     }
     if let Some(saved) = saved {
@@ -655,6 +706,13 @@ fn rollback_for(
     steps.push(format!("{s}systemctl{} daemon-reload", scope.flag()));
     steps.push(format!("{s}systemctl{} start {UNIT_NAME}", scope.flag()));
     let mut text = format!("To go back to the TS gateway:\n  {}", steps.join("\n  "));
+    if backup.is_some() {
+        text.push_str(&format!(
+            "\nBefore starting it, make sure {} still points OMNI_DB_PATH at {} (as when it was backed up).",
+            root.join(".env").display(),
+            db.display()
+        ));
+    }
     if backup.is_some() {
         text.push_str("\nRows written after the migration are lost by the restore.");
     }
@@ -1007,6 +1065,10 @@ fn port_free(host: &dyn Host, plan: &Plan) -> Result<(), String> {
 }
 
 pub(crate) fn migrate(host: &dyn Host, paths: &Paths, now: i64) -> Outcome {
+    // Nothing is judged, stopped or rewritten over a record we cannot read.
+    if let Err(e) = read_record(paths) {
+        return outcome(paths, now, Status::FailedRecord, e, json!({}));
+    }
     let plan = match preflight(host, paths) {
         Ok(plan) => plan,
         Err((Status::NothingToMigrate, _)) => {
@@ -1099,11 +1161,26 @@ enum Starter {
 }
 
 /// The line the bridge adds so systemd runs the verifier after Rust starts.
-fn verifier_line(binary: &Path) -> String {
+/// It names the record and scope it was armed with, so the verifier never
+/// recomputes them from an environment that may have changed since.
+fn verifier_line(binary: &Path, record: &Path, scope: Scope) -> String {
     format!(
-        "ExecStartPost={} omni service migrate --verify-start",
-        binary.display()
+        "ExecStartPost={} omni service migrate --verify-start --record {} --scope {}",
+        binary.display(),
+        record.display(),
+        scope.name()
     )
+}
+/// `(record, scope)` of a verifier line for `binary`, if `line` is one.
+fn parse_verifier_line(line: &str, binary: &Path) -> Option<(PathBuf, Scope)> {
+    let rest = line
+        .strip_prefix("ExecStartPost=")?
+        .strip_prefix(&binary.display().to_string())?
+        .strip_prefix(" omni service migrate --verify-start --record ")?;
+    let (record, scope) = rest.rsplit_once(" --scope ")?;
+    let record = PathBuf::from(record);
+    (record.is_absolute() && !record.as_os_str().is_empty()).then_some(())?;
+    Some((record, Scope::parse(scope)?))
 }
 
 /// Under the held lock: back up, save and rewrite the unit, reload; then
@@ -1204,7 +1281,8 @@ fn convert(
             return failed;
         }
     }
-    let post = (starter == Starter::Bridge).then(|| verifier_line(&paths.binary));
+    let post = (starter == Starter::Bridge)
+        .then(|| verifier_line(&paths.binary, &paths.state.join(RECORD), scope));
     if let Err(e) = rewrite_exec(&plan.unit, &paths.binary, post.as_deref()) {
         host.release(lock);
         return failure(e, false, true);
@@ -1359,6 +1437,7 @@ impl Handoff {
         rollback_for(
             self.scope,
             &self.root,
+            &self.db,
             &self.unit,
             Some(&self.backup),
             Some(&self.saved),
@@ -1385,26 +1464,58 @@ fn armed(record: Option<&Value>) -> Option<Result<Handoff, ()>> {
 ///   exit 1. The line stays armed, so a `Restart=on-failure` restart (if the
 ///   stop could not be queued) is judged again rather than trusted. Nothing
 ///   follows the stop request: systemd may kill this process at once.
-pub(crate) fn verify_start(host: &dyn Host, paths: &Paths, main: u32, now: i64) -> i32 {
-    let file = paths.state.join(RECORD);
-    let previous = match fs::read_to_string(&file) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return 0,
-        Err(e) => Err(format!("cannot read {}: {e}", file.display())),
-        Ok(text) => serde_json::from_str::<Value>(&text)
-            .map_err(|e| format!("cannot parse {}: {e}", file.display())),
+pub(crate) fn verify_start(
+    host: &dyn Host,
+    paths: &Paths,
+    hook: &Hook,
+    main: u32,
+    now: i64,
+) -> i32 {
+    // The record the hook was armed with, not one recomputed from today's
+    // environment; outcomes are written there too.
+    let state = hook
+        .record
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    let paths = &Paths {
+        state,
+        user_unit: paths.user_unit.clone(),
+        system_unit: paths.system_unit.clone(),
+        binary: paths.binary.clone(),
+        version: paths.version.clone(),
     };
-    let handoff = match previous.as_ref().map(|r| armed(Some(r))) {
+    if hook.record.file_name().is_none_or(|n| n != RECORD) {
+        return stop_unjudged(
+            host,
+            hook.scope,
+            &format!("{} is not a migration record path", hook.record.display()),
+        );
+    }
+    let handoff = match read_record_at(&hook.record) {
         Ok(None) => return 0,
-        Ok(Some(Ok(handoff))) => handoff,
-        Ok(Some(Err(()))) => {
-            return stop_unjudged(
-                host,
-                paths,
-                &format!("{} holds an unreadable handoff", file.display()),
-            );
-        }
-        Err(e) => return stop_unjudged(host, paths, e.as_str()),
+        Ok(Some(record)) => match armed(Some(&record)) {
+            None => return 0,
+            Some(Ok(handoff)) => handoff,
+            Some(Err(())) => {
+                let why = format!("{} holds an unreadable handoff", hook.record.display());
+                return stop_unjudged(host, hook.scope, &why);
+            }
+        },
+        Err(e) => return stop_unjudged(host, hook.scope, &e),
     };
+    if handoff.scope != hook.scope {
+        return stop_unjudged(
+            host,
+            hook.scope,
+            &format!(
+                "the handoff in {} is for the {} unit, not this {} one",
+                hook.record.display(),
+                handoff.scope.name(),
+                hook.scope.name()
+            ),
+        );
+    }
     let verdict = if main == 0 {
         Err("systemd did not pass the gateway's MAINPID".to_owned())
     } else if !host.healthy(&format!("http://{}", handoff.addr)) {
@@ -1468,30 +1579,36 @@ pub(crate) fn verify_start(host: &dyn Host, paths: &Paths, main: u32, now: i64) 
     }
 }
 
-/// The verifier cannot judge: stop every unit that carries it, exit 1.
-fn stop_unjudged(host: &dyn Host, paths: &Paths, why: &str) -> i32 {
+/// The verifier cannot judge: stop the unit that invoked it (its scope is
+/// in its own command line), exit 1. Says whether the stop was queued.
+fn stop_unjudged(host: &dyn Host, scope: Scope, why: &str) -> i32 {
+    let (s, flag) = (sudo(scope), scope.flag());
     eprintln!(
-        "omnigateway: {why}; the Rust gateway's start cannot be verified, so {UNIT_NAME} is being stopped. Run omni service migrate."
+        "omnigateway: {why}; the Rust gateway's start cannot be verified, so {UNIT_NAME} is being stopped. Inspect the record, then run omni service migrate."
     );
-    for unit in find_units(paths).unwrap_or_default() {
-        if unit.text.lines().any(|l| l == verifier_line(&paths.binary)) {
-            let _queued = host.systemctl(unit.scope, &["stop", "--no-block", UNIT_NAME]);
-        }
+    // The last act: systemd may end this process as soon as it acts on it.
+    if let Err(e) = host.systemctl(scope, &["stop", "--no-block", UNIT_NAME]) {
+        eprintln!(
+            "omnigateway: could not ask systemd to stop {UNIT_NAME} ({e}); run {s}systemctl{flag} stop {UNIT_NAME}"
+        );
     }
     1
+}
+
+/// What the armed `ExecStartPost` line carries.
+pub(crate) struct Hook {
+    pub(crate) record: PathBuf,
+    pub(crate) scope: Scope,
 }
 
 /// Remove the verifier line from the handoff's unit and reload.
 fn disarm(host: &dyn Host, handoff: &Handoff, binary: &Path) -> Result<(), String> {
     let text = fs::read_to_string(&handoff.unit).map_err(|e| e.to_string())?;
-    let line = verifier_line(binary);
-    if !text.lines().any(|l| l == line) {
+    let ours = |l: &str| parse_verifier_line(l.trim_end_matches('\n'), binary).is_some();
+    if !text.lines().any(ours) {
         return Ok(());
     }
-    let without: String = text
-        .split_inclusive('\n')
-        .filter(|l| l.trim_end_matches('\n') != line)
-        .collect();
+    let without: String = text.split_inclusive('\n').filter(|l| !ours(l)).collect();
     let temp = handoff.unit.with_extension("service.omni-tmp");
     fs::write(&temp, without)
         .and_then(|()| fs::rename(&temp, &handoff.unit))
@@ -1650,6 +1767,13 @@ fn refresh(host: &dyn Host, paths: &Paths, plan: &Plan, now: i64) -> Outcome {
 /// refusal and for the handoff (so `Restart=on-failure` does not loop), 1 when
 /// run by hand outside the unit.
 pub(crate) fn bridge(host: &dyn Host, paths: &Paths, now: i64) -> i32 {
+    if let Err(e) = read_record(paths) {
+        eprintln!(
+            "{}",
+            outcome(paths, now, Status::FailedRecord, e, json!({})).message
+        );
+        return 0;
+    }
     let refuse = |status: Status, message: String| {
         eprintln!("{message}");
         outcome(paths, now, status, message, json!({}));
@@ -1726,6 +1850,11 @@ pub(crate) fn announces(command: &str) -> bool {
 /// One stderr line while a migration needs attention, or a 0.x unit is
 /// still installed. `None` when there is nothing to say.
 pub(crate) fn banner(paths: &Paths) -> Option<String> {
+    if let Err(e) = read_record(paths) {
+        return Some(format!(
+            "omnigateway: the npm migration record cannot be read ({e}); a migration may be unverified. Inspect it, then run omni service migrate."
+        ));
+    }
     let latest = previous_record(paths);
     // Show what the operator needs to act on: the unresolved failure (the
     // one with rollback when there is one), else the latest attempt.
@@ -1777,16 +1906,36 @@ gateway.js runs it on the service's next start (--bridge).
 ";
 
 /// `omni service migrate [--from-npm|--bridge] [--json]`.
+/// `--record <path> --scope <user|system>` from the hook's command line.
+fn hook_args(flags: &[String]) -> Option<Hook> {
+    let value = |name: &str| {
+        let i = flags.iter().position(|f| f == name)?;
+        flags.get(i + 1).cloned()
+    };
+    let record = PathBuf::from(value("--record")?);
+    record.is_absolute().then_some(())?;
+    Some(Hook {
+        record,
+        scope: Scope::parse(&value("--scope")?)?,
+    })
+}
+
 pub(crate) fn command(flags: &[String]) -> std::process::ExitCode {
     use std::process::ExitCode;
     if flags.iter().any(|f| f == "--help" || f == "-h") {
         print!("{HELP}");
         return ExitCode::SUCCESS;
     }
+    let values = ["--record", "--scope"];
+    let mut skip = false;
     if let Some(bad) = flags.iter().find(|f| {
+        if std::mem::take(&mut skip) {
+            return false;
+        }
+        skip = values.contains(&f.as_str());
         !matches!(
             f.as_str(),
-            "--from-npm" | "--bridge" | "--verify-start" | "--json"
+            "--from-npm" | "--bridge" | "--verify-start" | "--json" | "--record" | "--scope"
         )
     }) {
         eprintln!("unknown option for omni service migrate: {bad}\n{HELP}");
@@ -1813,7 +1962,13 @@ pub(crate) fn command(flags: &[String]) -> std::process::ExitCode {
             .ok()
             .and_then(|p| p.trim().parse::<u32>().ok())
             .unwrap_or(0);
-        let code = verify_start(&host::System, &paths, main, now);
+        let Some(hook) = hook_args(flags) else {
+            eprintln!(
+                "omni service migrate --verify-start needs --record <path> --scope user|system"
+            );
+            return ExitCode::FAILURE;
+        };
+        let code = verify_start(&host::System, &paths, &hook, main, now);
         return ExitCode::from(u8::try_from(code).unwrap_or(1));
     }
     if !cfg!(target_os = "linux") {
