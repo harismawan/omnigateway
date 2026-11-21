@@ -1,6 +1,6 @@
 //! Codex's derived identifiers (`packages/providers/src/openai/codexIdentity.ts`).
 
-use hmac::{Hmac, Mac as _};
+use hmac::{Hmac, KeyInit as _, Mac as _};
 use sha1::Sha1;
 use sha2::{Digest as _, Sha256};
 
@@ -49,6 +49,11 @@ pub fn uuid_v5(namespace: &str, name: &str) -> String {
     hasher.update(&ns);
     hasher.update(name.as_bytes());
     format_uuid(&with_version(&hasher.finalize(), 5))
+}
+
+/// `crypto.randomUUID()`: a random v4 UUID in lowercase hex.
+pub fn random_uuid_v4() -> String {
+    format_uuid(&with_version(&rand::random::<[u8; 16]>(), 4))
 }
 
 /// A UUIDv4-shaped digest of `seed`.
@@ -125,4 +130,21 @@ pub fn keyed(salt: Option<&str>, seed: &str) -> String {
 /// Codex's per-thread namespace: UUIDv5 of the thread id under `NAMESPACE_OID`.
 pub fn prefix_namespace(thread_id: &str) -> String {
     uuid_v5(NAMESPACE_OID, thread_id)
+}
+
+#[cfg(test)]
+mod random_tests {
+    #[test]
+    fn random_v4_has_the_rfc_shape_and_differs() {
+        let a = super::random_uuid_v4();
+        assert_eq!(a.len(), 36);
+        assert_eq!(a.matches('-').count(), 4);
+        assert_eq!(&a[14..15], "4");
+        assert!(matches!(&a[19..20], "8" | "9" | "a" | "b"));
+        assert!(
+            a.bytes()
+                .all(|b| b == b'-' || b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        );
+        assert_ne!(a, super::random_uuid_v4());
+    }
 }

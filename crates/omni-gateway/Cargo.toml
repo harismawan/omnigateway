@@ -32,9 +32,6 @@ omni-ratelimit = { path = "../omni-ratelimit" }
 omni-router = { path = "../omni-router" }
 omni-store = { path = "../omni-store" }
 arc-swap = "1"
-foldhash = "0.2"
-httpdate = "1"
-subtle = "2.6"
 serde_json.workspace = true
 serde.workspace = true
 thiserror.workspace = true
@@ -49,14 +46,14 @@ http-body = "1"
 http-body-util = "0.1"
 bytes = "1"
 base64 = "0.22.1"
-sha1 = "0.10.7"
+sha1 = "0.11"
 async-stream = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 futures-core = "0.3"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "registry"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
-rand = "0.9"
-rusqlite = { version = "0.41", default-features = false, features = ["bundled"] }
+rand = "0.10"
+rusqlite = { version = "0.43", default-features = false, features = ["bundled"] }
 # The global allocator: glibc malloc's arena locks showed up as ~7% of a
 # streaming request (`__lll_lock_*`), and malloc/free as a third of it.
 # `v2`: on held-streams its peak RSS measured 74-82 MiB against v3's 78-88,
@@ -67,10 +64,10 @@ mimalloc = { version = "0.1", default-features = false, features = ["v2"] }
 # arenas fault in 2 MiB pages, which took idle RSS from 7 to 17.5 MiB. Linux
 # only: `nix::sys::prctl` does not exist elsewhere, and neither does THP.
 [target.'cfg(target_os = "linux")'.dependencies]
-nix = { version = "0.31", default-features = false, features = ["process", "inotify"] }
+nix = { version = "0.32", default-features = false, features = ["process", "inotify"] }
 
 [dev-dependencies]
-nix = { version = "0.31", default-features = false, features = ["fs"] }
+nix = { version = "0.32", default-features = false, features = ["fs"] }
 # The `profile_gateway` example: a SIGPROF sampler, no perf events needed.
 pprof = { version = "0.15", default-features = false, features = ["cpp"] }
 tempfile = "3"

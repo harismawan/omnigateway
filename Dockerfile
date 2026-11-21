@@ -41,7 +41,7 @@ RUN bun run --cwd apps/dashboard build:production
 
 # Native musl build on each buildx target (QEMU on single-architecture hosts).
 # Keep the compiler pin aligned with rust-toolchain.toml.
-FROM rust:1.99-alpine AS rust-build
+FROM rust:1.100-alpine AS rust-build
 WORKDIR /app
 RUN apk add --no-cache build-base perl linux-headers
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./

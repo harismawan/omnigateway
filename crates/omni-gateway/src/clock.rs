@@ -1,7 +1,7 @@
 //! The wall clock as TS reads it (`Date.now()`: integer epoch ms) and the
 //! random ids the gateway mints.
 
-use rand::{Rng, SeedableRng};
+use rand::{RngExt as _, SeedableRng as _};
 
 /// Epoch milliseconds, `Date.now()`.
 pub fn now_ms() -> i64 {
@@ -12,10 +12,7 @@ pub fn now_ms() -> i64 {
 
 /// `crypto.randomUUID()`: a v4 UUID in lowercase hex.
 pub fn uuid_v4() -> String {
-    let mut b: [u8; 16] = rand::random();
-    b[6] = (b[6] & 0x0f) | 0x40;
-    b[8] = (b[8] & 0x3f) | 0x80;
-    format_uuid(&b)
+    omni_crypto::codex::random_uuid_v4()
 }
 
 /// `req_` + an RFC 9562 UUIDv7, minted monotonically in this process.
@@ -45,7 +42,7 @@ static REQUEST_IDS: std::sync::Mutex<Option<RequestIds>> = std::sync::Mutex::new
 /// initialized thread RNG on this path. Repeated boots retain process ordering.
 pub fn init_request_ids() -> Result<(), String> {
     init_request_ids_with(&REQUEST_IDS, || {
-        rand::rngs::StdRng::try_from_os_rng().map_err(|e| e.to_string())
+        rand::rngs::StdRng::try_from_rng(&mut rand::rngs::SysRng).map_err(|e| e.to_string())
     })
 }
 
@@ -161,7 +158,7 @@ pub fn random() -> f64 {
 mod tests {
     #[test]
     fn entropy_failure_leaves_request_ids_uninitialized_and_can_retry() {
-        use rand::{Rng, SeedableRng};
+        use rand::{RngExt as _, SeedableRng as _};
         let state = std::sync::Mutex::new(None);
         let error = super::init_request_ids_with(&state, || Err("injected failure".into()))
             .expect_err("boot must fail");

@@ -453,7 +453,7 @@ impl Remote {
         window_ms: f64,
         at: f64,
     ) -> Result<WindowClaim, Fault> {
-        let member = format!("{}-{}", js_number(at), uuid::Uuid::new_v4());
+        let member = format!("{}-{}", js_number(at), omni_crypto::codex::random_uuid_v4());
         let out = self
             .eval(
                 &scripts::WINDOW_CLAIM,
@@ -500,7 +500,7 @@ impl Remote {
         holder: Option<&str>,
     ) -> Result<u64, Fault> {
         // An unnamed slot gets a uuid: a distinct member nothing can address.
-        let member = holder.map_or_else(|| uuid::Uuid::new_v4().to_string(), str::to_owned);
+        let member = holder.map_or_else(omni_crypto::codex::random_uuid_v4, str::to_owned);
         let out = self
             .eval(
                 &scripts::GAUGE_ACQUIRE,
@@ -1060,7 +1060,7 @@ impl Coord for RedisCoord {
         let mut attempt = Attempt {
             remote: &self.remote,
             name: key,
-            token: Some(uuid::Uuid::new_v4().to_string()),
+            token: Some(omni_crypto::codex::random_uuid_v4()),
         };
         let token = attempt.token.clone().unwrap_or_default();
         // Real elapsed time: the wait is time spent polling, whatever the

@@ -387,7 +387,7 @@ impl Coord for MemoryCoord {
         // One deadline for the whole wait. Contenders race; no fairness (TS
         // "ponytail" note).
         let deadline = tokio::time::Instant::now() + wait;
-        let token = uuid::Uuid::new_v4().to_string();
+        let token = omni_crypto::codex::random_uuid_v4();
         loop {
             let notify = {
                 let mut st = self.state();

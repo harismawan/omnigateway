@@ -3,7 +3,7 @@
 //! The RSA half of the `Cosy-Key` wrapping is randomised PKCS#1 v1.5 padding
 //! and lives with the provider, where the embedded public key is.
 
-use aes::cipher::{BlockEncryptMut as _, KeyIvInit as _, block_padding::Pkcs7};
+use aes::cipher::{BlockModeEncrypt as _, KeyIvInit as _, block_padding::Pkcs7};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use md5::{Digest as _, Md5};
@@ -96,5 +96,5 @@ pub fn encrypt_user_info(user_json: &str, key: &str) -> Result<String, InvalidKe
     }
     let bytes: [u8; 16] = key.as_bytes().try_into().map_err(|_| InvalidKey)?;
     let cipher = cbc::Encryptor::<aes::Aes128>::new(&bytes.into(), &bytes.into());
-    Ok(B64.encode(cipher.encrypt_padded_vec_mut::<Pkcs7>(user_json.as_bytes())))
+    Ok(B64.encode(cipher.encrypt_padded_vec::<Pkcs7>(user_json.as_bytes())))
 }

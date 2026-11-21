@@ -41,12 +41,15 @@ fn parse_date_ms(raw: &str) -> Option<f64> {
     let s = js::trim(raw);
     #[allow(clippy::cast_precision_loss)]
     let from_millis = |ms: i64| ms as f64;
-    if let Ok(t) = httpdate::parse_http_date(s) {
-        let ms = t
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .and_then(|d| i64::try_from(d.as_millis()).ok())?;
-        return Some(from_millis(ms));
+    // RFC 9110 §5.6.7: IMF-fixdate, then the obsolete RFC 850 and asctime forms.
+    for format in [
+        "%a, %d %b %Y %H:%M:%S GMT",
+        "%A, %d-%b-%y %H:%M:%S GMT",
+        "%a %b %e %H:%M:%S %Y",
+    ] {
+        if let Ok(t) = chrono::NaiveDateTime::parse_from_str(s, format) {
+            return Some(from_millis(t.and_utc().timestamp_millis()));
+        }
     }
     if let Ok(t) = chrono::DateTime::parse_from_rfc2822(&title_case_words(s)) {
         return Some(from_millis(t.timestamp_millis()));
@@ -140,6 +143,30 @@ pub fn now_ms() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The three HTTP-date forms (RFC 9110 §5.6.7) a Retry-After may carry,
+    /// all naming 1994-11-06 08:49:37 UTC.
+    #[test]
+    fn retry_after_reads_every_http_date_form() {
+        let at = 784_111_777_000.0;
+        for form in [
+            "Sun, 06 Nov 1994 08:49:37 GMT",
+            "Sunday, 06-Nov-94 08:49:37 GMT",
+            "Sun Nov  6 08:49:37 1994",
+        ] {
+            assert_eq!(
+                parse_retry_after(Some(form), at - 5_000.0),
+                Some(5_000.0),
+                "{form}"
+            );
+        }
+        assert_eq!(parse_retry_after(Some("120"), 0.0), Some(120_000.0));
+        assert_eq!(
+            parse_retry_after(Some("Sun, 06 Nov 1994 08:49:37 GMT"), at + 1.0),
+            Some(0.0)
+        );
+        assert_eq!(parse_retry_after(Some("not a date"), 0.0), None);
+    }
 
     fn headers() -> Headers {
         Headers::new()

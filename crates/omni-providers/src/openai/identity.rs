@@ -64,7 +64,7 @@ pub(crate) fn ensure_with(
 /// existing OS-seeded rand dependency. Persistence belongs to OAuth refresh.
 #[allow(dead_code)]
 pub(crate) fn ensure_secrets(data: &Value) -> Secrets {
-    use rand::RngCore as _;
+    use rand::Rng as _;
     ensure_with(
         data,
         || {

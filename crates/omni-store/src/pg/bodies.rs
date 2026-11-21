@@ -17,7 +17,7 @@ use crate::error::StoreError;
 use aes_gcm::aead::{Aead as _, KeyInit as _, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
 use omni_crypto::field::FieldKey;
-use rand::RngCore as _;
+use rand::Rng as _;
 use sha2::{Digest as _, Sha256};
 
 /// `MAX_ARTIFACT_BYTES`.
@@ -148,7 +148,7 @@ pub fn seal(key: &FieldKey, json: &str) -> Result<Sealed, StoreError> {
     rand::rng().fill_bytes(&mut iv);
     let sealed = cipher(key)
         .encrypt(
-            Nonce::from_slice(&iv),
+            &Nonce::from(iv),
             Payload {
                 msg: plain,
                 aad: &header,
@@ -252,9 +252,10 @@ pub fn decode_plaintext(
         if !fits || !digest_ok() {
             return None;
         }
+        let nonce = Nonce::try_from(&bytes[HEADER..HEADER + IV]).ok()?;
         let opened = cipher(key)
             .decrypt(
-                Nonce::from_slice(&bytes[HEADER..HEADER + IV]),
+                &nonce,
                 Payload {
                     msg: &bytes[HEADER + IV..],
                     aad: &bytes[..HEADER],
