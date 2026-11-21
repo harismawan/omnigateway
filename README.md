@@ -9,8 +9,8 @@ Rust local service commands and diagnostic migration limits are documented in
 One endpoint in front of the AI accounts you already pay for.
 
 OmniGateway is a self-hosted gateway that speaks the Anthropic and OpenAI APIs
-and answers them using your own Anthropic, OpenAI, Kimi Coding, Kilo, and xAI
-subscriptions. Point any compatible client at it, ask for a model you defined,
+and answers them using your own Anthropic, OpenAI (including Codex), and
+Google Antigravity subscriptions, plus any OpenAI-compatible endpoint you add. Point any compatible client at it, ask for a model you defined,
 and the gateway picks an account that can serve it — falling back to another
 when one is rate-limited, expired, or out of quota.
 
@@ -92,7 +92,8 @@ boundary, and the background loops.
   a native binary; npm (Node 18 or later) only installs it. There is no Windows
   build: Windows stays on the last TypeScript release, `omnigateway@0.15.5`.
 - A directory that persists, for the SQLite database.
-- At least one Anthropic, OpenAI, Kimi Coding, Kilo, or xAI account to connect.
+- At least one Anthropic, OpenAI, or Antigravity account to connect, or a custom
+  OpenAI-compatible endpoint.
 
 ## Install
 
@@ -130,16 +131,20 @@ native binary (every other line is kept), and the service is started and
 checked on `/health`. With install scripts allowed this happens during the
 update; otherwise the old process keeps serving until its next restart, which
 runs the migration instead of the old gateway. `omni service migrate` does the
-same on demand, and every later npm update restarts the service onto the new
-binary.
+same on demand. A later npm update restarts the service onto the new binary
+when install scripts are allowed; when they are blocked, run
+`omni service migrate` after updating to do that restart.
 
-What is **not** migrated automatically, and is left running as it was:
-cluster installations (Postgres/Redis — follow the
-[cutover runbook](docs/rust-cutover-runbook.md)), units with drop-ins or a
-changed `ExecStart`, both a user and a system unit, another process holding the
-database, and a system unit when the update did not run as root. The reason is
-recorded in `~/.local/state/omnigateway/npm-migration.json`, and `omni doctor`
-and `omni status` repeat it on stderr until it is resolved.
+What is **not** migrated automatically: cluster installations (Postgres/Redis —
+follow the [cutover runbook](docs/rust-cutover-runbook.md)), units that differ
+from the one `omni service install` wrote (drop-ins, `Environment=`, other
+directives, another `ExecStart`), both a user and a system unit, another process
+holding the database, and a system unit when the update did not run as root.
+During the update such a service keeps running the old gateway; when the check
+happens at the service's next start instead, the service is **left stopped**.
+Either way the reason is recorded in
+`~/.local/state/omnigateway/npm-migration.json`, and `omni doctor` and
+`omni status` print it on stderr until it is resolved.
 
 What stops working: plugins (their data stays), and accounts for Grok, Kimi,
 Kilo, Muse and Qoder, which this release does not serve; `omni doctor` lists
@@ -148,10 +153,12 @@ stopped, and the message names the way back:
 
 ```bash
 npm i -g omnigateway@0.15.5
-omni db restore db_<time>_preRust.sqlite
-omni service install --force        # add --system for a system unit
-systemctl --user start omnigateway   # or: sudo systemctl start omnigateway
+omni db restore --root <root> db_<time>_preRust.sqlite
+cp ~/.local/state/omnigateway/pre-rust/omnigateway.service ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user start omnigateway
 ```
+
+The exact commands, with your root and unit paths, are in the failure message.
 
 ## Getting started
 
@@ -178,7 +185,7 @@ omni start                 # serves the API and the console on 127.0.0.1:9000
 Connect an account. The CLI prints a URL to open, and waits:
 
 ```bash
-omni connect anthropic     # or: openai, kimi, kilo, grok
+omni connect anthropic     # or: openai, antigravity
 ```
 
 An installed [plugin](#plugins) that supplies its own provider is connected the
@@ -661,6 +668,11 @@ built: [docs/roadmap.md](docs/roadmap.md).
 
 ## Plugins
 
+**Not supported by the Rust gateway (1.x).** Installed plugins are listed by
+`omni doctor` and their data stays in the database, but nothing loads them and
+the `omni plugin` commands refuse. What follows describes the 0.x TypeScript
+gateway (`omnigateway@0.15.5`).
+
 A plugin adds routes, storage, a provider, and a screen in the console to one
 installation,
 without being part of OmniGateway. Most installations run none.
@@ -737,6 +749,7 @@ Releases are published to npm from a `v*` tag, with provenance attesting which
 commit produced them.
 # Qoder provider
 
+Not served by the Rust gateway (1.x); this describes `omnigateway@0.15.5`.
 Experimental Qoder global account login, server-derived models and native streaming
 are available without installing its CLI. See [Qoder setup and limitations](docs/qoder.md).
 Live account compatibility is not yet verified; unknown prices are not free usage.

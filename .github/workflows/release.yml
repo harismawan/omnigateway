@@ -265,12 +265,25 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
+          mkdir -p dist/packed
+          for dir in linux-x64 linux-arm64 darwin-x64 darwin-arm64 omnigateway; do
+            npm pack --silent --pack-destination dist/packed "dist/npm/$dir" > /dev/null
+          done
+          # Every platform tarball holds the release archive's binary, byte for byte.
+          bun scripts/build-npm.ts --verify-packed "$GITHUB_REF_NAME" release-assets dist/packed/*.tgz
           for dir in linux-x64 linux-arm64 darwin-x64 darwin-arm64 omnigateway; do
             name=$(node -p "require('./dist/npm/$dir/package.json').name")
-            if [ "$(npm view "$name@$version" version 2>/dev/null || true)" = "$version" ]; then
-              echo "$name@$version is already published; skipping"
-            else
+            tarball=dist/packed/$(node -p "require('./dist/npm/$dir/package.json').name.replace('@','').replace('/','-')")-$version.tgz
+            local_integrity="sha512-$(openssl dgst -sha512 -binary "$tarball" | base64 -w0)"
+            published=$(npm view "$name@$version" dist.integrity 2>/dev/null || true)
+            if [ -z "$published" ]; then
               (cd "dist/npm/$dir" && npm publish --access public)
+            elif [ "$published" = "$local_integrity" ]; then
+              echo "$name@$version is already published with these exact bytes; skipping"
+            else
+              # A rerun must never point `latest` at different bytes.
+              echo "$name@$version is already on npm with different contents ($published); refusing" >&2
+              exit 1
             fi
           done
 
@@ -286,9 +299,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # The first Rust major carries its upgrade notice above the
+          # generated changelog; other releases get the changelog alone.
+          notes=()
+          if [ "${GITHUB_REF_NAME}" = "v1.0.0" ]; then
+            sed -n '/^```text$/,/^```$/p' docs/rust-npm-final-notice.md | sed '1d;$d' > release-notice.md
+            test -s release-notice.md
+            notes=(--notes "$(cat release-notice.md)")
+          fi
           gh release create "${GITHUB_REF_NAME}" \
             --title "${GITHUB_REF_NAME}" \
-            --generate-notes \
+            --generate-notes "${notes[@]}" \
             --verify-tag
 
   # The container image, tagged with the version the tag names. Built after the

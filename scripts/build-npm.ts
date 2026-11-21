@@ -129,7 +129,50 @@ export async function buildPackages(options: {
   return dirs;
 }
 
-if (import.meta.main) {
+async function sha256(bytes: Uint8Array): Promise<string> {
+  return new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
+}
+
+async function binaryOf(archive: string, member: string): Promise<Uint8Array> {
+  const out = Bun.spawnSync(["tar", "-xzOf", archive, member], { stderr: "pipe" });
+  if (out.exitCode !== 0) throw new Error(`no ${member} in ${archive}: ${out.stderr}`);
+  return out.stdout;
+}
+
+/**
+ * Before anything irreversible: every packed platform tarball must hold the
+ * release archive's `omnigateway` byte for byte. Returns how many it checked;
+ * all four must be present.
+ */
+export async function verifyPacked(options: {
+  version: string;
+  assets: string;
+  tarballs: string[];
+}): Promise<number> {
+  const { version, assets, tarballs } = options;
+  let checked = 0;
+  for (const { target, npm } of PLATFORMS) {
+    const short = npm.replace("@omnigateway/", "");
+    const tarball = tarballs.find((t) => t.includes(`omnigateway-${short}-${version}.tgz`));
+    if (tarball === undefined) throw new Error(`no packed tarball for ${npm}@${version}`);
+    const expected = await sha256(
+      await binaryOf(join(assets, `omnigateway-v${version}-${target}.tar.gz`), "./omnigateway"),
+    );
+    const actual = await sha256(await binaryOf(tarball, "package/omnigateway"));
+    if (actual !== expected) {
+      throw new Error(`${short}: packed binary ${actual} is not the release archive's ${expected}`);
+    }
+    checked++;
+  }
+  return checked;
+}
+
+if (import.meta.main && process.argv[2] === "--verify-packed") {
+  const [, , , rawVersion, assets, ...tarballs] = process.argv;
+  const version = releaseVersion(rawVersion ?? "");
+  const checked = await verifyPacked({ version, assets: assets ?? "", tarballs });
+  console.log(`verified ${checked} platform tarballs against the release archives`);
+} else if (import.meta.main) {
   const version = releaseVersion(process.argv[2] ?? process.env.OMNI_RELEASE_VERSION ?? "");
   const assets = process.argv[3] ?? join(root, "release-assets");
   const out = join(root, "dist", "npm");

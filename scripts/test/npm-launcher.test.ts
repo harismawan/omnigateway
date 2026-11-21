@@ -85,6 +85,24 @@ test.skipIf(node === null)("a signal reaches the binary and the launcher dies by
   expect(child.signalCode).toBe("SIGTERM");
 });
 
+test.skipIf(node === null)(
+  "the bridge exits 0 when the binary is missing, so systemd stops",
+  () => {
+    const { main } = installed(recorder);
+    rmSync(join(main, "..", "@omnigateway"), { recursive: true });
+    const run = Bun.spawnSync([node as string, join(main, "gateway.js")], { stderr: "pipe" });
+    expect(run.exitCode).toBe(0);
+    expect(run.stderr.toString()).toContain("is not installed");
+  },
+);
+
+test.skipIf(node === null)("the bridge exits 0 when the binary cannot run", () => {
+  const { main, native } = installed(recorder);
+  chmodSync(native, 0o644);
+  const run = Bun.spawnSync([node as string, join(main, "gateway.js")], { stderr: "pipe" });
+  expect(run.exitCode).toBe(0);
+});
+
 test.skipIf(node === null)("a missing platform package names the fix", () => {
   const { main } = installed(recorder);
   rmSync(join(main, "..", "@omnigateway"), { recursive: true });

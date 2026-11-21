@@ -6,12 +6,18 @@ const { binaryPath } = require("./platform.js");
 
 const FORWARDED = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT"];
 
+/**
+ * `failureCode` is what a launch failure exits with: 1 for the CLI, 0 for the
+ * gateway.js bridge, so an old unit's Restart=on-failure does not loop on a
+ * missing or broken platform package.
+ */
 function run(args, options = {}) {
   const binary = options.binary ?? binaryPath();
   const exit = options.exit ?? ((code) => process.exit(code));
+  const failureCode = options.failureCode ?? 1;
   if (binary instanceof Error) {
     process.stderr.write(`${binary.message}\n`);
-    exit(1);
+    exit(failureCode);
     return;
   }
   const child = spawn(binary, args, { stdio: "inherit" });
@@ -22,7 +28,7 @@ function run(args, options = {}) {
   });
   child.on("error", (error) => {
     process.stderr.write(`omnigateway: could not run ${binary}: ${error.message}\n`);
-    exit(1);
+    exit(failureCode);
   });
   child.on("exit", (code, signal) => {
     for (const [name, handler] of handlers) process.off(name, handler);

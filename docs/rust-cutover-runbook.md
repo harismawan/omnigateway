@@ -250,21 +250,29 @@ service the TS CLI wrote, through `omni service migrate` (design:
 [npm distribution](superpowers/specs/2026-11-21-rust-npm-distribution-design.md)).
 It runs from `postinstall` when npm allows the package's scripts
 (`--allow-scripts=omnigateway`; npm 12 blocks them by default), otherwise from
-the `gateway.js` bridge on the old unit's next start. Either way it refuses,
-before stopping anything, for cluster `.env` settings, drop-ins, an unrecognised
-`ExecStart`, both scopes, a foreign database holder, too little disk for the
-backup, a database migrated by a newer build, or a system unit when not root or
-with a binary path that is not root-owned. It replaces only the `ExecStart=`
-line, saves the old unit under `<state>/pre-rust/`, and records the outcome in
-`<state>/npm-migration.json` (`~/.local/state/omnigateway` by default), which
-`omni doctor` and `omni status` repeat on stderr until resolved. On a failed health check the
-service is left stopped with the rollback in the message. This replaces the
-maintenance window for that one shape only. It does not take step 6, so run it
-after the update.
+the `gateway.js` bridge on the old unit's next start.
 
-The bridge serves the migrating start as its own child, so that one run's
-process tree is `bun gateway.js` → `omnigateway omni service migrate --bridge`
-→ `omnigateway`; the next restart is the binary alone.
+Before stopping anything it refuses a unit systemd did not load from that file
+(`FragmentPath`, pending reload, drop-ins), any `Environment=`, environment
+files other than `<root>/.env`, directives beyond the TS template (output
+wiring excepted), cluster settings, a visible foreign database holder, an
+unwritable or full snapshot directory, an unreadable or newer ledger, a
+non-running binary, both scopes, and a system unit without root or with a
+non-root-owned binary path. After the stop it takes an SQLite exclusive lock,
+which fails while any other connection exists, holds it across the backup and
+the `ExecStart=` rewrite, and accepts the start only when `/health` answers and
+systemd's `MainPID` is this binary. Any failure after the stop leaves the
+service **stopped**, with rollback steps for that branch. The outcome is
+recorded in `<state>/npm-migration.json` (`~/.local/state/omnigateway` by
+default); `omni doctor` and `omni status` print its reason until resolved.
+This replaces the maintenance window for that one shape only. It does not take
+step 6, so run it after the update.
+
+The bridge serves the migrating start as its own child (signals relayed), so
+that one run's process tree is `bun gateway.js` →
+`omnigateway omni service migrate --bridge` → `omnigateway`; the next restart is
+the binary alone. With scripts blocked, later Rust updates are not restarted
+automatically: run `omni service migrate` after `npm update`.
 
 ## 5. Postgres + Redis fleet maintenance window
 

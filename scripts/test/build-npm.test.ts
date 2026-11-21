@@ -12,7 +12,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildPackages, PLATFORMS, releaseVersion } from "../build-npm.ts";
+import { buildPackages, PLATFORMS, releaseVersion, verifyPacked } from "../build-npm.ts";
 
 test("a release tag becomes the published version", () => {
   expect(releaseVersion("v1.2.3")).toBe("1.2.3");
@@ -117,3 +117,32 @@ test("an archive for another tag stops the build", async () => {
   const { assets, out } = fixture();
   await expect(buildPackages({ version: "1.0.1", assets, out })).rejects.toThrow(/v1\.0\.1/);
 });
+
+/** `npm pack` of every built directory, as the publish step does. */
+function pack(dirs: string[], into: string): string[] {
+  mkdirSync(into, { recursive: true });
+  return dirs.map((dir) => {
+    const out = Bun.spawnSync(["npm", "pack", "--silent", "--pack-destination", into, dir], {
+      cwd: dir,
+    });
+    expect(out.exitCode).toBe(0);
+    return join(into, out.stdout.toString().trim().split("\n").at(-1) as string);
+  });
+}
+
+test.skipIf(Bun.which("npm") === null)(
+  "packed platform tarballs carry exactly the archive's binary",
+  async () => {
+    const { dir, assets, out } = fixture();
+    const dirs = await buildPackages({ version: "1.0.0", assets, out });
+    const tarballs = pack(dirs, join(dir, "packed"));
+    expect(await verifyPacked({ version: "1.0.0", assets, tarballs })).toBe(4);
+    // A tampered tarball is caught.
+    const bad = join(out, "linux-x64", "omnigateway");
+    writeFileSync(bad, "something else");
+    const again = pack([join(out, "linux-x64")], join(dir, "packed-bad"));
+    await expect(
+      verifyPacked({ version: "1.0.0", assets, tarballs: [...tarballs.slice(1), ...again] }),
+    ).rejects.toThrow(/linux-x64/);
+  },
+);

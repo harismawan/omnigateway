@@ -189,65 +189,64 @@ other-writable. Otherwise the tool prints the exact
 
 ### Legacy TS → Rust
 
-1. **Read root and mode** from the unit's `WorkingDirectory` and its `.env`.
-   `OMNI_DATABASE_URL` or `OMNI_REDIS_URL` set: this is a **cluster** node, so
-   record `skipped-cluster`, print the cluster runbook pointer, and stop.
-2. **Preflight, nothing touched yet:** the binary runs `--version`; the database
-   opens read-only and its migration ledger has no id this build doesn't know;
-   the snapshots directory is writable; free space is at least 1.1× the database
-   (the existing snapshot rule).
-3. **Writers.** The only process holding the database file may be the unit's
-   `MainPID`. On Linux this is checked by scanning `/proc/*/fd`, plus the
-   existing pidfile check for an `omni start` gateway. Any other holder: record
-   `skipped-writer`, name the PID, and stop. *(controller call)*
-4. **Stop TS** (`systemctl [--user] stop`). Wait until `ActiveState=inactive`,
-   `MainPID=0`, and no process holds the file. Remember whether the unit was
-   active and enabled.
-5. **Back up** with the existing snapshot code into
-   `<db dir>/snapshots/db_<stamp>_preRust.sqlite`. The TS snapshot id pattern
-   accepts any alphabetic reason, so the frozen TS CLI's `omni db restore
-   <id>` restores it. Copy the old unit file to
-   `<state dir>/pre-rust/omnigateway.service`. Bodies and `.env` stay in place.
-   **Backup failure:** Rust has not opened the database, so TS data is
-   unchanged. Record `failed-backup`, leave the service stopped (TS can no
-   longer start: its files are gone), and print the rollback steps.
-6. **Rewrite the unit's `ExecStart=`** to the platform binary (written to a
-   temporary file, then renamed), then `daemon-reload`. Start it only if it was
-   active before. Enablement is kept, since the unit name and `WantedBy` are
-   unchanged.
-7. **Health:** `/health` on `http://<OMNI_HOST>:<OMNI_PORT>` (a wildcard host
-   probes loopback) must answer 2xx within 30 s. It is never probed on
-   `OMNI_BASE_URL`, which may be a public proxy. *(controller call)*
-8. **Record and report.**
-   - Success: record `migrated` with the backup id, binary path and version.
-     Print what `omni doctor` says no longer runs (deferred-provider accounts,
-     plugins present).
-   - Failure: leave the service stopped. Record `failed-start` with the journal
-     hint, the backup id, and the rollback steps:
-     1. `npm i -g omnigateway@0.15.5`
-     2. `omni db restore <id>`
-     3. `omni service install --force [--system]`
-     4. `systemctl [--user] start omnigateway`
-
-     Rows the gateway wrote after migration are lost by the restore. Body files
-     Rust wrote are left behind and later removed by the TS orphan sweep.
-9. **Idempotent.** A unit already migrated takes the Rust→Rust path.
+1. **The unit as systemd loaded it.** `systemctl show` must report
+   `FragmentPath` = the file, `NeedDaemonReload=no`, no `DropInPaths`, no
+   `Environment`, `EnvironmentFiles` = exactly `<root>/.env (ignore_errors=no)`,
+   and an `ExecStart` argv equal to the file's. The file itself must be the
+   template line for line: every line a section header or `Key=Value` with
+   nothing around `=`, only template keys plus `StandardOutput`/`StandardError`,
+   the interpreter an absolute `…/bun`. Anything else is `skipped-unit`. *(review
+   finding 1–2)*
+2. **Mode** from that `.env` (unreadable → refuse): any of `OMNI_DATABASE_URL`,
+   `OMNI_REDIS_URL`, `OMNI_CLUSTER_MODE` → `skipped-cluster`.
+3. **Preflight, nothing touched yet:** no process other than `MainPID` visible
+   holding the database; the snapshot directory exists, is writable, has 1.1× the
+   database free; the ledger is readable and has no unknown id; the binary runs
+   `omni --version`.
+4. **Stop TS** and confirm through systemd (`inactive`/`failed`, `MainPID=0`).
+5. **Exclusivity:** open the database, `PRAGMA locking_mode=EXCLUSIVE; BEGIN
+   EXCLUSIVE` with no busy wait. It fails while *any* other connection is open
+   (another user, a hard link) and blocks every later opener, so this is the
+   proof `/proc` cannot give. Held through steps 6–7. *(review finding 3)*
+6. **Back up** through the locked connection (`VACUUM INTO`) into
+   `<db dir>/snapshots/db_<stamp>_preRust.sqlite`; save the old unit under
+   `<state>/pre-rust/`.
+7. **Rewrite `ExecStart=`** only (temp file + rename), `daemon-reload`, then
+   release the lock.
+8. **Start** (only if it was active) and accept it only when `/health` answers
+   **and** systemd's `MainPID` is alive running this binary. *(finding 5)*
+9. **Failure after step 4 leaves the service stopped** (npm already removed the
+   TS files, so TS cannot be restarted): stop again and confirm, record
+   `failed-*`, and print branch-specific rollback — no restore step when nothing
+   was written, `omni db restore --root <root> <id>` and copying the saved unit
+   back when it was. *(finding 4)*
+10. **Idempotent.** A unit already migrated takes the Rust→Rust path.
 
 ### Rust → Rust (later npm updates)
 
-For an **npm Rust** unit that is active: when `/proc/<MainPID>/exe` no longer
-names the current platform binary, because npm replaced the file and the
-running inode reads `(deleted)` or points elsewhere, run
-`systemctl [--user] restart` and apply the 30 s health check. On failure the
-service stays stopped, the failure is recorded, and the rollback is
-`npm i -g omnigateway@<previous version from the record>`. An inactive unit is
-left as it is.
+For an **npm Rust** unit that is active, restart only on positive evidence:
+`/proc/<MainPID>/exe` reads ` (deleted)` or names another file. Unreadable is
+not evidence (`current`). Success requires the same health + identity check;
+`runningVersion` in the record is the last version that ran healthy and is the
+rollback target, or the message says it is not recorded. With install scripts
+blocked nothing runs at update time; `omni service migrate` does the restart.
+*(finding 7)*
+
+### The bridge's own rules
+
+The migrator runs as the bridge only when systemd's `MainPID` is one of its
+ancestors (it was started by the unit, not by hand). It skips the stop, holds
+the same lock, and after the rewrite runs the gateway as its child: health plus
+"child still running" decide success, `SIGTERM`/`SIGINT`/`SIGHUP` are relayed
+to the child, and the exit status is the child's. Every refusal, and every
+launcher failure in `gateway.js` (missing or non-executable platform binary),
+exits **0**, so `Restart=on-failure` does not loop. *(finding 6)*
 
 ### Not a service
 
-A TS gateway started with `omni start` (pidfile) is never touched. The tool
-records `skipped-foreground` and tells the user to stop it and run `omni start`
-again. With no unit and no pidfile, it records `nothing-to-migrate` and prints
+A TS gateway started with `omni start` (a live pidfile, and no unit) is never
+touched. The tool records `skipped-foreground` and tells the user to stop it and
+run `omni start` again. With no unit and no pidfile, it records `nothing-to-migrate` and prints
 the one-paragraph what-changed note.
 
 ### Making the outcome visible *(controller call)*

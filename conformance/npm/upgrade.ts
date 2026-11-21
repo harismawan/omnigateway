@@ -13,7 +13,10 @@
  * Scenarios: `scripts` (postinstall allowed: migrates at install time) and
  * `blocked` (npm 12's default script policy: the old unit's next restart runs
  * the gateway.js bridge). Both end with a second update (1.0.1) that restarts
- * the service onto the replaced binary.
+ * the service onto the replaced binary. `foreign`: another process (here a
+ * second SQLite connection under its own process) keeps the database open, so
+ * the exclusive lock refuses after the stop: nothing is rewritten, the service
+ * is left stopped, the record says why.
  *
  * Usage: bun upgrade.ts <ts-0.15.5.tgz> <release omnigateway binary> <scratch> <scripts|blocked>
  */
@@ -35,8 +38,13 @@ import { join, resolve } from "node:path";
 import { buildPackages } from "../../scripts/build-npm.ts";
 
 const [tsTarball, binary, scratch, scenario] = process.argv.slice(2);
-if (!tsTarball || !binary || !scratch || (scenario !== "scripts" && scenario !== "blocked")) {
-  throw new Error("usage: upgrade.ts <ts.tgz> <binary> <scratch> <scripts|blocked>");
+if (
+  !tsTarball ||
+  !binary ||
+  !scratch ||
+  !["scripts", "blocked", "foreign"].includes(scenario ?? "")
+) {
+  throw new Error("usage: upgrade.ts <ts.tgz> <binary> <scratch> <scripts|blocked|foreign>");
 }
 const repo = resolve(import.meta.dir, "../..");
 const home = join(scratch, "home");
@@ -169,6 +177,7 @@ try {
     unitPath,
     tsUnit.replace("Restart=", `StandardOutput=append:${join(root, "gateway.log")}\nRestart=`),
   );
+  sh(["systemctl", "--user", "daemon-reload"]);
   sh(["systemctl", "--user", "start", "omnigateway.service"]);
   assert(await healthy(), "TS gateway did not start");
   const tsPid = servicePid();
@@ -176,6 +185,42 @@ try {
 
   // 2. The update.
   await publish("1.0.0", binary);
+  if (scenario === "foreign") {
+    // Holds a shared lock in a separate process the whole time; /proc shows
+    // it, so this is refused before the stop. That is the visible-holder path.
+    const holder = Bun.spawn(
+      [
+        "python3",
+        "-c",
+        `import sqlite3,time,sys;c=sqlite3.connect(${JSON.stringify(join(root, "omnigateway.db"))});c.execute('begin');c.execute('select count(*) from api_keys').fetchall();print('held',flush=True);time.sleep(120)`,
+      ],
+      { stdout: "pipe" },
+    );
+    await holder.stdout.getReader().read();
+    const out = sh([
+      "npm",
+      "update",
+      "-g",
+      "omnigateway",
+      "--foreground-scripts",
+      "--allow-scripts=omnigateway",
+    ]);
+    holder.kill();
+    assert.match(out.stdout + out.stderr, /is open in process \d+ besides the service/);
+    assert.equal(readFileSync(unitPath, "utf8").includes("gateway.js"), true, "unit untouched");
+    assert.equal(servicePid(), tsPid, "TS left running: refused before the stop");
+    assert.equal(JSON.parse(readFileSync(recordPath, "utf8")).status, "skipped-writer");
+    assert.match(
+      sh(["omni", "doctor", "--json"]).stderr,
+      /skipped-writer\): .* is open in process/,
+    );
+    console.log(JSON.stringify({ scenario, ok: true }));
+    // `process.exit` skips `finally`: clean up here.
+    sh(["systemctl", "--user", "stop", "omnigateway.service"], { ok: false });
+    registry.kill();
+    save();
+    process.exit(0);
+  }
   const update = ["npm", "update", "-g", "omnigateway", "--foreground-scripts"];
   if (scenario === "scripts") update.push("--allow-scripts=omnigateway");
   const updated = sh(update);

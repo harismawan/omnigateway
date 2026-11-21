@@ -25,7 +25,8 @@ def pid():
         return None
 
 def directive(key):
-    for line in unit.read_text().splitlines():
+    text = (state / 'loaded').read_text() if (state / 'loaded').exists() else unit.read_text()
+    for line in text.splitlines():
         if line.startswith(key + '='):
             return line[len(key) + 1:]
     raise SystemExit(f'no {key}')
@@ -59,11 +60,25 @@ def stop():
 verb = args[0] if args else ''
 if verb == 'show':
     p = pid()
-    print(f"ActiveState={'active' if p else 'inactive'}\nUnitFileState=enabled\nMainPID={p or 0}\nDropInPaths=")
+    loaded = (state / 'loaded').read_text() if (state / 'loaded').exists() else unit.read_text()
+    def loaded_directive(key):
+        for line in loaded.splitlines():
+            if line.startswith(key + '='):
+                return line[len(key) + 1:]
+        return ''
+    argv = loaded_directive('ExecStart')
+    print(f"ActiveState={'active' if p else 'inactive'}\nUnitFileState=enabled\nMainPID={p or 0}\n"
+          f"DropInPaths=\nFragmentPath={unit}\n"
+          f"NeedDaemonReload={'no' if loaded == unit.read_text() else 'yes'}\nEnvironment=\n"
+          f"EnvironmentFiles={loaded_directive('EnvironmentFile')} (ignore_errors=no)\n"
+          f"WorkingDirectory={loaded_directive('WorkingDirectory')}\n"
+          f"ExecStart={{ path={argv.split(' ')[0]} ; argv[]={argv} ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }}")
 elif verb == 'is-active':
     print('active' if pid() else 'inactive')
     sys.exit(0 if pid() else 3)
-elif verb in ('daemon-reload', 'enable'):
+elif verb == 'daemon-reload':
+    (state / 'loaded').write_text(unit.read_text())
+elif verb == 'enable':
     pass
 elif verb == 'start':
     start()

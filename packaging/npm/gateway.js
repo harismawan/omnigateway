@@ -8,4 +8,6 @@
 //
 // Plain CommonJS so both Bun (the old unit's interpreter) and Node run it.
 "use strict";
-require("./lib/run.js").run(["omni", "service", "migrate", "--bridge"]);
+// A launch failure exits 0: the old unit has Restart=on-failure, and retrying
+// a missing binary every two seconds helps nobody. The service stays stopped.
+require("./lib/run.js").run(["omni", "service", "migrate", "--bridge"], { failureCode: 0 });
