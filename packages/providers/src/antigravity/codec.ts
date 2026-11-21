@@ -123,6 +123,7 @@ export const antigravityCodec: ProviderCodec = {
 
     const { body, degradations } = toAntigravityWire(input.request, input.model, {
       project,
+      // Keep our ID after the captured prefix; the App's extra segments are not understood.
       requestId: `agent/${requestId}`,
       cloak,
     });

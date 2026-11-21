@@ -145,6 +145,7 @@ fn encode(
             )
             .into()
         })
+        // Keep our ID after the captured prefix; the App's extra segments are not understood.
         .surrounded("agent/", "");
     let (body, degradations) =
         super::wire::to_wire_source(request, source, model, project, &request_id, &cloak)?;

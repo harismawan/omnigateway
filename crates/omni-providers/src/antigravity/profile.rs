@@ -65,6 +65,11 @@ pub fn headers(extra: Vec<(String, String)>) -> Vec<(String, String)> {
 pub(super) const INFERENCE_HOST: &str = "daily-cloudcode-pa.googleapis.com";
 
 /// App 2.34.0 Linux Hub identity, from the same fixture as the TS profile.
+/// omniroute reported that Google refused a non-Mac identity; this offline
+/// capture neither confirms nor disproves that report. Live acceptance of the
+/// Linux Hub default is untested. Set `OMNI_UA_ANTIGRAVITY` to
+/// `antigravity/ide/2.12.2 darwin/arm64` to restore the old UA only, not the old
+/// header order, framing, or envelope.
 pub(super) fn inference_headers(token: &str) -> Vec<(String, String)> {
     let version = env("OMNI_ANTIGRAVITY_IDE_VERSION", "2.34.0");
     ordered(

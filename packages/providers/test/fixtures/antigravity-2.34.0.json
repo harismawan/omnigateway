@@ -3,6 +3,7 @@
   "capturedAt": "2026-11-21",
   "archiveSha256": "478c68f86c9ef61a502185a39e9ceec66b1276a6a53b191a19b0d9ce869836db",
   "requestLine": "POST /v1internal:streamGenerateContent?alt=sse HTTP/1.1",
+  "gatewayRequestIdDeviation": "The gateway keeps agent/<gateway id>; the App's extra segments are not reproduced.",
   "headers": [
     ["Host", "daily-cloudcode-pa.googleapis.com"],
     [
@@ -16,7 +17,7 @@
   ],
   "envelope": {
     "project": "<project>",
-    "requestId": "agent/<id>",
+    "requestId": "agent/<uuid-v4>/<13 decimal digits>/<uuid-v4>/1",
     "request": {
       "contents": "<history>",
       "systemInstruction": "<prompt>",

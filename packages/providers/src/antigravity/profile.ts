@@ -4,6 +4,11 @@ import { type ClientProfile, env, envOrder } from "../headers.ts";
  * Linux x86_64 App 2.34.0 Hub agent turn, captured here on 2026-11-21 from the
  * official Google release. See `scripts/antigravity-capture/README.md` and the
  * sanitized fixture `antigravity-2.34.0.json`. This is not a CLI or Mac capture.
+ * omniroute reported that Google refused a non-Mac identity. This offline
+ * capture neither confirms nor disproves that secondhand report; live
+ * acceptance of the Linux Hub default is untested. Set OMNI_UA_ANTIGRAVITY to
+ * `antigravity/ide/2.12.2 darwin/arm64` to restore the old UA only, not the old
+ * header order, framing, or envelope.
  * Keep helpers imported from `headers.ts` to avoid a profile initialization cycle.
  */
 const HUB_VERSION = env("OMNI_ANTIGRAVITY_IDE_VERSION", "2.34.0");

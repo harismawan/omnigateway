@@ -74,15 +74,23 @@ UA. The App also made a `checkpoint` request; the gateway only sends agent turns
 | HTTP/1.1 header order | `Host`, `User-Agent`, `Transfer-Encoding`, `Authorization`, `Content-Type`, `Accept-Encoding` |
 | Framing and media type | `Transfer-Encoding: chunked`, `Content-Type: application/json`; no `Content-Length` or `Accept` |
 | Envelope order | `project`, `requestId`, `request`, `model`, `userAgent`, `requestType` |
-| Envelope identity | `userAgent: antigravity`, `requestType: agent`, `requestId: agent/<id>` |
+| Envelope identity | `userAgent: antigravity`, `requestType: agent`, `requestId: agent/<uuid-v4>/<13 decimal digits>/<uuid-v4>/1` |
 
-The gateway retains its request-ID generation and translation. It does not
-copy the App's tool inventory, labels or session IDs. It does not advertise
-the captured `Accept-Encoding: gzip` because the response readers do not
-decompress it; the shared HTTP transport also emits `Connection: keep-alive`.
+The gateway deliberately sends `agent/<gateway id>` instead. The two recorded
+first turns do not establish how the extra segments are derived. The gateway
+also keeps its translation and does not copy the App's tools, labels or session
+IDs or advertise the captured `Accept-Encoding: gzip`: the response readers
+do not decompress it. The shared HTTP transport emits `Connection: keep-alive`.
+Only Antigravity omits the transport's automatic length for plain chunking.
 This is an HTTP/1.1 trace from a stub, not evidence of backend acceptance or
 HTTP/2 framing. `OMNI_ANTIGRAVITY_IDE_VERSION`, `OMNI_UA_ANTIGRAVITY` and
 `OMNI_ORDER_ANTIGRAVITY` still override the version, complete UA and header order.
+
+**Compatibility risk:** omniroute reported that Google refused a non-Mac
+identity. This offline capture neither confirms nor disproves that secondhand
+report, and live acceptance of the Linux Hub default is untested. To restore
+the old UA, set `OMNI_UA_ANTIGRAVITY='antigravity/ide/2.12.2 darwin/arm64'`.
+That restores only the UA, not the previous header order, framing or envelope.
 
 **Open: bootstrap parity.** The App/CLI recordings used `daily-cloudcode-pa`
 for `loadCodeAssist` and `onboardUser`; onboarding used `tierId`. The CLI's

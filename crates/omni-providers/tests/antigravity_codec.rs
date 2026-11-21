@@ -61,7 +61,7 @@ fn codec_matches_frozen_ts() {
     eprintln!("codec corpus: {} rows green", rows.len());
 }
 #[test]
-fn matches_recorded_app_agent_profile() {
+fn matches_app_headers_and_envelope_order_but_keeps_gateway_request_id() {
     use omni_providers::codec::{CodecInput, Credentials};
     let raw = include_str!("../../../packages/providers/test/fixtures/antigravity-2.34.0.json");
     let fixture: serde_json::Value = serde_json::from_str(raw).expect("capture");

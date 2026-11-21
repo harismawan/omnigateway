@@ -119,11 +119,9 @@ describe("the project id", () => {
 });
 
 describe("the request id", () => {
-  test("prefixes the gateway's own id with the recorded request kind", () => {
+  test("keeps the gateway id with the captured agent prefix, not the full App id", () => {
     const built = antigravityCodec.buildRequest(input());
-    expect(JSON.parse(built.request.body).requestId).toBe(
-      capture.envelope.requestId.replace("<id>", "req-1"),
-    );
+    expect(JSON.parse(built.request.body).requestId).toBe("agent/req-1");
   });
 
   test("is derived, not random, when the caller has none", () => {
