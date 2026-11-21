@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub(crate) fn absolute(base: &Path, value: &str) -> PathBuf {
+fn absolute(base: &Path, value: &str) -> PathBuf {
     let joined = base.join(value);
     let mut out = PathBuf::new();
     for part in joined.components() {
@@ -29,32 +29,6 @@ pub struct Context {
     pub root: PathBuf,
     pub path: PathBuf,
     pub(crate) config: Result<Config, omni_control::config::ConfigError>,
-}
-
-/// The root `.env` as the CLI and the TS `parseEnvFile` read it.
-pub(crate) fn parse_env(text: &str) -> HashMap<String, String> {
-    let mut file_env = HashMap::new();
-    for raw in text.split('\n') {
-        let line = trim(raw);
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let line = trim(line.strip_prefix("export ").unwrap_or(line));
-        if let Some((key, value)) = line.split_once('=') {
-            if key.is_empty() {
-                continue;
-            }
-            let mut value = trim(value);
-            if value.len() >= 2
-                && (value.starts_with('"') && value.ends_with('"')
-                    || value.starts_with('\'') && value.ends_with('\''))
-            {
-                value = &value[1..value.len() - 1];
-            }
-            file_env.insert(trim(key).to_owned(), value.to_owned());
-        }
-    }
-    file_env
 }
 
 pub fn open(flags: &HashMap<String, String>) -> Result<omni_store::SqliteStore, String> {
@@ -90,12 +64,33 @@ pub fn resolve(flags: &HashMap<String, String>) -> Result<Context, String> {
             .ok_or("could not resolve account home directory")?
             .join(".config/omnigateway")
     };
+    let mut file_env = HashMap::new();
     let file = root.join(".env");
-    let file_env = if file.exists() {
-        parse_env(&std::fs::read_to_string(file).map_err(|e| e.to_string())?)
-    } else {
-        HashMap::new()
-    };
+    if file.exists() {
+        for raw in std::fs::read_to_string(file)
+            .map_err(|e| e.to_string())?
+            .split('\n')
+        {
+            let line = trim(raw);
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let line = trim(line.strip_prefix("export ").unwrap_or(line));
+            if let Some((key, value)) = line.split_once('=') {
+                if key.is_empty() {
+                    continue;
+                }
+                let mut value = trim(value);
+                if value.len() >= 2
+                    && (value.starts_with('"') && value.ends_with('"')
+                        || value.starts_with('\'') && value.ends_with('\''))
+                {
+                    value = &value[1..value.len() - 1];
+                }
+                file_env.insert(trim(key).to_owned(), value.to_owned());
+            }
+        }
+    }
     let db_flag = flags.get("db").filter(|s| !trim(s).is_empty());
     let suppressed =
         if flag_root.is_some() && db_flag.is_none() && !file_env.contains_key("OMNI_DB_PATH") {

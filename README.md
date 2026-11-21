@@ -90,7 +90,7 @@ boundary, and the background loops.
 
 - Linux (x86_64 or aarch64) or macOS (Intel or Apple silicon). The gateway is
   a native binary; npm (Node 18 or later) only installs it. There is no Windows
-  build: Windows stays on the last TypeScript release, `omnigateway@0.15.5`.
+  build (npm refuses the install there).
 - A directory that persists, for the SQLite database.
 - At least one Anthropic, OpenAI, or Antigravity account to connect, or a custom
   OpenAI-compatible endpoint.
@@ -106,62 +106,36 @@ the server hosts. npm picks the matching native build
 (`@omnigateway/<os>-<cpu>`); the same binaries are attached to each
 [GitHub release](https://github.com/harismawan/omnigateway/releases).
 
-npm 12 blocks install scripts by default. Allowing this package's lets it link
-`omni` straight to the binary and restart the service after an update:
+npm 12 blocks install scripts by default. Allowing this package's lets it
+replace the `omni` and `omnigateway` launchers with symlinks to the binary:
 
 ```bash
 npm i -g omnigateway --allow-scripts=omnigateway
 # or once: npm config set allow-scripts=omnigateway --location=user
 ```
 
-Without it everything still works, through a small Node launcher.
+Without it everything still works, through a small Node launcher. The
+postinstall only creates those links; it never touches a service or a
+database.
 
-### Upgrading from 0.x
+### Coming from 0.x
 
-`1.0.0` replaces the TypeScript gateway with the Rust one under the same
-package name; `npm update -g omnigateway` is the upgrade. On servers, run it as
-`npm update -g omnigateway --allow-scripts=omnigateway --foreground-scripts` to
-watch it. Your database, `.env`, encryption key and captured bodies are read in
-place.
-
-A systemd service written by `omni service install` (user or system scope) is
-migrated for you: the old gateway is stopped, the database is backed up to
-`snapshots/db_<time>_preRust.sqlite`, the unit's `ExecStart` is pointed at the
-native binary (every other line is kept), and the service is started and
-checked on `/health`. With install scripts allowed this happens during the
-update; otherwise the old process keeps serving until its next restart, which
-runs the migration instead of the old gateway. `omni service migrate` does the
-same on demand. A later npm update restarts the service onto the new binary
-when install scripts are allowed; when they are blocked, run
-`omni service migrate` after updating to do that restart.
-
-What is **not** migrated automatically: cluster installations (Postgres/Redis —
-follow the [cutover runbook](docs/rust-cutover-runbook.md)), units that differ
-from the one `omni service install` wrote (drop-ins, `Environment=`, other
-directives, another `ExecStart`), both a user and a system unit, another process
-holding the database, a system unit when the update did not run as root, and an
-installation or npm prefix whose path has spaces, quotes, `%` or `$` (a unit line
-cannot carry it verbatim) or that is reached through a symlink.
-When it is refused during the update, before anything is stopped, the old
-gateway keeps running; when the check happens at the service's next start, or
-after the old gateway was stopped, the service is **left stopped**.
-Either way the reason is recorded in
-`~/.local/state/omnigateway/npm-migration.json`, and `omni doctor` and
-`omni status` print it on stderr until it is resolved.
-
-What stops working: plugins (their data stays), and accounts for Grok, Kimi,
-Kilo, Muse and Qoder, which this release does not serve; `omni doctor` lists
-what it found. If the Rust gateway fails its health check the service is left
-stopped, and the message names the way back:
+`1.0.0` is a fresh install of the Rust gateway; nothing is converted for you.
+It reads an existing 0.x SQLite database as it is (same schema), so to keep
+your data point it at the old installation and replace the service yourself:
 
 ```bash
-npm i -g omnigateway@0.15.5
-omni db restore --root <root> --db <root>/omnigateway.db db_<time>_preRust.sqlite
-cp ~/.local/state/omnigateway/pre-rust/omnigateway.service ~/.config/systemd/user/
-systemctl --user daemon-reload && systemctl --user start omnigateway
+omni stop                                  # or: systemctl --user stop omnigateway
+npm i -g omnigateway
+omni db backup --root <old root>           # optional: a snapshot first
+omni service install --force --root <old root>
+systemctl --user restart omnigateway
 ```
 
-The exact commands, with your root and unit paths, are in the failure message.
+Use the same `.env` and `OMNI_ENCRYPTION_KEY`, or the stored accounts cannot be
+decrypted. Plugins (their data stays) and accounts for Grok, Kimi, Kilo, Muse
+and Qoder are not served by 1.x; `omni doctor` lists what it found. Cluster
+installations follow the [cutover runbook](docs/rust-cutover-runbook.md).
 
 ## Getting started
 

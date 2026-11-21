@@ -60,18 +60,6 @@ test.skipIf(node === null)("bin/omnigateway passes its arguments through untouch
   expect(readFileSync(log, "utf8").split("\n").slice(1)).toEqual(["--version", ""]);
 });
 
-test.skipIf(node === null)("gateway.js runs the bridge migration", () => {
-  const { main, log } = installed(recorder);
-  Bun.spawnSync([node as string, join(main, "gateway.js")]);
-  expect(readFileSync(log, "utf8").split("\n").slice(1)).toEqual([
-    "omni",
-    "service",
-    "migrate",
-    "--bridge",
-    "",
-  ]);
-});
-
 test.skipIf(node === null)("a signal reaches the binary and the launcher dies by it", async () => {
   const { main } = installed(
     `#!/bin/sh\ntrap 'exit 0' INT\necho ready\nwhile :; do sleep 0.05; done\n`,
@@ -85,22 +73,12 @@ test.skipIf(node === null)("a signal reaches the binary and the launcher dies by
   expect(child.signalCode).toBe("SIGTERM");
 });
 
-test.skipIf(node === null)(
-  "the bridge exits 0 when the binary is missing, so systemd stops",
-  () => {
-    const { main } = installed(recorder);
-    rmSync(join(main, "..", "@omnigateway"), { recursive: true });
-    const run = Bun.spawnSync([node as string, join(main, "gateway.js")], { stderr: "pipe" });
-    expect(run.exitCode).toBe(0);
-    expect(run.stderr.toString()).toContain("is not installed");
-  },
-);
-
-test.skipIf(node === null)("the bridge exits 0 when the binary cannot run", () => {
+test.skipIf(node === null)("a binary that cannot run exits 1", () => {
   const { main, native } = installed(recorder);
   chmodSync(native, 0o644);
-  const run = Bun.spawnSync([node as string, join(main, "gateway.js")], { stderr: "pipe" });
-  expect(run.exitCode).toBe(0);
+  const run = Bun.spawnSync([node as string, join(main, "bin", "omni")], { stderr: "pipe" });
+  expect(run.exitCode).toBe(1);
+  expect(run.stderr.toString()).toContain("could not run");
 });
 
 test.skipIf(node === null)("a missing platform package names the fix", () => {
@@ -111,11 +89,12 @@ test.skipIf(node === null)("a missing platform package names the fix", () => {
   expect(run.stderr.toString()).toContain(`@omnigateway/${key} is not installed`);
 });
 
-test.skipIf(node === null)("an unsupported host is told to stay on the TS release", () => {
+test.skipIf(node === null)("an unsupported host names the supported builds", () => {
   const script = `const p=require(${JSON.stringify(join(packaging, "lib", "platform.js"))});
     const e=p.binaryPath({platform:"win32",arch:"x64"}); console.log(e.message)`;
   const run = Bun.spawnSync([node as string, "-e", script]);
-  expect(run.stdout.toString()).toContain("npm i -g omnigateway@0.15.5");
+  expect(run.stdout.toString()).toContain("no native build for win32-x64");
+  expect(run.stdout.toString()).toContain("linux-x64");
 });
 
 test.skipIf(node === null)("postinstall links both bins straight to the binary", () => {
@@ -130,24 +109,15 @@ test.skipIf(node === null)("postinstall links both bins straight to the binary",
     expect(readlinkSync(path).startsWith("/")).toBe(false);
     expect(realpathSync(path)).toBe(realpathSync(native));
   }
-  // Not a global install: no migration attempted.
+  // It only links: the binary is never run.
   expect(() => readFileSync(log)).toThrow();
 });
 
-test.skipIf(node === null || process.platform !== "linux")(
-  "a global postinstall runs the migration and still exits 0 when it fails",
-  () => {
-    const { main, log } = installed(recorder);
-    const run = Bun.spawnSync([node as string, join(main, "postinstall.js")], {
-      env: { PATH: process.env.PATH ?? "", npm_config_global: "true" },
-    });
-    expect(run.exitCode).toBe(0);
-    expect(readFileSync(log, "utf8").split("\n").slice(1)).toEqual([
-      "omni",
-      "service",
-      "migrate",
-      "--from-npm",
-      "",
-    ]);
-  },
-);
+test.skipIf(node === null)("a global postinstall runs nothing either", () => {
+  const { main, log } = installed(recorder);
+  const run = Bun.spawnSync([node as string, join(main, "postinstall.js")], {
+    env: { PATH: process.env.PATH ?? "", npm_config_global: "true" },
+  });
+  expect(run.exitCode).toBe(0);
+  expect(() => readFileSync(log)).toThrow();
+});

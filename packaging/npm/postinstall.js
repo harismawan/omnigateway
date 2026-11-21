@@ -1,12 +1,11 @@
 "use strict";
 // Runs after npm extracted this package. Always exits 0: a failing postinstall
-// fails the whole install, and by now the old TS files are already gone.
+// fails the whole install.
 //
-// 1. Replace bin/omni and bin/omnigateway with symlinks to the native binary,
-//    so ordinary use has no Node process in the way.
-// 2. On a global Linux install, run `omni service migrate --from-npm`, which
-//    moves a 0.x systemd service onto the binary and records the outcome.
-const { spawnSync } = require("node:child_process");
+// Replaces bin/omni and bin/omnigateway with symlinks to the native binary, so
+// ordinary use has no Node process in the way. With install scripts blocked
+// (npm 12's default) the Node launchers stay and work the same, one process
+// deeper.
 const { existsSync, renameSync, symlinkSync, unlinkSync } = require("node:fs");
 const { join, relative } = require("node:path");
 const { binaryPath } = require("./lib/platform.js");
@@ -28,21 +27,13 @@ function linkBins(binary, binDir) {
   }
 }
 
-function main(env = process.env) {
+function main() {
   const binary = binaryPath();
   if (binary instanceof Error) {
     process.stderr.write(`${binary.message}\n`);
     return;
   }
   if (process.platform !== "win32") linkBins(binary, join(__dirname, "bin"));
-  if (env.npm_config_global !== "true" || process.platform !== "linux") return;
-  const result = spawnSync(binary, ["omni", "service", "migrate", "--from-npm"], {
-    stdio: "inherit",
-    env,
-  });
-  if (result.error) {
-    process.stderr.write(`omnigateway: service migration did not run: ${result.error.message}\n`);
-  }
 }
 
 if (require.main === module) {

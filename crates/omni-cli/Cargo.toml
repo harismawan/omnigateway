@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 omni-providers = { path = "../omni-providers" }
-tokio = { version = "1", features = ["rt", "time", "net", "signal", "macros"] }
+tokio = { version = "1", features = ["rt", "time", "net"] }
 url = "2.5"
 omni-crypto = { path = "../omni-crypto" }
 rustix = { version = "1.1.6", features = ["termios", "fs", "process"] }
@@ -26,6 +26,3 @@ omni-router = { path = "../omni-router" }
 serde_json.workspace = true
 rusqlite = { version = "0.41", default-features = false, features = ["bundled"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
-
-[dev-dependencies]
-tempfile = "3"

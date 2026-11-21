@@ -1,11 +1,7 @@
 "use strict";
-// Shared by the launcher, postinstall and the gateway.js bridge. No
-// dependencies: this runs under whatever Node npm used, or under Bun when an
-// old 0.x systemd unit starts gateway.js.
+// Shared by the launcher and postinstall. No dependencies: this runs under
+// whatever Node npm used.
 const { join, dirname } = require("node:path");
-
-/** The last TS release: rollback target, and the version Windows stays on. */
-const LAST_TS_VERSION = "0.15.5";
 
 const SUPPORTED = ["linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64"];
 
@@ -22,8 +18,7 @@ function binaryPath(options = {}) {
   const resolve = options.resolve ?? ((id) => require.resolve(id));
   if (!SUPPORTED.includes(key)) {
     return new Error(
-      `omnigateway: no native build for ${key} (supported: ${SUPPORTED.join(", ")}).\n` +
-        `Stay on the TS release: npm i -g omnigateway@${LAST_TS_VERSION}`,
+      `omnigateway: no native build for ${key} (supported: ${SUPPORTED.join(", ")}).`,
     );
   }
   try {
@@ -36,4 +31,4 @@ function binaryPath(options = {}) {
   }
 }
 
-module.exports = { LAST_TS_VERSION, SUPPORTED, platformKey, binaryPath };
+module.exports = { SUPPORTED, platformKey, binaryPath };

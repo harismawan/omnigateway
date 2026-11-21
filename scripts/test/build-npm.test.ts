@@ -96,10 +96,12 @@ test("the main package pins every platform at its own version and refuses Window
   expect(manifest.scripts).toEqual({ postinstall: "node postinstall.js" });
   expect(manifest.engines).toEqual({ node: ">=18" });
   expect(manifest.dependencies).toBeUndefined();
-  // The bridge sits where every 0.x unit's ExecStart points.
-  for (const file of ["gateway.js", "postinstall.js", "lib/run.js", "lib/platform.js"]) {
+  for (const file of ["postinstall.js", "lib/run.js", "lib/platform.js"]) {
     expect(existsSync(join(out, "omnigateway", file))).toBe(true);
   }
+  // No 0.x migration bridge: 1.x is installed fresh.
+  expect(existsSync(join(out, "omnigateway", "gateway.js"))).toBe(false);
+  expect(manifest.files).not.toContain("gateway.js");
   for (const file of ["bin/omni", "bin/omnigateway"]) {
     expect(lstatSync(join(out, "omnigateway", file)).mode & 0o111).toBe(0o111);
   }

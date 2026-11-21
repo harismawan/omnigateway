@@ -5,9 +5,8 @@
  * Nothing is compiled here. The `rust-binaries` release job already built and
  * verified one archive per target; this unpacks each into its platform package
  * (`@omnigateway/<os>-<cpu>`) so npm ships the same bytes as the GitHub release,
- * and writes the main `omnigateway` package: a Node launcher, the postinstall
- * that links straight to the binary and migrates a 0.x service, and the
- * `gateway.js` bridge that every 0.x systemd unit points at.
+ * and writes the main `omnigateway` package: a Node launcher and the
+ * postinstall that links straight to the binary.
  *
  * Design: docs/superpowers/specs/2026-11-21-rust-npm-distribution-design.md.
  */
@@ -115,10 +114,9 @@ export async function buildPackages(options: {
     ...COMMON,
     type: "commonjs",
     bin: { omni: "bin/omni", omnigateway: "bin/omnigateway" },
-    files: ["bin", "lib", "gateway.js", "postinstall.js", "README.md", "LICENSE"],
+    files: ["bin", "lib", "postinstall.js", "README.md", "LICENSE"],
     scripts: { postinstall: "node postinstall.js" },
-    // Hosts with no native build refuse the update (EBADPLATFORM) and keep
-    // the TS release they already run.
+    // Hosts with no native build refuse the install (EBADPLATFORM).
     os: ["linux", "darwin"],
     cpu: ["x64", "arm64"],
     engines: { node: ">=18" },

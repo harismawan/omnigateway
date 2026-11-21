@@ -60,9 +60,10 @@ checks, not manual Redis repairs an operator should improvise.
 - The CLI administers local SQLite only. Use authenticated admin HTTP and the
   database's own tooling for a Postgres fleet.
 - Rust ships as release binaries, the container image, and npm
-  `omnigateway@1.x` (a native binary per platform; Node only installs it). The
-  TS `0.15.5` npm release stays published for rollback and Windows, which is
-  not a Rust release target; Linux and macOS targets are listed below.
+  `omnigateway@1.x` (a native binary per platform; Node only installs it). It
+  is a fresh install: nothing migrates a 0.x service automatically. The TS
+  `0.15.5` npm release stays published for rollback; Windows is not a Rust
+  release target; Linux and macOS targets are listed below.
 
 ### Measured performance and overload behavior
 
@@ -245,106 +246,21 @@ encrypted accounts and key hashes; treat it and body archives as sensitive.
 
 ### npm installations (`omnigateway` 0.x → 1.x)
 
-`npm update -g omnigateway` performs steps 1–2 above for a **single-node**
-service the TS CLI wrote, through `omni service migrate` (design:
-[npm distribution](superpowers/specs/2026-11-21-rust-npm-distribution-design.md)).
-It runs from `postinstall` when npm allows the package's scripts
-(`--allow-scripts=omnigateway`; npm 12 blocks them by default), otherwise from
-the `gateway.js` bridge on the old unit's next start.
+`omnigateway@1.x` on npm installs the same native binary as the release
+archive; it converts nothing. There is no automatic service migration: an npm
+update replaces the files under the old 0.x unit, so do steps 1–2 above by hand,
+using the npm-installed `omni`:
 
-Before stopping anything it refuses: a unit systemd did not load from that file
-(`FragmentPath`, `WorkingDirectory`, pending reload, drop-ins, missing facts);
-a transitional state (`activating`, `deactivating`, `reloading`); any
-`Environment=`, or any `OMNI_*` in the user or system manager's environment;
-environment files other than `<root>/.env`, or one outside plain ASCII
-`NAME=VALUE` lines (no `export`, no whitespace around `=` or at either end;
-single-line quotes allowed; no `\`, `$`, backtick, continuation or multi-line
-quote); an `OMNI_HOST` that is a host name rather than an IP or `localhost`
-(`localhost` is probed at the resolver's first address, as the gateway binds
-it); directives
-beyond the TS template (output wiring excepted, but not into the replaced
-package); cluster settings; a visible foreign database holder; an unwritable or
-full snapshot directory; an unreadable or newer ledger; a non-running binary;
-both scopes; and a system unit without root or with a non-root-owned binary
-path. It prints and records directive **names**, never their values.
+1. Stop the old service and back up the database and `.env` (section 3).
+2. `npm i -g omnigateway` (add `--allow-scripts=omnigateway` to link `omni`
+   straight to the binary; without it a Node launcher runs it, which works the
+   same).
+3. `omni service install --force --root <old root> [--system]` rewrites the
+   unit's `ExecStart` to the npm binary, then start the service and continue at
+   step 6. The Rust gateway reads the existing SQLite database in place.
 
-After the stop it confirms systemd reports the unit stopped, checks nothing
-still answers on the gateway's port, and takes an SQLite exclusive lock. That
-lock fails while another connection holds a shared lock (any connection that
-has read and not finished) and keeps new readers out while held; it does not
-see a process that opened the file and never read it. The lock is held across
-the backup and the `ExecStart=` rewrite and released just before the start. A
-start is accepted only when `/health` answers, the listening socket serving the
-probed address belongs to systemd's `MainPID`, that
-process runs this binary and has the backed-up database open, and no other
-process visible in `/proc` has it open.
-
-**Accepted limitation (owner ruling):** this is not an exclusive handoff.
-Between releasing the lock and Rust opening the database there is a short
-window, and the TS gateway takes no lock that Rust could wait on. A second TS
-gateway on the same SQLite file (another installation, another supervisor)
-starting in that window would write alongside Rust; the post-start check catches
-it only if it is visible in `/proc` (same user, same path) and then stops the
-service after both have run. Automatic migration assumes no other gateway uses
-this database; if one might, stop it first or migrate by hand. Any failure after the stop leaves the
-service stopped if systemd confirms it, or says it could not be confirmed and
-gives the stop command first, with rollback steps for that branch. A recorded
-failure, with its backup and saved unit, is kept as `pendingFailure` across
-every later attempt — refused, current, or another failure, which never replaces
-the first failure that took a backup (an earlier failure that took none gives
-way to it, and never masks it) — until the service is seen serving (answering `/health` on the
-probed address from this binary, holding the database). The outcome is recorded in `<state>/npm-migration.json`
-(`~/.local/state/omnigateway` by default); `omni doctor` and `omni status` print
-its reason until resolved. This replaces the maintenance window for that one
-shape only. It does not take step 6, so run it after the update.
-
-The bridge never runs the gateway itself. The install root and the binary must
-be plain paths (letters, digits, `/._-+@`); anything a unit line cannot carry
-verbatim (spaces, quotes, `%`, `$`), or a root reached through a symlink, is
-refused before anything is stopped.
-After the backup the bridge durably writes the handoff to
-`<root>/npm-handoff.json` (the database it backed up, the address, the unit) —
-or, if it cannot, records `failed-record` and leaves the unit untouched and
-stopped — then rewrites the unit with an
-`ExecStartPost=… omni service migrate --verify-start --scope <scope>` line and
-asks systemd to restart it, so systemd starts the binary as `MainPID`. The
-verifier runs in the unit's `WorkingDirectory` and reads the handoff there,
-so no environment can send it elsewhere; it judges each start against the
-handoff, not the current `.env`. On success it records `migrated`, removes the
-handoff, then its own line. On failure it records `failed-start` with
-rollback, then asks systemd to stop the unit; the handoff and line stay, so
-any further start is judged again.
-
-`omni doctor`, `omni status` and `omni service migrate` find the handoff
-through the unit, whatever state directory your shell uses. If a start is
-never verified (the verifier was killed), `doctor` and `status` print a
-one-line warning naming the handoff file until `omni service migrate` sees
-the service serving the backed-up database; `omni service migrate` prints the
-full rollback (with your paths), and the handoff file itself records the
-backup, database and saved unit. The install root must be writable (the
-handoff and its lock live there) even if the database lives elsewhere.
-
-If a conversion was interrupted after the handoff was written but before the
-unit was rewritten, or you restored the saved TS unit after a failed
-verification, the handoff still owns the backup: any new conversion refuses
-before stopping anything and prints that handoff's rollback. Roll back with
-the service stopped, or put the Rust unit back and run
-`omni service migrate`.
-To recover by hand, check `systemctl --user status omnigateway.service`, then
-either roll back with the recorded steps or start the service and run
-`omni service migrate`. The rollback's `omni db restore … --db <path>` names
-the database that was backed up; keep (or put back) `OMNI_DB_PATH` pointing at
-it before starting. Two states differ: *no handoff file* means the hook is
-stale and does nothing; *a handoff that cannot be read* means every start is
-refused and the unit stopped, and `omni service migrate` reports
-`failed-record` without touching it. **Repair that file, or roll back with the
-service stopped — do not delete it**: a missing handoff turns the hook into a
-no-op and the next start would go unverified.
-
-For an IPv4 `OMNI_HOST`, a listener on `[::]:<port>` owned by another process
-counts against the migration (`/proc` cannot tell an IPv6-only socket), so the
-migrated service is stopped with rollback; free the port first. With scripts blocked, later Rust updates are not restarted
-automatically: run `omni service migrate` after `npm update`.
+Rollback is section 7 with `npm i -g omnigateway@0.15.5` as the compatible
+executable.
 
 ## 5. Postgres + Redis fleet maintenance window
 
