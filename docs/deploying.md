@@ -190,8 +190,10 @@ docker run --rm \
 ```
 
 The container listens on `0.0.0.0:9000`, serves the console, and keeps its
-database and plugins under `/data`. It runs as the unprivileged `bun` user and
-carries a `HEALTHCHECK` on `/health`.
+database and plugins under `/data`. The `scratch` image runs as the unprivileged
+`bun` user (UID 1000), and its `HEALTHCHECK` runs `omni health`. Use
+`docker exec <container> omni …` to run CLI commands; the image has no shell,
+so `docker exec <container> sh` does not work.
 
 For a fleet, set `OMNI_CLUSTER_MODE=true` with `OMNI_DATABASE_URL` and `OMNI_REDIS_URL` and
 drop the volume;
@@ -219,8 +221,9 @@ v0.13.5 on the way up: an older replica beside a new one calls every new body un
 (see [Recording bodies](operations.md#recording-bodies)).
 
 Plugins in a fleet are baked into the image so every replica holds the same
-set: `COPY plugins/ /data/plugins/` in a derived Dockerfile. The image is
-public, so no pull secret is configured; a private fork adds
+set: `COPY plugins/ /data/plugins/` in a derived Dockerfile still works because
+`COPY` does not need a shell. The image is public, so no pull secret is
+configured; a private fork adds
 `imagePullSecrets` to the Deployment.
 
 Give the container a restart policy — `--restart unless-stopped` — if you want a

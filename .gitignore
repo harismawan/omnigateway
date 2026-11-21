@@ -40,3 +40,4 @@ k8s/secret.yaml
 
 # Rust build output
 /target/
+prebuilt/

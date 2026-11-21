@@ -1,3 +1,4 @@
+ARG ARTIFACTS=compiled
 FROM --platform=$BUILDPLATFORM oven/bun:1.4.4-alpine AS base
 WORKDIR /app
 
@@ -56,22 +57,39 @@ RUN cargo build --locked --release -p omni-gateway --bin omnigateway
 FROM scratch AS binary
 COPY --from=rust-build /app/target/release/omnigateway /omnigateway
 
-# Runtime: only the standalone gateway and built console, no separate Bun or npm tree.
-FROM alpine:3.22 AS runner
-WORKDIR /app
+FROM --platform=$BUILDPLATFORM alpine:3.22 AS rootfs
 RUN apk add --no-cache ca-certificates \
- && addgroup -g 1000 bun \
- && adduser -D -u 1000 -G bun bun
-COPY --from=rust-build /app/target/release/omnigateway /app/omnigateway
-COPY --from=build /app/apps/dashboard/dist /app/public
-RUN ln -s /app/omnigateway /usr/local/bin/omni
+ && mkdir -p /out/etc/ssl/certs /out/data/plugins /out/tmp /out/usr/local/bin \
+ && cp /etc/ssl/certs/ca-certificates.crt /out/etc/ssl/certs/ \
+ && printf 'bun:x:1000:1000::/data:/sbin/nologin\n' > /out/etc/passwd \
+ && printf 'bun:x:1000:\n' > /out/etc/group \
+ && chown -R 1000:1000 /out/data \
+ && chmod 1777 /out/tmp \
+ && ln -s /app/omnigateway /out/usr/local/bin/omni
+
+FROM scratch AS compiled
+COPY --from=rust-build /app/target/release/omnigateway /omnigateway
+COPY --from=build /app/apps/dashboard/dist /public
+
+FROM scratch AS prebuilt
+ARG TARGETARCH
+COPY prebuilt/${TARGETARCH}/omnigateway /omnigateway
+COPY prebuilt/${TARGETARCH}/public /public
+
+FROM ${ARTIFACTS} AS artifacts
+
+# Runtime: only the standalone gateway, built console and minimal rootfs, no shell or Bun.
+FROM scratch AS runner
+WORKDIR /app
+COPY --from=rootfs /out/ /
+COPY --from=artifacts /omnigateway /app/omnigateway
+COPY --from=artifacts /public /app/public
 
 # Plugins are read from `$OMNI_ROOT/plugins` at boot. On one node that is the
 # data volume, so `omni plugin install` against it survives a restart; in a
 # fleet, bake them in — `COPY plugins/ /data/plugins/` in a derived image — so
-# every replica holds the same set. The directory exists either way, so the
+# every replica holds the same set. The rootfs supplies the directory, so the
 # boot line names a path rather than an absence.
-RUN mkdir -p /data/plugins && chown -R bun:bun /data
 USER bun
 
 # The tag is handed in by the release workflow, independently of compilation.
@@ -94,7 +112,7 @@ EXPOSE 9000
 # answers `ok` before the store is asked anything, which is what a liveness
 # probe should read.
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
-  CMD ["wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/health"]
+  CMD ["/usr/local/bin/omni", "health"]
 
 # OMNI_ENCRYPTION_KEY is deliberately not set. The gateway refuses to boot
 # without it, which is the intended behaviour: baking a key into an image
