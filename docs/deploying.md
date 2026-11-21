@@ -149,9 +149,9 @@ be checked against the shared store is refused with `503`, because a session ver
 one a password change on another replica cannot end. `GET /health` reports `mode`, `nodeId` and
 `coord` (`ok` or `fallback`) for a readiness probe to read.
 
-Plugins are loaded from each replica's own `<root>/plugins/`; bake them into the image so every
-replica holds the same set. Plugin storage is Postgres in cluster mode, so a plugin's SQL is
-written for it. `POST /api/restart` refuses in cluster mode — roll the deployment instead.
+The Rust gateway (1.x) does not load plugins: each replica warns once per entry in its own
+`<root>/plugins/` and skips it, so files baked into the image are staged, not run (see
+[Docker](#docker)). `POST /api/restart` refuses in cluster mode — roll the deployment instead.
 
 ### Log capture in a fleet
 
