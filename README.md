@@ -402,6 +402,7 @@ Use `--db <path>` to point one command somewhere else.
 | | |
 | --- | --- |
 | `omni status` | the gateway, its accounts, and their quota, on one screen |
+| `omni health` | probe the gateway's `/health` endpoint |
 | `omni start` / `stop` / `restart` | run the gateway; `--foreground` attaches it to your terminal |
 | `omni doctor` | which installation it resolved, and whether it can act on it |
 | `omni logs` | recent requests as the gateway recorded them; filter and page with `--failed`, `--key`, `--since`, `--cursor` |

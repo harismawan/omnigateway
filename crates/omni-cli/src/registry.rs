@@ -5,6 +5,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
         "status",
         "Show the gateway process, its accounts, and their quota",
     ),
+    ("health", "health", "Probe the gateway's /health endpoint"),
     (
         "start",
         "start [--foreground]",
@@ -283,7 +284,8 @@ pub fn help() -> String {
         (
             "Gateway",
             &[
-                "status", "start", "stop", "restart", "doctor", "logs", "bodies", "console",
+                "status", "health", "start", "stop", "restart", "doctor", "logs", "bodies",
+                "console",
             ],
         ),
         ("Service", &["service "]),
@@ -362,7 +364,7 @@ pub fn implemented(name: &str) -> Option<String> {
     ) {
         return Some(name.replace(' ', "-"));
     }
-    if name == "status" {
+    if matches!(name, "status" | "health") {
         return Some(name.into());
     }
     if name == "admin set-password" {
