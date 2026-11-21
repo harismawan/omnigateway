@@ -92,11 +92,18 @@ export function nodeHttpClient(options: HttpClientOptions = {}): HttpClient {
           const send = url.protocol === "https:" ? httpsRequest : httpRequest;
           // A plain object preserves insertion order for string keys, and node
           // writes it in that order without re-casing. Content-Length is set
-          // explicitly so node does not chunk and does not append its own headers
-          // in the middle of the ordered set.
+          // explicitly so node does not add framing in the middle of the ordered
+          // set, unless the codec supplied the plain chunked profile itself.
           const headers: Record<string, string | number> = {};
           for (const [name, value] of req.headers) headers[name] = value;
-          if (req.body.length > 0 && !hasHeader(req, "content-length")) {
+          if (
+            req.body.length > 0 &&
+            !hasHeader(req, "content-length") &&
+            !req.headers.some(
+              ([name, value]) =>
+                name.toLowerCase() === "transfer-encoding" && value.toLowerCase() === "chunked",
+            )
+          ) {
             headers["Content-Length"] = bodyBytes.byteLength;
           }
           // node forwards this to `net.connect`, which is where it is declared and

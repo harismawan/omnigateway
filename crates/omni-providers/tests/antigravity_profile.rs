@@ -2,10 +2,32 @@
 fn profile_matches_frozen_codec() {
     if let Ok(expected) = std::env::var("ANTIGRAVITY_PROFILE_EXPECTED") {
         omni_providers::antigravity::profile::initialize();
-        let actual = omni_providers::antigravity::profile::headers(vec![(
-            "Authorization".into(),
-            "Bearer token".into(),
-        )]);
+        use omni_providers::codec::{CodecInput, Credentials};
+        let request = serde_json::from_str(r#"{"model":"m","stream":false,"messages":[]}"#)
+            .expect("canonical request");
+        let mut credentials = Credentials {
+            access_token: Some("token".into()),
+            api_key: None,
+            provider_data: Default::default(),
+        };
+        omni_ir::deep::insert(
+            &mut credentials.provider_data,
+            "projectId".into(),
+            "project".into(),
+        );
+        let actual = omni_providers::antigravity::codec::AntigravityCodec
+            .build_request(&CodecInput {
+                request: &request,
+                model: "m",
+                credentials: &credentials,
+                request_id: None,
+                auto_cache_enabled: None,
+                max_output_tokens: None,
+                request_started_at: None,
+            })
+            .expect("inference request")
+            .request
+            .headers;
         assert_eq!(
             serde_json::to_string(&actual).expect("headers"),
             expected.trim()

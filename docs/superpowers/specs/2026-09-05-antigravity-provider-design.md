@@ -33,11 +33,11 @@ The body is an envelope, not a bare Gemini request:
 ```json
 {
   "project": "<cloud code project id>",
-  "requestId": "<uuid>",
+  "requestId": "agent/<gateway request id>",
+  "request": { "contents": [], "systemInstruction": {}, "generationConfig": {}, "tools": [] },
   "model": "<upstream model id>",
   "userAgent": "antigravity",
-  "requestType": "agent",
-  "request": { "contents": [], "systemInstruction": {}, "generationConfig": {}, "tools": [] }
+  "requestType": "agent"
 }
 ```
 
@@ -58,6 +58,37 @@ flow's `origins` stay one host.~~
 **Wrong, and measured wrong — see "What the live probe found" below.** Inference
 is on `daily-cloudcode-pa.googleapis.com`; only the bootstrap and quota RPCs are
 on `cloudcode-pa.googleapis.com`.
+
+## Current inference fingerprint
+
+Captured 2026-11-21 from the official **Antigravity App 2.34.0**, Linux x86_64,
+Hub UI, for an agent turn on `gemini-pro-agent`. See the
+[capture procedure](../../../scripts/antigravity-capture/README.md) and
+[sanitized fixture](../../../packages/providers/test/fixtures/antigravity-2.34.0.json).
+The CLI 1.5.13 sent the same ordered envelope and header names, but a different
+UA. The App also made a `checkpoint` request; the gateway only sends agent turns.
+
+| Field | App wire |
+| --- | --- |
+| User-Agent | `antigravity/hub/2.34.0 (aidev_client; os_type=linux; arch=amd64; cl=1026637980)` |
+| HTTP/1.1 header order | `Host`, `User-Agent`, `Transfer-Encoding`, `Authorization`, `Content-Type`, `Accept-Encoding` |
+| Framing and media type | `Transfer-Encoding: chunked`, `Content-Type: application/json`; no `Content-Length` or `Accept` |
+| Envelope order | `project`, `requestId`, `request`, `model`, `userAgent`, `requestType` |
+| Envelope identity | `userAgent: antigravity`, `requestType: agent`, `requestId: agent/<id>` |
+
+The gateway retains its request-ID generation and translation. It does not
+copy the App's tool inventory, labels or session IDs. It does not advertise
+the captured `Accept-Encoding: gzip` because the response readers do not
+decompress it; the shared HTTP transport also emits `Connection: keep-alive`.
+This is an HTTP/1.1 trace from a stub, not evidence of backend acceptance or
+HTTP/2 framing. `OMNI_ANTIGRAVITY_IDE_VERSION`, `OMNI_UA_ANTIGRAVITY` and
+`OMNI_ORDER_ANTIGRAVITY` still override the version, complete UA and header order.
+
+**Open: bootstrap parity.** The App/CLI recordings used `daily-cloudcode-pa`
+for `loadCodeAssist` and `onboardUser`; onboarding used `tierId`. The CLI's
+quota summary also used `daily-cloudcode-pa`; no App quota summary was seen.
+Keep the existing OAuth/bootstrap profile, `cloudcode-pa` and `tier_id` pending
+separate verification; the offline capture does not invalidate the prior live probe.
 
 ## OAuth
 
@@ -539,8 +570,8 @@ change which caused it was itself verified against.
 
 - The `cloudcode-pa` and sandbox hosts as inference *failover*. One runtime host,
   and note that the obvious fallback is the host that refuses this tier.
-- The `cli` (`agy`) client profile. One identity, `ide`, hardcoded; the two differ
-  only in User-Agent and post-exchange headers against the same client id.
+- The `cli` (`agy`) inference profile. The gateway uses the App Hub identity;
+  OAuth/bootstrap keeps the historical IDE identity.
 - Claude and GPT model rows, and with them their quota family.
 - `retrieveUserQuota`'s per-model 5h detail. The summary RPC covers the window.
 - omniroute's background `onboardUser` polling loop.

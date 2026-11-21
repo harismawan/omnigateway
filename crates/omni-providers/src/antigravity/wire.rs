@@ -436,10 +436,10 @@ pub(super) fn to_wire_source(
         Value::object([
             ("project", project.into()),
             ("requestId", request_id.into()),
+            ("request", request),
             ("model", model.into()),
             ("userAgent", "antigravity".into()),
             ("requestType", "agent".into()),
-            ("request", request),
         ]),
         notes,
     ))

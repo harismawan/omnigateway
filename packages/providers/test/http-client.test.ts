@@ -102,6 +102,25 @@ test("sends the body verbatim", async () => {
   s.stop();
 });
 
+test("does not add a length to an explicitly chunked request", async () => {
+  const s = rawServer();
+  try {
+    await nodeHttpClient()({
+      provider: "antigravity",
+      url: s.url,
+      method: "POST",
+      headers: [["Transfer-Encoding", "chunked"]],
+      body: '{"a":1}',
+      signal: AbortSignal.timeout(5000),
+    });
+    const head = (await s.head()).split("\r\n\r\n", 1)[0];
+    expect(head).toContain("\r\nTransfer-Encoding: chunked");
+    expect(head).not.toMatch(/\r\ncontent-length:/i);
+  } finally {
+    s.stop();
+  }
+});
+
 test("reports response-head timing without changing outbound headers", async () => {
   const s = rawServer();
   const heads: unknown[] = [];

@@ -144,21 +144,20 @@ fn encode(
                 &h[20..32]
             )
             .into()
-        });
+        })
+        .surrounded("agent/", "");
     let (body, degradations) =
         super::wire::to_wire_source(request, source, model, project, &request_id, &cloak)?;
     let serialized = omni_ir::jsjson::to_string(&body);
     let cloaked_tools = (!cloak.to_wire.is_empty()).then_some(cloak.to_wire.len() as u32);
     Ok(CodecRequest {
         request: CodecHttpRequest {
-            url:
-                "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse"
-                    .into(),
+            url: format!(
+                "https://{}/v1internal:streamGenerateContent?alt=sse",
+                super::profile::INFERENCE_HOST
+            ),
             method: "POST".into(),
-            headers: super::profile::headers(vec![(
-                "Authorization".into(),
-                format!("Bearer {token}"),
-            )]),
+            headers: super::profile::inference_headers(token),
             body: serialized,
             body_encoding: None,
         },

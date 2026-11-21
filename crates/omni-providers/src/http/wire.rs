@@ -1,7 +1,8 @@
 //! The request bytes, exactly as `nodeHttpClient` puts them on the wire.
 //!
 //! `nodeHttpClient` copies the ordered header pairs into a plain JS object,
-//! adds `Content-Length` for a non-empty body, and hands it to `node:http`,
+//! adds `Content-Length` for a non-empty body unless explicit framing is
+//! `Transfer-Encoding: chunked`, and hands it to `node:http`,
 //! which then adds `Host`, `Connection: keep-alive` and — for a bodiless
 //! method that carries a body by default — `Content-Length: 0`. Each of those
 //! steps has an observable quirk, and each is reproduced here (all measured
@@ -191,7 +192,12 @@ fn encode_head(
             None => object.push((name.as_str(), value.clone())),
         }
     }
-    if body_len > 0 && !has("content-length") {
+    if body_len > 0
+        && !has("content-length")
+        && !headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("transfer-encoding") && value.eq_ignore_ascii_case("chunked")
+        })
+    {
         object.push(("Content-Length", body_len.to_string()));
     }
     // Enumeration order: array-index keys ascending, then insertion order.
@@ -308,6 +314,17 @@ mod tests {
         }
     }
     use super::*;
+
+    #[test]
+    fn explicit_chunked_framing_does_not_gain_content_length() {
+        let target = parse_target("http://host.test/").expect("url");
+        let headers = [("Transfer-Encoding".to_owned(), "chunked".to_owned())];
+        let (wire, _) = encode("POST", &target, &headers, b"{}").expect("request");
+        assert_eq!(
+            wire,
+            b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nHost: host.test\r\nConnection: keep-alive\r\n\r\n2\r\n{}\r\n0\r\n\r\n"
+        );
+    }
 
     #[test]
     fn token_match_is_word_bounded_and_case_insensitive() {

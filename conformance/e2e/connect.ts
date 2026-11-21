@@ -9,6 +9,7 @@ import { copyFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { isDeepStrictEqual, parseArgs } from "node:util";
 import { decrypt, deriveKey, encrypt } from "../../packages/store/src/encryption.ts";
+import { readRequestBody } from "./request-body.ts";
 
 const { values: f } = parseArgs({
   options: Object.fromEntries(
@@ -120,12 +121,12 @@ const stub = Bun.listen<{ buffer: Buffer }>({
       const end = s.data.buffer.indexOf("\r\n\r\n");
       if (end < 0) return;
       const [line, ...headers] = s.data.buffer.subarray(0, end).toString().split("\r\n");
-      const length = Number(headers.find((h) => /^content-length:/i.test(h))?.split(":")[1] ?? 0);
-      if (s.data.buffer.length < end + 4 + length) return;
+      const read = readRequestBody(s.data.buffer, end + 4, headers);
+      if (read === undefined) return;
       wires.push({
         line: line!,
         headers,
-        body: s.data.buffer.subarray(end + 4, end + 4 + length).toString(),
+        body: read.body.toString(),
       });
       if (
         /oauth2\/v1\/userinfo|:loadCodeAssist|:onboardUser|:retrieveUserQuotaSummary|:fetchAvailableModels/.test(

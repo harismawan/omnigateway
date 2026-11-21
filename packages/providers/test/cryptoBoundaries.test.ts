@@ -74,7 +74,7 @@ test("Antigravity fallback request id consumes namespace, model and Unicode proj
     credentials: { accessToken: "tok", apiKey: null, providerData: { projectId: "project-雪" } },
     fail: (code, message) => new GatewayError(code, message),
   }).request;
-  expect(JSON.parse(sent.body).requestId).toBe("2b68b718-c49e-4751-8d18-52fec7a16f81");
+  expect(JSON.parse(sent.body).requestId).toBe("agent/2b68b718-c49e-4751-8d18-52fec7a16f81");
 });
 
 test("Codex codec preserves SHA Buffer timestamp reads, SHA1 namespace bytes and UTF8 HMAC salt", () => {
