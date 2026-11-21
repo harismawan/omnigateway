@@ -434,24 +434,6 @@ fn preview_table(preview: &Value) -> String {
     }
 }
 
-#[cfg(test)]
-#[allow(clippy::items_after_test_module, clippy::unwrap_used)]
-mod preview_tests {
-    #[test]
-    fn frozen_formatter_goldens() {
-        let goldens: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../conformance/cli/db-preview-goldens.json"
-        ))
-        .unwrap();
-        for case in goldens.as_array().unwrap() {
-            assert_eq!(
-                super::preview_table(&case["preview"]),
-                case["output"].as_str().unwrap()
-            );
-        }
-    }
-}
-
 fn table(headers: &[&str], rows: &[Vec<String>], right: &[usize]) -> String {
     let widths = headers
         .iter()

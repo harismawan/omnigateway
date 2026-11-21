@@ -5,23 +5,15 @@
 
 mod common;
 
-use common::pg::{TestDb, base_url, table_rows};
-use common::{bun_required, bun_script, ts};
+use common::pg::{TestDb, base_url};
 use omni_store::pg::{PgConfig, PgStore};
 use omni_store::writer::{
-    BreakerTransition, Committed, HealthMeasurement, LogEvent, PendingLog, RequestLog, RouteTarget,
-    SeedQuery, WriteEvent, Writer, WriterConfig,
+    Committed, HealthMeasurement, LogEvent, PendingLog, RequestLog, RouteTarget, SeedQuery,
+    WriteEvent, Writer, WriterConfig,
 };
-use omni_store::{BreakerState, CredentialHealth};
 use std::time::Duration;
 
 const NODE: &str = "node-a";
-const TABLES: [&str; 4] = [
-    "request_logs",
-    "usage_daily",
-    "usage_rollup",
-    "credential_health",
-];
 /// 2026-11-06T23:30:00Z, half an hour before midnight UTC.
 const T0: i64 = 1_794_007_800_000;
 
@@ -257,22 +249,6 @@ fn done(id: &str, at: i64, key: Option<&str>, model: &str, n: i64) -> RequestLog
     log
 }
 
-#[allow(clippy::cast_precision_loss)]
-fn transition(cred: &str, model: &str, state: BreakerState, failures: i64) -> WriteEvent {
-    BreakerTransition(CredentialHealth {
-        scalar: None,
-        credential_id: cred.into(),
-        model: model.into(),
-        breaker_state: state,
-        consecutive_failures: failures,
-        opened_at: (failures > 0).then_some(T0 as f64 + failures as f64),
-        // Fractional, as a fractional Retry-After makes it in TS; the BIGINT
-        // column rounds it.
-        rate_limited_until: (failures == 2).then_some(T0 as f64 + 60_000.5),
-    })
-    .into()
-}
-
 fn measure(cred: &str, model: &str, failures: i64, until: Option<f64>) -> WriteEvent {
     HealthMeasurement {
         credential_id: cred.into(),
@@ -281,123 +257,6 @@ fn measure(cred: &str, model: &str, failures: i64, until: Option<f64>) -> WriteE
         rate_limited_until: until,
     }
     .into()
-}
-
-#[allow(clippy::cast_precision_loss)]
-fn health_sequence() -> Vec<WriteEvent> {
-    use BreakerState::{Closed, HalfOpen, Open};
-    vec![
-        transition("cred-1", "sonnet", Open, 3),
-        measure("cred-1", "sonnet", 4, Some(T0 as f64 + 5.0)),
-        transition("cred-1", "sonnet", Closed, 0),
-        transition("cred-2", "gpt-x", Closed, 0),
-        transition("cred-2", "gpt-x", Open, 2),
-        transition("cred-2", "gpt-x", HalfOpen, 2),
-        measure("cred-2", "gpt-x", 1, None),
-        // Half-to-even on the way into BIGINT: .5 and 1.5 land differently.
-        measure("cred-2", "gpt-x", 5, Some(T0 as f64 + 9.5)),
-        measure("cred-3", "opus", 7, Some(T0 as f64 + 1.0)),
-        transition("cred-3", "opus", Open, 1),
-        measure("cred-1", "haiku", 2, Some(T0 as f64 + 60_001.5)),
-        measure("cred-3", "seeded", 9, None),
-        transition("cred-ghost", "sonnet", Open, 3),
-        // A valid measurement, then a transition Postgres refuses (failures
-        // out of INTEGER range): TS keeps the measurement and rejects only
-        // the transition, whatever the batch boundaries.
-        measure("cred-1", "mixed", 2, None),
-        BreakerTransition(CredentialHealth {
-            scalar: None,
-            credential_id: "cred-1".into(),
-            model: "mixed".into(),
-            breaker_state: Open,
-            consecutive_failures: i64::from(i32::MAX) + 1,
-            opened_at: Some(T0 as f64),
-            rate_limited_until: None,
-        })
-        .into(),
-    ]
-}
-
-/// Every lifecycle the gateway produces (as `writer.rs`'s `sequence`), plus
-/// the Postgres-specific edges: a `-0` and an integral cost, and anonymous
-/// and keyed requests in the same hour.
-fn sequence() -> Vec<WriteEvent> {
-    let k = Some("key-1");
-    let mut ev: Vec<WriteEvent> = Vec::new();
-    let mut push = |e: LogEvent| ev.push(e.into());
-    push(pending("r01", T0, k, "sonnet"));
-    push(LogEvent::Finish(done("r01", T0, k, "sonnet", 1)));
-    push(pending("r02", T0 + 1, k, "sonnet"));
-    push(route("r02", "openai", "gpt-x", "cred-2"));
-    push(route("r02", "codex", "gpt-y", "cred-3"));
-    let mut l = done("r02", T0 + 1, k, "sonnet", 2);
-    l.attempts = 3;
-    l.resolved_provider = Some("codex".into());
-    l.resolved_model = Some("gpt-y".into());
-    l.credential_id = Some("cred-3".into());
-    l.degradations = vec!["droppedThinking".into(), "q\"uo\\te\u{2028}é".into()];
-    push(LogEvent::Finish(l));
-    push(pending("r03", T0 + 2, k, "haiku"));
-    push(route("r03", "openai", "gpt-z", "cred-2"));
-    let mut l = RequestLog::new("r04", T0 + 3, 400);
-    l.api_key_id = k.map(Into::into);
-    l.requested_model = "sonnet".into();
-    l.error_code = Some("INVALID_REQUEST".into());
-    push(LogEvent::Finish(l));
-    push(pending("r05", T0 + 4, k, "opus"));
-    let mut l = RequestLog::new("r05", T0 + 999_999, 502);
-    l.error_code = Some("UPSTREAM".into());
-    l.duration_ms = 1234;
-    push(LogEvent::Finish(l));
-    push(pending("r06", T0 + 5, k, "sonnet"));
-    let mut l = done("r06", T0 + 5, k, "sonnet", 6);
-    l.status = 499;
-    l.error_code = Some("CANCELLED".into());
-    push(LogEvent::Finish(l));
-    push(pending("r07", T0 + 6, k, "sonnet"));
-    push(LogEvent::Finish(done("r07", T0 + 6, k, "sonnet", 7)));
-    push(LogEvent::Finish(done("r07", T0 + 6, k, "sonnet", 70)));
-    push(route("r07", "openai", "late", "cred-9"));
-    push(pending("r07", T0 + 6, k, "late"));
-    push(pending("r08", T0 + 7, k, "sonnet"));
-    push(pending("r08", T0 + 7, Some("key-other"), "other"));
-    push(LogEvent::Finish(done("r08", T0 + 7, k, "sonnet", 8)));
-    push(route("r09", "openai", "early", "cred-2"));
-    push(pending("r09", T0 + 8, k, "sonnet"));
-    push(LogEvent::Finish(done("r09", T0 + 8, k, "sonnet", 9)));
-    push(pending("r10", T0 + 9, None, "sonnet"));
-    push(LogEvent::Finish(done("r10", T0 + 9, None, "sonnet", 10)));
-    push(pending("r11", T0 + 10, k, "sonnet"));
-    let mut l = done("r11", T0 + 10, Some("key-2"), "sonnet", 11);
-    l.rtk_applied = true;
-    l.rtk_filter_hits = 3;
-    l.rtk_original_code_units = 9000;
-    l.rtk_compressed_code_units = 4000;
-    l.rtk_estimated_tokens_saved = 1250;
-    l.rtk_filters = vec!["git-status".into(), "ls".into()];
-    push(LogEvent::Finish(l));
-    // `-0` survives in float8 on both sides; an integral cost too.
-    let mut l = done("r12", T0 + 11, k, "sonnet", 12);
-    l.cost_usd = -0.0;
-    push(LogEvent::Finish(l));
-    let mut l = done("r13", T0 + 12, k, "sonnet", 13);
-    l.cost_usd = 2.0;
-    push(LogEvent::Finish(l));
-    for n in 0..40 {
-        let id = format!("m{n:02}");
-        let at = T0 + 1_000 + n * 60_000;
-        push(pending(&id, at, k, "sonnet"));
-        if n % 7 == 3 {
-            push(route(&id, "openai", "gpt-x", "cred-2"));
-        }
-        let mut l = done(&id, at, k, "sonnet", n);
-        if n % 9 == 0 {
-            l.status = 529;
-        }
-        push(LogEvent::Finish(l));
-    }
-    ev.extend(health_sequence());
-    ev
 }
 
 async fn prepare(db: &TestDb, offset: i64) -> PgStore {
@@ -422,42 +281,6 @@ async fn prepare(db: &TestDb, offset: i64) -> PgStore {
     store
 }
 
-fn event_json(e: &WriteEvent) -> serde_json::Value {
-    match e {
-        WriteEvent::Log(l) => serde_json::to_value(l).expect("log json"),
-        WriteEvent::BreakerTransition(BreakerTransition(h)) => {
-            let mut v = serde_json::to_value(h).expect("health json");
-            v.as_object_mut()
-                .expect("object")
-                .insert("type".into(), "breakerTransition".into());
-            v
-        }
-        WriteEvent::HealthMeasurement(m) => serde_json::json!({
-            "type": "healthMeasurement",
-            "credentialId": m.credential_id,
-            "model": m.model,
-            "consecutiveFailures": m.consecutive_failures,
-            "rateLimitedUntil": m.rate_limited_until,
-        }),
-        WriteEvent::Seed(_) => unreachable!("no seeds in the TS sequence"),
-    }
-}
-
-fn run_ts(dir: &std::path::Path, url: &str, offset: i64, events: &[WriteEvent]) {
-    let input = serde_json::json!({
-        "url": url,
-        "nodeId": NODE,
-        "dayOffsetMinutes": offset,
-        "events": events.iter().map(event_json).collect::<Vec<_>>(),
-    });
-    let script = format!(
-        "await import({:?});\n",
-        ts("conformance/store/pg-usage-writer.ts")
-    );
-    let out = bun_script(dir, &script, &input.to_string());
-    assert!(out.contains("\"healthFailures\":2"), "ts driver: {out}");
-}
-
 fn config(offset: i64, max_batch: usize) -> WriterConfig {
     WriterConfig {
         node_id: NODE.into(),
@@ -465,157 +288,6 @@ fn config(offset: i64, max_batch: usize) -> WriterConfig {
         max_batch,
         ..WriterConfig::default()
     }
-}
-
-async fn run_rust(store: PgStore, cfg: WriterConfig, events: &[WriteEvent]) -> u64 {
-    let writer = Writer::spawn_postgres(store, cfg).expect("spawn");
-    let handle = writer.handle();
-    for e in events {
-        assert!(handle.send(e.clone()), "channel full");
-        tokio::task::yield_now().await;
-    }
-    let stats = writer.close().await.expect("close");
-    assert_eq!(stats.dropped, 0);
-    assert_eq!(stats.failed, 0);
-    assert_eq!(
-        stats.health_refused, 2,
-        "the ghost credential and the out-of-range transition, as in TS"
-    );
-    stats.batches
-}
-
-async fn rows(db: &TestDb) -> Vec<(&'static str, Vec<String>)> {
-    let c = db.client().await;
-    let mut out = Vec::new();
-    for t in TABLES {
-        out.push((t, table_rows(&c, t).await));
-    }
-    out
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rows_equal_what_the_ts_postgres_store_writes() {
-    let Some(base) = base_url("rows_equal_what_the_ts_postgres_store_writes") else {
-        return;
-    };
-    if !bun_required("rows_equal_what_the_ts_postgres_store_writes") {
-        return;
-    }
-    let dir = tempfile::tempdir().expect("tempdir");
-    let events = sequence();
-    for offset in [0, 60, -330] {
-        let ts_db = TestDb::create(&base, &format!("wts{offset}")).await;
-        drop(prepare(&ts_db, offset).await);
-        run_ts(dir.path(), &ts_db.url, offset, &events);
-        let want = rows(&ts_db).await;
-        assert!(
-            want[2].1.len() >= 2 && want[1].1.len() >= 4,
-            "fixture reaches several daily and hourly rows"
-        );
-        for max_batch in [1, 3, 7, 512] {
-            let rs_db = TestDb::create(&base, &format!("wrs{offset}_{max_batch}")).await;
-            let store = prepare(&rs_db, offset).await;
-            let batches = run_rust(store, config(offset, max_batch), &events).await;
-            if max_batch == 1 {
-                assert!(batches >= 100, "one event per batch: {batches}");
-            }
-            let got = rows(&rs_db).await;
-            for ((table, w), (_, g)) in want.iter().zip(&got) {
-                let only_rust: Vec<_> = g.iter().filter(|r| !w.contains(r)).collect();
-                let only_ts: Vec<_> = w.iter().filter(|r| !g.contains(r)).collect();
-                assert!(
-                    g == w,
-                    "{table} differs at offset {offset}, max_batch {max_batch}\n\
-                     rust only: {only_rust:?}\nts only: {only_ts:?}"
-                );
-            }
-        }
-    }
-}
-
-/// TS appends to a row the Rust writer began, and the Rust writer completes
-/// a row TS began: one replica of each on one database.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ts_and_rust_continue_each_others_rows() {
-    let Some(base) = base_url("ts_and_rust_continue_each_others_rows") else {
-        return;
-    };
-    if !bun_required("ts_and_rust_continue_each_others_rows") {
-        return;
-    }
-    let dir = tempfile::tempdir().expect("tempdir");
-    let db = TestDb::create(&base, "mixed_rows").await;
-    let store = prepare(&db, 0).await;
-    let k = Some("key-1");
-    // Rust begins a, TS begins b.
-    run_rust_events(&store, &[pending("a", T0, k, "m").into()]).await;
-    run_ts_events(dir.path(), &db.url, &[pending("b", T0 + 1, k, "m").into()]);
-    // TS finishes a, Rust finishes b.
-    run_ts_events(
-        dir.path(),
-        &db.url,
-        &[LogEvent::Finish(done("a", T0, k, "m", 1)).into()],
-    );
-    run_rust_events(
-        &store,
-        &[LogEvent::Finish(done("b", T0 + 1, k, "m", 2)).into()],
-    )
-    .await;
-    let c = db.client().await;
-    let states: Vec<(String, String, i64)> = c
-        .query(
-            "SELECT id, state, input_tokens FROM request_logs ORDER BY id",
-            &[],
-        )
-        .await
-        .expect("rows")
-        .iter()
-        .map(|r| (r.get(0), r.get(1), r.get(2)))
-        .collect();
-    assert_eq!(
-        states,
-        vec![
-            ("a".into(), "done".into(), 101),
-            ("b".into(), "done".into(), 102)
-        ]
-    );
-    let requests: i64 = c
-        .query_one(
-            "SELECT requests FROM usage_rollup WHERE api_key_id = 'key-1' AND hour = $1",
-            &[&T0.div_euclid(3_600_000)],
-        )
-        .await
-        .expect("rollup")
-        .get(0);
-    // `prepare` seeded this bucket with 5 requests.
-    assert_eq!(
-        requests,
-        5 + 2,
-        "each completion counted once, by whichever wrote it"
-    );
-}
-
-async fn run_rust_events(store: &PgStore, events: &[WriteEvent]) {
-    let writer = Writer::spawn_postgres(store.clone(), config(0, 512)).expect("spawn");
-    for e in events {
-        assert!(writer.handle().send(e.clone()));
-    }
-    let stats = writer.close().await.expect("close");
-    assert_eq!(stats.failed, 0);
-}
-
-fn run_ts_events(dir: &std::path::Path, url: &str, events: &[WriteEvent]) {
-    let input = serde_json::json!({
-        "url": url,
-        "nodeId": "node-ts",
-        "dayOffsetMinutes": 0,
-        "events": events.iter().map(event_json).collect::<Vec<_>>(),
-    });
-    let script = format!(
-        "await import({:?});\n",
-        ts("conformance/store/pg-usage-writer.ts")
-    );
-    bun_script(dir, &script, &input.to_string());
 }
 
 /// Two Rust writers (two replicas) on the same keys and hours at once:

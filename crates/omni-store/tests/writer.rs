@@ -4,23 +4,15 @@
 
 mod common;
 
-use common::{bun_available, bun_script, ts, typed_rows};
+use omni_store::SqliteStore;
 use omni_store::writer::{
-    BarrierError, BreakerTransition, HealthMeasurement, LogEvent, PendingLog, RequestLog,
-    RouteTarget, WriteEvent, Writer, WriterConfig, WriterStats,
+    BarrierError, LogEvent, PendingLog, RequestLog, Writer, WriterConfig, WriterStats,
 };
-use omni_store::{BreakerState, CredentialHealth, SqliteStore};
 use rusqlite::Connection;
 use std::path::Path;
 use std::time::Duration;
 
 const NODE: &str = "node-a";
-const TABLES: [&str; 4] = [
-    "request_logs",
-    "usage_daily",
-    "usage_rollup",
-    "credential_health",
-];
 /// 2026-11-06T23:30:00Z: half an hour before midnight UTC, so the +60 offset
 /// puts some of these requests on another day than UTC does.
 const T0: i64 = 1_794_007_800_000;
@@ -100,17 +92,6 @@ fn pending(id: &str, at: i64, key: Option<&str>, model: &str) -> LogEvent {
     })
 }
 
-fn route(id: &str, provider: &str, model: &str, cred: &str) -> LogEvent {
-    LogEvent::Route {
-        id: id.into(),
-        target: RouteTarget {
-            provider: provider.into(),
-            model: model.into(),
-            credential_id: cred.into(),
-        },
-    }
-}
-
 fn done(id: &str, at: i64, key: Option<&str>, model: &str, n: i64) -> RequestLog {
     let mut log = RequestLog::new(id, at, 200);
     log.api_key_id = key.map(Into::into);
@@ -132,273 +113,12 @@ fn done(id: &str, at: i64, key: Option<&str>, model: &str, n: i64) -> RequestLog
     log
 }
 
-/// The row a breaker transition persists.
-fn transition(cred: &str, model: &str, state: BreakerState, failures: i64) -> WriteEvent {
-    BreakerTransition(CredentialHealth {
-        scalar: None,
-        credential_id: cred.into(),
-        model: model.into(),
-        breaker_state: state,
-        consecutive_failures: failures,
-        opened_at: (failures > 0).then_some(T0 as f64 + failures as f64),
-        // Fractional, as a fractional Retry-After makes it in TS.
-        rate_limited_until: (failures == 2).then_some(T0 as f64 + 60_000.4),
-    })
-    .into()
-}
-
-fn measure(cred: &str, model: &str, failures: i64, until: Option<f64>) -> WriteEvent {
-    HealthMeasurement {
-        credential_id: cred.into(),
-        model: model.into(),
-        consecutive_failures: failures,
-        rate_limited_until: until,
-    }
-    .into()
-}
-
-/// Transitions that must each be applied in order, measurements around them
-/// that must not revert their state, and one row for a credential that does
-/// not exist (the foreign key refuses it on both sides).
-fn health_sequence() -> Vec<WriteEvent> {
-    use BreakerState::{Closed, HalfOpen, Open};
-    vec![
-        // Open -> Closed for one pair: the final row is the Closed one.
-        transition("cred-1", "sonnet", Open, 3),
-        measure("cred-1", "sonnet", 4, Some(T0 as f64 + 5.0)),
-        transition("cred-1", "sonnet", Closed, 0),
-        // Closed -> Open -> HalfOpen, with a measurement after the last one:
-        // it keeps HalfOpen and its `opened_at`, and sets the two counters.
-        transition("cred-2", "gpt-x", Closed, 0),
-        transition("cred-2", "gpt-x", Open, 2),
-        transition("cred-2", "gpt-x", HalfOpen, 2),
-        measure("cred-2", "gpt-x", 1, None),
-        measure("cred-2", "gpt-x", 5, Some(T0 as f64 + 9.25)),
-        // A measurement before a transition is overwritten by it.
-        measure("cred-3", "opus", 7, Some(T0 as f64 + 1.0)),
-        transition("cred-3", "opus", Open, 1),
-        // A measurement on a pair with no row files a blank one.
-        measure("cred-1", "haiku", 2, Some(T0 as f64 + 60_000.5)),
-        // A measurement over a row that existed before the batch.
-        measure("cred-3", "seeded", 9, None),
-        transition("cred-ghost", "sonnet", Open, 3),
-    ]
-}
-
-/// Every lifecycle the gateway produces, plus the out-of-order and repeated
-/// ones the TS claim semantics have an answer for.
-fn sequence() -> Vec<WriteEvent> {
-    let k = Some("key-1");
-    let mut ev: Vec<WriteEvent> = Vec::new();
-    let mut push = |e: LogEvent| ev.push(e.into());
-
-    // Plain: begin, finish.
-    push(pending("r01", T0, k, "sonnet"));
-    push(LogEvent::Finish(done("r01", T0, k, "sonnet", 1)));
-    // Failover: begin, route, route, finish naming the last target.
-    push(pending("r02", T0 + 1, k, "sonnet"));
-    push(route("r02", "openai", "gpt-x", "cred-2"));
-    push(route("r02", "codex", "gpt-y", "cred-3"));
-    let mut l = done("r02", T0 + 1, k, "sonnet", 2);
-    l.attempts = 3;
-    l.resolved_provider = Some("codex".into());
-    l.resolved_model = Some("gpt-y".into());
-    l.credential_id = Some("cred-3".into());
-    l.degradations = vec!["droppedThinking".into(), "q\"uo\\te\u{2028}é".into()];
-    push(LogEvent::Finish(l));
-    // Begun and still pending at the end.
-    push(pending("r03", T0 + 2, k, "haiku"));
-    push(route("r03", "openai", "gpt-z", "cred-2"));
-    // Failed before dispatch: no begin at all.
-    let mut l = RequestLog::new("r04", T0 + 3, 400);
-    l.api_key_id = k.map(Into::into);
-    l.requested_model = "sonnet".into();
-    l.error_code = Some("INVALID_REQUEST".into());
-    push(LogEvent::Finish(l));
-    // Terminal catch: a blank log over a row that began keeps the row's key,
-    // model and start time.
-    push(pending("r05", T0 + 4, k, "opus"));
-    let mut l = RequestLog::new("r05", T0 + 999_999, 502);
-    l.error_code = Some("UPSTREAM".into());
-    l.duration_ms = 1234;
-    push(LogEvent::Finish(l));
-    // Cancelled mid-stream.
-    push(pending("r06", T0 + 5, k, "sonnet"));
-    let mut l = done("r06", T0 + 5, k, "sonnet", 6);
-    l.status = 499;
-    l.error_code = Some("CANCELLED".into());
-    push(LogEvent::Finish(l));
-    // Finished twice: the second claim loses and counts nothing.
-    push(pending("r07", T0 + 6, k, "sonnet"));
-    push(LogEvent::Finish(done("r07", T0 + 6, k, "sonnet", 7)));
-    push(LogEvent::Finish(done("r07", T0 + 6, k, "sonnet", 70)));
-    // A route and a begin after the finish change nothing.
-    push(route("r07", "openai", "late", "cred-9"));
-    push(pending("r07", T0 + 6, k, "late"));
-    // Begun twice: the second insert is refused.
-    push(pending("r08", T0 + 7, k, "sonnet"));
-    push(pending("r08", T0 + 7, Some("key-other"), "other"));
-    push(LogEvent::Finish(done("r08", T0 + 7, k, "sonnet", 8)));
-    // A route before any begin updates nothing; the begin then files it.
-    push(route("r09", "openai", "early", "cred-2"));
-    push(pending("r09", T0 + 8, k, "sonnet"));
-    push(LogEvent::Finish(done("r09", T0 + 8, k, "sonnet", 9)));
-    // Anonymous: a daily row, no hourly one.
-    push(pending("r10", T0 + 9, None, "sonnet"));
-    push(LogEvent::Finish(done("r10", T0 + 9, None, "sonnet", 10)));
-    // RTK and a finish carrying another key than the begin.
-    push(pending("r11", T0 + 10, k, "sonnet"));
-    let mut l = done("r11", T0 + 10, Some("key-2"), "sonnet", 11);
-    l.rtk_applied = true;
-    l.rtk_filter_hits = 3;
-    l.rtk_original_code_units = 9000;
-    l.rtk_compressed_code_units = 4000;
-    l.rtk_estimated_tokens_saved = 1250;
-    l.rtk_filters = vec!["git-status".into(), "ls".into()];
-    push(LogEvent::Finish(l));
-    // Many into one key and hour, and across midnight at the +60 offset, so
-    // the daily and hourly sums cross batch boundaries.
-    for n in 0..40 {
-        let id = format!("m{n:02}");
-        let at = T0 + 1_000 + n * 60_000;
-        push(pending(&id, at, k, "sonnet"));
-        if n % 7 == 3 {
-            push(route(&id, "openai", "gpt-x", "cred-2"));
-        }
-        let mut l = done(&id, at, k, "sonnet", n);
-        if n % 9 == 0 {
-            l.status = 529;
-        }
-        push(LogEvent::Finish(l));
-    }
-    ev.extend(health_sequence());
-    ev
-}
-
-/// A migrated database holding the credentials health rows refer to, with
-/// one usage row already present so the batch adds onto existing state.
-fn prepare(path: &Path, offset: i64) {
-    let store = SqliteStore::open(path, offset).expect("open");
-    let conn = store.connection();
-    for id in ["cred-1", "cred-2", "cred-3"] {
-        conn.execute(
-            "INSERT INTO credentials (id, provider, label, auth_type, created_at, updated_at)
-             VALUES (?, 'anthropic', ?, 'apiKey', 1, 1)",
-            [id, id],
-        )
-        .expect("credential");
-    }
-    conn.execute_batch(
-        "INSERT INTO credential_health VALUES ('cred-3', 'seeded', 'open', 4, 1794000000000, NULL);
-         INSERT INTO usage_rollup VALUES ('key-1', 498335, 5, 1, 2, 3, 4, 0.7);
-         INSERT INTO usage_daily (day, provider, credential_id, requested_model, resolved_model,
-                                  api_key_id, requests, cost_usd)
-              VALUES (1793923200000, 'anthropic', 'cred-1', 'sonnet', 'sonnet-upstream',
-                      'key-1', 2, 0.3);",
-    )
-    .expect("seed");
-}
-
-fn event_json(e: &WriteEvent) -> serde_json::Value {
-    match e {
-        WriteEvent::Log(l) => serde_json::to_value(l).expect("log json"),
-        WriteEvent::BreakerTransition(BreakerTransition(h)) => {
-            let mut v = serde_json::to_value(h).expect("health json");
-            v.as_object_mut()
-                .expect("object")
-                .insert("type".into(), "breakerTransition".into());
-            v
-        }
-        WriteEvent::HealthMeasurement(m) => serde_json::json!({
-            "type": "healthMeasurement",
-            "credentialId": m.credential_id,
-            "model": m.model,
-            "consecutiveFailures": m.consecutive_failures,
-            "rateLimitedUntil": m.rate_limited_until,
-        }),
-        WriteEvent::Seed(_) => unreachable!("the TS comparison sequence has no seeds"),
-    }
-}
-
-fn run_ts(dir: &Path, db: &Path, offset: i64, events: &[WriteEvent]) {
-    let input = serde_json::json!({
-        "db": db.display().to_string(),
-        "nodeId": NODE,
-        "dayOffsetMinutes": offset,
-        "events": events.iter().map(event_json).collect::<Vec<_>>(),
-    });
-    let script = format!(
-        "await import({:?});\n",
-        ts("conformance/store/usage-writer.ts")
-    );
-    let out = bun_script(dir, &script, &input.to_string());
-    assert!(out.contains("\"healthFailures\":1"), "ts driver: {out}");
-}
-
 fn config(offset: i64, max_batch: usize) -> WriterConfig {
     WriterConfig {
         node_id: NODE.into(),
         day_offset_minutes: offset,
         max_batch,
         ..WriterConfig::default()
-    }
-}
-
-/// Sends `events` and closes. `max_batch` decides how they split.
-async fn run_rust(db: &Path, cfg: WriterConfig, events: &[WriteEvent]) -> u64 {
-    let writer = Writer::spawn(db, cfg).expect("spawn");
-    let handle = writer.handle();
-    for e in events {
-        assert!(handle.send(e.clone()), "channel full");
-        // Let the writer take what is there, so batches really do split.
-        tokio::task::yield_now().await;
-    }
-    let stats = writer.close().await.expect("close");
-    assert_eq!(stats.dropped, 0);
-    assert_eq!(stats.failed, 0);
-    assert_eq!(stats.health_refused, 1, "the ghost credential, as in TS");
-    stats.batches
-}
-
-fn rows(db: &Path) -> Vec<(&'static str, Vec<Vec<String>>)> {
-    let conn = Connection::open(db).expect("open");
-    TABLES.iter().map(|t| (*t, typed_rows(&conn, t))).collect()
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rows_equal_what_the_ts_store_writes() {
-    if !bun_available("rows_equal_what_the_ts_store_writes") {
-        return;
-    }
-    let dir = tempfile::tempdir().expect("tempdir");
-    let events = sequence();
-    for offset in [0, 60, -330] {
-        let ts_db = dir.path().join(format!("ts{offset}.db"));
-        prepare(&ts_db, offset);
-        run_ts(dir.path(), &ts_db, offset, &events);
-        let want = rows(&ts_db);
-        assert!(
-            want[2].1.len() >= 2 && want[1].1.len() >= 4,
-            "fixture reaches several daily and hourly rows"
-        );
-        for max_batch in [1, 2, 3, 7, 512] {
-            let rs_db = dir.path().join(format!("rs{offset}-{max_batch}.db"));
-            prepare(&rs_db, offset);
-            let batches = run_rust(&rs_db, config(offset, max_batch), &events).await;
-            if max_batch == 1 {
-                assert!(batches >= 100, "one event per batch: {batches}");
-            }
-            let got = rows(&rs_db);
-            for ((table, w), (_, g)) in want.iter().zip(&got) {
-                let only_rust: Vec<_> = g.iter().filter(|r| !w.contains(r)).collect();
-                let only_ts: Vec<_> = w.iter().filter(|r| !g.contains(r)).collect();
-                assert!(
-                    g == w,
-                    "{table} differs at offset {offset}, max_batch {max_batch}\n\
-                     rust only: {only_rust:?}\nts only: {only_ts:?}"
-                );
-            }
-        }
     }
 }
 

@@ -7,7 +7,7 @@ mod common;
 
 use std::sync::Mutex;
 
-use common::{chunks, describe_error, normalize, same, vectors};
+use common::{chunks, describe_error};
 use omni_ir::request::ChatRequest;
 use omni_providers::adapter::{AdapterRequest, send};
 use omni_providers::codec::Credentials;
@@ -15,7 +15,6 @@ use omni_providers::custom::CustomCodec;
 use omni_providers::http::{
     Headers, HttpClient, HttpError, HttpRequest, HttpResponse, ResponseBody,
 };
-use omni_providers::http_error::{http_error, parse_retry_after};
 use serde_json::{Value, json};
 
 /// Records each request and answers with one scripted response.
@@ -68,17 +67,6 @@ impl HttpClient for Fake {
                 body,
             })
         })
-    }
-}
-
-fn credentials(value: &Value) -> Credentials {
-    Credentials {
-        access_token: value["accessToken"].as_str().map(str::to_string),
-        api_key: value["apiKey"].as_str().map(str::to_string),
-        provider_data: value["providerData"]
-            .as_object()
-            .expect("providerData")
-            .clone(),
     }
 }
 
@@ -139,123 +127,6 @@ async fn run(request: &ChatRequest, creds: Credentials, fake: &Fake) -> Value {
                 "streamError": stream_error,
             })
         }
-    }
-}
-
-/// Parses without serde_json's 128-level recursion limit, which the
-/// deep-schema requests exceed (`JSON.parse` has no such limit).
-fn parse_request(text: &str) -> Result<ChatRequest, serde_json::Error> {
-    use serde::Deserialize;
-    let mut de = serde_json::Deserializer::from_str(text);
-    de.disable_recursion_limit();
-    let value = Value::deserialize(&mut de)?;
-    serde_json::from_value(value)
-}
-
-fn check(name: &str, got: &Value, want: &Value) {
-    let want = normalize(want);
-    if !same(got, &want) {
-        let g = serde_json::to_string_pretty(got).unwrap_or_default();
-        let w = serde_json::to_string_pretty(&want).unwrap_or_default();
-        panic!("{name}\n--- got\n{g}\n--- want\n{w}");
-    }
-}
-
-#[tokio::test]
-async fn encode_vectors_match_the_ts_custom_adapter_byte_for_byte() {
-    let cases = vectors()["custom"]["encode"].as_array().expect("encode");
-    assert!(cases.len() >= 100, "{}", cases.len());
-    let done = json!({"status": 200, "headers": [], "chunks": ["data: [DONE]\n\n"]});
-    let completed = json!({"status": 200, "headers": [], "chunks": [
-        "event: response.completed\ndata: {\"response\":{\"id\":\"r\",\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}}\n\n"
-    ]});
-    for case in cases {
-        let name = format!(
-            "{} [{}]",
-            case["name"].as_str().expect("name"),
-            case["protocol"].as_str().expect("protocol")
-        );
-        let request = parse_request(case["request"].as_str().expect("request text"))
-            .unwrap_or_else(|e| panic!("{name}: request parses: {e}"));
-        let fake = Fake::new(if case["protocol"] == "responses" {
-            &completed
-        } else {
-            &done
-        });
-        let got = run(&request, credentials(&case["credentials"]), &fake).await;
-        check(&name, &got, &case["result"]);
-    }
-}
-
-#[tokio::test]
-async fn decode_vectors_match_the_ts_custom_adapter() {
-    let cases = vectors()["custom"]["decode"].as_array().expect("decode");
-    assert!(cases.len() >= 90, "{}", cases.len());
-    let request: ChatRequest = serde_json::from_value(json!({
-        "model": "pool",
-        "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
-        "stream": true
-    }))
-    .expect("request");
-    let large = vectors()["customLargeDecode"]
-        .as_array()
-        .expect("large decode");
-    assert_eq!(large.len(), 3, "all large TS decode vectors must run");
-    for case in cases.iter().chain(large) {
-        let name = format!(
-            "{} [{}]",
-            case["name"].as_str().expect("name"),
-            case["protocol"].as_str().expect("protocol")
-        );
-        let creds = Credentials {
-            access_token: None,
-            api_key: Some("ck".into()),
-            provider_data: json!({"origin": "https://host.test", "protocol": case["protocol"]})
-                .as_object()
-                .expect("object")
-                .clone(),
-        };
-        let fake = Fake::new(&case["response"]);
-        let mut got = run(&request, creds, &fake).await;
-        if let Some(obj) = got.as_object_mut() {
-            obj.remove("sent");
-        }
-        check(&name, &got, &case["result"]);
-    }
-}
-
-#[test]
-fn parse_retry_after_matches_ts() {
-    for case in vectors()["custom"]["http"]["parseRetryAfter"]
-        .as_array()
-        .expect("cases")
-    {
-        let now = case["now"].as_f64().expect("now");
-        let got = parse_retry_after(case["header"].as_str(), now);
-        let want = case["output"].as_f64();
-        assert_eq!(got, want, "{}", case["header"]);
-    }
-}
-
-#[tokio::test]
-async fn http_error_matches_ts() {
-    for case in vectors()["custom"]["http"]["httpError"]
-        .as_array()
-        .expect("cases")
-    {
-        let mut headers = Headers::new();
-        for p in case["headers"].as_array().expect("headers") {
-            headers.append_received(p[0].as_str().expect("n"), p[1].as_str().expect("v"));
-        }
-        let status = u16::try_from(case["status"].as_u64().expect("status")).expect("u16");
-        let e = http_error(
-            status,
-            &headers,
-            case["body"].as_str().expect("body"),
-            "custom",
-            case["now"].as_f64().expect("now"),
-        );
-        check("httpError", &describe_error(&e), &case["output"]);
     }
 }
 

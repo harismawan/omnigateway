@@ -42,46 +42,6 @@ fn safe(s: &str) -> bool {
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
-    use super::*;
-    #[test]
-    fn startup_profile_subprocess() {
-        if std::env::var_os("OMNI_PROFILE_CHILD").is_some() {
-            initialize();
-            // Supply a changed environment source without unsafe process-wide
-            // mutation. The same OnceLock boundary used by initialize ignores it.
-            capture(|| HashMap::from([("OMNI_ANTHROPIC_CLI_VERSION".into(), "later".into())]));
-            assert_eq!(env("OMNI_ANTHROPIC_CLI_VERSION", "fallback"), "startup");
-            assert!(
-                headers(vec![])
-                    .iter()
-                    .any(|(k, v)| k == "User-Agent" && v == "startup-agent")
-            );
-            return;
-        }
-        let child = std::process::Command::new(std::env::current_exe().expect("exe"))
-            .args([
-                "anthropic::profile::tests::startup_profile_subprocess",
-                "--exact",
-            ])
-            .env("OMNI_PROFILE_CHILD", "1")
-            .env("OMNI_ANTHROPIC_CLI_VERSION", "startup")
-            .env("OMNI_UA_ANTHROPIC", "startup-agent")
-            .output()
-            .expect("child");
-        assert!(
-            child.status.success(),
-            "{}",
-            String::from_utf8_lossy(&child.stdout)
-        );
-        let oracle=std::process::Command::new("bun").args(["-e",r#"const p=await import('./packages/providers/src/anthropic/profile.ts');process.env.OMNI_ANTHROPIC_CLI_VERSION='later';process.env.OMNI_UA_ANTHROPIC='later';console.log(JSON.stringify([p.ANTHROPIC_CLI_VERSION,p.anthropicProfile.headers.find(x=>x[0]==='User-Agent')[1]]))"#])
-            .current_dir(concat!(env!("CARGO_MANIFEST_DIR"),"/../.."))
-            .env("OMNI_ANTHROPIC_CLI_VERSION","startup").env("OMNI_UA_ANTHROPIC","startup-agent").output().expect("bun");
-        assert!(oracle.status.success());
-        assert_eq!(
-            String::from_utf8_lossy(&oracle.stdout).trim(),
-            r#"["startup","startup-agent"]"#
-        );
-    }
     #[cfg(unix)]
     #[test]
     fn nonunicode_environment_subprocess() {

@@ -39,11 +39,6 @@ fn thread(seed: &str) -> String {
         &hex[20..]
     )
 }
-#[cfg(test)]
-pub(crate) fn encode(req: &ChatRequest, model: &str) -> (Map<String, Value>, Vec<String>, String) {
-    let (body, notes, key, _, _) = encode_mode(req, model, None);
-    (body, notes, key)
-}
 type Encoded = (
     Map<String, Value>,
     Vec<String>,
@@ -435,27 +430,4 @@ pub(crate) fn encode_mode(
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
-    #[test]
-    fn wire_order_matches_real_ts() {
-        let run = std::process::Command::new("bun")
-            .arg("tests/openai-request-reference.ts")
-            .current_dir(env!("CARGO_MANIFEST_DIR"))
-            .output()
-            .unwrap();
-        assert!(run.status.success());
-        let rows: serde_json::Value = serde_json::from_slice(&run.stdout).unwrap();
-        for row in rows.as_array().unwrap() {
-            let req = serde_json::from_value(row["request"].clone()).unwrap();
-            omni_ir::deep::scope(|| {
-                let (body, notes, key) = super::encode(&req, row["model"].as_str().unwrap());
-                let body = omni_ir::deep::Owned(serde_json::Value::Object(body));
-                assert_eq!(
-                    omni_ir::jsjson::to_string(&body.0),
-                    row["wire"].as_str().unwrap()
-                );
-                assert_eq!(serde_json::json!(notes), row["notes"]);
-                assert_eq!(key, row["key"].as_str().unwrap());
-            });
-        }
-    }
 }

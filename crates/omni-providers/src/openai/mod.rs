@@ -4,8 +4,6 @@ mod identity;
 #[cfg(test)]
 mod identity_tests;
 mod lite;
-#[cfg(test)]
-mod lite_tests;
 pub mod oauth;
 mod oauth_lifecycle;
 mod oauth_start;

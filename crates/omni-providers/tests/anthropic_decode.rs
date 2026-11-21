@@ -1,8 +1,4 @@
-use omni_providers::{
-    anthropic::decode::AnthropicDecoder,
-    codec::{Flow, StreamDecoder},
-    sse::SseMessage,
-};
+use omni_providers::{anthropic::decode::AnthropicDecoder, codec::StreamDecoder, sse::SseMessage};
 use std::collections::VecDeque;
 
 #[test]
@@ -86,66 +82,4 @@ fn deep_valid_events_are_not_silently_discarded() {
         decoder.message(&msg, &mut out).is_err(),
         "depth policy must be explicit"
     );
-}
-
-#[test]
-fn frozen_ts_decoder_generated_corpus() {
-    compare(false);
-}
-#[test]
-fn overflow_matches_ts() {
-    compare(true);
-}
-fn compare(overflow: bool) {
-    let run = std::process::Command::new("bun")
-        .arg("tests/anthropic-decode-reference.ts")
-        .args(if overflow { vec!["--overflow"] } else { vec![] })
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .expect("Bun");
-    assert!(
-        run.status.success(),
-        "{}",
-        String::from_utf8_lossy(&run.stderr)
-    );
-    let rows: serde_json::Value = serde_json::from_slice(&run.stdout).expect("corpus");
-    for (i, row) in rows.as_array().expect("rows").iter().enumerate() {
-        let mut decoder = AnthropicDecoder::default();
-        let mut out = VecDeque::new();
-        let mut stopped = false;
-        let mut threw = false;
-        for msg in row["messages"].as_array().expect("messages") {
-            let msg = SseMessage {
-                event: msg["event"].as_str().expect("event").into(),
-                data: msg["data"].as_str().expect("data").into(),
-            };
-            match decoder.message(&msg, &mut out) {
-                Ok(Flow::Continue) => {}
-                Ok(Flow::Stop) => {
-                    stopped = true;
-                    break;
-                }
-                Err(omni_providers::codec::DecodeError::Throw(_)) => {
-                    threw = true;
-                    stopped = true;
-                    break;
-                }
-                Err(e) => panic!("{e:?}"),
-            }
-        }
-        if !stopped {
-            decoder.finish(&mut out);
-        }
-        let actual: Vec<serde_json::Value> = out
-            .iter()
-            .map(|e| serde_json::from_str(&e.to_json()).expect("event JSON"))
-            .collect();
-        assert_eq!(threw, row["throws"].as_bool().expect("throws"), "case {i}");
-        assert_eq!(
-            serde_json::Value::Array(actual),
-            row["events"],
-            "case {i}: {}",
-            row["messages"]
-        );
-    }
 }

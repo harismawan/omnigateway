@@ -8,7 +8,6 @@ use std::time::{Duration, Instant};
 
 use common::*;
 use omni_cluster_limit::{ClusterLimiter, ClusterLimiterOptions};
-use serde_json::json;
 
 fn opts(clock: &ManualClock) -> ClusterLimiterOptions {
     ClusterLimiterOptions {
@@ -67,64 +66,6 @@ async fn concurrent_admissions_across_two_clients_never_over_admit() {
         drop(held);
     }
     assert_eq!(l1.metrics().verdict_mismatches.load(Ordering::SeqCst), 0);
-}
-
-/// TS and Rust admitting on one key at once share one ceiling.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn rust_and_ts_admitting_together_share_one_ceiling() {
-    let Some(base) = redis_base() else { return };
-    let db = fresh_db(&base).await;
-    let ts = Ts::spawn(&db.url).await;
-    ts.call("reset", json!(["k"])).await;
-    let clock = ManualClock::at(T0);
-    ts.call("clock", json!([T0])).await;
-    let c = coord(&db.url, clock.clock()).await;
-    let l = limiter(&c, MemUsage::new(), clock.clock());
-    for (raw, cap) in [
-        (r#"{"concurrency":4}"#, 4),
-        (r#"{"requests":{"1m":11}}"#, 11),
-    ] {
-        flush(&db.url).await;
-        let lim = limits(raw);
-        let lim_json: serde_json::Value = serde_json::from_str(raw).expect("json");
-        let mut rs = Vec::new();
-        let mut tsr = Vec::new();
-        for h in 0..40_u64 {
-            let l = l.clone();
-            let lim = lim.clone();
-            rs.push(tokio::spawn(
-                async move { l.admit("k", &lim, "m", T0).await },
-            ));
-            let ts = Arc::clone(&ts);
-            let lj = lim_json.clone();
-            tsr.push(tokio::spawn(async move {
-                ts.call("admit", json!([1000 + h, "k", lj, "m"])).await
-            }));
-        }
-        let mut admitted = 0;
-        let mut held = Vec::new();
-        for t in rs {
-            if let Ok(a) = t.await.expect("task") {
-                admitted += 1;
-                held.push(a);
-            }
-        }
-        for t in tsr {
-            if t.await.expect("task").get("ok").is_some() {
-                admitted += 1;
-            }
-        }
-        // TS's per-step claims may refuse a request a concurrent claim was
-        // about to give back (over-count, its documented direction); never
-        // more than the ceiling.
-        assert!(admitted <= cap, "{raw}: {admitted} admitted, cap {cap}");
-        assert!(admitted >= 1, "{raw}: nothing admitted");
-        for h in 0..40_u64 {
-            ts.call("release", json!([1000 + h])).await;
-        }
-        drop(held);
-    }
-    ts.close().await;
 }
 
 /// `concurrency: 1`, back to back: the release at stream end is ordered

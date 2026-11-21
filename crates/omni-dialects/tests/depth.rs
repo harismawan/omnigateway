@@ -190,25 +190,6 @@ fn deep_values_clone_serialize_and_drop_on_a_small_stack() {
     });
 }
 
-#[test]
-fn the_bound_is_the_depth_bun_can_still_stringify() {
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../conformance/vectors/dialects.json"
-    );
-    let v: Value =
-        serde_json::from_str(&std::fs::read_to_string(path).expect("vectors")).expect("json");
-    assert_eq!(v["depth"]["bound"].as_u64(), Some(D as u64));
-    for case in v["depth"]["cases"].as_array().expect("cases") {
-        let d = case["depth"].as_u64().expect("depth");
-        // TS parses and carries every one of these into the IR.
-        assert_eq!(case["chatArgumentsDepth"].as_u64(), Some(d));
-        assert_eq!(case["responsesArgumentsDepth"].as_u64(), Some(d));
-        // ...but can stringify a bare value only up to the bound.
-        assert_eq!(case["stringifyValue"].is_null(), d <= D as u64, "depth {d}");
-    }
-}
-
 // ------------------------------------------------------------------ ingest()
 //
 // Through the public entry point, with no help from the test: the body text

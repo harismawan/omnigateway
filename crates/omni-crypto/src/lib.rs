@@ -1,8 +1,7 @@
 //! Byte-exact crypto and hashing contracts shared with the TS build.
 //!
-//! Every function here has vectors exported from TypeScript
-//! (`conformance/vectors/vectors.json`). A difference is a wire or storage
-//! incompatibility, never a style choice.
+//! A difference from the TS output is a wire or storage incompatibility,
+//! never a style choice.
 
 pub mod apikey;
 pub mod cch;

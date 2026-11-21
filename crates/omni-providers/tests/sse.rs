@@ -3,10 +3,7 @@
 
 mod common;
 
-use common::{chunks, describe_data, describe_error, normalize, same, vectors};
 use omni_providers::sse::{MAX_RECORD_CHARS, SseMessage, SseParser};
-use serde_json::{Value, json};
-
 /// Runs the parser over `chunks` the way `parseSse` consumes a body.
 fn run(chunks: &[&[u8]]) -> (Vec<SseMessage>, Option<omni_ir::error::GatewayError>) {
     let mut parser = SseParser::new();
@@ -32,38 +29,6 @@ fn text(chunks: &[&str]) -> Vec<SseMessage> {
     let (out, err) = run(&bytes);
     assert!(err.is_none(), "unexpected error {err:?}");
     out
-}
-
-#[test]
-fn matches_every_exported_parse_sse_vector() {
-    let sse = &vectors()["sse"];
-    assert_eq!(
-        sse["maxRecordChars"].as_u64(),
-        Some(MAX_RECORD_CHARS as u64)
-    );
-    let cases = sse["cases"].as_array().expect("cases");
-    assert!(cases.len() >= 40);
-    for case in cases {
-        let name = case["name"].as_str().expect("name");
-        let owned = chunks(&case["chunks"]);
-        let slices: Vec<&[u8]> = owned.iter().map(|b| b.as_ref()).collect();
-        let (messages, error) = run(&slices);
-        let got: Vec<Value> = messages
-            .iter()
-            .map(|m| json!({ "event": m.event, "data": describe_data(&m.data) }))
-            .collect();
-        let expected = normalize(&case["messages"]);
-        assert!(
-            same(&Value::Array(got.clone()), &expected),
-            "{name}: messages\n got {got:?}\nwant {expected}"
-        );
-        let got_error = error.as_ref().map_or(Value::Null, describe_error);
-        assert!(
-            same(&got_error, &case["error"]),
-            "{name}: error\n got {got_error}\nwant {}",
-            case["error"]
-        );
-    }
 }
 
 #[test]

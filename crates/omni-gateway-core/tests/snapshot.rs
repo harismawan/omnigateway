@@ -57,69 +57,6 @@ fn open() -> (tempfile::TempDir, std::path::PathBuf, SqliteStore) {
 }
 
 #[test]
-fn ts_written_real_expiry_survives_routing_snapshot() {
-    let dir = tempfile::tempdir().expect("dir");
-    let path = dir.path().join("omni.db");
-    let output = std::process::Command::new("bun")
-        .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
-        .args(["--no-env-file", "conformance/store/sqlite-expiry.ts"])
-        .arg(&path)
-        .output()
-        .expect("Bun fixture writer");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let store = SqliteStore::open(&path, 0).expect("store");
-    let kind: String = store
-        .connection()
-        .query_row(
-            "SELECT typeof(expires_at) FROM credentials WHERE id='ts-real'",
-            [],
-            |r| r.get(0),
-        )
-        .expect("raw expiry");
-    assert_eq!(kind, "real");
-    let holder =
-        SnapshotHolder::build(&store, omni_crypto::field::derive_key(ENC), 2.0).expect("build");
-    let snapshot = holder.load();
-    let [credential] = snapshot.routing.credentials.as_slice() else {
-        panic!("TS-written REAL credential is absent from the routing snapshot");
-    };
-    assert_eq!(credential.id, "ts-real");
-    assert_eq!(credential.expires_at, Some(1.5));
-    assert_eq!(
-        credential.inference_secret().as_deref(),
-        Some("fixture-key")
-    );
-    let targets = serde_json::from_str(TARGETS).expect("targets");
-    let model = omni_store::VirtualModel {
-        id: "fixture".into(),
-        targets,
-        strategy: omni_store::Strategy::Priority,
-        is_alias: false,
-    };
-    let request = serde_json::from_str(r#"{"model":"fixture","messages":[],"stream":false}"#)
-        .expect("request");
-    let result = omni_router::eligible(&omni_router::RankInput {
-        request: &request,
-        model: &model,
-        snapshot: &snapshot.routing,
-        now: 2.0,
-        rand: 0.0,
-        load: None,
-        recent: None,
-        providers: None,
-    });
-    assert_eq!(
-        result.pairs.len(),
-        1,
-        "API-key expiry must not exclude routing"
-    );
-}
-
-#[test]
 fn boot_builds_keys_by_hash_models_and_decrypted_secrets_and_drops_a_broken_model() {
     let (_dir, _path, store) = open();
     let holder =

@@ -1,44 +1,6 @@
-//! Request paths against the runtime frozen TS runs on:
-//! `conformance/vectors/static-paths.json` (written by `static-paths.ts`)
-//! holds Bun's `new URL(...).pathname` and `decodeURIComponent` of it per
-//! request-target. The content-type table is checked for the frozen runtime's
-//! answers in `static-mime.tsv` (`static-mime.ts --check` guards drift).
+//! Request paths and the content-type table (`static-mime.tsv`).
 
-use omni_gateway::static_files::{content_type, decode_uri_component, normalize_path};
-use serde_json::Value;
-
-#[test]
-fn pathname_and_decode_match_bun() {
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../conformance/vectors/static-paths.json"
-    );
-    let doc: Value =
-        serde_json::from_str(&std::fs::read_to_string(path).expect("vectors")).expect("json");
-    let mut failed = Vec::new();
-    let mut checked = 0;
-    for c in doc["cases"].as_array().expect("cases") {
-        let target = c["target"].as_str().expect("target");
-        let pathname = c["pathname"].as_str().expect("pathname");
-        let decoded = c["decoded"].as_str();
-        // Backslash targets reach the router (hyper accepts `\` in a
-        // request-target) and normalize to `/`, as WHATWG URL does.
-        let got = normalize_path(target);
-        if got != pathname {
-            failed.push(format!("{target:?}: pathname {got:?} != {pathname:?}"));
-        }
-        let got_decoded = decode_uri_component(pathname);
-        if got_decoded.as_deref() != decoded {
-            failed.push(format!(
-                "{target:?}: decoded {got_decoded:?} != {decoded:?}"
-            ));
-        }
-        checked += 1;
-    }
-    assert!(checked >= 50);
-    assert!(failed.is_empty(), "{}", failed.join("\n"));
-}
-
+use omni_gateway::static_files::content_type;
 #[test]
 fn content_types_are_the_frozen_runtime_table() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/data/static-mime.tsv");

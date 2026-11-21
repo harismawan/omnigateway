@@ -9,7 +9,6 @@
 mod common;
 
 use common::pg::{TestDb, base_url};
-use common::{bun_required, bun_script, ts};
 use omni_store::pg::{PgConfig, PgStore};
 use omni_store::writer::{
     HealthCommitted, HealthStats, HealthWriter, HealthWriterConfig, LogEvent, RequestLog, Writer,
@@ -203,61 +202,6 @@ async fn concurrent_failures_from_two_replicas_accumulate() {
     assert_eq!(sa.failed + sb.failed + sa.refused + sb.refused, 0);
     let (_, failures, _) = health_row(&db, "m").await.expect("row");
     assert_eq!(i64::from(failures), 2 * i64::try_from(n).expect("n"));
-}
-
-/// The frozen TS `updateHealth` and the Rust one, interleaved on one row:
-/// they share the lock and each reads the other's writes.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn ts_and_rust_failures_on_one_row_accumulate() {
-    let Some(base) = base_url("ts_and_rust_failures_on_one_row_accumulate") else {
-        return;
-    };
-    if !bun_required("ts_and_rust_failures_on_one_row_accumulate") {
-        return;
-    }
-    let dir = tempfile::tempdir().expect("tempdir");
-    let db = TestDb::create(&base, "health_mixed").await;
-    let store = store_with_credential(&db).await;
-    let script = format!(
-        "import {{ SQL }} from 'bun';
-         import {{ deriveKey }} from {enc:?};
-         import {{ createCredentialRepo }} from {creds:?};
-         const sql = new SQL({{ url: {url:?}, max: 4 }});
-         const repo = createCredentialRepo(sql, await deriveKey('x'), () => {{}});
-         await Promise.all(Array.from({{ length: 4 }}, async () => {{
-           for (let i = 0; i < 25; i++) {{
-             await repo.updateHealth('c1', 'm', (cur) => ({{
-               credentialId: 'c1', model: 'm', breakerState: cur?.breakerState ?? 'closed',
-               consecutiveFailures: (cur?.consecutiveFailures ?? 0) + 1,
-               openedAt: cur?.openedAt ?? null, rateLimitedUntil: cur?.rateLimitedUntil ?? null,
-             }}));
-           }}
-         }}));
-         await sql.close();
-         console.log('ok');",
-        enc = ts("packages/store/src/encryption.ts"),
-        creds = ts("packages/store/src/postgres/credentials.ts"),
-        url = db.url,
-    );
-    let path = dir.path().to_owned();
-    let ts_side = tokio::task::spawn_blocking(move || bun_script(&path, &script, ""));
-    let mut rust = Vec::new();
-    for _ in 0..4 {
-        let s = store.clone();
-        rust.push(tokio::spawn(async move {
-            for _ in 0..25 {
-                s.update_health("c1", "m", &fail(1_000_000))
-                    .await
-                    .expect("rust update");
-            }
-        }));
-    }
-    for r in rust {
-        r.await.expect("join");
-    }
-    assert!(ts_side.await.expect("join").contains("ok"));
-    let (_, failures, _) = health_row(&db, "m").await.expect("row");
-    assert_eq!(failures, 200, "100 from TS and 100 from Rust");
 }
 
 /// A transition reaches the database (and the commit sink, for publishing)

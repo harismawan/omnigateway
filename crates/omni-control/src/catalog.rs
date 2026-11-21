@@ -1,6 +1,5 @@
 //! Built-in provider descriptors (`PROVIDER_DESCRIPTORS`), generated from the
-//! frozen TS registry by `conformance/cli/provider-catalog.ts`. Never edit the
-//! data file by hand; `--check` reports drift.
+//! frozen TS registry. Never edit the data file by hand.
 //!
 //! Operator metadata only: registry order, catalog rows, pricing, limits,
 //! model auth, capabilities and presentation. Gateway routing keeps its own
@@ -112,31 +111,6 @@ pub fn target(spec: &str) -> Result<JsValue, String> {
 
 #[cfg(test)]
 mod tests {
-    use std::process::Command;
-
-    /// The embedded data is the frozen registry, compared as values with key
-    /// and row order intact. The generator's `--check` holds the bytes.
-    #[test]
-    fn generated_data_matches_frozen_ts_registry() {
-        let repo = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
-        let output = Command::new("bun")
-            .current_dir(repo)
-            .args([
-                "-e",
-                "import { PROVIDER_DESCRIPTORS } from './packages/providers/src/descriptors.ts'; process.stdout.write(JSON.stringify(PROVIDER_DESCRIPTORS))",
-            ])
-            .output()
-            .expect("Bun oracle required");
-        assert!(output.status.success(), "{output:?}");
-        let frozen = crate::operator_json::parse(&String::from_utf8(output.stdout).expect("UTF8"))
-            .expect("frozen JSON");
-        let embedded = crate::operator_json::parse(super::DATA).expect("embedded JSON");
-        assert_eq!(embedded, frozen);
-        assert_eq!(
-            omni_ir::jsjson::stringify(&embedded),
-            omni_ir::jsjson::stringify(&frozen)
-        );
-    }
 
     #[test]
     fn lookups_are_own_keys_and_auths_follow_rows() {

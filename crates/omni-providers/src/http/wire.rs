@@ -6,7 +6,7 @@
 //! which then adds `Host`, `Connection: keep-alive` and — for a bodiless
 //! method that carries a body by default — `Content-Length: 0`. Each of those
 //! steps has an observable quirk, and each is reproduced here (all measured
-//! against bun 1.4.4, see `httpWire` in `conformance/vectors/vectors.json`):
+//! against bun 1.4.4):
 //!
 //! - **JS object keys.** Assigning the pairs to an object collapses exact
 //!   duplicates (last value, first position) and enumerates array-index keys

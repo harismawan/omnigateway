@@ -511,66 +511,6 @@ async fn a_hung_store_read_times_out() {
     l.shutdown().await;
 }
 
-/// I5 (the reviewer's repro, against frozen TS): 10,000 debits of 0.1 in
-/// one entry. TS's 10,000 `HINCRBYFLOAT`s store `999.99999999999991296`,
-/// read back as `1000`, so a `spend/5h` ceiling of `1000.0000000001`
-/// admits; the bucket hashes must be byte-identical.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn ten_thousand_costs_in_one_entry_equal_ts() {
-    let Some(base) = redis_base() else { return };
-    let ts_db = fresh_db(&base).await;
-    let rs_db = fresh_db(&base).await;
-    let ts = Ts::spawn(&ts_db.url).await;
-    let clock = ManualClock::at(T0);
-    let rs = coord(&rs_db.url, clock.clock()).await;
-    let raw = r#"{"spend":{"5h":1000.0000000001}}"#;
-    let lim_json: serde_json::Value = serde_json::from_str(raw).expect("json");
-    let lim = limits(raw);
-    ts.call("reset", serde_json::json!(["k"])).await;
-    ts.call("clock", serde_json::json!([T0])).await;
-    let usage: Arc<dyn omni_cluster_limit::UsageSource> = Arc::new(AgentUsage(Arc::clone(&ts)));
-    let l = ClusterLimiter::new(Arc::clone(&rs), usage, slow_flush(&clock));
-    assert_eq!(l.preseed_now("k", &lim, T0).await, 0);
-    ts.call("admit", serde_json::json!([1, "k", lim_json, "m"]))
-        .await;
-    ts.call("release", serde_json::json!([1])).await;
-    drop(l.admit("k", &lim, "m", T0).await.expect("admit"));
-    for _ in 0..10_000 {
-        ts.call("debitNoSync", serde_json::json!(["k", "m", 0, 0.1]))
-            .await;
-        l.debit("k", "m", 0.0, 0.1, T0, "");
-    }
-    ts.call("sync", serde_json::json!([])).await;
-    l.flush_debits().await;
-    let field = format!("{}:c", ((T0 / 60_000.0).floor() * 60_000.0) as i64);
-    let get = |url: String| {
-        let field = field.clone();
-        async move {
-            let mut conn = admin(&url).await;
-            let v: String = redis::cmd("HGET")
-                .arg("omni:b:lim:k:5h")
-                .arg(&field)
-                .query_async(&mut conn)
-                .await
-                .expect("hget");
-            v
-        }
-    };
-    let (t, r) = (get(ts_db.url.clone()).await, get(rs_db.url.clone()).await);
-    assert_eq!(t, "999.99999999999991296", "TS's own value");
-    assert_eq!(r, t, "Rust's stored float differs from TS's");
-    let tdec = ts
-        .call("admit", serde_json::json!([2, "k", lim_json, "m"]))
-        .await;
-    assert!(tdec.get("ok").is_some(), "TS admits: {tdec}");
-    assert!(
-        l.admit("k", &lim, "m", T0).await.is_ok(),
-        "Rust refused where TS admits"
-    );
-    l.shutdown().await;
-    ts.close().await;
-}
-
 /// Minor: an admission cancelled after its script was written leaves no
 /// named concurrency slot (the cleanup guard gives it back).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

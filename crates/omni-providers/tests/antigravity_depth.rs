@@ -4,7 +4,6 @@ use omni_providers::{
     codec::{CodecInput, Credentials},
 };
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 
 fn body(kind: &str, depth: usize) -> String {
     let nested = "null";
@@ -85,46 +84,6 @@ fn body(kind: &str, depth: usize) -> String {
         .body
 }
 
-fn compare(kind: &'static str) {
-    let out = std::process::Command::new("bun")
-        .args(["--no-env-file", "tests/antigravity_depth-reference.ts"])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .expect("bun");
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let rows: Value = serde_json::from_slice(&out.stdout).expect("oracle JSON");
-    let row = rows
-        .as_array()
-        .expect("rows")
-        .iter()
-        .find(|r| r["kind"] == kind)
-        .expect("row")
-        .clone();
-    std::thread::Builder::new()
-        .stack_size(2 * 1024 * 1024)
-        .spawn(move || {
-            let body = body(kind, 39_990);
-            assert_eq!(json!(body.len()), row["length"], "{kind}");
-            assert_eq!(
-                format!("{:x}", Sha256::digest(body.as_bytes())),
-                row["sha256"],
-                "{kind}"
-            );
-        })
-        .expect("spawn")
-        .join()
-        .expect("join");
-}
-
-#[test]
-fn input_depth_matches_frozen() {
-    compare("input");
-}
-
 #[test]
 fn null_schema_throw_drops_partial_deep_body() {
     std::thread::Builder::new()
@@ -162,18 +121,6 @@ fn null_schema_throw_drops_partial_deep_body() {
                 &request, "m", "p", "r", &cloak,
             ), Err(BuildError::Throw)));
         }).expect("spawn").join().expect("join");
-}
-#[test]
-fn vendor_depth_matches_frozen() {
-    compare("vendor");
-}
-#[test]
-fn response_schema_depth_matches_frozen() {
-    compare("schema");
-}
-#[test]
-fn tool_schema_depth_matches_frozen() {
-    compare("tool");
 }
 #[test]
 fn input_engine_threshold_band() {

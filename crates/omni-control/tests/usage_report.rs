@@ -1,7 +1,6 @@
 //! `GET /api/usage`'s body, byte for byte, for cells that exercise every
 //! branch of the row writer: the report is written straight from the SQLite
 //! rows, so nothing else pins its escaping, key order and number text.
-//! (The HTTP comparison with the TS gateway is `conformance/e2e/admin-routes.ts`.)
 
 use omni_store::SqliteStore;
 

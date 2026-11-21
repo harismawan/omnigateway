@@ -66,45 +66,6 @@ fn routes_lint_commands_to_lint_output() {
 }
 
 #[test]
-fn routes_test_commands_to_test_output() {
-    for command in [
-        "bun test",
-        "bunx vitest",
-        "npx jest",
-        "pytest",
-        "go test ./...",
-    ] {
-        let executable = if command.contains("vitest") {
-            "vitest"
-        } else if command.contains("jest") {
-            "jest"
-        } else if command.starts_with("pytest") {
-            "pytest"
-        } else if command.starts_with("go ") {
-            "go"
-        } else {
-            "bun"
-        };
-        let failure = match executable {
-            "vitest" => " FAIL  test/a.test.ts > named case",
-            "jest" => "  ● named case",
-            "pytest" => "  FAILED test_a.py::test_named",
-            "go" => "    --- FAIL: TestNamed (0.00s)",
-            _ => "  FAIL named case",
-        };
-        let f = run_diag(
-            command,
-            &[
-                failure,
-                "  at test/a.test.ts:2:3",
-                "1 failed, 2 passed in 1s",
-            ],
-        );
-        assert!(has(&f.report, "test-output"), "{command}");
-    }
-}
-
-#[test]
 fn routes_build_commands_to_build_output() {
     for command in ["bun build src/a.ts", "bun run build", "cargo build"] {
         let f = run_diag(

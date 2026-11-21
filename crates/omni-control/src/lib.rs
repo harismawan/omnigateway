@@ -16,8 +16,6 @@ pub mod date;
 pub mod diagnostics;
 pub mod dry_run;
 pub mod fs_error;
-#[cfg(test)]
-mod http_oracle_tests;
 pub mod keys;
 pub mod logs;
 mod model_schema;

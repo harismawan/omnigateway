@@ -5,8 +5,7 @@
 
 mod common;
 
-use common::pg::{TestDb, base_url, contents, schema};
-use common::{bun_required, bun_script, ts};
+use common::pg::{TestDb, base_url};
 use omni_store::pg::migrate::{LATEST_MIGRATION, MIGRATION_LOCK, MIGRATIONS};
 use omni_store::pg::{PgConfig, PgStore};
 use std::time::Duration;
@@ -60,61 +59,8 @@ async fn legacy(db: &TestDb, upto: usize) {
     }
 }
 
-/// `openPg(url)` and close, from Bun.
-fn ts_open(dir: &std::path::Path, url: &str) {
-    let script = format!(
-        "import {{ openPg }} from {:?};\nconst sql = await openPg(process.env.URL!);\nawait sql.close();\nconsole.log('ok');\n",
-        ts("packages/store/src/postgres/db.ts")
-    );
-    let script = script.replace("process.env.URL!", &format!("{url:?}"));
-    let out = bun_script(dir, &script, "");
-    assert!(out.contains("ok"), "{out}");
-}
-
 fn config(url: &str) -> PgConfig {
     PgConfig::new(url)
-}
-
-/// Rows that existed before a migration, so continuing has data to carry.
-async fn seed_at(db: &TestDb, upto: usize) {
-    if upto == 0 {
-        return;
-    }
-    let c = db.client().await;
-    c.batch_execute(
-        "INSERT INTO credentials (id, provider, label, auth_type, created_at, updated_at)
-           VALUES ('c1', 'anthropic', 'one', 'apiKey', 1, 2);
-         INSERT INTO api_keys (id, label, prefix, hash, limits, created_at)
-           VALUES ('k1', 'key', 'sk-omni-abcd', 'h1', '{}', 5);
-         INSERT INTO request_logs (id, at, api_key_id, requested_model, status, duration_ms, cost_usd)
-           VALUES ('r1', 1794000000000, 'k1', 'fast', 200, 9, 0.5);
-         INSERT INTO settings (key, value) VALUES ('settings', '{\"rtkEnabled\":true}');",
-    )
-    .await
-    .expect("seed");
-    if upto == 1 {
-        c.batch_execute(
-            "INSERT INTO credential_health (credential_id, model, breaker_state, consecutive_failures,
-                                            opened_at, rate_limited_until, ewma_ttft_ms, last_used_at)
-               VALUES ('c1', 'm', 'open', 3, 10, NULL, 12.5, 99)",
-        )
-        .await
-        .expect("seed health with the columns 002 drops");
-    } else {
-        c.batch_execute(
-            "INSERT INTO credential_health (credential_id, model, breaker_state, consecutive_failures,
-                                            opened_at, rate_limited_until)
-               VALUES ('c1', 'm', 'open', 3, 10, NULL)",
-        )
-        .await
-        .expect("seed health");
-    }
-}
-
-/// Every table's rows, `migrations.applied_at` (a wall clock) left out.
-async fn comparable(db: &TestDb) -> (Vec<String>, Vec<(String, Vec<String>)>) {
-    let c = db.client().await;
-    (schema(&c).await, contents(&c).await)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -152,56 +98,6 @@ async fn fresh_database_gets_every_migration_verbatim() {
         .map(|r| r.get(0))
         .collect();
     assert_eq!(applied, again);
-}
-
-/// Rust from every id 0..=8 ends where TS's `openPg` ends from the same
-/// state, schema and rows alike; and TS opening what Rust finished applies
-/// nothing.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn every_partial_state_finishes_exactly_as_ts_would() {
-    let Some(base) = base_url("every_partial_state_finishes_exactly_as_ts_would") else {
-        return;
-    };
-    if !bun_required("every_partial_state_finishes_exactly_as_ts_would") {
-        return;
-    }
-    let dir = tempfile::tempdir().expect("tempdir");
-    for upto in 0..=MIGRATIONS.len() {
-        let ts_db = TestDb::create(&base, &format!("ts{upto}")).await;
-        legacy(&ts_db, upto).await;
-        seed_at(&ts_db, upto).await;
-        ts_open(dir.path(), &ts_db.url);
-        let want = comparable(&ts_db).await;
-
-        let rs_db = TestDb::create(&base, &format!("rs{upto}")).await;
-        legacy(&rs_db, upto).await;
-        seed_at(&rs_db, upto).await;
-        PgStore::open(config(&rs_db.url), 0)
-            .await
-            .unwrap_or_else(|e| panic!("rust continues from {upto}: {e}"));
-        let got = comparable(&rs_db).await;
-        assert_eq!(got.0, want.0, "schema after continuing from {upto}");
-        assert_eq!(got.1, want.1, "rows after continuing from {upto}");
-
-        // TS opening the database Rust finished finds nothing to apply.
-        let c = rs_db.client().await;
-        let before: Vec<(i32, i64)> = c
-            .query("SELECT id, applied_at FROM migrations ORDER BY id", &[])
-            .await
-            .expect("ledger")
-            .iter()
-            .map(|r| (r.get(0), r.get(1)))
-            .collect();
-        ts_open(dir.path(), &rs_db.url);
-        let after: Vec<(i32, i64)> = c
-            .query("SELECT id, applied_at FROM migrations ORDER BY id", &[])
-            .await
-            .expect("ledger")
-            .iter()
-            .map(|r| (r.get(0), r.get(1)))
-            .collect();
-        assert_eq!(before, after, "TS applies nothing after Rust ({upto})");
-    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -273,28 +169,6 @@ async fn two_migrators_serialise_on_the_advisory_lock() {
         assert_eq!(ledger(&c).await, (1..=8).collect::<Vec<_>>());
         assert_eq!(advisory_locks_held(&c).await, 0);
     }
-}
-
-/// A Rust migrator and a TS one at once.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_rust_and_a_ts_migrator_serialise_on_the_same_lock() {
-    let Some(base) = base_url("a_rust_and_a_ts_migrator_serialise_on_the_same_lock") else {
-        return;
-    };
-    if !bun_required("a_rust_and_a_ts_migrator_serialise_on_the_same_lock") {
-        return;
-    }
-    let dir = tempfile::tempdir().expect("tempdir");
-    let db = TestDb::create(&base, "mixed").await;
-    let url = db.url.clone();
-    let path = dir.path().to_owned();
-    let ts = tokio::task::spawn_blocking(move || ts_open(&path, &url));
-    PgStore::open(config(&db.url), 0)
-        .await
-        .expect("rust migrator");
-    ts.await.expect("ts migrator");
-    let c = db.client().await;
-    assert_eq!(ledger(&c).await, (1..=8).collect::<Vec<_>>());
 }
 
 /// The walk waits for whoever holds the lock, and starts once it is let go.

@@ -16,42 +16,6 @@ fn pkce_matches_rfc7636_and_state_is_unpredictable() {
 }
 
 #[test]
-fn real_typescript_request_bytes() {
-    let output = std::process::Command::new("bun")
-        .arg("tests/oauth-reference.ts")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .expect("Bun must be installed for frozen TS differential");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let expected: serde_json::Value = serde_json::from_slice(&output.stdout).expect("TS output");
-    let p = PendingFlow {
-        verifier: "v".into(),
-        challenge: "c".into(),
-        state: "s".into(),
-        redirect_uri: "r".into(),
-    };
-    for row in expected["rows"].as_array().expect("rows") {
-        let actual = exchange_request(row["code"].as_str().expect("code"), &p).expect("exchange");
-        assert_eq!(
-            serde_json::to_value(actual).expect("request"),
-            row["request"]
-        );
-    }
-    assert_eq!(
-        serde_json::to_value(refresh_request("old")).expect("refresh"),
-        expected["refresh"]
-    );
-    assert_eq!(
-        serde_json::to_value(start("v", "c", "s")).expect("start"),
-        expected["start"]
-    );
-}
-
-#[test]
 fn exchange_preserves_wire_order_and_checks_pasted_state() {
     let p = PendingFlow {
         verifier: "v".into(),

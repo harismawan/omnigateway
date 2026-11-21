@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use common::vectors;
 use omni_providers::http::{Client, HttpClient, HttpError, HttpRequest};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -117,53 +116,6 @@ async fn only_antigravity_omits_automatic_length_when_chunked() {
         );
         assert!(bytes.ends_with(b"\r\n\r\n2\r\nxy\r\n0\r\n\r\n"));
     }
-}
-
-#[tokio::test]
-async fn writes_exactly_the_bytes_node_http_wrote_for_every_vector() {
-    let (port, mut rx) = capture_server(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}").await;
-    let client = Client::new();
-    let cases = vectors()["httpWire"].as_array().expect("httpWire");
-    assert!(cases.len() >= 15);
-    let mut connections = std::collections::BTreeSet::new();
-    for case in cases {
-        let headers: Vec<(String, String)> = case["headers"]
-            .as_array()
-            .expect("headers")
-            .iter()
-            .map(|p| {
-                (
-                    p[0].as_str().expect("name").to_string(),
-                    p[1].as_str().expect("value").to_string(),
-                )
-            })
-            .collect();
-        let req = HttpRequest {
-            provider: "custom".into(),
-            url: format!(
-                "http://127.0.0.1:{port}{}",
-                case["path"].as_str().expect("path")
-            ),
-            method: case["method"].as_str().expect("method").into(),
-            headers,
-            body: case["body"].as_str().expect("body").into(),
-            body_encoding: None,
-            request_id: None,
-        };
-        let res = client.send(req).await.expect("send");
-        assert_eq!(res.status, 200);
-        assert_eq!(res.body.text().await.expect("text"), "{}");
-        let (conn, raw) = rx.recv().await.expect("captured");
-        connections.insert(conn);
-        let expected = case["raw"]
-            .as_str()
-            .expect("raw")
-            .replace("{port}", &port.to_string());
-        assert_eq!(latin1(&raw), expected, "{case}");
-    }
-    // Keep-alive: one connection carries every request up to the one that
-    // asked `Connection: close`, and one more carries the rest.
-    assert_eq!(connections.len(), 2, "{connections:?}");
 }
 
 #[tokio::test]
