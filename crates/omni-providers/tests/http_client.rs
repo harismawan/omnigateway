@@ -673,3 +673,71 @@ async fn antigravity_bootstrap_reaches_the_wire_in_the_captured_order() {
     );
     assert!(text.ends_with(&body), "{text}");
 }
+
+/// A non-ASCII body: `Content-Length` counts UTF-8 bytes and the body reaches
+/// the socket byte for byte.
+#[tokio::test]
+async fn antigravity_bootstrap_frames_a_non_ascii_body_by_its_utf8_bytes() {
+    let (port, mut rx) = capture_server(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+    let tier = "tier-\u{e9}\u{6c34}\u{1f600}";
+    let auth = omni_providers::antigravity::oauth::onboard_request("test-token-1", tier);
+    assert_ne!(auth.body.len(), auth.body.chars().count());
+    let req = HttpRequest {
+        provider: "antigravity".into(),
+        url: format!("http://127.0.0.1:{port}/v1internal:onboardUser"),
+        method: auth.method.clone(),
+        headers: auth.headers.clone(),
+        body: auth.body.clone(),
+        body_encoding: None,
+        request_id: None,
+    };
+    assert_eq!(Client::new().send(req).await.expect("send").status, 200);
+    let (_, bytes) = rx.recv().await.expect("capture");
+    let split = find(&bytes, b"\r\n\r\n").expect("head");
+    let head = latin1(&bytes[..split]);
+    assert!(
+        head.contains(&format!("\r\nContent-Length: {}\r\n", auth.body.len())),
+        "{head}"
+    );
+    assert_eq!(&bytes[split + 4..], auth.body.as_bytes());
+}
+
+/// A partial OMNI_ORDER_ANTIGRAVITY: the named header moves first and the rest
+/// keep the builder's pre-sort order, the same order the TS builder uses. The
+/// order is captured once per process, so the check runs in a child.
+#[test]
+fn a_partial_antigravity_order_override_leaves_the_rest_in_captured_order() {
+    if std::env::var_os("OMNI_ORDER_CHILD").is_some() {
+        omni_providers::antigravity::profile::initialize();
+        let r = omni_providers::antigravity::oauth::load_request("t");
+        let names: Vec<&str> = r.headers.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "Authorization",
+                "Host",
+                "User-Agent",
+                "Content-Length",
+                "Content-Type"
+            ]
+        );
+        return;
+    }
+    let out = std::process::Command::new(std::env::current_exe().expect("exe"))
+        .args([
+            "a_partial_antigravity_order_override_leaves_the_rest_in_captured_order",
+            "--exact",
+            "--nocapture",
+        ])
+        .env("OMNI_ORDER_CHILD", "1")
+        .env("OMNI_ORDER_ANTIGRAVITY", "Authorization")
+        .output()
+        .expect("child");
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("1 passed"));
+}

@@ -105,7 +105,12 @@ themselves, since the transports would otherwise append them after the ordered
 list; the order is pinned on the socket in both transports' tests. The **quota
 RPC** (`retrieveUserQuotaSummary`) was seen only from the CLI 1.5.13, on
 `daily-cloudcode-pa`; no App quota summary was recorded. Sending it with the
-App's bootstrap profile is a **gateway choice**, not an observed App request. Token exchange and userinfo were not
+App's bootstrap profile is a **gateway choice**, not an observed App request.
+Two deliberate wire differences remain on these RPCs: no `Accept-Encoding:
+gzip`, and the shared transport's trailing `Connection: keep-alive`, which the
+capture did not show. Both builders list all five headers in the captured order
+before sorting, so a partial `OMNI_ORDER_ANTIGRAVITY` reorders them identically
+on both runtimes. Token exchange and userinfo were not
 captured and keep the omniroute identity. **Live acceptance is not yet
 measured**: the earlier live probe found bootstrap and quota working on
 `cloudcode-pa`; whether `daily-cloudcode-pa` accepts them for every tier is the

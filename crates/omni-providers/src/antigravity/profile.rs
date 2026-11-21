@@ -76,26 +76,31 @@ fn hub_user_agent() -> String {
     )
 }
 
-/// Bootstrap (`loadCodeAssist`, `onboardUser`) and quota
-/// (`retrieveUserQuotaSummary`) as App 2.34 / CLI 1.5.13 send them in the
-/// 2026-11-21 capture: on [`INFERENCE_HOST`], the Hub UA, and
+/// Bootstrap (`loadCodeAssist`, `onboardUser`) as the **App 2.34** recording
+/// sent it on 2026-11-21: on [`INFERENCE_HOST`], the Hub UA, and
 /// `Host, User-Agent, Content-Length, Authorization, Content-Type,
 /// Accept-Encoding`. No `Accept` or `X-Goog-Api-Client`; `Accept-Encoding: gzip`
-/// is not adopted (the readers do not decompress it). Offline capture only: live
-/// acceptance is not yet measured. Same profile as the TS
-/// `antigravityBootstrapProfile`.
+/// is not adopted (the readers do not decompress it), and the shared transport
+/// adds `Connection: keep-alive`, which the capture did not show. The quota RPC
+/// was seen only from the CLI 1.5.13; sending it with this App profile is the
+/// gateway's choice. Offline capture only: live acceptance is not yet measured.
+/// Same headers and pre-sort order as the TS `antigravityBootstrapRequest`.
 /// `Host` and `Content-Length` are supplied here, not by the transport:
 /// the transport appends a missing one after the ordered list, which is not
 /// the captured order.
 pub(crate) fn bootstrap_headers(token: &str, body: &str) -> Vec<(String, String)> {
     ordered(
+        // Listed in the captured order before sorting, as the TS builder
+        // does, so a partial OMNI_ORDER_ANTIGRAVITY leaves the unlisted ones
+        // identical on both runtimes.
         vec![
             ("Host".into(), INFERENCE_HOST.into()),
             ("User-Agent".into(), hub_user_agent()),
             ("Content-Length".into(), body.len().to_string()),
+            ("Authorization".into(), format!("Bearer {token}")),
             ("Content-Type".into(), "application/json".into()),
         ],
-        vec![("Authorization".into(), format!("Bearer {token}"))],
+        vec![],
         &[
             "Host",
             "User-Agent",

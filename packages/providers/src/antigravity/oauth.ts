@@ -1,5 +1,5 @@
 import type { WindowType } from "@omni/store/types";
-import { mergeHeaders, orderHeaders } from "../headers.ts";
+import { orderHeaders } from "../headers.ts";
 import {
   type AuthHelpers,
   type AuthRequest,
@@ -18,7 +18,12 @@ import {
   SHORT_TIMEOUT_MS,
 } from "../oauthRequests.ts";
 import { numberOf, recordOf, reportFrom, resetAtOf, usageReadable } from "../oauthUsage.ts";
-import { antigravityBootstrapProfile, antigravityHost, antigravityProfile } from "./profile.ts";
+import {
+  antigravityBootstrapOrder,
+  antigravityBootstrapUserAgent,
+  antigravityHost,
+  antigravityProfile,
+} from "./profile.ts";
 
 /**
  * Antigravity's OAuth, against Google.
@@ -206,13 +211,18 @@ export function antigravityBootstrapRequest(
   return {
     url: `${CODE_ASSIST}:${operation}`,
     method: "POST",
+    // Listed in the captured order before sorting, as Rust's builder does, so
+    // a partial OMNI_ORDER_ANTIGRAVITY leaves the unlisted ones identical on
+    // both runtimes.
     headers: orderHeaders(
-      mergeHeaders(antigravityBootstrapProfile.headers, [
+      [
         ["Host", antigravityHost],
+        ["User-Agent", antigravityBootstrapUserAgent],
         ["Content-Length", String(Buffer.byteLength(body, "utf8"))],
         ["Authorization", `Bearer ${accessToken}`],
-      ]),
-      antigravityBootstrapProfile.order,
+        ["Content-Type", "application/json"],
+      ],
+      antigravityBootstrapOrder,
     ),
     body,
   };

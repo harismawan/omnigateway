@@ -37,36 +37,30 @@ export const antigravityInferenceProfile: ClientProfile = {
 };
 
 /**
- * Bootstrap (`loadCodeAssist`, `onboardUser`) and quota
- * (`retrieveUserQuotaSummary`) as App 2.34 / CLI 1.5.13 send them in the same
- * 2026-11-21 capture: on `daily-cloudcode-pa`, the Hub UA, and
+ * Bootstrap (`loadCodeAssist`, `onboardUser`) as the **App 2.34** recording
+ * sent it on 2026-11-21: on `daily-cloudcode-pa`, the Hub UA, and
  * `Host, User-Agent, Content-Length, Authorization, Content-Type,
  * Accept-Encoding`. No `Accept` or `X-Goog-Api-Client`; `Accept-Encoding: gzip`
- * is not adopted for the same reason as inference (the readers do not
- * decompress it). `Host` and `Content-Length` are supplied by the request
- * builder (`antigravityBootstrapRequest`) so they keep their captured position.
- * Offline capture only: live acceptance of this identity is not yet measured.
+ * is not adopted (the readers do not decompress it), and the shared transport
+ * adds `Connection: keep-alive`, which the capture did not show. The quota RPC
+ * (`retrieveUserQuotaSummary`) was seen only from the CLI 1.5.13; sending it
+ * with this App profile is the gateway's choice. The request builder
+ * (`antigravityBootstrapRequest`) lists every header in this order itself and
+ * supplies `Host`/`Content-Length`, as Rust's `bootstrap_headers` does.
+ * Offline capture only: live acceptance is not yet measured.
  */
-export const antigravityBootstrapProfile: ClientProfile = {
-  headers: [
-    [
-      "User-Agent",
-      env(
-        "OMNI_UA_ANTIGRAVITY",
-        `antigravity/hub/${HUB_VERSION} (aidev_client; os_type=linux; arch=amd64; cl=1026637980)`,
-      ),
-    ],
-    ["Content-Type", "application/json"],
-  ],
-  order: envOrder("OMNI_ORDER_ANTIGRAVITY", [
-    "Host",
-    "User-Agent",
-    "Content-Length",
-    "Authorization",
-    "Content-Type",
-    "Accept-Encoding",
-  ]),
-};
+export const antigravityBootstrapUserAgent = env(
+  "OMNI_UA_ANTIGRAVITY",
+  `antigravity/hub/${HUB_VERSION} (aidev_client; os_type=linux; arch=amd64; cl=1026637980)`,
+);
+export const antigravityBootstrapOrder: readonly string[] = envOrder("OMNI_ORDER_ANTIGRAVITY", [
+  "Host",
+  "User-Agent",
+  "Content-Length",
+  "Authorization",
+  "Content-Type",
+  "Accept-Encoding",
+]);
 
 /**
  * Token exchange and userinfo: not in the 2026-11-21 capture (the recorder
