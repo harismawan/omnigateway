@@ -104,7 +104,29 @@ In bridge mode the migration runs **as** the service, not against it:
   `systemd_plain` — absolute, ASCII letters, digits and `/._-+@` only — since
   they go into `ExecStart=`, `ExecStartPost=` and `WorkingDirectory=`
   verbatim. Anything with whitespace, quotes, `%` specifiers, `$` or `\\` is
-  `skipped-unit` with the path named.
+  `skipped-unit` with the path named. So is a root reached through a
+  symlink: systemd enters `WorkingDirectory` and the verifier sees the
+  physical path, so the root must already be its own canonical path.
+- **The bridge needs a writable install root**, even when the database and
+  `snapshots/` live elsewhere: the handoff and its lock file live there. If
+  the handoff cannot be written the legacy unit is left unchanged and the
+  service stopped (`failed-record`).
+- **One conversion per handoff** *(eighth rereview)*. If `<root>/npm-handoff.json`
+  exists — readable or not — a TS → Rust conversion (bridge or `omni service
+  migrate`) refuses before stopping, backing up or writing anything
+  (`failed-record`), and prints the existing handoff's rollback: it owns the
+  backup and the saved unit, which a second conversion would overwrite. This
+  covers a bridge that died between writing the handoff and rewriting the
+  unit, and an operator who restored the saved TS unit after a failed
+  verification. Recovery: roll back with the service stopped, or put the Rust
+  unit back and let the verifier (or `omni service migrate`) judge it.
+- **Ownership.** Each handoff carries a unique `attempt` id. A conversion
+  failure never removes a handoff; only a serving verdict removes it, and only
+  the handoff with the attempt id that was judged — checked under an
+  exclusive `flock` on `<root>/npm-handoff.json.lock`, which also wraps the
+  write (re-checking that none appeared), so a concurrent operator run and the
+  verifier never remove or replace each other's handoff. The lock is waited
+  for at most 30 s.
 - After the backup, and **before** the unit is touched, the migrator durably
   writes the handoff — scope, unit, root, the database path it backed up, the
   probe address, the backup id and the saved unit (temp, fsync, rename,

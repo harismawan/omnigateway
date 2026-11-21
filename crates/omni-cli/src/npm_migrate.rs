@@ -944,7 +944,47 @@ fn preflight(host: &dyn Host, paths: &Paths) -> Result<Plan, (Status, String)> {
 /// The binary and root go into the unit verbatim (`ExecStart=`,
 /// `ExecStartPost=`, `WorkingDirectory=`); refuse anything systemd would
 /// split, unquote or expand, before anything is stopped or written.
+/// Before anything is stopped or written in a TS → Rust conversion: an
+/// earlier conversion's handoff in this root (readable or not) is unresolved
+/// and owns the rollback, so no second conversion may overwrite it or the
+/// saved unit. Returns the message naming what to do.
+fn no_pending_handoff(plan: &Plan) -> Result<(), String> {
+    let file = plan.root.join(HANDOFF);
+    if fs::symlink_metadata(&file).is_err() {
+        return Ok(());
+    }
+    let rollback = match read_handoff(&plan.root) {
+        Ok(Some(h)) => h.rollback(),
+        Ok(None) => return Ok(()),
+        Err(e) => format!("({e}; repair it to see its rollback)"),
+    };
+    Err(format!(
+        "{} holds an earlier conversion that was never verified; nothing was stopped or changed. Do not delete it. Either roll back with the service stopped, or restore the Rust unit and run omni service migrate to verify it.\n{rollback}",
+        file.display()
+    ))
+}
+
 fn systemd_safe(plan: &Plan, paths: &Paths) -> Result<(), String> {
+    // systemd enters WorkingDirectory and the verifier sees the physical
+    // path: a root reached through a symlink would not match its handoff.
+    match fs::canonicalize(&plan.root) {
+        Ok(real) if real == plan.root => {}
+        Ok(real) => {
+            return Err(format!(
+                "{} was left alone: the installation root {} is reached through a symlink (it is {}); point WorkingDirectory and EnvironmentFile at the real path and run omni service migrate",
+                plan.unit.path.display(),
+                shq(&plan.root),
+                shq(&real)
+            ));
+        }
+        Err(e) => {
+            return Err(format!(
+                "{} was left alone: cannot resolve the installation root {}: {e}",
+                plan.unit.path.display(),
+                shq(&plan.root)
+            ));
+        }
+    }
     for (what, path) in [("binary", &paths.binary), ("installation root", &plan.root)] {
         if !systemd_plain(path) {
             return Err(format!(
@@ -1115,6 +1155,9 @@ pub(crate) fn migrate(host: &dyn Host, paths: &Paths, now: i64) -> Outcome {
     if let Err(e) = systemd_safe(&plan, paths) {
         return outcome(paths, now, Status::SkippedUnit, e, json!({}));
     }
+    if let Err(e) = no_pending_handoff(&plan) {
+        return outcome(paths, now, Status::FailedRecord, e, json!({}));
+    }
     let was_active = active(&plan.facts);
     let allowed: Vec<u32> = main_pid(&plan.facts).into_iter().collect();
     if let Err((status, message)) = preflight_data(host, paths, &plan, &allowed) {
@@ -1267,6 +1310,7 @@ fn convert(
     // The bridge arms a verifier only once the handoff it judges against —
     // the database backed up, the address, the unit — is durably recorded.
     let handoff = Handoff {
+        attempt: attempt_id(now),
         scope,
         unit: plan.unit.path.clone(),
         root: plan.root.clone(),
@@ -1278,7 +1322,18 @@ fn convert(
     if starter == Starter::Bridge {
         // The handoff file is what arms the verifier; the state record is
         // only the operator's log of it.
-        if let Err(e) = write_handoff(&handoff) {
+        let written = lock_root(&plan.root).and_then(|_held| {
+            // Checked again under the lock: another run may have armed one
+            // since preflight.
+            if fs::symlink_metadata(plan.root.join(HANDOFF)).is_ok() {
+                return Err(format!(
+                    "{} appeared during this conversion",
+                    plan.root.join(HANDOFF).display()
+                ));
+            }
+            write_handoff(&handoff)
+        });
+        if let Err(e) = written {
             host.release(lock);
             return outcome(
                 paths,
@@ -1408,10 +1463,9 @@ fn start_failure(
             rollback_steps(plan, Some(backup), saved)
         ),
         {
-            // A failure that did not arm a verifier leaves no handoff behind.
-            if !armed {
-                let _cleared = clear_handoff(&plan.root);
-            }
+            // A failure never removes a handoff: only a serving verdict on
+            // the same attempt does. `armed` only shapes the message.
+            let _ = armed;
             json!({"backup": backup, "unit": plan.unit.path, "savedUnit": saved_unit, "root": plan.root})
         },
     )
@@ -1420,6 +1474,8 @@ fn start_failure(
 /// What the bridge backed up and armed a verifier for. The verifier and any
 /// later recovery judge against this, never against the current `.env`.
 struct Handoff {
+    /// This conversion's own id: only a verdict on this id may remove it.
+    attempt: String,
     scope: Scope,
     unit: PathBuf,
     root: PathBuf,
@@ -1431,6 +1487,7 @@ struct Handoff {
 impl Handoff {
     fn to_json(&self) -> Value {
         json!({
+            "attempt": self.attempt,
             "scope": self.scope.name(),
             "unit": self.unit,
             "root": self.root,
@@ -1443,6 +1500,7 @@ impl Handoff {
     fn read(value: &Value) -> Option<Self> {
         let text = |k: &str| value[k].as_str().filter(|v| !v.is_empty());
         Some(Self {
+            attempt: text("attempt")?.to_owned(),
             scope: Scope::parse(text("scope")?)?,
             unit: PathBuf::from(text("unit")?),
             root: PathBuf::from(text("root")?),
@@ -1499,8 +1557,54 @@ fn write_handoff(handoff: &Handoff) -> Result<(), String> {
         format!("could not write {}: {e}", file.display())
     })
 }
-/// Remove the handoff once a serving verdict is durable.
-fn clear_handoff(root: &Path) -> Result<(), String> {
+/// An exclusive `flock` on `<root>/npm-handoff.lock`, held across writing,
+/// judging-then-removing, and conversion, so an operator's run and the
+/// verifier never interleave on the same handoff. Released on drop.
+struct RootLock(#[allow(dead_code)] fs::File);
+fn lock_root(root: &Path) -> Result<RootLock, String> {
+    let file = root.join(format!("{HANDOFF}.lock"));
+    let f = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&file)
+        .map_err(|e| format!("cannot open {}: {e}", file.display()))?;
+    // Bounded: a held lock is someone else mid-step; never wait forever.
+    for _ in 0..300 {
+        match rustix::fs::flock(&f, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => return Ok(RootLock(f)),
+            Err(rustix::io::Errno::WOULDBLOCK) => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => return Err(format!("cannot lock {}: {e}", file.display())),
+        }
+    }
+    Err(format!("{} stayed locked for 30 s", file.display()))
+}
+/// A fresh attempt id: time, pid and a counter, unique per conversion.
+fn attempt_id(now: i64) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "{now}-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    )
+}
+/// Remove the handoff only if it is still the one with `attempt` — under
+/// the root lock, so no newer handoff written meanwhile is ever removed.
+fn clear_handoff(root: &Path, attempt: &str) -> Result<(), String> {
+    let _held = lock_root(root)?;
+    match read_handoff(root)? {
+        None => return Ok(()),
+        Some(h) if h.attempt != attempt => {
+            return Err(format!(
+                "{} now belongs to another attempt; left in place",
+                root.join(HANDOFF).display()
+            ));
+        }
+        Some(_) => {}
+    }
     let file = root.join(HANDOFF);
     match fs::remove_file(&file) {
         Ok(()) => fs::File::open(root)
@@ -1641,7 +1745,7 @@ pub(crate) struct Hook {
 /// hook is stale and no-ops), then the verifier line. Either failing leaves
 /// the verifier armed or harmless, never trusting an unjudged start.
 fn resolve_handoff(host: &dyn Host, handoff: &Handoff, binary: &Path) {
-    if let Err(e) = clear_handoff(&handoff.root) {
+    if let Err(e) = clear_handoff(&handoff.root, &handoff.attempt) {
         eprintln!("the verifier stays armed: {e}");
     } else if let Err(e) = disarm(host, handoff, binary) {
         eprintln!(
@@ -1798,9 +1902,11 @@ fn refresh(host: &dyn Host, paths: &Paths, plan: &Plan, now: i64) -> Outcome {
         if serving
             && verifying
             && current.persisted
-            && let Ok(Some(h)) = read_handoff(&plan.root)
+            && let Some(Ok(h)) = &handoff
         {
-            resolve_handoff(host, &h, &paths.binary);
+            // The handoff that was judged, by its attempt id: a newer one
+            // written meanwhile is left alone.
+            resolve_handoff(host, h, &paths.binary);
         }
         return current;
     }
@@ -1834,9 +1940,11 @@ fn refresh(host: &dyn Host, paths: &Paths, plan: &Plan, now: i64) -> Outcome {
         );
         if verifying
             && restarted.persisted
-            && let Ok(Some(h)) = read_handoff(&plan.root)
+            && let Some(Ok(h)) = &handoff
         {
-            resolve_handoff(host, &h, &paths.binary);
+            // The handoff that was judged, by its attempt id: a newer one
+            // written meanwhile is left alone.
+            resolve_handoff(host, h, &paths.binary);
         }
         return restarted;
     };
@@ -1912,6 +2020,12 @@ pub(crate) fn bridge(host: &dyn Host, paths: &Paths, now: i64) -> i32 {
         return refuse(
             Status::SkippedUnit,
             format!("{e}; the service is left stopped"),
+        );
+    }
+    if let Err(e) = no_pending_handoff(&plan) {
+        return refuse(
+            Status::FailedRecord,
+            format!("{e}\nThe service is left stopped."),
         );
     }
     let allowed = [main, std::process::id()];

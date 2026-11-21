@@ -300,7 +300,8 @@ shape only. It does not take step 6, so run it after the update.
 
 The bridge never runs the gateway itself. The install root and the binary must
 be plain paths (letters, digits, `/._-+@`); anything a unit line cannot carry
-verbatim (spaces, quotes, `%`, `$`) is refused before anything is stopped.
+verbatim (spaces, quotes, `%`, `$`), or a root reached through a symlink, is
+refused before anything is stopped.
 After the backup the bridge durably writes the handoff to
 `<root>/npm-handoff.json` (the database it backed up, the address, the unit) —
 or, if it cannot, records `failed-record` and leaves the unit untouched and
@@ -316,8 +317,19 @@ any further start is judged again.
 
 `omni doctor`, `omni status` and `omni service migrate` find the handoff
 through the unit, whatever state directory your shell uses. If a start is
-never verified (the verifier was killed), they announce it with the rollback
-until `omni service migrate` sees the service serving the backed-up database.
+never verified (the verifier was killed), `doctor` and `status` print a
+one-line warning naming the handoff file until `omni service migrate` sees
+the service serving the backed-up database; `omni service migrate` prints the
+full rollback (with your paths), and the handoff file itself records the
+backup, database and saved unit. The install root must be writable (the
+handoff and its lock live there) even if the database lives elsewhere.
+
+If a conversion was interrupted after the handoff was written but before the
+unit was rewritten, or you restored the saved TS unit after a failed
+verification, the handoff still owns the backup: any new conversion refuses
+before stopping anything and prints that handoff's rollback. Roll back with
+the service stopped, or put the Rust unit back and run
+`omni service migrate`.
 To recover by hand, check `systemctl --user status omnigateway.service`, then
 either roll back with the recorded steps or start the service and run
 `omni service migrate`. The rollback's `omni db restore … --db <path>` names

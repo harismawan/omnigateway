@@ -2164,3 +2164,112 @@ fn unit_unsafe_paths_are_refused_and_rollback_is_shell_quoted() {
     let start = out.message.find("systemctl --user start").unwrap();
     assert!(note < start, "{}", out.message);
 }
+
+// ------------------------------------------------- eighth rereview
+
+/// Finding 4: the bridge wrote its handoff, then died before the rewrite.
+/// The next bridge start and a manual migrate both refuse before stopping,
+/// backing up or writing anything, and the handoff is byte-identical.
+#[test]
+fn a_pending_handoff_blocks_a_second_conversion() {
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    let host = bridge_host(&f);
+    bridge(&host, &f.paths(), 1);
+    let armed = fs::read_to_string(f.root.join(HANDOFF)).unwrap();
+    // Interrupted before the rewrite: the legacy unit is back.
+    f.write_user(&legacy_unit(&f.root, ""));
+    let saved = f.paths().state.join("pre-rust").join(UNIT_NAME);
+    let saved_before = fs::read_to_string(&saved).unwrap();
+    let host = bridge_host(&f);
+    assert_eq!(bridge(&host, &f.paths(), 2), 0);
+    assert!(!host.did("backup") && !host.did("lock ") && !host.did("systemctl user restart"));
+    assert_eq!(f.record()["status"], "failed-record");
+    assert!(
+        f.record()["message"]
+            .as_str()
+            .unwrap()
+            .contains("omni db restore"),
+        "the existing rollback is shown"
+    );
+    let host = f.host();
+    assert_eq!(migrate(&host, &f.paths(), 3).status, Status::FailedRecord);
+    assert!(!host.did("systemctl user stop") && !host.did("backup"));
+    assert_eq!(fs::read_to_string(f.root.join(HANDOFF)).unwrap(), armed);
+    assert_eq!(fs::read_to_string(&saved).unwrap(), saved_before);
+    // Unreadable too: still refused, still untouched.
+    fs::write(f.root.join(HANDOFF), "{bad").unwrap();
+    let host = f.host();
+    assert_eq!(migrate(&host, &f.paths(), 4).status, Status::FailedRecord);
+    assert!(!host.did("systemctl user stop"));
+    assert_eq!(fs::read_to_string(f.root.join(HANDOFF)).unwrap(), "{bad");
+}
+
+/// Finding 4: a failed conversion never removes a handoff, even its own:
+/// only a serving verdict on the same attempt does.
+#[test]
+fn a_failed_conversion_never_removes_a_handoff() {
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    let host = Fake {
+        fail_start: true,
+        ..bridge_host(&f)
+    };
+    bridge(&host, &f.paths(), 1);
+    assert_eq!(f.record()["status"], "failed-start");
+    assert!(f.root.join(HANDOFF).is_file(), "kept for its rollback");
+}
+
+/// Finding 4: removal is bound to the attempt that was judged; a newer
+/// handoff written meanwhile is left in place.
+#[test]
+fn clearing_a_handoff_is_bound_to_its_attempt() {
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    bridge(&bridge_host(&f), &f.paths(), 1);
+    let first = read_handoff(&f.root).unwrap().unwrap();
+    let mut newer = f.handoff();
+    newer["attempt"] = json!("someone-else");
+    fs::write(f.root.join(HANDOFF), newer.to_string()).unwrap();
+    assert!(clear_handoff(&f.root, &first.attempt).is_err());
+    assert!(f.root.join(HANDOFF).is_file());
+    assert!(clear_handoff(&f.root, "someone-else").is_ok());
+    assert!(!f.root.join(HANDOFF).exists());
+    // Attempt ids are distinct per conversion.
+    assert_ne!(attempt_id(1), attempt_id(1));
+}
+
+/// Finding 4: the root lock serialises: while it is held, clearing waits
+/// (and gives up rather than removing unseen).
+#[test]
+fn the_root_lock_excludes_a_concurrent_clear() {
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    bridge(&bridge_host(&f), &f.paths(), 1);
+    let attempt = read_handoff(&f.root).unwrap().unwrap().attempt;
+    let held = lock_root(&f.root).unwrap();
+    let root = f.root.clone();
+    let a = attempt.clone();
+    let waiter = std::thread::spawn(move || clear_handoff(&root, &a));
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(f.root.join(HANDOFF).is_file(), "not removed while locked");
+    drop(held);
+    assert!(waiter.join().unwrap().is_ok());
+    assert!(!f.root.join(HANDOFF).exists());
+}
+
+/// Finding 1: a root reached through a symlink is refused before stop.
+#[test]
+fn a_symlinked_root_is_refused_before_stop() {
+    let f = fixture(SINGLE);
+    let link = f.dir.path().join("link");
+    std::os::unix::fs::symlink(&f.root, &link).unwrap();
+    let mut f = f;
+    f.root = link;
+    f.write_user(&legacy_unit(&f.root, ""));
+    let host = f.host();
+    let out = migrate(&host, &f.paths(), 1);
+    assert_eq!(out.status, Status::SkippedUnit, "{}", out.message);
+    assert!(out.message.contains("symlink"), "{}", out.message);
+    assert!(!host.did("systemctl user stop"));
+}
