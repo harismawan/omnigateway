@@ -48,5 +48,4 @@ for this single-node implementation.
 
 Tests: `quota_runtime::tests` covers shared probes, cancellation/drain and quota-only
 cooldown; `quota::tests::quota_host_uses_registered_owner_after_restore` covers owner
-re-entry. `conformance/e2e/quota-gateway-ns.sh` pairs supported HTTP flows against the
-frozen gateway with private TLS stubs, including token-refresh reuse and boot ticks.
+re-entry.
