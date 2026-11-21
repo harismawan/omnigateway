@@ -755,8 +755,9 @@ test("every usage probe reads a usage endpoint, authenticated, and gates on stat
       authed: call?.headers.some(([k]) => k?.toLowerCase() === "authorization"),
     }).toEqual({ id, authed: true });
     // `Accept` is added by the shared GET builder and had no pin anywhere.
-    // Antigravity states its exception: the captured App 2.34 quota RPC sends
-    // none (scripts/antigravity-capture), so its probe must not either.
+    // Antigravity states its exception: its quota probe wears the captured App
+    // 2.34 bootstrap profile, which sends no `Accept` (scripts/antigravity-capture;
+    // the quota RPC itself was seen only from the CLI, which sent none either).
     expect({ id, accepts: call?.headers.some(([k]) => k?.toLowerCase() === "accept") }).toEqual({
       id,
       accepts: !NO_ACCEPT.has(id),

@@ -620,3 +620,56 @@ async fn a_request_the_server_received_is_never_resent() {
     assert_eq!(body_of(res).await.expect("body"), b"x");
     assert_eq!(accepted.load(Ordering::SeqCst), 2);
 }
+
+/// Antigravity's bootstrap/quota RPCs on the wire (what a socket receives),
+/// not the header list handed to the transport: the captured App order
+/// `Host, User-Agent, Content-Length, Authorization, Content-Type` (gzip not
+/// adopted), then the transport's own `Connection`.
+#[tokio::test]
+async fn antigravity_bootstrap_reaches_the_wire_in_the_captured_order() {
+    let (port, mut rx) = capture_server(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+    let client = Client::new();
+    let auth = omni_providers::antigravity::oauth::onboard_request("test-token-1", "free-tier");
+    let body = auth.body.clone();
+    let path = url::Url::parse(&auth.url).expect("url").path().to_owned();
+    let req = HttpRequest {
+        provider: "antigravity".into(),
+        url: format!("http://127.0.0.1:{port}{path}"),
+        method: auth.method.clone(),
+        headers: auth.headers.clone(),
+        body: body.clone(),
+        body_encoding: None,
+        request_id: None,
+    };
+    assert_eq!(client.send(req).await.expect("send").status, 200);
+    let (_, bytes) = rx.recv().await.expect("capture");
+    let text = latin1(&bytes);
+    let head = text.split("\r\n\r\n").next().expect("head");
+    let names: Vec<&str> = head
+        .split("\r\n")
+        .skip(1)
+        .map(|l| l.split_once(": ").expect("header").0)
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "Host",
+            "User-Agent",
+            "Content-Length",
+            "Authorization",
+            "Content-Type",
+            "Connection"
+        ],
+        "{head}"
+    );
+    // The captured host is written even though this test dials a local port.
+    assert!(
+        head.contains("\r\nHost: daily-cloudcode-pa.googleapis.com\r\n"),
+        "{head}"
+    );
+    assert!(
+        head.contains(&format!("\r\nContent-Length: {}\r\n", body.len())),
+        "{head}"
+    );
+    assert!(text.ends_with(&body), "{text}");
+}

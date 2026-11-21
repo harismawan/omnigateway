@@ -23,12 +23,21 @@ fn header<'a>(r: &'a AuthRequest, name: &str) -> &'a str {
 fn assert_captured_shape(r: &AuthRequest, operation: &str) {
     assert_eq!(r.url, format!("{HOST}{operation}"));
     assert_eq!(r.method, "POST");
-    // Host and Content-Length are the transport's; the rest is the request's.
+    // The builder supplies Host and Content-Length so they keep the
+    // captured position; the wire itself is pinned in http_client.rs.
     assert_eq!(
         names(r),
-        ["User-Agent", "Authorization", "Content-Type"],
+        [
+            "Host",
+            "User-Agent",
+            "Content-Length",
+            "Authorization",
+            "Content-Type"
+        ],
         "{operation}"
     );
+    assert_eq!(header(r, "Host"), "daily-cloudcode-pa.googleapis.com");
+    assert_eq!(header(r, "Content-Length"), r.body.len().to_string());
     assert_eq!(header(r, "User-Agent"), UA, "{operation}");
     assert_eq!(header(r, "Authorization"), "Bearer test-token-1");
     assert_eq!(header(r, "Content-Type"), "application/json");

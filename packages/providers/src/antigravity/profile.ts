@@ -43,7 +43,8 @@ export const antigravityInferenceProfile: ClientProfile = {
  * `Host, User-Agent, Content-Length, Authorization, Content-Type,
  * Accept-Encoding`. No `Accept` or `X-Goog-Api-Client`; `Accept-Encoding: gzip`
  * is not adopted for the same reason as inference (the readers do not
- * decompress it). `Host` and `Content-Length` are written by the transport.
+ * decompress it). `Host` and `Content-Length` are supplied by the request
+ * builder (`antigravityBootstrapRequest`) so they keep their captured position.
  * Offline capture only: live acceptance of this identity is not yet measured.
  */
 export const antigravityBootstrapProfile: ClientProfile = {

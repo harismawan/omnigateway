@@ -28,7 +28,7 @@ describe("the request", () => {
     // **`daily-` is load-bearing, not a canary.** Measured against a live
     // account: this host served the request, plain `cloudcode-pa` answered 429
     // for the same bytes while that account's quota read 0% used and its IDE
-    // was generating. Only the bootstrap and quota RPCs belong on `cloudcode-pa`.
+    // was generating. (Bootstrap and quota follow the App capture to `daily-` too.)
     expect(built.request.url).toBe(
       "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
     );

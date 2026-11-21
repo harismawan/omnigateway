@@ -56,8 +56,9 @@ received. Unknown name "…"`), so the encoder emits exactly the six keys above 
 flow's `origins` stay one host.~~
 
 **Wrong, and measured wrong — see "What the live probe found" below.** Inference
-is on `daily-cloudcode-pa.googleapis.com`; only the bootstrap and quota RPCs are
-on `cloudcode-pa.googleapis.com`.
+is on `daily-cloudcode-pa.googleapis.com`. At that probe the bootstrap and quota
+RPCs answered on `cloudcode-pa.googleapis.com` (historical; they now follow the
+2026-11-21 capture, below).
 
 ## Current inference fingerprint
 
@@ -93,14 +94,18 @@ the old UA, set `OMNI_UA_ANTIGRAVITY='antigravity/ide/2.12.2 darwin/arm64'`.
 That restores only the UA, not the previous header order, framing or envelope.
 
 **Bootstrap and quota follow the same capture** *(owner decision,
-2026-11-21)*. `loadCodeAssist`, `onboardUser` and `retrieveUserQuotaSummary`
-go to `daily-cloudcode-pa`, as App 2.34 / CLI 1.5.13 sent them, with the Hub
-UA, no `Accept` or `X-Goog-Api-Client`, and the captured order `Host,
-User-Agent, Content-Length, Authorization, Content-Type, Accept-Encoding`
-(`Accept-Encoding: gzip` not adopted, as for inference). `onboardUser` sends
+2026-11-21)*. The App 2.34 recording supplied the bootstrap fingerprint:
+`loadCodeAssist` and `onboardUser` on `daily-cloudcode-pa`, the Hub UA, no
+`Accept` or `X-Goog-Api-Client`, order `Host, User-Agent, Content-Length,
+Authorization, Content-Type, Accept-Encoding` (`Accept-Encoding: gzip` not
+adopted, as for inference), and `onboardUser` with
 `{"tierId":…,"metadata":{"ideType":"ANTIGRAVITY"}}` — the App spelling; the old
-`tier_id` came from omniroute. The quota RPC's host is from the CLI recording
-only (no App quota summary was seen). Token exchange and userinfo were not
+`tier_id` came from omniroute. The builders supply `Host` and `Content-Length`
+themselves, since the transports would otherwise append them after the ordered
+list; the order is pinned on the socket in both transports' tests. The **quota
+RPC** (`retrieveUserQuotaSummary`) was seen only from the CLI 1.5.13, on
+`daily-cloudcode-pa`; no App quota summary was recorded. Sending it with the
+App's bootstrap profile is a **gateway choice**, not an observed App request. Token exchange and userinfo were not
 captured and keep the omniroute identity. **Live acceptance is not yet
 measured**: the earlier live probe found bootstrap and quota working on
 `cloudcode-pa`; whether `daily-cloudcode-pa` accepts them for every tier is the
@@ -163,10 +168,12 @@ No other flow here does this. After the token, `exchange` yields:
 2. `POST v1internal:loadCodeAssist` with `{ metadata: { ideType: "ANTIGRAVITY" } }`
    — reads `cloudaicompanionProject` (a string, or an object with `id`) and the
    onboarding tier.
-3. Only when that returns no project: `POST v1internal:onboardUser` with the tier,
-   then one re-read of `loadCodeAssist`.
+3. Only when that returns no project: `POST v1internal:onboardUser` with the tier;
+   the project is read from that response (`response.cloudaicompanionProject`),
+   with no follow-up `loadCodeAssist`.
 
-Three or five yielded requests in one step, under the host's yield cap. omniroute
+Three or four requests in all (token, userinfo, load, and onboard when needed),
+under the host's four-request cap. omniroute
 polls `onboardUser` up to ten times at five-second intervals in the background;
 that is not available to a flow that must return a credential, so this takes the
 single bounded attempt its own comment describes as the inline path and lets the

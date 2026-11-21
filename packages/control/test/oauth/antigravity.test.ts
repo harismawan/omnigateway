@@ -367,11 +367,26 @@ test("bootstrap and quota requests wear the captured App identity and header ord
   await antigravityOAuth.usage?.({ accessToken: "test-token-1" }, deps(http), {
     projectId: "projects/p-1",
   });
+  // loadCodeAssist's body, exactly; onboardUser's is pinned above.
+  expect(http.to(LOAD_URL)?.body).toBe('{"metadata":{"ideType":"ANTIGRAVITY"}}');
   for (const url of [LOAD_URL, ONBOARD_URL, QUOTA_URL]) {
     const req = http.to(url);
     const names = (req?.headers ?? []).map(([n]) => n);
-    // Host and Content-Length are the transport's; the rest is the request's.
-    expect(names).toEqual(["User-Agent", "Authorization", "Content-Type"]);
+    // The builder supplies Host and Content-Length so they keep the captured
+    // position; the socket itself is pinned in providers' http-client.test.ts.
+    expect(names).toEqual([
+      "Host",
+      "User-Agent",
+      "Content-Length",
+      "Authorization",
+      "Content-Type",
+    ]);
+    expect(req?.method).toBe("POST");
+    const value = (n: string) => (req?.headers ?? []).find(([k]) => k === n)?.[1];
+    expect(value("Host")).toBe("daily-cloudcode-pa.googleapis.com");
+    expect(value("Content-Length")).toBe(String(Buffer.byteLength(req?.body ?? "")));
+    expect(value("Authorization")).toBe("Bearer test-token-1");
+    expect(value("Content-Type")).toBe("application/json");
     const ua = (req?.headers ?? []).find(([n]) => n === "User-Agent")?.[1] ?? "";
     expect(ua).toMatch(
       /^antigravity\/hub\/2\.34\.0 \(aidev_client; os_type=linux; arch=amd64; cl=1026637980\)$/,

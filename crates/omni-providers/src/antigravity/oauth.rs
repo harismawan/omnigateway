@@ -151,7 +151,7 @@ pub(crate) fn code_assist_request(operation: &str, access: &str, body: String) -
             super::profile::INFERENCE_HOST
         ),
         method: "POST".into(),
-        headers: super::profile::bootstrap_headers(access),
+        headers: super::profile::bootstrap_headers(access, &body),
         body,
     }
 }

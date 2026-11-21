@@ -497,3 +497,39 @@ test("an unmarked request goes out as the bytes it was given", async () => {
   expect(contentLength(head)).toBe(Buffer.byteLength(body));
   s.stop();
 });
+
+/**
+ * Antigravity's bootstrap and quota RPCs as they reach the socket — not the
+ * header list handed to the transport — in the order App 2.34 sent them:
+ * `Host, User-Agent, Content-Length, Authorization, Content-Type` (its
+ * `Accept-Encoding: gzip` is not adopted), then the transport's `Connection`.
+ */
+test("antigravity bootstrap reaches the wire in the captured order", async () => {
+  const s = rawServer();
+  const { antigravityBootstrapRequest } = await import("../src/antigravity/oauth.ts");
+  const built = antigravityBootstrapRequest("onboardUser", "test-token-1", '{"tierId":"t"}');
+  await nodeHttpClient()({
+    provider: "antigravity",
+    url: s.url,
+    method: built.method,
+    headers: built.headers,
+    body: built.body ?? "",
+    signal: new AbortController().signal,
+  });
+  const head = (await s.head()).split("\r\n\r\n")[0] ?? "";
+  s.stop();
+  const names = head
+    .split("\r\n")
+    .slice(1)
+    .map((l) => l.split(": ")[0]);
+  expect(names).toEqual([
+    "Host",
+    "User-Agent",
+    "Content-Length",
+    "Authorization",
+    "Content-Type",
+    "Connection",
+  ]);
+  expect(head).toContain("\r\nHost: daily-cloudcode-pa.googleapis.com\r\n");
+  expect(head).toContain(`\r\nContent-Length: ${Buffer.byteLength('{"tierId":"t"}')}\r\n`);
+});

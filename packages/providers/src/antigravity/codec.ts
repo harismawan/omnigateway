@@ -23,9 +23,9 @@ import { toAntigravityWire } from "./wire.ts";
  * others "failover omniroute rotates through". That was wrong in the way that
  * costs the most: every request failed, and the error the upstream chose to
  * return pointed at the account rather than at the URL. The bootstrap and quota
- * RPCs in `oauth.ts` genuinely do live on `cloudcode-pa` — they were verified
- * working there in the same session — so the split is real and each side is
- * pinned by its own test.
+ * RPCs in `oauth.ts` were verified working on `cloudcode-pa` in that session;
+ * since the 2026-11-21 App/CLI capture they use `daily-cloudcode-pa` as well
+ * (not yet measured live). Each side is pinned by its own test.
  *
  * The streaming endpoint is used even for a non-streaming client request: plain
  * `v1internal:generateContent` answers 400 on several models because Cloud Code

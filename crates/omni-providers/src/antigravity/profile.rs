@@ -81,14 +81,18 @@ fn hub_user_agent() -> String {
 /// 2026-11-21 capture: on [`INFERENCE_HOST`], the Hub UA, and
 /// `Host, User-Agent, Content-Length, Authorization, Content-Type,
 /// Accept-Encoding`. No `Accept` or `X-Goog-Api-Client`; `Accept-Encoding: gzip`
-/// is not adopted (the readers do not decompress it). `Host` and
-/// `Content-Length` are written by the transport. Offline capture only: live
+/// is not adopted (the readers do not decompress it). Offline capture only: live
 /// acceptance is not yet measured. Same profile as the TS
 /// `antigravityBootstrapProfile`.
-pub(crate) fn bootstrap_headers(token: &str) -> Vec<(String, String)> {
+/// `Host` and `Content-Length` are supplied here, not by the transport:
+/// the transport appends a missing one after the ordered list, which is not
+/// the captured order.
+pub(crate) fn bootstrap_headers(token: &str, body: &str) -> Vec<(String, String)> {
     ordered(
         vec![
+            ("Host".into(), INFERENCE_HOST.into()),
             ("User-Agent".into(), hub_user_agent()),
+            ("Content-Length".into(), body.len().to_string()),
             ("Content-Type".into(), "application/json".into()),
         ],
         vec![("Authorization".into(), format!("Bearer {token}"))],
