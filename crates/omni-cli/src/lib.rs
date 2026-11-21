@@ -7,6 +7,7 @@ mod credentials;
 mod database;
 mod date;
 mod doctor;
+mod health;
 mod limits;
 mod models;
 mod mutations;
@@ -70,6 +71,8 @@ pub fn run(argv: Vec<String>) -> ExitCode {
                     database::run(&command, &flags, &positional).map_err(|e| (1, e))
                 } else if command == "status" {
                     status::run(&flags).map_err(|e| (1, e))
+                } else if command == "health" {
+                    health::run(&flags).map_err(|e| (1, e))
                 } else if service::owns(&command) {
                     service::run(&command, &flags)
                 } else if command == "admin-set-password" {
