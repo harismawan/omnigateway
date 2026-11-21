@@ -1,7 +1,7 @@
 /**
  * The per-model values Codex reads from its bundled model catalog.
  *
- * Copied from `codex-rs/models-manager/models.json` at `rust-v0.165.0`, the
+ * Copied from `codex-rs/models-manager/models.json` at `rust-v0.170.0`, the
  * release the OAuth fingerprint claims. Codex chooses the request shape and
  * several defaults per model from these fields, so a request for one model has
  * to carry that model's values to look like Codex's: `use_responses_lite`,
@@ -32,7 +32,7 @@ export type CodexModel = {
   supportsReasoningEffortUpdates: boolean;
 };
 
-export const CODEX_CATALOG_RELEASE = "0.165.0";
+export const CODEX_CATALOG_RELEASE = "0.170.0";
 
 /**
  * The named members of Codex's `ReasoningEffort` (`openai_models.rs`).
@@ -74,7 +74,7 @@ const entry = (
 /**
  * What a model this table does not list is sent with.
  *
- * Every model in the 0.165.0 catalog but `gpt-5.5` is lite, and a non-lite
+ * Every model in the 0.170.0 catalog but `gpt-5.5` is lite, and a non-lite
  * request was never captured, so an unlisted id — the bare `gpt-5.6`
  * alias, a model released after this table — takes the shape and defaults the
  * lite rows share rather than a shape nothing measured.
@@ -88,6 +88,8 @@ const UNLISTED: CodexModel = entry("low", false);
  * Null-prototype, as every id-keyed table here: a model id is operator text.
  */
 const MODELS: Readonly<Record<string, CodexModel>> = Object.assign(Object.create(null), {
+  "gpt-6.2-sol": entry("low", true, { supportsReasoningEffortUpdates: true }),
+  "gpt-6.2-astra": entry("low", true, { supportsReasoningEffortUpdates: true }),
   "gpt-6-astra": entry("low", true, { supportsReasoningEffortUpdates: true }),
   "gpt-6.1-sol": entry("low", true, { supportsReasoningEffortUpdates: true }),
   "gpt-6.1-terra": entry("low", true, { supportsReasoningEffortUpdates: true }),

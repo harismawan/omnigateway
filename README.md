@@ -567,7 +567,7 @@ Worth knowing before you deploy it:
   classifier calls instead; these remain billed as token usage. See
   [Anthropic's notice guide](https://code.claude.com/docs/en/auto-mode-classifier-billing).
 - **An OpenAI OAuth (ChatGPT) target presents itself as Codex, and answers like
-  it.** Requests on that leg follow Codex 0.165.0's captured TUI shape, which
+  it.** Requests on that leg follow Codex 0.170.0's captured TUI shape, which
   changes model behaviour for every client routed there, Claude Code included:
   one tool call per turn (`parallel_tool_calls: false`), terser answers
   (`text.verbosity: "low"`), and a request that names no reasoning effort —
@@ -577,6 +577,12 @@ Worth knowing before you deploy it:
   are unaffected. Credentials connected before this pick up their per-credential
   identity on their next token refresh. Details:
   [the fingerprint design](docs/superpowers/specs/2026-10-16-codex-0163-fingerprint-design.md).
+- **GPT-6.2 Sol and Astra** are available for OpenAI API keys and ChatGPT OAuth.
+  The existing default model is unchanged. API input caps are 922K; OAuth uses
+  Codex's defaults, 500K for Sol and 272K for Astra (128K output on both legs).
+  Catalog prices are the short-context tier: above 272K input, input/cache rates
+  double and output is 1.5× for the whole request. Adjust saved target prices if
+  routinely using the long tier.
 - Not in scope: semantic caching, billing.
 
 What is missing on purpose, what is missing for now, and what is designed but not

@@ -1,7 +1,7 @@
 /**
- * The OpenAI OAuth leg presenting itself as Codex 0.165.0's interactive TUI.
+ * The OpenAI OAuth leg presenting itself as Codex 0.170.0's interactive TUI.
  *
- * Structure is pinned against `fixtures/codex-0.165.0.json`, which is a
+ * Structure is pinned against `fixtures/codex-0.170.0.json`, which is a
  * hand-sanitized copy of what the real client sent to a local capture server
  * (`scripts/codex-capture/`). Values are this gateway's own; what is compared
  * against the capture is names, order and the constants Codex sends.
@@ -30,7 +30,7 @@ type Fixture = {
 };
 
 const FIXTURE: Fixture = JSON.parse(
-  readFileSync(resolve(import.meta.dir, "fixtures/codex-0.165.0.json"), "utf8"),
+  readFileSync(resolve(import.meta.dir, "fixtures/codex-0.170.0.json"), "utf8"),
 );
 
 /** A thread id the client supplied: a UUID, so it passes through unchanged. */
@@ -139,7 +139,7 @@ test("headers go out in Codex's names and order, with its constants", () => {
     expect([name, header(built, name)]).toEqual([name, THREAD]);
   }
   expect(header(built, "user-agent")).toBe(
-    "codex-tui/0.165.0 (Windows 10.0.26200; x86_64) WindowsTerminal (codex-tui; 0.165.0)",
+    "codex-tui/0.170.0 (Windows 10.0.26200; x86_64) WindowsTerminal (codex-tui; 0.170.0)",
   );
 });
 
@@ -642,11 +642,13 @@ test("model-specific metadata comes from the Codex catalog", () => {
 });
 
 /**
- * Every row of Codex 0.165.0's bundled `models.json`, as this leg sends it:
+ * Every row of Codex 0.170.0's bundled `models.json`, as this leg sends it:
  * lite or not, verbosity, the default effort, and the two `node_repl_*` flags.
  * Read off the catalog by hand, so a row edited in the table fails here.
  */
-const CATALOG_0165: [string, boolean, string, string, boolean][] = [
+const CATALOG_0170: [string, boolean, string, string, boolean][] = [
+  ["gpt-6.2-sol", true, "low", "low", true],
+  ["gpt-6.2-astra", true, "low", "low", true],
   ["gpt-6-astra", true, "low", "low", true],
   ["gpt-6.1-sol", true, "low", "low", true],
   ["gpt-6.1-terra", true, "low", "low", true],
@@ -662,7 +664,13 @@ const CATALOG_0165: [string, boolean, string, string, boolean][] = [
 ];
 
 test("supported models carry the current effort update before the tool loop", () => {
-  for (const model of ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra"]) {
+  for (const model of [
+    "gpt-6.2-sol",
+    "gpt-6.2-astra",
+    "gpt-6-astra",
+    "gpt-6.1-sol",
+    "gpt-6.1-terra",
+  ]) {
     const body = bodyOf(
       build({ ...FOLLOW_UP, reasoning: { mode: "adaptive", effort: "high" } }, { model }),
     );
@@ -737,7 +745,7 @@ test("effort updates honor vendor overrides and API-key requests stay on the pub
 });
 
 test("every catalog row reaches the wire with its own values", () => {
-  for (const [model, lite, verbosity, effort, review] of CATALOG_0165) {
+  for (const [model, lite, verbosity, effort, review] of CATALOG_0170) {
     const built = build(FOLLOW_UP, { model });
     const body = bodyOf(built);
     const metadata = metadataOf(built);
