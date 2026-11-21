@@ -1,0 +1,4 @@
+#!/usr/bin/env node
+"use strict";
+// The binary is the CLI when its first argument is `omni` (or argv[0] is).
+require("../lib/run.js").run(["omni", ...process.argv.slice(2)]);

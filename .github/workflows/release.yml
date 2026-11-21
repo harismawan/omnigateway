@@ -173,11 +173,21 @@ jobs:
       - name: Lint
         run: bun run lint
 
-      - name: Build the dashboard
-        run: bun run build:dashboard
+      # The npm packages carry the release archives' bytes, not a rebuild:
+      # the four platform packages are unpacked from the same artifacts that
+      # `rust-assets` attaches to the GitHub release.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: rust-*
+          merge-multiple: true
+          path: release-assets
 
-      - name: Build the package
-        run: bun run build:npm "${GITHUB_REF_NAME}"
+      - name: Build the packages
+        run: bun run build:npm "${GITHUB_REF_NAME}" release-assets
+
+      # The linux-x64 package must run here exactly as npm will install it.
+      - name: Check the linux-x64 package
+        run: test "$(dist/npm/linux-x64/omnigateway omni --version)" = "${GITHUB_REF_NAME#v}"
 
       # npm, not bun, does the publishing: the OIDC exchange is an npm CLI
       # feature.
@@ -230,25 +240,39 @@ jobs:
             fi
           done
 
-      # The gateway goes last of the three, and the order is a risk decision
-      # rather than a preference. Every publish here is irreversible — npm allows
-      # unpublishing for 72 hours and not after — so when two of them must both
-      # happen, the one most likely to fail belongs first, where failing costs
-      # nothing but a re-tag.
-      #
-      # This step is the proven one: it has published every gateway version since
-      # v0.2.2 through the same OIDC exchange. The SDK step above is the unproven
-      # one, on package names whose trusted-publishing policies were configured by
-      # hand and cannot be verified from here — no API exposes them, so the first
-      # release is the test. Publishing the gateway first would mean discovering a
-      # bad policy with the gateway already on npm, the tag consumed, and a
-      # half-published release to explain.
+      # The gateway goes last, and the order is a risk decision rather than a
+      # preference. Every publish here is irreversible — npm allows unpublishing
+      # for 72 hours and not after — so when several must all happen, the ones
+      # most likely to fail belong first, where failing costs nothing but a
+      # re-run. The SDK step above and the four platform names are the unproven
+      # ones: their trusted-publishing policies were configured by hand and no
+      # API exposes them. `omnigateway` itself has published every version since
+      # v0.2.2 through the same OIDC exchange.
       #
       # No token and no `--provenance`: trusted publishing supplies the credential
       # from the OIDC token above, and attaches the provenance attestation itself.
+      #
+      # Platform packages first, the main `omnigateway` last: until the main
+      # package is on `latest`, `npm update -g omnigateway` keeps resolving the
+      # previous release, so a failure part-way strands nobody. An already
+      # published platform version is skipped, so a re-run after a failed main
+      # publish completes rather than erroring.
+      #
+      # The four `@omnigateway/<os>-<cpu>` names must each be bootstrapped once
+      # (`0.0.1` under `--tag bootstrap`) with trusted publishing configured,
+      # exactly as the SDK names above were.
       - name: Publish
-        run: npm publish --access public
-        working-directory: dist/npm
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          for dir in linux-x64 linux-arm64 darwin-x64 darwin-arm64 omnigateway; do
+            name=$(node -p "require('./dist/npm/$dir/package.json').name")
+            if [ "$(npm view "$name@$version" version 2>/dev/null || true)" = "$version" ]; then
+              echo "$name@$version is already published; skipping"
+            else
+              (cd "dist/npm/$dir" && npm publish --access public)
+            fi
+          done
 
       # After the publish, never before. A release created first would announce
       # a version that a failing publish then never puts on npm, and the fix

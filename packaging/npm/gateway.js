@@ -1,0 +1,11 @@
+// The 0.x → Rust migration bridge.
+//
+// Every omnigateway 0.x systemd unit runs `ExecStart=<bun> …/omnigateway/gateway.js`.
+// npm replaced that package with this one, so the next time systemd starts the
+// old unit it lands here. `omni service migrate --bridge` backs the database
+// up, points the unit at the native binary, and runs the Rust gateway for this
+// one start; every later start is the binary itself.
+//
+// Plain CommonJS so both Bun (the old unit's interpreter) and Node run it.
+"use strict";
+require("./lib/run.js").run(["omni", "service", "migrate", "--bridge"]);

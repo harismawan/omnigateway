@@ -1,0 +1,5 @@
+#!/usr/bin/env node
+"use strict";
+// Replaced by a symlink to the native binary when postinstall runs; this
+// launcher is what remains under --ignore-scripts or npm's script policy.
+require("../lib/run.js").run(process.argv.slice(2));

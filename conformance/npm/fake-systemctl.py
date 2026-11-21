@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+"""A user-scope systemctl stand-in that really runs the unit's ExecStart.
+
+State lives in $FAKE_SYSTEMD (pid file, log, calls). Only the verbs the CLI and
+the migration use exist; anything else exits 1 so a new call is noticed.
+"""
+import os, pathlib, signal, subprocess, sys, time
+
+state = pathlib.Path(os.environ['FAKE_SYSTEMD'])
+state.mkdir(parents=True, exist_ok=True)
+args = [a for a in sys.argv[1:] if a != '--user']
+with open(state / 'calls', 'a') as f:
+    f.write(' '.join(args) + '\n')
+unit = pathlib.Path(os.environ['HOME']) / '.config/systemd/user/omnigateway.service'
+pidfile = state / 'pid'
+
+def pid():
+    try:
+        p = int(pidfile.read_text())
+        os.kill(p, 0)
+        if pathlib.Path(f'/proc/{p}/stat').read_text().split(')')[-1].split()[0] == 'Z':
+            return None
+        return p
+    except (OSError, ValueError):
+        return None
+
+def directive(key):
+    for line in unit.read_text().splitlines():
+        if line.startswith(key + '='):
+            return line[len(key) + 1:]
+    raise SystemExit(f'no {key}')
+
+def start():
+    if pid():
+        return
+    # The manager's environment, as systemd --user hands it to a service.
+    env = {k: os.environ[k] for k in ('PATH', 'HOME', 'FAKE_SYSTEMD', 'XDG_STATE_HOME') if k in os.environ}
+    for line in pathlib.Path(directive('EnvironmentFile')).read_text().splitlines():
+        if '=' in line and not line.startswith('#'):
+            k, v = line.split('=', 1)
+            env[k.strip()] = v.strip()
+    log = open(state / 'service.log', 'ab')
+    p = subprocess.Popen(directive('ExecStart').split(' '), cwd=directive('WorkingDirectory'),
+                         env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                         start_new_session=True)
+    pidfile.write_text(str(p.pid))
+    (state / 'starts').open('a').write(directive('ExecStart') + '\n')
+
+def stop():
+    p = pid()
+    if p:
+        os.killpg(p, signal.SIGTERM)
+        for _ in range(100):
+            if not pid():
+                break
+            time.sleep(0.05)
+    pidfile.unlink(missing_ok=True)
+
+verb = args[0] if args else ''
+if verb == 'show':
+    p = pid()
+    print(f"ActiveState={'active' if p else 'inactive'}\nUnitFileState=enabled\nMainPID={p or 0}\nDropInPaths=")
+elif verb == 'is-active':
+    print('active' if pid() else 'inactive')
+    sys.exit(0 if pid() else 3)
+elif verb in ('daemon-reload', 'enable'):
+    pass
+elif verb == 'start':
+    start()
+elif verb == 'stop':
+    stop()
+elif verb == 'restart':
+    stop(); start()
+else:
+    sys.exit(1)
