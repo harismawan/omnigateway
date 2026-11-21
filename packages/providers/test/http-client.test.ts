@@ -546,15 +546,18 @@ test("antigravity bootstrap frames a non-ASCII body by its UTF-8 bytes", async (
   const bytes = Buffer.from(body, "utf8");
   expect(bytes.length).not.toBe(body.length);
   let received = Buffer.alloc(0);
-  // Answer once the head has arrived: a wrong length must fail the
-  // assertions below, not leave this test waiting for bytes that never come.
+  // Answer once the fixture's own byte count has arrived after the head (not
+  // the declared Content-Length), so a request split across reads still
+  // passes, and a wrong declared length fails the assertions below rather than
+  // leaving this test waiting for bytes that never come.
   const server = Bun.listen({
     hostname: "127.0.0.1",
     port: 0,
     socket: {
       data(socket, data) {
         received = Buffer.concat([received, Buffer.from(data)]);
-        if (received.includes("\r\n\r\n") && received.length > received.indexOf("\r\n\r\n") + 4) {
+        const end = received.indexOf("\r\n\r\n");
+        if (end !== -1 && received.length >= end + 4 + bytes.length) {
           socket.write("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
           socket.end();
         }
