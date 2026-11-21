@@ -249,6 +249,10 @@ try {
     sh(["systemctl", "--user", "restart", "omnigateway.service"]);
   }
   assert(await healthy(), "Rust gateway did not answer /health");
+  // The bridge hands over to systemd, whose ExecStartPost verifier records
+  // the outcome and removes itself; wait for it before reading the unit.
+  const record = await migrationRecord((r) => r.status !== undefined && r.status !== "verifying");
+  assert.equal(record.status, "migrated");
   // Only ExecStart changed; the operator's StandardOutput line survived.
   assert.equal(
     readFileSync(unitPath, "utf8"),
@@ -257,9 +261,6 @@ try {
       .replace(/ExecStart=.*\n/, `ExecStart=${native}\n`),
   );
   assert.equal(backups().length, 1, "one preRust backup");
-  // The bridge records after its own health check, which may trail ours.
-  const record = await migrationRecord((r) => r.status !== undefined);
-  assert.equal(record.status, "migrated");
   // The data came across: the key minted under TS authenticates against Rust.
   const models = await fetch(`http://127.0.0.1:${PORT}/v1/models`, {
     headers: { authorization: `Bearer ${key.key}` },
@@ -269,15 +270,15 @@ try {
   assert.equal(dashboard.status, 200, "console served from the platform package's public/");
   assert.equal(sh(["omni", "doctor", "--json"]).stderr, "", "no banner after migration");
   if (scenario === "blocked") {
-    // The bridge tree (bun → migrator → gateway) is judged by its native
-    // child: unchanged, so `omni service migrate` must not restart it.
-    const bridgePid = servicePid();
+    // systemd, not the bridge, runs Rust: one verifier run, which passed,
+    // and the binary is MainPID. Nothing left to restart.
+    const posts = readFileSync(join(fake, "posts"), "utf8").trim().split("\n");
+    assert.equal(posts.length, 1, posts.join("\n"));
+    assert.match(posts[0] ?? "", /omni service migrate --verify-start exit=0$/);
+    const servingPid = servicePid();
     const same = sh(["omni", "service", "migrate"]);
     assert.match(same.stderr, /no restart needed/);
-    assert.equal(servicePid(), bridgePid, "bridge tree left running");
-    // The bridge ran Rust for that one start; the next start is the binary.
-    sh(["systemctl", "--user", "restart", "omnigateway.service"]);
-    assert(await healthy());
+    assert.equal(servicePid(), servingPid, "gateway left running");
   }
   assert.equal(exe(servicePid()), native);
 

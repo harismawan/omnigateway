@@ -256,10 +256,12 @@ Before stopping anything it refuses: a unit systemd did not load from that file
 (`FragmentPath`, `WorkingDirectory`, pending reload, drop-ins, missing facts);
 a transitional state (`activating`, `deactivating`, `reloading`); any
 `Environment=`, or any `OMNI_*` in the user or system manager's environment;
-environment files other than `<root>/.env`, or one outside plain
-`[export ]NAME=VALUE` lines (single-line quotes allowed; no `\`, `$`, backtick,
-continuation or multi-line quote); an `OMNI_HOST` that is a host name rather
-than an IP or `localhost`; directives
+environment files other than `<root>/.env`, or one outside plain ASCII
+`NAME=VALUE` lines (no `export`, no whitespace around `=` or at either end;
+single-line quotes allowed; no `\`, `$`, backtick, continuation or multi-line
+quote); an `OMNI_HOST` that is a host name rather than an IP or `localhost`
+(`localhost` is probed at the resolver's first address, as the gateway binds
+it); directives
 beyond the TS template (output wiring excepted, but not into the replaced
 package); cluster settings; a visible foreign database holder; an unwritable or
 full snapshot directory; an unreadable or newer ledger; a non-running binary;
@@ -273,7 +275,7 @@ has read and not finished) and keeps new readers out while held; it does not
 see a process that opened the file and never read it. The lock is held across
 the backup and the `ExecStart=` rewrite and released just before the start. A
 start is accepted only when `/health` answers, the listening socket serving the
-probed address belongs to systemd's `MainPID` (or the bridge's child), that
+probed address belongs to systemd's `MainPID`, that
 process runs this binary and has the backed-up database open, and no other
 process visible in `/proc` has it open.
 
@@ -289,16 +291,18 @@ service stopped if systemd confirms it, or says it could not be confirmed and
 gives the stop command first, with rollback steps for that branch. A recorded
 failure, with its backup and saved unit, is kept as `pendingFailure` across
 every later attempt — refused, current, or another failure, which never replaces
-the first — until the service is seen serving (answering `/health` on the
+the first failure that took a backup (an earlier failure that took none gives
+way to it, and never masks it) — until the service is seen serving (answering `/health` on the
 probed address from this binary, holding the database). The outcome is recorded in `<state>/npm-migration.json`
 (`~/.local/state/omnigateway` by default); `omni doctor` and `omni status` print
 its reason until resolved. This replaces the maintenance window for that one
 shape only. It does not take step 6, so run it after the update.
 
-The bridge serves the migrating start as its own child (signals relayed), so
-that one run's process tree is `bun gateway.js` →
-`omnigateway omni service migrate --bridge` → `omnigateway`; the next restart is
-the binary alone. With scripts blocked, later Rust updates are not restarted
+The bridge never runs the gateway itself: after the backup and rewrite it asks
+systemd to restart the unit, which starts the binary as `MainPID`. A one-shot
+`ExecStartPost=… omni service migrate --verify-start`, added by the rewrite,
+checks that start, removes its own line, and records `migrated`, or records
+`failed-start` with rollback and stops the unit. With scripts blocked, later Rust updates are not restarted
 automatically: run `omni service migrate` after `npm update`.
 
 ## 5. Postgres + Redis fleet maintenance window

@@ -44,10 +44,8 @@ struct Fake {
     fail_start: bool,
     low_disk: bool,
     binary_runs: bool,
-    child_exits_early: bool,
     pidfile_gateway: bool,
     stop_sticks: bool,
-    spawned_code: i32,
     bridge_parent_is_main: bool,
     /// `systemctl show-environment`: the manager's own environment.
     manager_env: Vec<String>,
@@ -62,8 +60,6 @@ struct Fake {
     late_holder: bool,
     /// The listener on the port after start is someone else.
     foreign_listener: bool,
-    /// `(pid, exe)` of a native child of MainPID (the bridge's gateway).
-    bridge_child: RefCell<Option<(u32, PathBuf)>>,
     /// The started gateway holds the database that was backed up.
     rust_holds_db: bool,
 }
@@ -96,10 +92,8 @@ impl Fake {
             fail_start: false,
             low_disk: false,
             binary_runs: true,
-            child_exits_early: false,
             pidfile_gateway: false,
             stop_sticks: true,
-            spawned_code: 0,
             bridge_parent_is_main: true,
             manager_env: vec!["HOME=/home/u".into(), "PATH=/usr/bin".into()],
             port_taken: false,
@@ -110,7 +104,6 @@ impl Fake {
             stops: Cell::new(0),
             late_holder: false,
             foreign_listener: false,
-            bridge_child: RefCell::new(None),
             rust_holds_db: true,
         }
     }
@@ -211,10 +204,6 @@ impl Host for Fake {
         if *self.main_pid.borrow() == Some(4242) && self.rust_holds_db {
             found.push(4242);
         }
-        // The bridge's child, once spawned, holds the database.
-        if self.rust_holds_db && self.log.borrow().iter().any(|l| l.starts_with("spawn")) {
-            found.push(5151);
-        }
         if self.late_holder && self.log.borrow().iter().any(|l| l == "unlock") {
             found.push(31337);
         }
@@ -240,7 +229,7 @@ impl Host for Fake {
         }
         match pid {
             4242 if self.impostor => Some(PathBuf::from("/usr/bin/other-server")),
-            4242 | 5151 => Some(self.binary.clone()),
+            4242 => Some(self.binary.clone()),
             _ => Some(PathBuf::from(BUN)),
         }
     }
@@ -253,22 +242,12 @@ impl Host for Fake {
         self.log.borrow_mut().push(format!("probe {addr}"));
         self.port_taken
     }
-    fn native_child(&self, parent: u32, binary: &Path) -> Option<(u32, PathBuf)> {
-        let _ = binary;
-        (parent == 777)
-            .then(|| self.bridge_child.borrow().clone())
-            .flatten()
-    }
     fn listener_pid(&self, _addr: std::net::SocketAddr) -> Option<u32> {
         if self.foreign_listener {
             return Some(31338);
         }
-        // The gateway we started (MainPID 4242, or the bridge's child 5151).
-        Some(if *self.main_pid.borrow() == Some(4242) {
-            4242
-        } else {
-            5151
-        })
+        // The gateway systemd started (MainPID 4242), when it runs.
+        (*self.main_pid.borrow() == Some(4242)).then_some(4242)
     }
     fn preflight_db(&self, _db: &Path, _snapshots: &Path) -> Result<(), String> {
         if self.low_disk {
@@ -301,21 +280,6 @@ impl Host for Fake {
     }
     fn bridge_invoked_by(&self, main_pid: u32) -> bool {
         self.bridge_parent_is_main && main_pid == 777
-    }
-    fn run_gateway(
-        &self,
-        binary: &Path,
-        root: &Path,
-        _listen: std::net::SocketAddr,
-    ) -> Result<Child, String> {
-        self.log
-            .borrow_mut()
-            .push(format!("spawn {} in {}", binary.display(), root.display()));
-        Ok(Child::Fake {
-            pid: 5151,
-            code: self.spawned_code,
-            exited_early: self.child_exits_early,
-        })
     }
 }
 
@@ -944,19 +908,89 @@ fn only_doctor_and_status_announce() {
 
 // ------------------------------------------------------------- bridge
 
+/// The bridge migrates under the lock, adds a one-shot verifier to the unit,
+/// and asks systemd to restart it: Rust runs as a plain MainPID, never as the
+/// bridge's child.
 #[test]
-fn bridge_migrates_under_lock_and_hands_over_to_the_gateway() {
+fn bridge_migrates_under_lock_and_hands_over_to_systemd() {
     let f = fixture(SINGLE);
     f.write_user(&legacy_unit(&f.root, ""));
-    // systemd started gateway.js; the bridge descends from MainPID 777.
     let host = bridge_host(&f);
-    let code = run_bridge(&host, &f.paths());
-    assert_eq!(code, 0);
-    assert!(!host.did("systemctl user stop") && !host.did("systemctl user start"));
+    assert_eq!(bridge(&host, &f.paths(), 1), 0);
+    assert!(!host.did("systemctl user stop") && !host.did("spawn"));
     assert!(host.at("lock ") < host.at("backup"));
-    assert!(host.at("unlock") < host.at("spawn"));
-    assert!(f.unit().contains(&f.binary.display().to_string()));
-    assert_eq!(f.record()["status"], "migrated");
+    assert!(host.at("backup") < host.at("systemctl user daemon-reload"));
+    assert!(host.at("unlock") < host.at("systemctl user restart --no-block omnigateway.service"));
+    let unit = f.unit();
+    assert!(unit.contains(&format!("ExecStart={}\n", f.binary.display())));
+    assert!(
+        unit.contains(&format!(
+            "ExecStartPost={} omni service migrate --verify-start\n",
+            f.binary.display()
+        )),
+        "{unit}"
+    );
+    assert_eq!(f.record()["status"], "verifying");
+}
+
+/// systemd runs the verifier once Rust is up: success removes the line and
+/// records `migrated`.
+#[test]
+fn verify_start_records_migrated_and_removes_itself() {
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    bridge(&bridge_host(&f), &f.paths(), 1);
+    let host = rust_host(&f, None);
+    assert_eq!(verify_start(&host, &f.paths(), 4242, 2), 0);
+    assert!(!f.unit().contains("ExecStartPost="), "{}", f.unit());
+    assert!(host.did("systemctl user daemon-reload"));
+    let record = f.record();
+    assert_eq!(record["status"], "migrated");
+    assert_eq!(record["runningVersion"], "1.0.0");
+    assert_eq!(
+        record["backup"],
+        "db_2026-11-21T00-00-00-000Z_preRust.sqlite"
+    );
+}
+
+/// A failing verifier exits non-zero, so systemd fails and stops the unit,
+/// and records the failure with the bridge's rollback.
+#[test]
+fn verify_start_failure_fails_the_unit_with_rollback() {
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    bridge(&bridge_host(&f), &f.paths(), 1);
+    let host = Fake {
+        healthy: false,
+        ..rust_host(&f, None)
+    };
+    assert_ne!(verify_start(&host, &f.paths(), 4242, 2), 0);
+    assert!(!f.unit().contains("ExecStartPost="));
+    // Without a stop, Restart=on-failure would start Rust again unverified.
+    assert!(host.did("systemctl user stop --no-block omnigateway.service"));
+    let record = f.record();
+    assert_eq!(record["status"], "failed-start");
+    let message = record["message"].as_str().unwrap();
+    assert!(message.contains("omni db restore --root"), "{message}");
+    assert!(message.contains("npm i -g omnigateway@0.15.5"), "{message}");
+    // Not our process on the port either.
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    bridge(&bridge_host(&f), &f.paths(), 1);
+    let host = Fake {
+        foreign_listener: true,
+        ..rust_host(&f, None)
+    };
+    assert_ne!(verify_start(&host, &f.paths(), 4242, 2), 0);
+}
+
+/// Without a pending bridge handoff the verifier does nothing (and succeeds).
+#[test]
+fn verify_start_without_a_handoff_is_a_no_op() {
+    let f = fixture(SINGLE);
+    let host = rust_host(&f, None);
+    assert_eq!(verify_start(&host, &f.paths(), 4242, 1), 0);
+    assert!(!host.did("health"));
 }
 
 #[test]
@@ -964,10 +998,10 @@ fn bridge_refusals_exit_zero_so_systemd_does_not_loop() {
     let f = fixture("OMNI_DATABASE_URL=postgres://x/y\n");
     f.write_user(&legacy_unit(&f.root, ""));
     let host = bridge_host(&f);
-    assert_eq!(run_bridge(&host, &f.paths()), 0);
-    assert!(!host.did("spawn"));
+    assert_eq!(bridge(&host, &f.paths(), 1), 0);
+    assert!(!host.did("systemctl user restart"));
     let none = fixture(SINGLE);
-    assert_eq!(run_bridge(&bridge_host(&none), &none.paths()), 1);
+    assert_eq!(bridge(&bridge_host(&none), &none.paths(), 1), 1);
 }
 
 #[test]
@@ -978,33 +1012,33 @@ fn bridge_run_by_hand_with_the_service_active_is_refused() {
         bridge_parent_is_main: false,
         ..bridge_host(&f)
     };
-    assert_eq!(run_bridge(&host, &f.paths()), 1);
-    assert!(!host.did("backup") && !host.did("spawn"));
+    assert_eq!(bridge(&host, &f.paths(), 1), 1);
+    assert!(!host.did("backup") && !host.did("systemctl user restart"));
 }
 
+/// A failed restart request leaves the rewritten unit stopped with rollback.
 #[test]
-fn bridge_child_dying_before_health_is_a_failure() {
+fn bridge_restart_refused_by_systemd_is_a_failure() {
     let f = fixture(SINGLE);
     f.write_user(&legacy_unit(&f.root, ""));
     let host = Fake {
-        child_exits_early: true,
+        fail_start: true,
         ..bridge_host(&f)
     };
-    assert_eq!(run_bridge(&host, &f.paths()), 0);
+    assert_eq!(bridge(&host, &f.paths(), 1), 0);
     assert_eq!(f.record()["status"], "failed-start");
+    assert!(
+        f.record()["message"]
+            .as_str()
+            .unwrap()
+            .contains("omni db restore")
+    );
 }
 
 fn bridge_host(f: &Fixture) -> Fake {
     let host = f.host();
     host.ts_holds_db.set(false);
     host
-}
-
-fn run_bridge(host: &Fake, paths: &Paths) -> i32 {
-    match bridge(host, paths, 1) {
-        Bridge::Exit(code) => code,
-        Bridge::Serve(child) => child.wait_fake(),
-    }
 }
 
 // ------------------------------------------------- rereview (npm-review.md)
@@ -1138,7 +1172,7 @@ fn another_server_on_the_port_fails_before_anything_is_written() {
         port_taken: true,
         ..bridge_host(&f)
     };
-    assert_eq!(run_bridge(&host, &f.paths()), 0);
+    assert_eq!(bridge(&host, &f.paths(), 1), 0);
     assert!(!host.did("backup") && !host.did("spawn"));
     assert_eq!(f.record()["status"], "failed-port");
 }
@@ -1154,14 +1188,6 @@ fn health_with_a_foreign_listener_is_not_success() {
         ..f.host()
     };
     assert_eq!(migrate(&host, &f.paths(), 1).status, Status::FailedStart);
-    let f = fixture(SINGLE);
-    f.write_user(&legacy_unit(&f.root, ""));
-    let host = Fake {
-        foreign_listener: true,
-        ..bridge_host(&f)
-    };
-    assert_eq!(run_bridge(&host, &f.paths()), 0);
-    assert_eq!(f.record()["status"], "failed-start");
 }
 
 /// Finding 4: only a confirmed stop is reported as stopped.
@@ -1232,25 +1258,8 @@ fn bridge_without_a_main_pid_is_a_recorded_zero_exit() {
     f.write_user(&legacy_unit(&f.root, ""));
     let host = bridge_host(&f);
     *host.main_pid.borrow_mut() = None;
-    assert_eq!(run_bridge(&host, &f.paths()), 0);
+    assert_eq!(bridge(&host, &f.paths(), 1), 0);
     assert_eq!(f.record()["status"], "skipped-unit");
-}
-
-/// Finding 7: the first bridge start leaves Bun as MainPID and the gateway as
-/// its child. An unchanged child is current; a replaced one restarts.
-#[test]
-fn bridge_tree_is_judged_by_its_native_child() {
-    let (f, bin) = migrated_fixture();
-    let host = rust_host(&f, None);
-    *host.main_pid.borrow_mut() = Some(777);
-    *host.bridge_child.borrow_mut() = Some((5151, bin.clone()));
-    assert_eq!(migrate(&host, &f.paths(), 2).status, Status::Current);
-    assert!(!host.did("systemctl user restart"));
-    let host = rust_host(&f, None);
-    *host.main_pid.borrow_mut() = Some(777);
-    *host.bridge_child.borrow_mut() =
-        Some((5151, PathBuf::from(format!("{} (deleted)", bin.display()))));
-    assert_eq!(migrate(&host, &f.paths(), 2).status, Status::Restarted);
 }
 
 // ------------------------------------------------- second rereview
@@ -1403,6 +1412,14 @@ fn env_files_outside_the_shared_grammar_are_refused() {
         "OMNI_ENCRYPTION_KEY=kkkkkkkkkkkkkkkkkkkk\nOMNI_NOTE=a\\b\n",
         "OMNI_ENCRYPTION_KEY=kkkkkkkkkkkkkkkkkkkk\nnot an assignment\n",
         "OMNI_ENCRYPTION_KEY=kkkkkkkkkkkkkkkkkkkk\n1BAD=x\n",
+        // systemd discards `export NAME` as an invalid name; the CLI strips it.
+        "OMNI_ENCRYPTION_KEY=kkkkkkkkkkkkkkkkkkkk\nOMNI_DB_PATH=live.db\nexport OMNI_DB_PATH=other.db\n",
+        // Unicode whitespace Rust trims and systemd does not.
+        "OMNI_ENCRYPTION_KEY=kkkkkkkkkkkkkkkkkkkk\n\u{a0}OMNI_DB_PATH=other.db\n",
+        "OMNI_ENCRYPTION_KEY=kkkkkkkkkkkkkkkkkkkk\nOMNI_DB_PATH=other.db\u{2003}\n",
+        // Spaces around `=`: systemd keeps them in name/value differently.
+        "OMNI_ENCRYPTION_KEY=kkkkkkkkkkkkkkkkkkkk\nOMNI_DB_PATH = other.db\n",
+        "OMNI_ENCRYPTION_KEY=kkkkkkkkkkkkkkkkkkkk\r\nOMNI_DB_PATH=x.db\r\n",
     ] {
         let f = fixture(text);
         f.write_user(&legacy_unit(&f.root, ""));
@@ -1410,7 +1427,7 @@ fn env_files_outside_the_shared_grammar_are_refused() {
     }
     // Quoted single-line values, comments, export and base64 keys are fine.
     let f = fixture(
-        "# comment\nexport OMNI_ENCRYPTION_KEY=\"q1w2e3r4t5y6u7i8o9p0+/==\"\nOMNI_PORT='19100'\n\n",
+        "# comment\nOMNI_ENCRYPTION_KEY=\"q1w2e3r4t5y6u7i8o9p0+/==\"\nOMNI_PORT='19100'\n\n",
     );
     f.write_user(&legacy_unit(&f.root, ""));
     assert_eq!(migrate(&f.host(), &f.paths(), 1).status, Status::Migrated);
@@ -1480,11 +1497,130 @@ fn a_bind_host_that_is_not_an_address_is_refused() {
         ("0.0.0.0", "127.0.0.1:9000"),
         ("::", "[::1]:9000"),
         ("::1", "[::1]:9000"),
-        ("localhost", "127.0.0.1:9000"),
         ("10.1.2.3", "10.1.2.3:9000"),
     ] {
         let env = std::collections::HashMap::from([("OMNI_HOST".to_owned(), host.to_owned())]);
         assert_eq!(probe_addr(&env).to_string(), probed, "{host}");
         assert_eq!(local_base(&env), format!("http://{probed}"), "{host}");
     }
+    // localhost resolves as the gateway's bind does: the resolver's first.
+    use std::net::ToSocketAddrs as _;
+    let first = ("localhost", 9000)
+        .to_socket_addrs()
+        .unwrap()
+        .next()
+        .unwrap();
+    let env = std::collections::HashMap::from([("OMNI_HOST".to_owned(), "localhost".to_owned())]);
+    assert_eq!(probe_addr(&env), first);
+}
+
+// ------------------------------------------------- fourth rereview
+
+/// Finding 4: a failure with no backup must not mask the rollback of a later
+/// attempt that took one; and a later inactive run must not erase it.
+#[test]
+fn rollback_data_outranks_an_earlier_artifact_free_failure() {
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    // 1. Refused after stop, before any backup.
+    assert_eq!(
+        migrate(
+            &Fake {
+                port_taken: true,
+                ..f.host()
+            },
+            &f.paths(),
+            1
+        )
+        .status,
+        Status::FailedPort
+    );
+    // 2. Retry: backup taken, unit rewritten, Rust fails health.
+    let host = Fake {
+        healthy: false,
+        ..f.host()
+    };
+    assert_eq!(migrate(&host, &f.paths(), 2).status, Status::FailedStart);
+    let second = f.record();
+    assert!(second["backup"].is_string());
+    let shown = banner(&f.paths()).unwrap();
+    assert!(shown.contains("failed-start"), "{shown}");
+    // 3. An inactive rerun keeps the rollback of attempt 2.
+    let host = rust_host(&f, None);
+    *host.active.borrow_mut() = false;
+    *host.main_pid.borrow_mut() = None;
+    migrate(&host, &f.paths(), 3);
+    let record = f.record();
+    let recovery = &record["pendingFailure"];
+    assert_eq!(recovery["backup"], second["backup"], "{record:#}");
+    assert_eq!(recovery["savedUnit"], second["savedUnit"]);
+    assert!(
+        recovery["message"]
+            .as_str()
+            .unwrap()
+            .contains("omni db restore")
+    );
+    assert!(
+        record["message"]
+            .as_str()
+            .unwrap()
+            .contains("omni db restore"),
+        "{record:#}"
+    );
+}
+
+/// Non-ASCII anywhere is outside the shared grammar (systemd's whitespace
+/// and the CLI's differ beyond ASCII).
+#[test]
+fn non_ascii_env_lines_are_refused() {
+    let f = fixture("OMNI_ENCRYPTION_KEY=kkkkkkkkkkkkkkkkkkkk\nOMNI_DB_PATH=caf\u{e9}.db\n");
+    f.write_user(&legacy_unit(&f.root, ""));
+    refused_before_stop(&f, &f.host(), Status::SkippedUnit);
+}
+
+/// The reverse order: a failure with rollback, then one without. The first
+/// stays the pending failure and the banner shows it.
+#[test]
+fn a_later_artifact_free_failure_does_not_mask_rollback() {
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    migrate(
+        &Fake {
+            healthy: false,
+            ..f.host()
+        },
+        &f.paths(),
+        1,
+    );
+    let first = f.record();
+    assert!(first["backup"].is_string());
+    // The operator restores the TS unit; the retry fails before any backup.
+    f.write_user(&legacy_unit(&f.root, ""));
+    assert_eq!(
+        migrate(
+            &Fake {
+                port_taken: true,
+                ..f.host()
+            },
+            &f.paths(),
+            2
+        )
+        .status,
+        Status::FailedPort
+    );
+    let record = f.record();
+    assert_eq!(record["pendingFailure"]["backup"], first["backup"]);
+    let shown = banner(&f.paths()).unwrap();
+    assert!(shown.contains("failed-start"), "{shown}");
+}
+
+/// A verifier line left behind (the verifier never ran) is still our unit.
+#[test]
+fn a_leftover_verifier_line_is_still_a_rust_unit() {
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    bridge(&bridge_host(&f), &f.paths(), 1);
+    assert!(f.unit().contains("ExecStartPost="));
+    let host = rust_host(&f, None);
+    assert_ne!(migrate(&host, &f.paths(), 2).status, Status::SkippedUnit);
 }

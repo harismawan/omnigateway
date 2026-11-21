@@ -8,7 +8,8 @@ import os, pathlib, signal, subprocess, sys, time
 
 state = pathlib.Path(os.environ['FAKE_SYSTEMD'])
 state.mkdir(parents=True, exist_ok=True)
-args = [a for a in sys.argv[1:] if a != '--user']
+args = [a for a in sys.argv[1:] if a not in ('--user', '--no-block')]
+no_block = '--no-block' in sys.argv[1:]
 with open(state / 'calls', 'a') as f:
     f.write(' '.join(args) + '\n')
 unit = pathlib.Path(os.environ['HOME']) / '.config/systemd/user/omnigateway.service'
@@ -24,12 +25,14 @@ def pid():
     except (OSError, ValueError):
         return None
 
-def directive(key):
+def directive(key, required=True):
     text = (state / 'loaded').read_text() if (state / 'loaded').exists() else unit.read_text()
     for line in text.splitlines():
         if line.startswith(key + '='):
             return line[len(key) + 1:]
-    raise SystemExit(f'no {key}')
+    if required:
+        raise SystemExit(f'no {key}')
+    return None
 
 def start():
     if pid():
@@ -46,6 +49,17 @@ def start():
                          start_new_session=True)
     pidfile.write_text(str(p.pid))
     (state / 'starts').open('a').write(directive('ExecStart') + '\n')
+    # ExecStartPost runs once the main process is up, with MAINPID set; a
+    # non-zero exit fails the unit, which systemd then stops.
+    post = directive('ExecStartPost', required=False)
+    if post:
+        time.sleep(0.3)
+        r = subprocess.run(post.split(' '), cwd=directive('WorkingDirectory'),
+                           env=env | {'MAINPID': str(p.pid)}, stdin=subprocess.DEVNULL,
+                           stdout=log, stderr=log)
+        (state / 'posts').open('a').write(f"{post} exit={r.returncode}\n")
+        if r.returncode != 0:
+            stop()
 
 def stop():
     p = pid()
@@ -90,6 +104,13 @@ elif verb == 'start':
 elif verb == 'stop':
     stop()
 elif verb == 'restart':
-    stop(); start()
+    if no_block:
+        # Queued: returns now; the job runs once this caller (perhaps the
+        # unit's own main process, about to be stopped) has gone on.
+        subprocess.Popen([sys.executable, __file__, 'restart'], env=os.environ,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    else:
+        stop(); start()
 else:
     sys.exit(1)

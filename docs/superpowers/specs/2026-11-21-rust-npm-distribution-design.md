@@ -94,12 +94,22 @@ In bridge mode the migration runs **as** the service, not against it:
 
 - TS is not running (the bridge took its place), so there is no stop step.
 - The writer check still applies: nothing may hold the database open.
-- After the backup and unit rewrite, the migrator itself spawns the Rust
-  gateway as its child, applies the same health check, records the outcome,
-  then waits on the child and exits with its code. For this one run the process
-  tree is bridge → migrator → gateway. The next restart of the rewritten unit is
-  pure Rust, and the Rust→Rust check below restarts it at the next npm update.
-- Every refusal or failure exits **0**, so `Restart=on-failure` does not loop
+- The rewrite also adds one line after `ExecStart=`:
+  `ExecStartPost=<binary> omni service migrate --verify-start`. The migrator
+  records `verifying` (with `handoff: true`), releases the lock, asks
+  `systemctl restart --no-block omnigateway.service` and exits 0. systemd
+  stops the bridge and starts the binary as a plain `MainPID`; the bridge
+  never spawns, relays signals to, or waits on the gateway. *(owner decision,
+  fourth rereview: a child gateway could not tell a slow boot from a drain)*
+- The verifier runs once the binary is up (`MAINPID` set by systemd). It first
+  removes its own line and reloads, then applies the same check as any start
+  (`/health`, listener attribution to `MAINPID`, the backed-up database held,
+  no other holder). Success records `migrated`. Failure records `failed-start`
+  with rollback, queues `systemctl stop --no-block` (a non-zero exit alone
+  would let `Restart=on-failure` start Rust again unverified — measured on
+  systemd 257) and exits 1, so the unit ends failed and stopped. Without a
+  pending handoff, or once the unit is no longer ours, it does nothing.
+- Every bridge refusal exits **0**, so `Restart=on-failure` does not loop
   and the service is left stopped with the record written.
 - Started outside systemd (no legacy unit found), the bridge prints that
   `gateway.js` is a migration bridge, points at `omni start`, and exits 1.
@@ -199,13 +209,17 @@ other-writable. Otherwise the tool prints the exact
    finding 1–2)*
 2. **Mode** from that `.env` (unreadable → refuse): any of `OMNI_DATABASE_URL`,
    `OMNI_REDIS_URL`, `OMNI_CLUSTER_MODE` → `skipped-cluster`. The whole file must
-   be in the grammar systemd and the CLI read alike — blank, `#`/`;` comments,
-   `[export ]NAME=VALUE` with a plain value or one single-line quoted value with
-   no `\`, `$`, backtick or nested quote — else `skipped-unit`. `OMNI_*` in
-   either manager's environment (`show-environment`: user exports or the system
-   manager's `DefaultEnvironment`) is refused; `OMNI_HOST` must be an IP or
-   `localhost`, and that one address is used for occupancy, `/health` and
-   listener attribution.
+   be in the grammar systemd and the CLI read alike — ASCII only, empty lines,
+   `#`/`;` comments at column 0, `NAME=VALUE` with no `export` (systemd discards
+   `export NAME` as an invalid name; the CLI strips the word), no whitespace
+   around `=` or at either end, and a plain value or one single-line quoted
+   value with no `\`, `$`, backtick or nested quote — else `skipped-unit`.
+   `OMNI_*` in either manager's environment (`show-environment`: user exports
+   or the system manager's `DefaultEnvironment`) is refused; `OMNI_HOST` must be
+   an IP or `localhost`, and that one address is used for occupancy, `/health`
+   and listener attribution. `localhost` resolves as the gateway's bind does:
+   the resolver's first address (`::1` on an IPv6-first host). A wildcard bind
+   is probed on its family's loopback.
 3. **Preflight, nothing touched yet:** no process other than `MainPID` visible
    holding the database; the snapshot directory exists, is writable, has 1.1× the
    database free; the ledger is readable and has no unknown id; the binary runs
@@ -255,11 +269,12 @@ blocked nothing runs at update time; `omni service migrate` does the restart.
 
 The migrator runs as the bridge only when systemd's `MainPID` is one of its
 ancestors (it was started by the unit, not by hand). It skips the stop, holds
-the same lock, and after the rewrite runs the gateway as its child: health plus
-"child still running" decide success, `SIGTERM`/`SIGINT`/`SIGHUP` are relayed
-to the child, and the exit status is the child's. Every refusal, and every
-launcher failure in `gateway.js` (missing or non-executable platform binary),
-exits **0**, so `Restart=on-failure` does not loop. *(finding 6)*
+the same lock, and after the rewrite hands the start to systemd as above. The
+`verifying` record is written before the restart request, since the restart
+may end the bridge at any point after it. A unit still carrying the verifier
+line (the verifier never ran) is still classified as ours. Every refusal, and
+every launcher failure in `gateway.js` (missing or non-executable platform
+binary), exits **0**, so `Restart=on-failure` does not loop. *(finding 6)*
 
 ### Not a service
 

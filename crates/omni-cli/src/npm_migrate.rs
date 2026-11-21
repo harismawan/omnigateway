@@ -40,6 +40,7 @@ impl Scope {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Status {
     NothingToMigrate,
+    Verifying,
     Migrated,
     Current,
     Restarted,
@@ -59,6 +60,7 @@ impl Status {
     fn name(self) -> &'static str {
         match self {
             Self::NothingToMigrate => "nothing-to-migrate",
+            Self::Verifying => "verifying",
             Self::Migrated => "migrated",
             Self::Current => "current",
             Self::Restarted => "restarted",
@@ -114,58 +116,6 @@ impl Paths {
     }
 }
 
-/// The Rust gateway the bridge started, owned by this process.
-pub(crate) enum Child {
-    Real(std::process::Child),
-    #[cfg(test)]
-    Fake {
-        pid: u32,
-        code: i32,
-        exited_early: bool,
-    },
-}
-impl Child {
-    fn pid(&self) -> u32 {
-        match self {
-            Self::Real(child) => child.id(),
-            #[cfg(test)]
-            Self::Fake { pid, .. } => *pid,
-        }
-    }
-    /// Still running (it did not exit while we waited for /health).
-    fn running(&mut self) -> bool {
-        match self {
-            Self::Real(child) => matches!(child.try_wait(), Ok(None)),
-            #[cfg(test)]
-            Self::Fake { exited_early, .. } => !*exited_early,
-        }
-    }
-    fn kill(self) {
-        match self {
-            Self::Real(mut child) => {
-                let _killed = child.kill();
-                let _reaped = child.wait();
-            }
-            #[cfg(test)]
-            Self::Fake { .. } => {}
-        }
-    }
-    pub(crate) fn into_real(self) -> Option<std::process::Child> {
-        match self {
-            Self::Real(child) => Some(child),
-            #[cfg(test)]
-            Self::Fake { .. } => None,
-        }
-    }
-    #[cfg(test)]
-    pub(crate) fn wait_fake(self) -> i32 {
-        match self {
-            Self::Fake { code, .. } => code,
-            Self::Real(_) => unreachable!(),
-        }
-    }
-}
-
 /// An SQLite exclusive lock on the database: proof that no other connection,
 /// from any user or through any link, has it open (`BEGIN EXCLUSIVE` under
 /// `locking_mode=EXCLUSIVE` fails while one does, and holds every later
@@ -210,8 +160,6 @@ pub(crate) trait Host {
     /// (bound to it or to its wildcard); `None` when there is none, several,
     /// or one whose owner cannot be seen.
     fn listener_pid(&self, addr: std::net::SocketAddr) -> Option<u32>;
-    /// A child of `parent` whose executable is (or was, `(deleted)`) `binary`.
-    fn native_child(&self, parent: u32, binary: &Path) -> Option<(u32, PathBuf)>;
     /// Free space and writability of the snapshot directory, a readable
     /// ledger this build knows. Nothing is stopped yet.
     fn preflight_db(&self, db: &Path, snapshots: &Path) -> Result<(), String>;
@@ -226,14 +174,6 @@ pub(crate) trait Host {
     fn foreground_gateway(&self, state: &Path) -> Option<u32>;
     /// This process descends from `main_pid` (systemd started the bridge).
     fn bridge_invoked_by(&self, main_pid: u32) -> bool;
-    /// Spawn the gateway; `listen` is the address it will serve, which the
-    /// signal relay uses to tell a group stop from one aimed at the bridge.
-    fn run_gateway(
-        &self,
-        binary: &Path,
-        root: &Path,
-        listen: std::net::SocketAddr,
-    ) -> Result<Child, String>;
 }
 
 type Facts = std::collections::HashMap<String, String>;
@@ -373,6 +313,12 @@ fn template_shape(text: &str) -> Result<(String, String), String> {
 }
 
 fn classify(text: &str, binary: &Path) -> Result<(Kind, PathBuf), String> {
+    // The bridge's one-shot verifier is ours; the rest is the template.
+    let text: String = text
+        .split_inclusive('\n')
+        .filter(|l| l.trim_end() != verifier_line(binary))
+        .collect();
+    let text = text.as_str();
     let (root, exec) = template_shape(text)?;
     if Path::new(&exec) == binary {
         return Ok((Kind::Rust, PathBuf::from(root)));
@@ -427,10 +373,21 @@ fn bind_ip(env: &std::collections::HashMap<String, String>) -> Option<std::net::
         .map(|h| h.trim().trim_start_matches('[').trim_end_matches(']'))
         .filter(|h| !h.is_empty())
         .unwrap_or("127.0.0.1");
-    match host {
-        "localhost" => Some(std::net::IpAddr::from([127, 0, 0, 1])),
-        h => h.parse().ok(),
+    if let Ok(ip) = host.parse() {
+        return Some(ip);
     }
+    if host != "localhost" {
+        return None;
+    }
+    // The gateway binds `(host, port)`, which tries the resolver's addresses
+    // in order and keeps the first that binds; with the port free, that is
+    // the first one. Resolve the same way and take the same one.
+    use std::net::ToSocketAddrs as _;
+    ("localhost", 0)
+        .to_socket_addrs()
+        .ok()?
+        .next()
+        .map(|a| a.ip())
 }
 /// The address the health probe, the occupancy check and the listener
 /// attribution all use: the bind IP, or loopback for a wildcard bind.
@@ -464,18 +421,19 @@ fn database_path(root: &Path, env: &std::collections::HashMap<String, String>) -
 }
 
 /// `Err(line number)` for the first line outside the grammar both readers
-/// agree on: blank, `#`/`;` comment, or `[export ]NAME=VALUE` where NAME is
+/// agree on: empty, `#`/`;` comment, or `NAME=VALUE` (no `export`) where NAME is
 /// `[A-Za-z_][A-Za-z0-9_]*` and VALUE is plain (no whitespace, quotes, `\\`,
 /// `$`, backtick) or one whole single-line `"…"`/`'…'` with none of those
 /// inside but spaces.
 fn shared_env_grammar(text: &str) -> Result<(), usize> {
-    let plain = |c: char| !c.is_whitespace() && !matches!(c, '"' | '\'' | '\\' | '$' | '`');
-    for (i, raw) in text.lines().enumerate() {
-        let line = raw.trim();
+    // ASCII only, and no whitespace except the space inside a quoted value:
+    // systemd trims ASCII whitespace where Rust trims Unicode, and it rejects
+    // a name with `export ` in it where the CLI strips the word.
+    let plain = |c: char| c.is_ascii_graphic() && !matches!(c, '"' | '\'' | '\\' | '$' | '`');
+    for (i, line) in text.split('\n').enumerate() {
         if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
             continue;
         }
-        let line = line.strip_prefix("export ").unwrap_or(line);
         let Some((name, value)) = line.split_once('=') else {
             return Err(i + 1);
         };
@@ -534,40 +492,75 @@ fn previous_record(paths: &Paths) -> Option<Value> {
     serde_json::from_str(&fs::read_to_string(paths.state.join(RECORD)).ok()?).ok()
 }
 
-/// The failure a later attempt must not erase: the latest `failed-*`
-/// record's message and rollback data, carried as `pendingFailure`.
-fn pending_failure(previous: Option<&Value>) -> Option<Value> {
-    let previous = previous?;
-    if let Some(pending) = previous.get("pendingFailure").filter(|p| !p.is_null()) {
-        return Some(pending.clone());
-    }
-    let status = previous["status"].as_str()?;
+/// The latest record as a failure summary, if it is one.
+fn as_failure(record: &Value) -> Option<Value> {
+    let status = record["status"].as_str()?;
     status.starts_with("failed-").then(|| {
         json!({
             "status": status,
-            "at": previous["at"],
-            "message": previous["message"],
-            "backup": previous["backup"],
-            "savedUnit": previous["savedUnit"],
-            "unit": previous["unit"],
+            "at": record["at"],
+            "message": record["message"],
+            "backup": record["backup"],
+            "savedUnit": record["savedUnit"],
+            "unit": record["unit"],
+            "root": record["root"],
         })
     })
+}
+fn has_rollback(failure: &Value) -> bool {
+    failure["backup"].as_str().is_some_and(|b| !b.is_empty())
+}
+
+/// The failure later attempts must not erase, carried as `pendingFailure`:
+/// the first failure that left rollback artifacts (a backup, a rewritten
+/// unit), which no later failure replaces; until one exists, the latest
+/// failure. An artifact-free failure never masks one with rollback.
+fn pending_failure(previous: Option<&Value>) -> Option<Value> {
+    let previous = previous?;
+    let carried = previous
+        .get("pendingFailure")
+        .filter(|p| !p.is_null())
+        .cloned();
+    let latest = as_failure(previous);
+    match (carried, latest) {
+        (Some(carried), _) if has_rollback(&carried) => Some(carried),
+        // Neither left artifacts: the latest says what to do now.
+        (_, Some(latest)) => Some(latest),
+        (carried, None) => carried,
+    }
 }
 
 /// Records this attempt. The last version known to have run healthy and any
 /// unresolved failure survive it; `extra["recovered"] = true` (set only when
-/// the service is seen running this binary) clears the failure.
+/// the gateway is seen serving) clears the failure. When this attempt adds
+/// nothing actionable but a carried failure has rollback, the top-level
+/// message keeps that rollback visible too.
 fn outcome(paths: &Paths, now: i64, status: Status, message: String, extra: Value) -> Outcome {
     let mut extra = extra;
     let previous = previous_record(paths);
     let running = previous
         .as_ref()
         .and_then(|r| r["runningVersion"].as_str().map(str::to_owned));
-    // The first unresolved failure is the one whose backup and saved unit
-    // restore the operator's TS install; a later failure never replaces it.
-    let pending = pending_failure(previous.as_ref());
+    let mut pending = pending_failure(previous.as_ref());
+    // This attempt, if it failed with rollback, supersedes an artifact-free one.
+    if status.name().starts_with("failed-")
+        && extra["backup"].as_str().is_some_and(|b| !b.is_empty())
+        && pending.as_ref().is_none_or(|p| !has_rollback(p))
+    {
+        pending = None;
+    }
+    let mut message = message;
     if let Some(obj) = extra.as_object_mut() {
         let recovered = obj.remove("recovered").is_some_and(|v| v == true);
+        if !recovered
+            && let Some(p) = pending.as_ref().filter(|p| has_rollback(p))
+            && !obj.get("backup").is_some_and(Value::is_string)
+        {
+            message.push_str(&format!(
+                "\nAn earlier attempt is still unresolved:\n{}",
+                p["message"].as_str().unwrap_or_default()
+            ));
+        }
         obj.insert("message".into(), json!(message));
         if !obj.contains_key("runningVersion")
             && let Some(running) = running
@@ -614,11 +607,15 @@ fn rollback_steps(plan: &Plan, backup: Option<&str>, saved: Option<&Path>) -> St
     text
 }
 
-fn rewrite_exec(unit: &Unit, binary: &Path) -> Result<(), String> {
+fn rewrite_exec(unit: &Unit, binary: &Path, post: Option<&str>) -> Result<(), String> {
     let mut out = String::with_capacity(unit.text.len());
     for line in unit.text.split_inclusive('\n') {
         if line.starts_with("ExecStart=") {
             out.push_str(&format!("ExecStart={}\n", binary.display()));
+            if let Some(post) = post {
+                out.push_str(post);
+                out.push('\n');
+            }
         } else {
             out.push_str(line);
         }
@@ -1014,26 +1011,12 @@ pub(crate) fn migrate(host: &dyn Host, paths: &Paths, now: i64) -> Outcome {
             );
         }
     };
-    convert(host, paths, &plan, lock, was_active, now).0
-}
-
-/// Under the held lock: back up, save and rewrite the unit, reload; then
-/// release and start Rust (by systemd unless `bridge`). Returns the bridge's
-/// child when it started one.
-fn convert(
-    host: &dyn Host,
-    paths: &Paths,
-    plan: &Plan,
-    lock: Lock,
-    start: bool,
-    now: i64,
-) -> (Outcome, Option<Child>) {
-    convert_as(
+    convert(
         host,
         paths,
-        plan,
+        &plan,
         lock,
-        if start {
+        if was_active {
             Starter::Systemd
         } else {
             Starter::None
@@ -1042,134 +1025,122 @@ fn convert(
     )
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone, Copy)]
 enum Starter {
+    /// It was not running: leave it stopped.
     None,
+    /// Start it and verify here.
     Systemd,
+    /// We are the bridge, running as the unit: ask systemd to restart it and
+    /// let a one-shot `ExecStartPost` verifier judge the start.
     Bridge,
 }
 
-fn convert_as(
+/// The line the bridge adds so systemd runs the verifier after Rust starts.
+fn verifier_line(binary: &Path) -> String {
+    format!(
+        "ExecStartPost={} omni service migrate --verify-start",
+        binary.display()
+    )
+}
+
+/// Under the held lock: back up, save and rewrite the unit, reload; then
+/// release and start Rust as `starter` says.
+fn convert(
     host: &dyn Host,
     paths: &Paths,
     plan: &Plan,
     lock: Lock,
     starter: Starter,
     now: i64,
-) -> (Outcome, Option<Child>) {
+) -> Outcome {
     let scope = plan.unit.scope;
     let backup = match host.backup(&lock, &plan.db) {
         Ok(id) => id,
         Err(e) => {
             host.release(lock);
-            return (
-                outcome(
-                    paths,
-                    now,
-                    Status::FailedBackup,
-                    format!(
-                        "could not back up {}: {e}. The service is stopped and nothing was changed; fix the error, then run omni service migrate.\n{}",
-                        plan.db.display(),
-                        rollback_steps(plan, None, None)
-                    ),
-                    json!({"unit": plan.unit.path}),
+            return outcome(
+                paths,
+                now,
+                Status::FailedBackup,
+                format!(
+                    "could not back up {}: {e}. The service is stopped and nothing was changed; fix the error, then run omni service migrate.\n{}",
+                    plan.db.display(),
+                    rollback_steps(plan, None, None)
                 ),
-                None,
+                json!({"unit": plan.unit.path}),
             );
         }
     };
     let saved = paths.state.join("pre-rust").join(UNIT_NAME);
-    let extra = json!({"backup": backup, "unit": plan.unit.path, "savedUnit": saved});
-    let journal = format!("journalctl{} -u {UNIT_NAME}", scope.flag());
-    let s = sudo(scope);
-    // `stopped` is whether the service is confirmed not running; only then
-    // does the message say so.
-    let fail_as = |why: String, rewritten: bool, stopped: bool| {
-        let state = if stopped {
-            "The service is left stopped".to_owned()
-        } else {
-            format!(
-                "The service could not be confirmed stopped: run {s}systemctl{} stop {UNIT_NAME} first",
-                scope.flag()
-            )
-        };
-        outcome(
+    let extra =
+        json!({"backup": backup, "unit": plan.unit.path, "savedUnit": saved, "root": plan.root});
+    let failure = |why: String, rewritten: bool, stopped: bool| {
+        start_failure(
             paths,
+            plan,
+            &backup,
+            rewritten.then_some(saved.as_path()),
+            why,
+            stopped,
             now,
-            Status::FailedStart,
-            format!(
-                "{why}. {state}; see {journal}.\nBackup: {backup}\n{}",
-                rollback_steps(plan, Some(&backup), rewritten.then_some(saved.as_path()))
-            ),
-            extra.clone(),
         )
     };
-    let fail = |why: String, rewritten: bool| fail_as(why, rewritten, true);
     if let Err(e) = fs::create_dir_all(paths.state.join("pre-rust"))
         .and_then(|()| fs::write(&saved, &plan.unit.text))
     {
         host.release(lock);
-        return (
-            fail(
-                format!("could not save the old unit to {}: {e}", saved.display()),
-                false,
-            ),
-            None,
+        return failure(
+            format!("could not save the old unit to {}: {e}", saved.display()),
+            false,
+            true,
         );
     }
-    if let Err(e) = rewrite_exec(&plan.unit, &paths.binary) {
+    let post = (starter == Starter::Bridge).then(|| verifier_line(&paths.binary));
+    if let Err(e) = rewrite_exec(&plan.unit, &paths.binary, post.as_deref()) {
         host.release(lock);
-        return (fail(e, false), None);
+        return failure(e, false, true);
     }
     if let Err(e) = host.systemctl(scope, &["daemon-reload"]) {
         host.release(lock);
-        return (
-            fail(format!("systemctl daemon-reload failed: {e}"), true),
-            None,
-        );
+        return failure(format!("systemctl daemon-reload failed: {e}"), true, true);
     }
     host.release(lock);
-    let base = local_base(&plan.env);
-    let health = "the Rust gateway did not answer /health within 30 s";
-    let mut child = None;
     match starter {
         Starter::None => {}
-        Starter::Bridge => match host.run_gateway(&paths.binary, &plan.root, probe_addr(&plan.env))
-        {
-            Ok(mut started) => {
-                let verdict = if !host.healthy(&base) {
-                    Err(health.to_owned())
-                } else if !started.running() {
-                    Err("the Rust gateway exited during startup".to_owned())
-                } else {
-                    serving_is(host, plan, started.pid(), &paths.binary)
-                };
-                if let Err(why) = verdict {
-                    started.kill();
-                    return (fail(why, true), None);
-                }
-                child = Some(started);
+        Starter::Bridge => {
+            // We are this unit's main process: the restart stops us and
+            // starts Rust; the verifier records the outcome. Record the
+            // handoff first — the stop may end this process at any point
+            // after the request.
+            let mut pending = extra.clone();
+            pending["handoff"] = json!(true);
+            let handed = outcome(
+                paths,
+                now,
+                Status::Verifying,
+                format!(
+                    "migrated {} to the Rust gateway {}; systemd is restarting it and will verify the start.\nBackup: {backup}",
+                    plan.unit.path.display(),
+                    paths.version
+                ),
+                pending,
+            );
+            if let Err(e) = host.systemctl(scope, &["restart", "--no-block", UNIT_NAME]) {
+                return failure(format!("systemctl restart failed: {e}"), true, true);
             }
-            Err(e) => {
-                return (
-                    fail(format!("could not start the Rust gateway: {e}"), true),
-                    None,
-                );
-            }
-        },
+            return handed;
+        }
         Starter::Systemd => {
             let verdict = match host.systemctl(scope, &["start", UNIT_NAME]) {
                 Err(e) => Err(format!("systemctl start failed: {e}")),
-                Ok(_) if !host.healthy(&base) => Err(health.to_owned()),
+                Ok(_) if !host.healthy(&local_base(&plan.env)) => Err(HEALTH.to_owned()),
                 Ok(_) => started_is_ours(host, plan, &paths.binary),
             };
             if let Err(why) = verdict {
                 return match stop_confirmed(host, scope) {
-                    Ok(()) => (fail(why, true), None),
-                    Err(e) => (
-                        fail_as(format!("{why} (stopping it: {e})"), true, false),
-                        None,
-                    ),
+                    Ok(()) => failure(why, true, true),
+                    Err(e) => failure(format!("{why} (stopping it: {e})"), true, false),
                 };
             }
         }
@@ -1179,22 +1150,148 @@ fn convert_as(
         done["runningVersion"] = json!(paths.version);
         done["recovered"] = json!(true);
     }
-    (
-        outcome(
-            paths,
-            now,
-            Status::Migrated,
-            format!(
-                "migrated {} to the Rust gateway {} ({}).\nBackup: {backup}\nOld unit saved at {}.\nRun omni doctor to see accounts and plugins this release does not serve.",
-                plan.unit.path.display(),
-                paths.version,
-                paths.binary.display(),
-                saved.display()
-            ),
-            done,
+    outcome(
+        paths,
+        now,
+        Status::Migrated,
+        format!(
+            "migrated {} to the Rust gateway {} ({}).\nBackup: {backup}\nOld unit saved at {}.\nRun omni doctor to see accounts and plugins this release does not serve.",
+            plan.unit.path.display(),
+            paths.version,
+            paths.binary.display(),
+            saved.display()
         ),
-        child,
+        done,
     )
+}
+
+const HEALTH: &str = "the Rust gateway did not answer /health within 30 s";
+
+/// A failed start after the unit was (possibly) rewritten.
+fn start_failure(
+    paths: &Paths,
+    plan: &Plan,
+    backup: &str,
+    saved: Option<&Path>,
+    why: String,
+    stopped: bool,
+    now: i64,
+) -> Outcome {
+    let scope = plan.unit.scope;
+    let state = if stopped {
+        "The service is left stopped".to_owned()
+    } else {
+        format!(
+            "The service could not be confirmed stopped: run {}systemctl{} stop {UNIT_NAME} first",
+            sudo(scope),
+            scope.flag()
+        )
+    };
+    let saved_unit = paths.state.join("pre-rust").join(UNIT_NAME);
+    outcome(
+        paths,
+        now,
+        Status::FailedStart,
+        format!(
+            "{why}. {state}; see journalctl{} -u {UNIT_NAME}.\nBackup: {backup}\n{}",
+            scope.flag(),
+            rollback_steps(plan, Some(backup), saved)
+        ),
+        json!({"backup": backup, "unit": plan.unit.path, "savedUnit": saved_unit, "root": plan.root}),
+    )
+}
+
+/// `--verify-start`, run by systemd as the bridge-rewritten unit's
+/// `ExecStartPost` once Rust is up (`MAINPID` is its pid). Removes itself
+/// from the unit whatever the outcome, records it, and exits non-zero on
+/// failure so systemd fails (and stops) the unit.
+pub(crate) fn verify_start(host: &dyn Host, paths: &Paths, main: u32, now: i64) -> i32 {
+    let Some(previous) = previous_record(paths).filter(|r| r["handoff"] == true) else {
+        return 0;
+    };
+    let Ok(plan) = preflight_for_verify(host, paths) else {
+        // The unit is no longer the one we rewrote: nothing of ours to judge.
+        return 0;
+    };
+    let backup = previous["backup"].as_str().unwrap_or_default().to_owned();
+    // Remove the verifier first, so no later start runs it again.
+    let without: String = plan
+        .unit
+        .text
+        .split_inclusive('\n')
+        .filter(|l| l.trim_end() != verifier_line(&paths.binary))
+        .collect();
+    let removed = fs::write(&plan.unit.path, without)
+        .map_err(|e| e.to_string())
+        .and_then(|()| {
+            host.systemctl(plan.unit.scope, &["daemon-reload"])
+                .map(drop)
+        });
+    let verdict = if !host.healthy(&local_base(&plan.env)) {
+        Err(HEALTH.to_owned())
+    } else {
+        serving_is(host, &plan, main, &paths.binary)
+    };
+    let saved = paths.state.join("pre-rust").join(UNIT_NAME);
+    match verdict {
+        Ok(()) if removed.is_ok() => {
+            let mut done = json!({"backup": backup, "unit": plan.unit.path, "savedUnit": saved, "root": plan.root});
+            done["runningVersion"] = json!(paths.version);
+            done["recovered"] = json!(true);
+            outcome(
+                paths,
+                now,
+                Status::Migrated,
+                format!(
+                    "migrated {} to the Rust gateway {} ({}).\nBackup: {backup}\nOld unit saved at {}.",
+                    plan.unit.path.display(),
+                    paths.version,
+                    paths.binary.display(),
+                    saved.display()
+                ),
+                done,
+            );
+            0
+        }
+        result => {
+            let why = match (result, removed) {
+                (Err(why), _) => why,
+                (Ok(()), Err(e)) => format!("could not remove the verifier from the unit: {e}"),
+                (Ok(()), Ok(())) => unreachable!(),
+            };
+            // Record first: the stop below ends this process. Exiting
+            // non-zero alone would let `Restart=on-failure` start Rust again,
+            // unverified (measured on systemd 257); a queued stop leaves the
+            // unit failed and stopped.
+            let stopped = host
+                .systemctl(plan.unit.scope, &["stop", "--no-block", UNIT_NAME])
+                .is_ok();
+            start_failure(paths, &plan, &backup, Some(&saved), why, stopped, now);
+            1
+        }
+    }
+}
+
+/// The rewritten unit, re-read for the verifier: our binary's `ExecStart`.
+fn preflight_for_verify(host: &dyn Host, paths: &Paths) -> Result<Plan, ()> {
+    let units = find_units(paths).map_err(drop)?;
+    let [unit] = <[Unit; 1]>::try_from(units).map_err(drop)?;
+    let (kind, root) = classify(&unit.text, &paths.binary).map_err(drop)?;
+    if kind != Kind::Rust {
+        return Err(());
+    }
+    let env_text = fs::read_to_string(root.join(".env")).map_err(drop)?;
+    let env = crate::context::parse_env(&env_text);
+    let db = database_path(&root, &env);
+    let facts = show(host, unit.scope, "ActiveState,MainPID").unwrap_or_default();
+    Ok(Plan {
+        unit,
+        kind,
+        root,
+        env,
+        db,
+        facts,
+    })
 }
 
 /// Rust → Rust: restart an active service only on positive evidence that npm
@@ -1239,15 +1336,7 @@ fn refresh(host: &dyn Host, paths: &Paths, plan: &Plan, now: i64) -> Outcome {
             extra,
         );
     };
-    // The first bridge start leaves the launcher as MainPID and the gateway
-    // as its child: judge the gateway.
-    let (pid, exe) = match host.process_exe(pid) {
-        Some(exe) if exe == paths.binary => (pid, Some(exe)),
-        other => match host.native_child(pid, &paths.binary) {
-            Some((child, exe)) => (child, Some(exe)),
-            None => (pid, other),
-        },
-    };
+    let exe = host.process_exe(pid);
     let replaced = exe.as_ref().is_some_and(|exe| {
         exe.display().to_string().ends_with(" (deleted)") || *exe != paths.binary
     });
@@ -1324,22 +1413,15 @@ fn refresh(host: &dyn Host, paths: &Paths, plan: &Plan, now: i64) -> Outcome {
     )
 }
 
-/// What the bridge does next.
-pub(crate) enum Bridge {
-    /// Exit with this code (0 for every refusal, so `Restart=on-failure`
-    /// does not loop).
-    Exit(i32),
-    /// Serve: relay signals to this child and exit with its status.
-    Serve(Child),
-}
-
 /// `gateway.js` started by a 0.x unit: migrate in place under the lock, then
-/// run Rust as this process's child for this one start.
-pub(crate) fn bridge(host: &dyn Host, paths: &Paths, now: i64) -> Bridge {
+/// ask systemd to restart the unit as Rust. Returns the exit code: 0 for every
+/// refusal and for the handoff (so `Restart=on-failure` does not loop), 1 when
+/// run by hand outside the unit.
+pub(crate) fn bridge(host: &dyn Host, paths: &Paths, now: i64) -> i32 {
     let refuse = |status: Status, message: String| {
         eprintln!("{message}");
         outcome(paths, now, status, message, json!({}));
-        Bridge::Exit(0)
+        0
     };
     let plan = match preflight(host, paths) {
         Ok(plan) => plan,
@@ -1347,7 +1429,7 @@ pub(crate) fn bridge(host: &dyn Host, paths: &Paths, now: i64) -> Bridge {
             eprintln!(
                 "gateway.js is the 0.x → Rust migration bridge, run by an old omnigateway systemd unit. No such unit was found; start the gateway with: omni start"
             );
-            return Bridge::Exit(1);
+            return 1;
         }
         Err((status, message)) => return refuse(status, message),
     };
@@ -1356,7 +1438,7 @@ pub(crate) fn bridge(host: &dyn Host, paths: &Paths, now: i64) -> Bridge {
             "{} already runs the Rust gateway; gateway.js is only a migration bridge",
             plan.unit.path.display()
         );
-        return Bridge::Exit(0);
+        return 0;
     }
     // Only as the unit's own start: systemd's MainPID is our ancestor.
     let Some(main) = main_pid(&plan.facts) else {
@@ -1371,7 +1453,7 @@ pub(crate) fn bridge(host: &dyn Host, paths: &Paths, now: i64) -> Bridge {
         eprintln!(
             "gateway.js is the migration bridge systemd runs for {UNIT_NAME}; run `omni service migrate` instead"
         );
-        return Bridge::Exit(1);
+        return 1;
     }
     let allowed = [main, std::process::id()];
     if let Err((status, message)) = preflight_data(host, paths, &plan, &allowed) {
@@ -1398,12 +1480,9 @@ pub(crate) fn bridge(host: &dyn Host, paths: &Paths, now: i64) -> Bridge {
             );
         }
     };
-    let (result, child) = convert_as(host, paths, &plan, lock, Starter::Bridge, now);
+    let result = convert(host, paths, &plan, lock, Starter::Bridge, now);
     eprintln!("{}", result.message);
-    match child {
-        Some(child) if result.status == Status::Migrated => Bridge::Serve(child),
-        _ => Bridge::Exit(0),
-    }
+    0
 }
 
 /// The commands an operator checks a service with. Only they print the
@@ -1416,10 +1495,11 @@ pub(crate) fn announces(command: &str) -> bool {
 /// still installed. `None` when there is nothing to say.
 pub(crate) fn banner(paths: &Paths) -> Option<String> {
     let latest = previous_record(paths);
-    // An unresolved failure outranks whatever the latest attempt said.
+    // Show what the operator needs to act on: the unresolved failure (the
+    // one with rollback when there is one), else the latest attempt.
     let shown = latest
         .as_ref()
-        .and_then(|r| r.get("pendingFailure").filter(|p| !p.is_null()).cloned())
+        .and_then(|r| pending_failure(Some(r)))
         .or(latest);
     if let Some(record) = shown
         && let Some(status) = record["status"].as_str()
@@ -1469,10 +1549,12 @@ pub(crate) fn command(flags: &[String]) -> std::process::ExitCode {
         print!("{HELP}");
         return ExitCode::SUCCESS;
     }
-    if let Some(bad) = flags
-        .iter()
-        .find(|f| !matches!(f.as_str(), "--from-npm" | "--bridge" | "--json"))
-    {
+    if let Some(bad) = flags.iter().find(|f| {
+        !matches!(
+            f.as_str(),
+            "--from-npm" | "--bridge" | "--verify-start" | "--json"
+        )
+    }) {
         eprintln!("unknown option for omni service migrate: {bad}\n{HELP}");
         return ExitCode::from(2);
     }
@@ -1488,10 +1570,17 @@ pub(crate) fn command(flags: &[String]) -> std::process::ExitCode {
         };
     };
     if flags.iter().any(|f| f == "--bridge") {
-        return match bridge(&host::System, &paths, now) {
-            Bridge::Exit(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
-            Bridge::Serve(child) => host::serve(child),
-        };
+        let code = bridge(&host::System, &paths, now);
+        return ExitCode::from(u8::try_from(code).unwrap_or(1));
+    }
+    if flags.iter().any(|f| f == "--verify-start") {
+        // systemd sets MAINPID for ExecStartPost.
+        let main = std::env::var("MAINPID")
+            .ok()
+            .and_then(|p| p.trim().parse::<u32>().ok())
+            .unwrap_or(0);
+        let code = verify_start(&host::System, &paths, main, now);
+        return ExitCode::from(u8::try_from(code).unwrap_or(1));
     }
     if !cfg!(target_os = "linux") {
         return ExitCode::SUCCESS;

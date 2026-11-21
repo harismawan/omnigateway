@@ -1,5 +1,5 @@
 //! The production [`Host`]: real `systemctl`, `/proc`, HTTP and SQLite.
-use super::{Child, Host, Lock, Scope};
+use super::{Host, Lock, Scope};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -219,24 +219,6 @@ impl Host for System {
         false
     }
 
-    fn run_gateway(
-        &self,
-        binary: &Path,
-        root: &Path,
-        addr: std::net::SocketAddr,
-    ) -> Result<Child, String> {
-        // Armed before the child exists, so a TERM during its startup or
-        // health wait is never lost.
-        let target = relay_signals(addr)?;
-        let child = Command::new(binary)
-            .current_dir(root)
-            .stdin(Stdio::null())
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        target.store(child.id(), std::sync::atomic::Ordering::SeqCst);
-        Ok(Child::Real(child))
-    }
-
     fn occupied(&self, addr: std::net::SocketAddr) -> bool {
         std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok()
     }
@@ -277,50 +259,40 @@ impl Host for System {
         }
         owners.into_iter().next()
     }
-
-    fn native_child(&self, parent: u32, binary: &Path) -> Option<(u32, PathBuf)> {
-        // Any thread of `parent` may have spawned it.
-        let mut children = String::new();
-        for task in fs::read_dir(format!("/proc/{parent}/task")).ok()?.flatten() {
-            if let Ok(list) = fs::read_to_string(task.path().join("children")) {
-                children.push_str(&list);
-                children.push(' ');
-            }
-        }
-        children
-            .split_whitespace()
-            .filter_map(|c| c.parse::<u32>().ok())
-            .find_map(|pid| {
-                let exe = fs::read_link(format!("/proc/{pid}/exe")).ok()?;
-                let shown = exe.display().to_string();
-                (exe == binary
-                    || shown.trim_end_matches(" (deleted)") == binary.display().to_string())
-                .then_some((pid, exe))
-            })
-    }
 }
 
-/// Inodes of listening sockets that serve `addr`: bound to exactly its IP,
-/// or to the wildcard of its family, on its port (`/proc/net/tcp*`, `0A`).
+/// Inodes of listening sockets that serve `addr`: bound to exactly its IP
+/// or to its own family's wildcard, on its port (`/proc/net/tcp*`, state
+/// `0A`). An IPv4 probe is also served by an IPv6 wildcard socket on a
+/// dual-stack host; `/proc` does not say whether that socket is v6only, so it
+/// counts it — the caller then requires the owner to be the gateway, which
+/// fails closed if it is someone else.
 fn serving_inodes(addr: std::net::SocketAddr) -> Vec<String> {
     let port = format!("{:04X}", addr.port());
-    let (file, exact, wildcard) = match addr.ip() {
-        std::net::IpAddr::V4(ip) => (
-            "/proc/net/tcp",
-            format!("{:08X}", u32::from_le_bytes(ip.octets())),
-            "00000000".to_owned(),
-        ),
-        std::net::IpAddr::V6(ip) => {
-            let mut hex = String::new();
-            for chunk in ip.octets().chunks(4) {
-                let word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                hex.push_str(&format!("{word:08X}"));
-            }
-            ("/proc/net/tcp6", hex, "0".repeat(32))
-        }
+    let hex6 = |octets: [u8; 16]| -> String {
+        octets
+            .chunks(4)
+            .map(|c| format!("{:08X}", u32::from_le_bytes([c[0], c[1], c[2], c[3]])))
+            .collect()
+    };
+    let wild6 = "0".repeat(32);
+    let wanted: Vec<(&str, String)> = match addr.ip() {
+        std::net::IpAddr::V4(ip) => vec![
+            (
+                "/proc/net/tcp",
+                format!("{:08X}", u32::from_le_bytes(ip.octets())),
+            ),
+            ("/proc/net/tcp", "00000000".to_owned()),
+            ("/proc/net/tcp6", wild6.clone()),
+            ("/proc/net/tcp6", hex6(ip.to_ipv6_mapped().octets())),
+        ],
+        std::net::IpAddr::V6(ip) => vec![
+            ("/proc/net/tcp6", hex6(ip.octets())),
+            ("/proc/net/tcp6", wild6.clone()),
+        ],
     };
     let mut out = vec![];
-    for (file, exact) in [(file, exact.as_str()), ("/proc/net/tcp6", "")] {
+    for file in ["/proc/net/tcp", "/proc/net/tcp6"] {
         let Ok(text) = fs::read_to_string(file) else {
             continue;
         };
@@ -333,134 +305,14 @@ fn serving_inodes(addr: std::net::SocketAddr) -> Vec<String> {
             let Some((ip, p)) = local.split_once(':') else {
                 continue;
             };
-            if *state != "0A" || p != port {
-                continue;
-            }
-            // An IPv6 wildcard socket also serves IPv4 unless v6only.
-            let serves =
-                ip == exact || ip == wildcard || (file == "/proc/net/tcp6" && ip == "0".repeat(32));
-            if serves {
+            if *state == "0A" && p == port && wanted.iter().any(|(f, w)| *f == file && w == ip) {
                 out.push((*inode).to_owned());
             }
-        }
-        if file == "/proc/net/tcp6" {
-            break;
         }
     }
     out.sort();
     out.dedup();
     out
-}
-
-/// This process's cgroup (`/proc/<pid>/cgroup`, unified hierarchy line).
-fn cgroup_of(pid: u32) -> Option<String> {
-    fs::read_to_string(format!("/proc/{pid}/cgroup"))
-        .ok()?
-        .lines()
-        .find_map(|l| l.strip_prefix("0::").map(str::to_owned))
-}
-
-/// Relay unless both share a known control group (systemd already signals
-/// every process in it, and a second TERM aborts the gateway's drain).
-fn should_relay(child: Option<String>, ours: Option<String>) -> bool {
-    match (child, ours) {
-        (Some(child), Some(ours)) => child != ours,
-        _ => true,
-    }
-}
-
-/// Forward TERM/INT/HUP to the gateway, whose pid the caller stores into the
-/// returned slot once spawned. Handlers are installed before this returns
-/// (`Err` when they cannot be, so the caller does not spawn); a signal that
-/// arrives before the pid is known is held and delivered once it is.
-///
-/// Under systemd's default `KillMode=control-group` a stop signals every
-/// process in the unit, the gateway included, and a second TERM is the
-/// gateway's "abort the drain" escalation. A signal aimed at this process
-/// alone (`systemctl kill --kill-whom=main`) reaches only us. The gateway
-/// closes its listener the moment it takes TERM, so: for a gateway in our
-/// own cgroup, wait briefly and relay only if it is still listening.
-fn relay_signals(
-    listen: std::net::SocketAddr,
-) -> Result<std::sync::Arc<std::sync::atomic::AtomicU32>, String> {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    let target = std::sync::Arc::new(AtomicU32::new(0));
-    let slot = target.clone();
-    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
-    std::thread::spawn(move || {
-        let runtime = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(runtime) => runtime,
-            Err(e) => {
-                let _sent = ready_tx.send(Err(e.to_string()));
-                return;
-            }
-        };
-        runtime.block_on(async move {
-            use tokio::signal::unix::{SignalKind, signal};
-            let (mut term, mut int, mut hup) = match (
-                signal(SignalKind::terminate()),
-                signal(SignalKind::interrupt()),
-                signal(SignalKind::hangup()),
-            ) {
-                (Ok(t), Ok(i), Ok(h)) => (t, i, h),
-                _ => {
-                    let _sent = ready_tx.send(Err("cannot install signal handlers".into()));
-                    return;
-                }
-            };
-            let _sent = ready_tx.send(Ok(()));
-            loop {
-                let sig = tokio::select! {
-                    _ = term.recv() => rustix::process::Signal::TERM,
-                    _ = int.recv() => rustix::process::Signal::INT,
-                    _ = hup.recv() => rustix::process::Signal::HUP,
-                };
-                // Not spawned yet: hold it until the pid is known.
-                let mut pid = slot.load(Ordering::SeqCst);
-                while pid == 0 {
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                    pid = slot.load(Ordering::SeqCst);
-                }
-                if !should_relay(cgroup_of(pid), cgroup_of(std::process::id())) {
-                    // Same unit: a group stop reached it too. Give it a moment
-                    // to close its listener; relay only if it did not.
-                    tokio::time::sleep(Duration::from_millis(300)).await;
-                    if !listening(listen) {
-                        continue;
-                    }
-                }
-                if let Some(pid) = rustix::process::Pid::from_raw(pid as i32) {
-                    let _sent = rustix::process::kill_process(pid, sig);
-                }
-            }
-        });
-    });
-    ready_rx
-        .recv()
-        .map_err(|_| "signal relay thread died".to_owned())??;
-    Ok(target)
-}
-
-/// Something accepts at `addr` (the gateway still serving).
-fn listening(addr: std::net::SocketAddr) -> bool {
-    std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
-}
-
-/// Serve as the bridge: wait for the gateway (signals are already relayed by
-/// [`relay_signals`]) and exit with its status, so systemd sees the gateway's
-/// own outcome.
-pub(crate) fn serve(child: Child) -> std::process::ExitCode {
-    use std::process::ExitCode;
-    let Some(mut child) = child.into_real() else {
-        return ExitCode::FAILURE;
-    };
-    match child.wait() {
-        Ok(status) => ExitCode::from(u8::try_from(status.code().unwrap_or(1)).unwrap_or(1)),
-        Err(_) => ExitCode::FAILURE,
-    }
 }
 
 #[cfg(test)]
@@ -546,132 +398,6 @@ mod tests {
         drop(listener);
         assert_eq!(System.listener_pid(addr), None);
         assert!(!System.occupied(addr));
-    }
-
-    #[test]
-    fn a_native_child_is_found_under_its_parent() {
-        let sleep = PathBuf::from("/bin/sleep");
-        let real = fs::canonicalize(&sleep).unwrap();
-        let mut child = Command::new(&sleep).arg("5").spawn().unwrap();
-        let found = (0..50).find_map(|_| {
-            std::thread::sleep(Duration::from_millis(20));
-            System.native_child(std::process::id(), &real)
-        });
-        let _killed = child.kill();
-        let _reaped = child.wait();
-        assert_eq!(found.map(|(pid, _)| pid), Some(child.id()));
-        assert_eq!(
-            System.native_child(std::process::id(), Path::new("/nope")),
-            None
-        );
-    }
-
-    #[test]
-    fn relay_skips_a_child_systemd_already_signals() {
-        let unit = Some("/user.slice/user@1000.service/app.slice/omnigateway.service".to_owned());
-        assert!(!should_relay(unit.clone(), unit.clone()));
-        assert!(should_relay(
-            Some("/user.slice/session-4.scope".into()),
-            unit
-        ));
-        assert!(should_relay(None, None));
-    }
-
-    /// The relay installs process-wide signal handlers, so it runs alone in
-    /// a re-executed copy of this test binary, never beside other tests.
-    #[test]
-    fn relay_reaches_a_child_only_when_the_signal_missed_it() {
-        if std::env::var_os("OMNI_RELAY_HARNESS").is_none() {
-            let out = Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "npm_migrate::host::tests::relay_reaches_a_child_only_when_the_signal_missed_it",
-                    "--exact",
-                    "--nocapture",
-                    "--test-threads=1",
-                ])
-                .env("OMNI_RELAY_HARNESS", "1")
-                .output()
-                .unwrap();
-            assert!(
-                out.status.success(),
-                "{}{}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
-            );
-            return;
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("child.py");
-        // Listens; logs every TERM and closes its listener on the first (as
-        // the gateway does); exits on its own after a few seconds.
-        fs::write(
-            &script,
-            "import signal,socket,sys,time\nport=int(sys.argv[1]);log=sys.argv[2]\ns=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);s.bind(('127.0.0.1',port));s.listen()\ndef h(*a):\n  open(log,'a').write('TERM\\n')\n  s.close()\nsignal.signal(signal.SIGTERM,h)\nopen(log,'a').write('up\\n')\nt=time.time()\nwhile time.time()-t<8: time.sleep(0.05)\n",
-        )
-        .unwrap();
-        let terms = |log: &Path| {
-            fs::read_to_string(log)
-                .unwrap_or_default()
-                .matches("TERM")
-                .count()
-        };
-        let spawn = |log: &Path, port: u16| {
-            Command::new("python3")
-                .arg(&script)
-                .arg(port.to_string())
-                .arg(log)
-                .spawn()
-                .unwrap()
-        };
-        let free_port = || {
-            std::net::TcpListener::bind("127.0.0.1:0")
-                .unwrap()
-                .local_addr()
-                .unwrap()
-                .port()
-        };
-        let wait_up = |log: &Path, addr| {
-            for _ in 0..200 {
-                if fs::read_to_string(log).is_ok_and(|l| l.contains("up")) && listening(addr) {
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            panic!("child did not start");
-        };
-        let me = rustix::process::getpid();
-
-        // 1. A TERM aimed at the bridge alone: relayed to the child.
-        let port = free_port();
-        let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-        let log = dir.path().join("one");
-        let slot = relay_signals(addr).unwrap();
-        let mut child = spawn(&log, port);
-        slot.store(child.id(), std::sync::atomic::Ordering::SeqCst);
-        wait_up(&log, addr);
-        rustix::process::kill_process(me, rustix::process::Signal::TERM).unwrap();
-        std::thread::sleep(Duration::from_millis(800));
-        assert_eq!(terms(&log), 1, "a bridge-only TERM must reach the child");
-        let _killed = child.kill();
-        let _reaped = child.wait();
-        slot.store(0, std::sync::atomic::Ordering::SeqCst);
-
-        // 2. A group stop: the child takes TERM itself (closing its listener),
-        // the bridge gets one too; the relay must not send a second.
-        let port = free_port();
-        let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-        let log = dir.path().join("two");
-        let slot = relay_signals(addr).unwrap();
-        let mut child = spawn(&log, port);
-        slot.store(child.id(), std::sync::atomic::Ordering::SeqCst);
-        wait_up(&log, addr);
-        let pid = rustix::process::Pid::from_raw(child.id() as i32).unwrap();
-        rustix::process::kill_process(pid, rustix::process::Signal::TERM).unwrap();
-        rustix::process::kill_process(me, rustix::process::Signal::TERM).unwrap();
-        std::thread::sleep(Duration::from_millis(800));
-        assert_eq!(terms(&log), 1, "a group stop must not be doubled");
-        let _killed = child.kill();
-        let _reaped = child.wait();
     }
 
     #[test]
