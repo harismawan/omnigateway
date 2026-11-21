@@ -1560,7 +1560,9 @@ fn write_handoff(handoff: &Handoff) -> Result<(), String> {
 /// An exclusive `flock` on `<root>/npm-handoff.lock`, held across writing,
 /// judging-then-removing, and conversion, so an operator's run and the
 /// verifier never interleave on the same handoff. Released on drop.
-struct RootLock(#[allow(dead_code)] fs::File);
+struct RootLock {
+    _held: fs::File,
+}
 fn lock_root(root: &Path) -> Result<RootLock, String> {
     let file = root.join(format!("{HANDOFF}.lock"));
     let f = fs::OpenOptions::new()
@@ -1572,7 +1574,7 @@ fn lock_root(root: &Path) -> Result<RootLock, String> {
     // Bounded: a held lock is someone else mid-step; never wait forever.
     for _ in 0..300 {
         match rustix::fs::flock(&f, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
-            Ok(()) => return Ok(RootLock(f)),
+            Ok(()) => return Ok(RootLock { _held: f }),
             Err(rustix::io::Errno::WOULDBLOCK) => {
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
