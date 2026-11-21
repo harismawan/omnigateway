@@ -16,7 +16,8 @@ for (const kind of ["input", "schema", "vendor", "tool"]) {
   if (kind === "vendor") request.vendor = { antigravity: { extra: nested } };
   if (kind === "tool") request.tools = [{ kind: "portable", name: "tool", inputSchema: nested }];
   try {
-    const r = toAntigravityWire(request, "m", { project: "p", requestId: "r" });
+    // `toAntigravityWire` receives the already-decorated ID from the codec.
+    const r = toAntigravityWire(request, "m", { project: "p", requestId: "agent/r" });
     const body = JSON.stringify(r.body);
     rows.push({
       kind,

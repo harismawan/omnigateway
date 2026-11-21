@@ -1,7 +1,8 @@
 //! The request bytes, exactly as `nodeHttpClient` puts them on the wire.
 //!
 //! `nodeHttpClient` copies the ordered header pairs into a plain JS object,
-//! adds `Content-Length` for a non-empty body, and hands it to `node:http`,
+//! adds `Content-Length` for a non-empty body, except for Antigravity's explicit
+//! `Transfer-Encoding: chunked`, and hands it to `node:http`,
 //! which then adds `Host`, `Connection: keep-alive` and — for a bodiless
 //! method that carries a body by default — `Content-Length: 0`. Each of those
 //! steps has an observable quirk, and each is reproduced here (all measured
@@ -129,12 +130,13 @@ fn has_token(value: &str, token: &str) -> bool {
 
 /// Encodes one request, head and body, or refuses it before anything is sent.
 pub(crate) fn encode(
+    provider: &str,
     method: &str,
     target: &Target,
     headers: &[(String, String)],
     body: &[u8],
 ) -> Result<(Vec<u8>, RequestFacts), HttpError> {
-    let (mut head, facts, chunked) = encode_head(method, target, headers, body.len())?;
+    let (mut head, facts, chunked) = encode_head(provider, method, target, headers, body.len())?;
     if chunked {
         if !body.is_empty() {
             head.extend_from_slice(format!("{:x}\r\n", body.len()).as_bytes());
@@ -150,12 +152,13 @@ pub(crate) fn encode(
 
 /// Reuse the compressed allocation rather than retaining two copies of it.
 pub(crate) fn encode_owned(
+    provider: &str,
     method: &str,
     target: &Target,
     headers: &[(String, String)],
     mut body: Vec<u8>,
 ) -> Result<(Vec<u8>, RequestFacts), HttpError> {
-    let (mut head, facts, chunked) = encode_head(method, target, headers, body.len())?;
+    let (mut head, facts, chunked) = encode_head(provider, method, target, headers, body.len())?;
     if chunked && !body.is_empty() {
         head.extend_from_slice(format!("{:x}\r\n", body.len()).as_bytes());
     }
@@ -173,6 +176,7 @@ pub(crate) fn encode_owned(
 }
 
 fn encode_head(
+    provider: &str,
     method: &str,
     target: &Target,
     headers: &[(String, String)],
@@ -191,7 +195,14 @@ fn encode_head(
             None => object.push((name.as_str(), value.clone())),
         }
     }
-    if body_len > 0 && !has("content-length") {
+    if body_len > 0
+        && !has("content-length")
+        && !(provider == "antigravity"
+            && headers.iter().any(|(name, value)| {
+                name.eq_ignore_ascii_case("transfer-encoding")
+                    && value.eq_ignore_ascii_case("chunked")
+            }))
+    {
         object.push(("Content-Length", body_len.to_string()));
     }
     // Enumeration order: array-index keys ascending, then insertion order.
@@ -308,6 +319,17 @@ mod tests {
         }
     }
     use super::*;
+
+    #[test]
+    fn explicit_chunked_framing_does_not_gain_content_length() {
+        let target = parse_target("http://host.test/").expect("url");
+        let headers = [("Transfer-Encoding".to_owned(), "chunked".to_owned())];
+        let (wire, _) = encode("antigravity", "POST", &target, &headers, b"{}").expect("request");
+        assert_eq!(
+            wire,
+            b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nHost: host.test\r\nConnection: keep-alive\r\n\r\n2\r\n{}\r\n0\r\n\r\n"
+        );
+    }
 
     #[test]
     fn token_match_is_word_bounded_and_case_insensitive() {

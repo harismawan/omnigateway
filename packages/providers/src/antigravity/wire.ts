@@ -956,14 +956,13 @@ export function toAntigravityWire(
     body: {
       project: identity.project,
       requestId: identity.requestId,
+      request,
       model,
       // Fixed. It names the *client family* to Cloud Code, not the version —
       // that is the `User-Agent` header's job — and the backend gates on it.
       userAgent: "antigravity",
-      // `image_gen` is the only other value, and nothing in this gateway's IR
-      // can ask for it.
+      // The App also makes separate checkpoint calls. The gateway sends only agent turns.
       requestType: "agent",
-      request,
     },
     degradations,
   };

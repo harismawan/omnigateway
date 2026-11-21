@@ -102,6 +102,24 @@ fn latin1(bytes: &[u8]) -> String {
 }
 
 #[tokio::test]
+async fn only_antigravity_omits_automatic_length_when_chunked() {
+    let (port, mut rx) = capture_server(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+    let client = Client::new();
+    for (provider, has_length) in [("custom", true), ("antigravity", false)] {
+        let mut req = request(port, "POST", "/", &[("Transfer-Encoding", "chunked")], "xy");
+        req.provider = provider.into();
+        assert_eq!(client.send(req).await.expect("send").status, 200);
+        let (_, bytes) = rx.recv().await.expect("capture");
+        assert_eq!(
+            latin1(&bytes).contains("\r\nContent-Length: 2\r\n"),
+            has_length,
+            "{provider}"
+        );
+        assert!(bytes.ends_with(b"\r\n\r\n2\r\nxy\r\n0\r\n\r\n"));
+    }
+}
+
+#[tokio::test]
 async fn writes_exactly_the_bytes_node_http_wrote_for_every_vector() {
     let (port, mut rx) = capture_server(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}").await;
     let client = Client::new();

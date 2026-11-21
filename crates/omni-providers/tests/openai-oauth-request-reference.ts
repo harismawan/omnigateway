@@ -319,6 +319,8 @@ for (const model of ["gpt-6-astra", "gpt-5.5"])
   ])
     add("response-format", { ...base, vendor: { openai: vendor } }, model, JSON.stringify(vendor));
 for (const model of [
+  "gpt-6.2-sol",
+  "gpt-6.2-astra",
   "gpt-6-astra",
   "gpt-6.1-sol",
   "gpt-6.1-terra",

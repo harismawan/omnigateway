@@ -5,6 +5,29 @@ import type { HttpRequest, HttpResponse } from "../src/index.ts";
 import { ADAPTERS } from "../src/registry.ts";
 import { entry as tableEntry } from "./entry.ts";
 
+test("GPT-6.2 prices and auth-specific input caps match official model data", () => {
+  for (const [id, input, output, cacheRead, cacheWrite5m, oauthContext] of [
+    ["gpt-6.2-sol", 2, 10, 0.1, 2.5, 500_000],
+    ["gpt-6.2-astra", 8, 40, 0.4, 10, 272_000],
+  ] as const) {
+    expect(catalogPricing("openai", id)).toEqual({
+      input,
+      output,
+      cacheRead,
+      cacheWrite5m,
+      cacheWrite1h: 0,
+    });
+    expect(catalogLimits("openai", id, "apiKey")).toEqual({
+      contextWindow: 922_000,
+      maxOutputTokens: 128_000,
+    });
+    expect(catalogLimits("openai", id, "oauth")).toEqual({
+      contextWindow: oauthContext,
+      maxOutputTokens: 128_000,
+    });
+  }
+});
+
 const PROVIDERS = [
   "anthropic",
   "openai",
@@ -34,6 +57,8 @@ const EXPECTED = {
   openai: {
     defaultModel: "gpt-6.1-sol",
     ids: [
+      "gpt-6.2-astra",
+      "gpt-6.2-sol",
       "gpt-6-astra",
       "gpt-6.1-sol",
       "gpt-6.1-terra",

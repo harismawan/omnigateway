@@ -1,0 +1,33 @@
+{
+  "client": "Antigravity App 2.34.0, Linux x86_64, Hub UI",
+  "capturedAt": "2026-11-21",
+  "archiveSha256": "478c68f86c9ef61a502185a39e9ceec66b1276a6a53b191a19b0d9ce869836db",
+  "requestLine": "POST /v1internal:streamGenerateContent?alt=sse HTTP/1.1",
+  "gatewayRequestIdDeviation": "The gateway keeps agent/<gateway id>; the App's extra segments are not reproduced.",
+  "headers": [
+    ["Host", "daily-cloudcode-pa.googleapis.com"],
+    [
+      "User-Agent",
+      "antigravity/hub/2.34.0 (aidev_client; os_type=linux; arch=amd64; cl=1026637980)"
+    ],
+    ["Transfer-Encoding", "chunked"],
+    ["Authorization", "Bearer <token>"],
+    ["Content-Type", "application/json"],
+    ["Accept-Encoding", "gzip"]
+  ],
+  "envelope": {
+    "project": "<project>",
+    "requestId": "agent/<uuid-v4>/<13 decimal digits>/<uuid-v4>/1",
+    "request": {
+      "contents": "<history>",
+      "systemInstruction": "<prompt>",
+      "tools": "<tool inventory>",
+      "labels": "<client labels>",
+      "generationConfig": "<model settings>",
+      "sessionId": "<session id>"
+    },
+    "model": "gemini-pro-agent",
+    "userAgent": "antigravity",
+    "requestType": "agent"
+  }
+}

@@ -1,6 +1,7 @@
-# Antigravity request-side audit — frozen 1780bb39
+# Antigravity request-side audit
 
-One current request inventory; independent re-review remains pending.
+Originally audited against frozen `1780bb39`. Inference identity and envelope
+order now follow the [App 2.34.0 capture](../scripts/antigravity-capture/README.md).
 
 | Literal / limit / regex / note | Rust location | Pinning test row |
 |---|---|---|
@@ -10,10 +11,9 @@ One current request inventory; independent re-review remains pending.
 | xxHash64 UTF-8, `0xffffff`, lowercase hex padded to six | existing `omni_crypto::cloak::antigravity_suffix` | aliases compared with Bun for all 132 rows |
 | portable tools, history tool calls, unmatched result ids, explicit tool choice | `cloak.rs::ToolCloak::build` | all six corpus source modes; result calls may appear later |
 | stable insertion order; reserved valid names claim first; suffix every collision | `cloak.rs::ToolCloak::build` | forward/reversed combined names, duplicate names, `read file` / `read/file` / `read_file` |
-| `OMNI_ANTIGRAVITY_IDE_VERSION`, `2.12.2` | `profile.rs::headers` | profile vectors |
-| `OMNI_UA_ANTIGRAVITY`, `antigravity/ide/`, `darwin/arm64` | `profile.rs::headers` | exact frozen codec header pairs |
-| `User-Agent`, `Content-Type: application/json`, `Accept: text/event-stream` | `profile.rs::headers` | exact pairs, casing, order |
-| `OMNI_ORDER_ANTIGRAVITY`; Host, Content-Type, Authorization, User-Agent, X-Goog-Api-Client, Accept, Accept-Encoding, Content-Length | `profile.rs::headers` | default and reordered headers; absent names skipped; duplicates consumed once |
+| `OMNI_ANTIGRAVITY_IDE_VERSION`, `OMNI_UA_ANTIGRAVITY`, `OMNI_ORDER_ANTIGRAVITY` | `profile.rs::headers`, `inference_headers` | bootstrap profile vectors and inference version/full-order conformance rows |
+| App 2.34.0 Linux Hub; Host, User-Agent, Transfer-Encoding, Authorization, Content-Type | `profile.rs::inference_headers` | sanitized capture, codec vectors |
+| Legacy IDE 2.12.2 Darwin bootstrap identity | `profile.rs::headers` | bootstrap profile and OAuth vectors |
 | shared header SAFE `[\x20-\x7E]{1,200}` | `profile.rs::safe` | empty, 200/201 bytes, Unicode, control characters, space |
 | comma splitting, JS trim, reject invalid entries, default if empty | `profile.rs::headers`, existing `omni_ir::js::trim` | whitespace/BOM/NBSP, duplicates, unknown names |
 | import-time environment capture | `profile.rs::initialize` + OnceLock | TS mutation after import; Rust capture ignores a second source |
@@ -33,7 +33,7 @@ One current request inventory; independent re-review remains pending.
 | structural inference uses original declared type for both agree calls | post-walk repair | inferred versus contradictory types |
 | required/propertyOrdering filter to own known property names | post-walk repair | missing-name rows |
 | lowercase `array` without items loses type; uppercase preserved | final repair | ARRAY/array rows |
-| project, requestId, model, userAgent, requestType, request; `antigravity`, `agent` | `wire::to_wire` | every wire row |
+| project, requestId, request, model, userAgent, requestType; `antigravity`, `agent` | `wire::to_wire` | capture fixture, every wire row |
 | user/model; merge same roles; empty opening, single-space closing | `wire::to_wire` | blocks/roles/result rows |
 | `skip_thought_signature_validator`; functionCall/functionResponse/inlineData | `wire::to_wire` | input, result, image and file rows |
 | cache-control/system-turn/thinking/provider-native/unmatched/error-flag/files-inlined degradation suffixes | `wire::to_wire` | cache, blocks, result, file rows; first-occurrence ordering compared |
@@ -48,7 +48,7 @@ One current request inventory; independent re-review remains pending.
 | daily-cloudcode-pa streaming URL, POST, Authorization Bearer | `codec::build_request` | all successful codec rows |
 | AUTH `antigravity credential has no access token`; `antigravity credential has no Cloud Code project; reconnect the account` | `codec::build_request` | invalid-token/project cross-product |
 | Internal order: Rust builds tool cloak before deriving request id; frozen derives id first. Both are infallible on representable input; no observable effect | `codec::build_request_scoped` | source audit; existing explicit/derived id and cloak rows |
-| `omni-antigravity-req`, SHA256 UUID slices, version 4, variant mask 3/or 8 | `codec::build_request` | derived versus explicit/empty/space ids |
+| `agent/` prefix; `omni-antigravity-req`, SHA256 UUID slices, version 4, variant mask 3/or 8 | `codec::build_request` | capture fixture, derived versus explicit/empty/space ids |
 | `antigravity:system-{image,thinking,toolUse,toolResult,providerNative}-dropped` | `system::system_text` | wire `system-drop:image/thinking/toolUse/toolResult/providerNative` |
 | response reader depth 64; items/additionalItems/additionalProperties/contains/contentSchema/if/then/else/not/propertyNames/unevaluatedItems/unevaluatedProperties; lists anyOf/allOf/oneOf/prefixItems/items; maps properties/patternProperties/$defs/definitions/dependentSchemas/dependencies | `response_format` | shared response-format corpus; wire `format:*`, depth response schema |
 | text/*, +json, +xml; application/json, x-ndjson, xml, yaml, x-yaml, toml, javascript, typescript, sql, x-sh; message/rfc822 | `tool_result_files::is_textual` | wire `file:*`, `file:application/x-yaml` |

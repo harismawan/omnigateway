@@ -3,6 +3,10 @@ pub use super::oauth_start::start;
 use omni_crypto::codex;
 use omni_ir::jsjson;
 use serde_json::{Value, json};
+
+/// Release of the bundled Codex model defaults below.
+pub(super) const CODEX_CATALOG_RELEASE: &str = "0.170.0";
+
 pub(crate) struct Catalog {
     pub lite: bool,
     pub effort: &'static str,
@@ -11,6 +15,10 @@ pub(crate) struct Catalog {
     pub updates: bool,
 }
 pub(crate) fn catalog(model: &str) -> Catalog {
+    let updates = matches!(
+        model,
+        "gpt-6.2-sol" | "gpt-6.2-astra" | "gpt-6-astra" | "gpt-6.1-sol" | "gpt-6.1-terra"
+    );
     Catalog {
         lite: model != "gpt-5.5",
         effort: if matches!(
@@ -32,11 +40,8 @@ pub(crate) fn catalog(model: &str) -> Catalog {
         } else {
             "low"
         },
-        review: matches!(
-            model,
-            "gpt-6-astra" | "gpt-6.1-sol" | "gpt-6.1-terra" | "gpt-6-sol"
-        ),
-        updates: matches!(model, "gpt-6-astra" | "gpt-6.1-sol" | "gpt-6.1-terra"),
+        review: updates || model == "gpt-6-sol",
+        updates,
     }
 }
 pub(crate) fn is_effort(e: &str) -> bool {

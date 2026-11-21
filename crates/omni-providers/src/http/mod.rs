@@ -287,9 +287,21 @@ impl Client {
                 .write_all(req.body.as_bytes())
                 .map_err(HttpError::Compression)?;
             let compressed = encoder.finish().map_err(HttpError::Compression)?;
-            wire::encode_owned(&req.method, &target, &req.headers, compressed)?
+            wire::encode_owned(
+                &req.provider,
+                &req.method,
+                &target,
+                &req.headers,
+                compressed,
+            )?
         } else {
-            wire::encode(&req.method, &target, &req.headers, req.body.as_bytes())?
+            wire::encode(
+                &req.provider,
+                &req.method,
+                &target,
+                &req.headers,
+                req.body.as_bytes(),
+            )?
         };
         let started = Instant::now();
         // `trace()`, once: on the response head, on a transport error, or —

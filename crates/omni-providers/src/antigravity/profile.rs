@@ -35,7 +35,7 @@ fn env(name: &str, fallback: &str) -> String {
 
 pub fn headers(extra: Vec<(String, String)>) -> Vec<(String, String)> {
     let version = env("OMNI_ANTIGRAVITY_IDE_VERSION", "2.12.2");
-    let mut base = vec![
+    let base = vec![
         (
             "User-Agent".into(),
             env(
@@ -46,6 +46,63 @@ pub fn headers(extra: Vec<(String, String)>) -> Vec<(String, String)> {
         ("Content-Type".into(), "application/json".into()),
         ("Accept".into(), "text/event-stream".into()),
     ];
+    ordered(
+        base,
+        extra,
+        &[
+            "Host",
+            "Content-Type",
+            "Authorization",
+            "User-Agent",
+            "X-Goog-Api-Client",
+            "Accept",
+            "Accept-Encoding",
+            "Content-Length",
+        ],
+    )
+}
+
+pub(super) const INFERENCE_HOST: &str = "daily-cloudcode-pa.googleapis.com";
+
+/// App 2.34.0 Linux Hub identity, from the same fixture as the TS profile.
+/// omniroute reported that Google refused a non-Mac identity; this offline
+/// capture neither confirms nor disproves that report. Live acceptance of the
+/// Linux Hub default is untested. Set `OMNI_UA_ANTIGRAVITY` to
+/// `antigravity/ide/2.12.2 darwin/arm64` to restore the old UA only, not the old
+/// header order, framing, or envelope.
+pub(super) fn inference_headers(token: &str) -> Vec<(String, String)> {
+    let version = env("OMNI_ANTIGRAVITY_IDE_VERSION", "2.34.0");
+    ordered(
+        vec![
+            ("Host".into(), INFERENCE_HOST.into()),
+            (
+                "User-Agent".into(),
+                env(
+                    "OMNI_UA_ANTIGRAVITY",
+                    &format!(
+                        "antigravity/hub/{version} (aidev_client; os_type=linux; arch=amd64; cl=1026637980)"
+                    ),
+                ),
+            ),
+            ("Transfer-Encoding".into(), "chunked".into()),
+            ("Content-Type".into(), "application/json".into()),
+        ],
+        vec![("Authorization".into(), format!("Bearer {token}"))],
+        &[
+            "Host",
+            "User-Agent",
+            "Transfer-Encoding",
+            "Authorization",
+            "Content-Type",
+        ],
+    )
+}
+
+fn ordered(
+    mut base: Vec<(String, String)>,
+    extra: Vec<(String, String)>,
+    default: &[&str],
+) -> Vec<(String, String)> {
     for pair in extra {
         if let Some(i) = base
             .iter()
@@ -64,18 +121,8 @@ pub fn headers(extra: Vec<(String, String)>) -> Vec<(String, String)> {
         .map(omni_ir::js::trim)
         .filter(|s| safe(s))
         .collect();
-    let default = [
-        "Host",
-        "Content-Type",
-        "Authorization",
-        "User-Agent",
-        "X-Goog-Api-Client",
-        "Accept",
-        "Accept-Encoding",
-        "Content-Length",
-    ];
     let order = if parts.is_empty() {
-        default.as_slice()
+        default
     } else {
         parts.as_slice()
     };

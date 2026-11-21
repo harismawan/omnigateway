@@ -448,7 +448,7 @@ Translation invariants:
   as `session-id`, `thread-id`, `x-client-request-id` headers on both legs; keep those names in
   `openaiProfile.order`. Only `session-id` routes the Codex cache (measured); never drop it. Keep `store: false` for Codex. Inspect client key sets, not one member.
   History: responses-ingress spec. The key is a UUIDv7 thread id (a supplied UUID passes through).
-  The OAuth leg wears Codex 0.163.0's TUI fingerprint, which moves only with a capture
+  The OAuth leg wears Codex 0.170.0's TUI fingerprint, which moves only with a capture
   (`scripts/codex-capture/README.md`); `nativeReasoning` reads the **client's** `include`, never
   the body's, which always carries Codex's. Every id it derives is keyed with the credential's
   `providerData.idSalt`, minted and backfilled by `openai/oauth.ts` alone; the unkeyed derivation

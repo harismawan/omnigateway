@@ -9,6 +9,7 @@ import { join, resolve } from "node:path";
 import { isDeepStrictEqual, parseArgs } from "node:util";
 import { decrypt, deriveKey, encrypt } from "../../packages/store/src/encryption.ts";
 import { normalize, normalizedEqual, REQUEST_UUID } from "./masks.ts";
+import { readRequestBody } from "./request-body.ts";
 
 const { values: f } = parseArgs({
   options: Object.fromEntries(
@@ -150,16 +151,20 @@ const stub = Bun.listen<{ buffer: Buffer }>({
       const end = raw.indexOf("\r\n\r\n");
       if (end < 0) return;
       const head = raw.slice(0, end).split("\r\n");
-      const size = Number(head.find((h) => /^content-length:/i.test(h))?.split(":")[1] ?? 0);
-      if (s.data.buffer.length < end + 4 + size) return;
+      const read = readRequestBody(s.data.buffer, end + 4, head.slice(1));
+      if (read === undefined) return;
       const [method, path] = head.shift()!.split(" ");
       const host = head
         .find((h) => /^host:/i.test(h))!
         .slice(5)
         .trim();
-      const body = s.data.buffer.subarray(end + 4, end + 4 + size).toString();
-      const wire = { url: `https://${host}${path}`, method: method!, headers: head, body };
-      s.data.buffer = s.data.buffer.subarray(end + 4 + size);
+      const wire = {
+        url: `https://${host}${path}`,
+        method: method!,
+        headers: head,
+        body: read.body.toString(),
+      };
+      s.data.buffer = s.data.buffer.subarray(read.end);
       const quota = path!.includes("retrieveUserQuotaSummary");
       (active && !quota ? recorded : boot).push(wire);
       const token = host === "oauth2.googleapis.com";
@@ -476,7 +481,7 @@ function wireMask(w: Wire) {
   return {
     ...w,
     body: w.body.replace(
-      new RegExp(`("requestId":")req_${REQUEST_UUID}("(?=,))`, "g"),
+      new RegExp(`("requestId":"agent/)req_${REQUEST_UUID}("(?=,))`, "g"),
       "$1req_<id>$2",
     ),
   };
@@ -541,11 +546,11 @@ function valid(row: Awaited<ReturnType<typeof run>>[number], c: Case): boolean {
   }
   if (c.profile) {
     const ua =
-      c.profile === "all" ? "fixture-antigravity/9.8.7" : "antigravity/ide/9.8.7 darwin/arm64";
+      c.profile === "all"
+        ? "fixture-antigravity/9.8.7"
+        : "antigravity/hub/9.8.7 (aidev_client; os_type=linux; arch=amd64; cl=1026637980)";
     if (!inference[0].headers.includes(`User-Agent: ${ua}`)) return false;
-    // Host is transport-appended, not a profile header. Profile order begins
-    // at User-Agent on the actual frozen wire.
-    if (c.profile === "all" && inference[0].headers[0] !== `User-Agent: ${ua}`) return false;
+    if (c.profile === "all" && inference[0].headers[1] !== `User-Agent: ${ua}`) return false;
   }
   if (
     !c.code &&

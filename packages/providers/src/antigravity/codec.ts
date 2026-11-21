@@ -4,7 +4,7 @@ import { parseSse } from "../sse.ts";
 import type { HeaderPair } from "../types.ts";
 import { buildToolCloak, type ToolCloak } from "./cloak.ts";
 import { decodeAntigravityStream } from "./decode.ts";
-import { antigravityProfile } from "./profile.ts";
+import { antigravityHost, antigravityInferenceProfile } from "./profile.ts";
 import { toAntigravityWire } from "./wire.ts";
 
 /**
@@ -37,7 +37,7 @@ import { toAntigravityWire } from "./wire.ts";
  * `cloudcode-pa` and a sandbox host; add that if `daily-` is ever measured
  * unavailable, but note the fallback host is the one that refuses this tier.
  */
-const URL = "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse";
+const URL = `https://${antigravityHost}/v1internal:streamGenerateContent?alt=sse`;
 
 /** Domain separator, so this hash can never collide with another use of a request id. */
 const REQUEST_NAMESPACE = "omni-antigravity-req";
@@ -123,14 +123,15 @@ export const antigravityCodec: ProviderCodec = {
 
     const { body, degradations } = toAntigravityWire(input.request, input.model, {
       project,
-      requestId,
+      // Keep our ID after the captured prefix; the App's extra segments are not understood.
+      requestId: `agent/${requestId}`,
       cloak,
     });
 
     const protocol: HeaderPair[] = [["Authorization", `Bearer ${accessToken}`]];
     const headers = orderHeaders(
-      mergeHeaders(antigravityProfile.headers, protocol),
-      antigravityProfile.order,
+      mergeHeaders(antigravityInferenceProfile.headers, protocol),
+      antigravityInferenceProfile.order,
     );
 
     return {
