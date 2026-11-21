@@ -255,8 +255,11 @@ the `gateway.js` bridge on the old unit's next start.
 Before stopping anything it refuses: a unit systemd did not load from that file
 (`FragmentPath`, `WorkingDirectory`, pending reload, drop-ins, missing facts);
 a transitional state (`activating`, `deactivating`, `reloading`); any
-`Environment=`, or any `OMNI_*` exported by the user service manager; environment
-files other than `<root>/.env`, or one using `\` line continuations; directives
+`Environment=`, or any `OMNI_*` in the user or system manager's environment;
+environment files other than `<root>/.env`, or one outside plain
+`[export ]NAME=VALUE` lines (single-line quotes allowed; no `\`, `$`, backtick,
+continuation or multi-line quote); an `OMNI_HOST` that is a host name rather
+than an IP or `localhost`; directives
 beyond the TS template (output wiring excepted, but not into the replaced
 package); cluster settings; a visible foreign database holder; an unwritable or
 full snapshot directory; an unreadable or newer ledger; a non-running binary;
@@ -285,8 +288,9 @@ this database; if one might, stop it first or migrate by hand. Any failure after
 service stopped if systemd confirms it, or says it could not be confirmed and
 gives the stop command first, with rollback steps for that branch. A recorded
 failure, with its backup and saved unit, is kept as `pendingFailure` across
-later attempts — refused, current or otherwise — until the service is seen
-running this binary. The outcome is recorded in `<state>/npm-migration.json`
+every later attempt — refused, current, or another failure, which never replaces
+the first — until the service is seen serving (answering `/health` on the
+probed address from this binary, holding the database). The outcome is recorded in `<state>/npm-migration.json`
 (`~/.local/state/omnigateway` by default); `omni doctor` and `omni status` print
 its reason until resolved. This replaces the maintenance window for that one
 shape only. It does not take step 6, so run it after the update.

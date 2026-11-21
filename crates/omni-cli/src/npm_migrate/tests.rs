@@ -302,7 +302,12 @@ impl Host for Fake {
     fn bridge_invoked_by(&self, main_pid: u32) -> bool {
         self.bridge_parent_is_main && main_pid == 777
     }
-    fn run_gateway(&self, binary: &Path, root: &Path) -> Result<Child, String> {
+    fn run_gateway(
+        &self,
+        binary: &Path,
+        root: &Path,
+        _listen: std::net::SocketAddr,
+    ) -> Result<Child, String> {
         self.log
             .borrow_mut()
             .push(format!("spawn {} in {}", binary.display(), root.display()));
@@ -1383,4 +1388,103 @@ fn unconfirmed_ts_stop_gives_the_stop_command_first() {
         .unwrap();
     let npm = outcome.message.find("npm i -g omnigateway@0.15.5").unwrap();
     assert!(stop < npm, "{}", outcome.message);
+}
+
+// ------------------------------------------------- third rereview
+
+/// Finding 1: the whole file must be in the subset both readers agree on;
+/// a quoted value spanning lines can hide or invent an assignment.
+#[test]
+fn env_files_outside_the_shared_grammar_are_refused() {
+    for text in [
+        "OMNI_ENCRYPTION_KEY=\"kkkkkkkkkkkkkkkkkkkk\nOMNI_DB_PATH=other.db\nrest\"\nOMNI_DB_PATH=live.db\n",
+        "OMNI_ENCRYPTION_KEY='kkkkkkkkkkkkkkkkkkkk\n",
+        "OMNI_ENCRYPTION_KEY=kkkkkkkkkkkkkkkkkkkk\nOMNI_NOTE=a\"b\n",
+        "OMNI_ENCRYPTION_KEY=kkkkkkkkkkkkkkkkkkkk\nOMNI_NOTE=a\\b\n",
+        "OMNI_ENCRYPTION_KEY=kkkkkkkkkkkkkkkkkkkk\nnot an assignment\n",
+        "OMNI_ENCRYPTION_KEY=kkkkkkkkkkkkkkkkkkkk\n1BAD=x\n",
+    ] {
+        let f = fixture(text);
+        f.write_user(&legacy_unit(&f.root, ""));
+        refused_before_stop(&f, &f.host(), Status::SkippedUnit);
+    }
+    // Quoted single-line values, comments, export and base64 keys are fine.
+    let f = fixture(
+        "# comment\nexport OMNI_ENCRYPTION_KEY=\"q1w2e3r4t5y6u7i8o9p0+/==\"\nOMNI_PORT='19100'\n\n",
+    );
+    f.write_user(&legacy_unit(&f.root, ""));
+    assert_eq!(migrate(&f.host(), &f.paths(), 1).status, Status::Migrated);
+}
+
+/// Finding 4: a later failure keeps the first unresolved failure's rollback.
+#[test]
+fn a_second_failure_keeps_the_first_failures_rollback() {
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    migrate(
+        &Fake {
+            healthy: false,
+            ..f.host()
+        },
+        &f.paths(),
+        1,
+    );
+    let first = f.record();
+    // The operator restores the saved TS unit and retries; it fails again.
+    f.write_user(&legacy_unit(&f.root, ""));
+    let host = Fake {
+        port_taken: true,
+        ..f.host()
+    };
+    assert_eq!(migrate(&host, &f.paths(), 2).status, Status::FailedPort);
+    let record = f.record();
+    assert_eq!(record["status"], "failed-port");
+    assert_eq!(record["pendingFailure"]["backup"], first["backup"]);
+    assert_eq!(record["pendingFailure"]["savedUnit"], first["savedUnit"]);
+    assert_eq!(record["pendingFailure"]["message"], first["message"]);
+}
+
+/// Finding 4: `current` clears a failure only when the gateway serves.
+#[test]
+fn a_failure_is_cleared_only_by_a_serving_gateway() {
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    migrate(
+        &Fake {
+            healthy: false,
+            ..f.host()
+        },
+        &f.paths(),
+        1,
+    );
+    // Running our binary but not yet answering /health.
+    let host = Fake {
+        healthy: false,
+        ..rust_host(&f, Some(f.binary.clone()))
+    };
+    migrate(&host, &f.paths(), 2);
+    assert!(banner(&f.paths()).unwrap().contains("failed"));
+    let host = rust_host(&f, Some(f.binary.clone()));
+    migrate(&host, &f.paths(), 3);
+    assert_eq!(banner(&f.paths()), None);
+}
+
+/// Finding 5: one endpoint for occupancy, health and attribution.
+#[test]
+fn a_bind_host_that_is_not_an_address_is_refused() {
+    let f = fixture("OMNI_ENCRYPTION_KEY=kkkkkkkkkkkkkkkkkkkk\nOMNI_HOST=gateway.internal\n");
+    f.write_user(&legacy_unit(&f.root, ""));
+    refused_before_stop(&f, &f.host(), Status::SkippedUnit);
+    for (host, probed) in [
+        ("127.0.0.1", "127.0.0.1:9000"),
+        ("0.0.0.0", "127.0.0.1:9000"),
+        ("::", "[::1]:9000"),
+        ("::1", "[::1]:9000"),
+        ("localhost", "127.0.0.1:9000"),
+        ("10.1.2.3", "10.1.2.3:9000"),
+    ] {
+        let env = std::collections::HashMap::from([("OMNI_HOST".to_owned(), host.to_owned())]);
+        assert_eq!(probe_addr(&env).to_string(), probed, "{host}");
+        assert_eq!(local_base(&env), format!("http://{probed}"), "{host}");
+    }
 }

@@ -226,7 +226,14 @@ pub(crate) trait Host {
     fn foreground_gateway(&self, state: &Path) -> Option<u32>;
     /// This process descends from `main_pid` (systemd started the bridge).
     fn bridge_invoked_by(&self, main_pid: u32) -> bool;
-    fn run_gateway(&self, binary: &Path, root: &Path) -> Result<Child, String>;
+    /// Spawn the gateway; `listen` is the address it will serve, which the
+    /// signal relay uses to tell a group stop from one aimed at the bridge.
+    fn run_gateway(
+        &self,
+        binary: &Path,
+        root: &Path,
+        listen: std::net::SocketAddr,
+    ) -> Result<Child, String>;
 }
 
 type Facts = std::collections::HashMap<String, String>;
@@ -409,32 +416,33 @@ fn find_units(paths: &Paths) -> Result<Vec<Unit>, String> {
 /// `OMNI_HOST`/`OMNI_PORT` from the root `.env`, never `OMNI_BASE_URL`, which
 /// may name a public proxy rather than this process.
 fn local_base(env: &std::collections::HashMap<String, String>) -> String {
-    let host = env
-        .get("OMNI_HOST")
-        .map(|h| h.trim())
-        .filter(|h| !h.is_empty())
-        .unwrap_or("127.0.0.1");
-    let host = match host {
-        "0.0.0.0" | "::" | "[::]" => "127.0.0.1",
-        h if h.contains(':') && !h.starts_with('[') => {
-            return format!("http://[{h}]:{}", port(env));
-        }
-        h => h,
-    };
-    format!("http://{host}:{}", port(env))
+    // The same endpoint occupancy and attribution check.
+    format!("http://{}", probe_addr(env))
 }
-/// The address the health probe connects to.
-fn probe_addr(env: &std::collections::HashMap<String, String>) -> std::net::SocketAddr {
-    let port: u16 = port(env).parse().unwrap_or(9000);
+/// `OMNI_HOST` as an IP: a literal, or `localhost`; `None` for a name this
+/// updater would have to resolve (and could resolve differently).
+fn bind_ip(env: &std::collections::HashMap<String, String>) -> Option<std::net::IpAddr> {
     let host = env
         .get("OMNI_HOST")
         .map(|h| h.trim().trim_start_matches('[').trim_end_matches(']'))
         .filter(|h| !h.is_empty())
         .unwrap_or("127.0.0.1");
-    let ip = match host {
-        "0.0.0.0" | "::" => std::net::IpAddr::from([127, 0, 0, 1]),
-        "localhost" => std::net::IpAddr::from([127, 0, 0, 1]),
-        h => h.parse().unwrap_or(std::net::IpAddr::from([127, 0, 0, 1])),
+    match host {
+        "localhost" => Some(std::net::IpAddr::from([127, 0, 0, 1])),
+        h => h.parse().ok(),
+    }
+}
+/// The address the health probe, the occupancy check and the listener
+/// attribution all use: the bind IP, or loopback for a wildcard bind.
+fn probe_addr(env: &std::collections::HashMap<String, String>) -> std::net::SocketAddr {
+    let port: u16 = port(env).parse().unwrap_or(9000);
+    let ip = match bind_ip(env) {
+        Some(ip) if ip.is_unspecified() && ip.is_ipv6() => {
+            std::net::IpAddr::from(std::net::Ipv6Addr::LOCALHOST)
+        }
+        Some(ip) if ip.is_unspecified() => std::net::IpAddr::from([127, 0, 0, 1]),
+        Some(ip) => ip,
+        None => std::net::IpAddr::from([127, 0, 0, 1]),
     };
     std::net::SocketAddr::new(ip, port)
 }
@@ -453,6 +461,44 @@ fn database_path(root: &Path, env: &std::collections::HashMap<String, String>) -
             .filter(|p| !p.is_empty())
             .unwrap_or("omnigateway.db"),
     )
+}
+
+/// `Err(line number)` for the first line outside the grammar both readers
+/// agree on: blank, `#`/`;` comment, or `[export ]NAME=VALUE` where NAME is
+/// `[A-Za-z_][A-Za-z0-9_]*` and VALUE is plain (no whitespace, quotes, `\\`,
+/// `$`, backtick) or one whole single-line `"…"`/`'…'` with none of those
+/// inside but spaces.
+fn shared_env_grammar(text: &str) -> Result<(), usize> {
+    let plain = |c: char| !c.is_whitespace() && !matches!(c, '"' | '\'' | '\\' | '$' | '`');
+    for (i, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some((name, value)) = line.split_once('=') else {
+            return Err(i + 1);
+        };
+        let mut chars = name.chars();
+        let name_ok = chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+        let value_ok = match value.chars().next() {
+            Some(q @ ('"' | '\'')) => {
+                value.len() >= 2
+                    && value.ends_with(q)
+                    && value[1..value.len() - 1]
+                        .chars()
+                        .all(|c| plain(c) || c == ' ')
+            }
+            _ => value.chars().all(plain),
+        };
+        if !name_ok || !value_ok {
+            return Err(i + 1);
+        }
+    }
+    Ok(())
 }
 
 fn clustered(env: &std::collections::HashMap<String, String>) -> bool {
@@ -517,12 +563,9 @@ fn outcome(paths: &Paths, now: i64, status: Status, message: String, extra: Valu
     let running = previous
         .as_ref()
         .and_then(|r| r["runningVersion"].as_str().map(str::to_owned));
-    let pending = if status.name().starts_with("failed-") {
-        // This attempt is the failure now; it carries its own rollback data.
-        None
-    } else {
-        pending_failure(previous.as_ref())
-    };
+    // The first unresolved failure is the one whose backup and saved unit
+    // restore the operator's TS install; a later failure never replaces it.
+    let pending = pending_failure(previous.as_ref());
     if let Some(obj) = extra.as_object_mut() {
         let recovered = obj.remove("recovered").is_some_and(|v| v == true);
         obj.insert("message".into(), json!(message));
@@ -734,30 +777,22 @@ fn preflight(host: &dyn Host, paths: &Paths) -> Result<Plan, (Status, String)> {
             env_file.display()
         )));
     }
-    // For the keys that choose the database and the mode, accept only values
-    // systemd and the CLI read identically: no `\\`, `$`, quote or space.
-    for line in text.lines() {
-        let line = line.trim();
-        let line = line.strip_prefix("export ").unwrap_or(line);
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        let key = key.trim();
-        if matches!(
-            key,
-            "OMNI_DB_PATH" | "OMNI_DATABASE_URL" | "OMNI_REDIS_URL" | "OMNI_CLUSTER_MODE"
-        ) && value
-            .trim()
-            .chars()
-            .any(|c| matches!(c, '\\' | '$' | '"' | '\'' | ' ' | '\t' | '`'))
-        {
-            return Err(left_alone(format!(
-                "{key} in {} uses quoting or escapes systemd may read differently; write it as a plain value",
-                env_file.display()
-            )));
-        }
+    // The whole file must sit in the subset systemd's EnvironmentFile parser
+    // and the CLI's read identically; a quote spanning lines or an escape
+    // could otherwise hide or invent the assignment that picks the database.
+    if let Err(line) = shared_env_grammar(&text) {
+        return Err(left_alone(format!(
+            "line {line} of {} uses syntax systemd may read differently from the CLI (multi-line or escaped quoting, $, \\, or a non-assignment); write plain KEY=value lines",
+            env_file.display()
+        )));
     }
     let env = crate::context::parse_env(&text);
+    if bind_ip(&env).is_none() {
+        return Err(left_alone(
+            "OMNI_HOST is a host name; the updater checks one exact address, so set it to an IP"
+                .into(),
+        ));
+    }
     if clustered(&env) {
         return Err((
             Status::SkippedCluster,
@@ -1099,7 +1134,8 @@ fn convert_as(
     let mut child = None;
     match starter {
         Starter::None => {}
-        Starter::Bridge => match host.run_gateway(&paths.binary, &plan.root) {
+        Starter::Bridge => match host.run_gateway(&paths.binary, &plan.root, probe_addr(&plan.env))
+        {
             Ok(mut started) => {
                 let verdict = if !host.healthy(&base) {
                     Err(health.to_owned())
@@ -1216,13 +1252,19 @@ fn refresh(host: &dyn Host, paths: &Paths, plan: &Plan, now: i64) -> Outcome {
         exe.display().to_string().ends_with(" (deleted)") || *exe != paths.binary
     });
     if !replaced {
-        let verified = exe.as_ref().is_some_and(|e| *e == paths.binary);
-        if verified {
-            // Seen running our binary: any recorded failure is resolved.
+        // Recovery means serving: answering /health on the probed address
+        // from this process, which runs this binary and holds the database.
+        let serving = exe.as_ref().is_some_and(|e| *e == paths.binary)
+            && pending_failure.is_some()
+            && host.healthy(&local_base(&plan.env))
+            && serving_is(host, plan, pid, &paths.binary).is_ok();
+        if serving || exe.as_ref().is_some_and(|e| *e == paths.binary) && pending_failure.is_none()
+        {
             extra["runningVersion"] = json!(paths.version);
+        }
+        if serving {
             extra["recovered"] = json!(true);
         }
-        let _ = pid;
         return outcome(
             paths,
             now,

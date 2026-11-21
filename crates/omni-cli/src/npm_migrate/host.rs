@@ -219,10 +219,15 @@ impl Host for System {
         false
     }
 
-    fn run_gateway(&self, binary: &Path, root: &Path) -> Result<Child, String> {
+    fn run_gateway(
+        &self,
+        binary: &Path,
+        root: &Path,
+        addr: std::net::SocketAddr,
+    ) -> Result<Child, String> {
         // Armed before the child exists, so a TERM during its startup or
         // health wait is never lost.
-        let target = relay_signals();
+        let target = relay_signals(addr)?;
         let child = Command::new(binary)
             .current_dir(root)
             .stdin(Stdio::null())
@@ -241,8 +246,10 @@ impl Host for System {
         if inodes.is_empty() {
             return None;
         }
-        let mut owners = vec![];
-        let mut unseen = false;
+        // Every serving socket must be accounted for by one process: an
+        // inode with no visible owner might be someone we cannot see.
+        let mut owners = std::collections::BTreeSet::new();
+        let mut owned = std::collections::BTreeSet::new();
         for entry in fs::read_dir("/proc").ok()?.flatten() {
             let Some(pid) = entry
                 .file_name()
@@ -252,29 +259,23 @@ impl Host for System {
                 continue;
             };
             let Ok(fds) = fs::read_dir(entry.path().join("fd")) else {
-                unseen = true;
                 continue;
             };
-            let owns = fds
-                .flatten()
-                .filter_map(|fd| fs::read_link(fd.path()).ok())
-                .any(|t| {
-                    t.to_str()
-                        .and_then(|t| t.strip_prefix("socket:[")?.strip_suffix(']'))
-                        .is_some_and(|i| inodes.iter().any(|n| n == i))
-                });
-            if owns {
-                owners.push(pid);
+            for target in fds.flatten().filter_map(|fd| fs::read_link(fd.path()).ok()) {
+                if let Some(inode) = target
+                    .to_str()
+                    .and_then(|t| t.strip_prefix("socket:[")?.strip_suffix(']'))
+                    .filter(|i| inodes.iter().any(|n| n == i))
+                {
+                    owners.insert(pid);
+                    owned.insert(inode.to_owned());
+                }
             }
         }
-        // Exactly one visible owner. A process we could not inspect may share
-        // the socket; the caller still requires the owner to be the gateway
-        // it started, which an unseen process cannot satisfy.
-        let _ = unseen;
-        match owners.as_slice() {
-            [one] => Some(*one),
-            _ => None,
+        if owned.len() != inodes.len() || owners.len() != 1 {
+            return None;
         }
+        owners.into_iter().next()
     }
 
     fn native_child(&self, parent: u32, binary: &Path) -> Option<(u32, PathBuf)> {
@@ -368,49 +369,68 @@ fn should_relay(child: Option<String>, ours: Option<String>) -> bool {
     }
 }
 
-/// Forward TERM/INT/HUP to the gateway (its pid is stored into the returned
-/// slot once spawned), registered before the caller spawns it.
+/// Forward TERM/INT/HUP to the gateway, whose pid the caller stores into the
+/// returned slot once spawned. Handlers are installed before this returns
+/// (`Err` when they cannot be, so the caller does not spawn); a signal that
+/// arrives before the pid is known is held and delivered once it is.
 ///
-/// Under systemd the gateway shares the bridge's control group, and the
-/// default `KillMode=control-group` already sends it TERM on stop; a relayed
-/// second TERM is the gateway's "abort the drain" escalation. So it relays
-/// only to a gateway outside our cgroup (the bridge run by hand).
-fn relay_signals() -> std::sync::Arc<std::sync::atomic::AtomicU32> {
+/// Under systemd's default `KillMode=control-group` a stop signals every
+/// process in the unit, the gateway included, and a second TERM is the
+/// gateway's "abort the drain" escalation. A signal aimed at this process
+/// alone (`systemctl kill --kill-whom=main`) reaches only us. The gateway
+/// closes its listener the moment it takes TERM, so: for a gateway in our
+/// own cgroup, wait briefly and relay only if it is still listening.
+fn relay_signals(
+    listen: std::net::SocketAddr,
+) -> Result<std::sync::Arc<std::sync::atomic::AtomicU32>, String> {
     use std::sync::atomic::{AtomicU32, Ordering};
     let target = std::sync::Arc::new(AtomicU32::new(0));
     let slot = target.clone();
-    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
     std::thread::spawn(move || {
-        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-        else {
-            let _sent = ready_tx.send(());
-            return;
+        {
+            Ok(runtime) => runtime,
+            Err(e) => {
+                let _sent = ready_tx.send(Err(e.to_string()));
+                return;
+            }
         };
         runtime.block_on(async move {
             use tokio::signal::unix::{SignalKind, signal};
-            let handlers = (
+            let (mut term, mut int, mut hup) = match (
                 signal(SignalKind::terminate()),
                 signal(SignalKind::interrupt()),
                 signal(SignalKind::hangup()),
-            );
-            let _sent = ready_tx.send(());
-            let (Ok(mut term), Ok(mut int), Ok(mut hup)) = handlers else {
-                return;
+            ) {
+                (Ok(t), Ok(i), Ok(h)) => (t, i, h),
+                _ => {
+                    let _sent = ready_tx.send(Err("cannot install signal handlers".into()));
+                    return;
+                }
             };
+            let _sent = ready_tx.send(Ok(()));
             loop {
                 let sig = tokio::select! {
                     _ = term.recv() => rustix::process::Signal::TERM,
                     _ = int.recv() => rustix::process::Signal::INT,
                     _ = hup.recv() => rustix::process::Signal::HUP,
                 };
-                let pid = slot.load(Ordering::SeqCst);
-                if pid == 0 {
-                    continue;
+                // Not spawned yet: hold it until the pid is known.
+                let mut pid = slot.load(Ordering::SeqCst);
+                while pid == 0 {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    pid = slot.load(Ordering::SeqCst);
                 }
                 if !should_relay(cgroup_of(pid), cgroup_of(std::process::id())) {
-                    continue;
+                    // Same unit: a group stop reached it too. Give it a moment
+                    // to close its listener; relay only if it did not.
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    if !listening(listen) {
+                        continue;
+                    }
                 }
                 if let Some(pid) = rustix::process::Pid::from_raw(pid as i32) {
                     let _sent = rustix::process::kill_process(pid, sig);
@@ -418,9 +438,15 @@ fn relay_signals() -> std::sync::Arc<std::sync::atomic::AtomicU32> {
             }
         });
     });
-    // Handlers are installed before we return.
-    let _ready = ready_rx.recv();
-    target
+    ready_rx
+        .recv()
+        .map_err(|_| "signal relay thread died".to_owned())??;
+    Ok(target)
+}
+
+/// Something accepts at `addr` (the gateway still serving).
+fn listening(addr: std::net::SocketAddr) -> bool {
+    std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
 }
 
 /// Serve as the bridge: wait for the gateway (signals are already relayed by
@@ -551,15 +577,101 @@ mod tests {
         assert!(should_relay(None, None));
     }
 
+    /// The relay installs process-wide signal handlers, so it runs alone in
+    /// a re-executed copy of this test binary, never beside other tests.
     #[test]
-    fn relay_handlers_are_installed_before_it_returns() {
-        // Nothing is spawned yet; a signal now must not be lost or forwarded.
-        let slot = relay_signals();
-        assert_eq!(slot.load(std::sync::atomic::Ordering::SeqCst), 0);
-        rustix::process::kill_process(rustix::process::getpid(), rustix::process::Signal::HUP)
-            .unwrap();
-        std::thread::sleep(Duration::from_millis(50));
-        // Still alive: the default HUP action (terminate) was replaced.
+    fn relay_reaches_a_child_only_when_the_signal_missed_it() {
+        if std::env::var_os("OMNI_RELAY_HARNESS").is_none() {
+            let out = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "npm_migrate::host::tests::relay_reaches_a_child_only_when_the_signal_missed_it",
+                    "--exact",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("OMNI_RELAY_HARNESS", "1")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("child.py");
+        // Listens; logs every TERM and closes its listener on the first (as
+        // the gateway does); exits on its own after a few seconds.
+        fs::write(
+            &script,
+            "import signal,socket,sys,time\nport=int(sys.argv[1]);log=sys.argv[2]\ns=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);s.bind(('127.0.0.1',port));s.listen()\ndef h(*a):\n  open(log,'a').write('TERM\\n')\n  s.close()\nsignal.signal(signal.SIGTERM,h)\nopen(log,'a').write('up\\n')\nt=time.time()\nwhile time.time()-t<8: time.sleep(0.05)\n",
+        )
+        .unwrap();
+        let terms = |log: &Path| {
+            fs::read_to_string(log)
+                .unwrap_or_default()
+                .matches("TERM")
+                .count()
+        };
+        let spawn = |log: &Path, port: u16| {
+            Command::new("python3")
+                .arg(&script)
+                .arg(port.to_string())
+                .arg(log)
+                .spawn()
+                .unwrap()
+        };
+        let free_port = || {
+            std::net::TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port()
+        };
+        let wait_up = |log: &Path, addr| {
+            for _ in 0..200 {
+                if fs::read_to_string(log).is_ok_and(|l| l.contains("up")) && listening(addr) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            panic!("child did not start");
+        };
+        let me = rustix::process::getpid();
+
+        // 1. A TERM aimed at the bridge alone: relayed to the child.
+        let port = free_port();
+        let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        let log = dir.path().join("one");
+        let slot = relay_signals(addr).unwrap();
+        let mut child = spawn(&log, port);
+        slot.store(child.id(), std::sync::atomic::Ordering::SeqCst);
+        wait_up(&log, addr);
+        rustix::process::kill_process(me, rustix::process::Signal::TERM).unwrap();
+        std::thread::sleep(Duration::from_millis(800));
+        assert_eq!(terms(&log), 1, "a bridge-only TERM must reach the child");
+        let _killed = child.kill();
+        let _reaped = child.wait();
+        slot.store(0, std::sync::atomic::Ordering::SeqCst);
+
+        // 2. A group stop: the child takes TERM itself (closing its listener),
+        // the bridge gets one too; the relay must not send a second.
+        let port = free_port();
+        let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        let log = dir.path().join("two");
+        let slot = relay_signals(addr).unwrap();
+        let mut child = spawn(&log, port);
+        slot.store(child.id(), std::sync::atomic::Ordering::SeqCst);
+        wait_up(&log, addr);
+        let pid = rustix::process::Pid::from_raw(child.id() as i32).unwrap();
+        rustix::process::kill_process(pid, rustix::process::Signal::TERM).unwrap();
+        rustix::process::kill_process(me, rustix::process::Signal::TERM).unwrap();
+        std::thread::sleep(Duration::from_millis(800));
+        assert_eq!(terms(&log), 1, "a group stop must not be doubled");
+        let _killed = child.kill();
+        let _reaped = child.wait();
     }
 
     #[test]

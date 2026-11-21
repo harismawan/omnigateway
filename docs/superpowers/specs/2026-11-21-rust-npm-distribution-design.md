@@ -198,7 +198,14 @@ other-writable. Otherwise the tool prints the exact
    the interpreter an absolute `…/bun`. Anything else is `skipped-unit`. *(review
    finding 1–2)*
 2. **Mode** from that `.env` (unreadable → refuse): any of `OMNI_DATABASE_URL`,
-   `OMNI_REDIS_URL`, `OMNI_CLUSTER_MODE` → `skipped-cluster`.
+   `OMNI_REDIS_URL`, `OMNI_CLUSTER_MODE` → `skipped-cluster`. The whole file must
+   be in the grammar systemd and the CLI read alike — blank, `#`/`;` comments,
+   `[export ]NAME=VALUE` with a plain value or one single-line quoted value with
+   no `\`, `$`, backtick or nested quote — else `skipped-unit`. `OMNI_*` in
+   either manager's environment (`show-environment`: user exports or the system
+   manager's `DefaultEnvironment`) is refused; `OMNI_HOST` must be an IP or
+   `localhost`, and that one address is used for occupancy, `/health` and
+   listener attribution.
 3. **Preflight, nothing touched yet:** no process other than `MainPID` visible
    holding the database; the snapshot directory exists, is writable, has 1.1× the
    database free; the ledger is readable and has no unknown id; the binary runs
@@ -209,7 +216,8 @@ other-writable. Otherwise the tool prints the exact
    BEGIN EXCLUSIVE` with no busy wait. It fails while another connection holds
    a shared lock (any that has read and not finished, whatever user or link) and
    keeps every new reader out while held. It cannot see a process that opened
-   the file and never read it; that is closed after the start instead (step 8).
+   the file and never read it; after the start (step 8) only holders visible
+   in `/proc` are checked, so that case stays within the accepted limitation.
    Held through steps 6–7. *(review finding 3)*
 6. **Back up** through the locked connection (`VACUUM INTO`) into
    `<db dir>/snapshots/db_<stamp>_preRust.sqlite`; save the old unit under
