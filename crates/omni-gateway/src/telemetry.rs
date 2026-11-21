@@ -288,21 +288,17 @@ impl Op {
     }
 }
 
-/// Raw series key → the series it resolved to, for one shard. `foldhash`:
-/// the index is probed on every write, and the keys are this process's own
-/// label sets.
-type Index = HashMap<Arc<str>, Arc<Series>, foldhash::fast::RandomState>;
+/// Raw series key → the series it resolved to, for one shard.
+type Index = HashMap<Arc<str>, Arc<Series>>;
 
 /// Index shards: a creation republishes one shard, so the copy is a
 /// 1/`SHARDS` slice of the resolved series, not all of them.
 const SHARDS: usize = 256;
 
 fn shard_of(key: &str) -> usize {
-    static PICK: std::sync::OnceLock<foldhash::fast::FixedState> = std::sync::OnceLock::new();
+    static PICK: std::sync::OnceLock<std::hash::RandomState> = std::sync::OnceLock::new();
     #[allow(clippy::cast_possible_truncation)]
-    let h = PICK
-        .get_or_init(foldhash::fast::FixedState::default)
-        .hash_one(key) as usize;
+    let h = PICK.get_or_init(std::hash::RandomState::new).hash_one(key) as usize;
     h % SHARDS
 }
 

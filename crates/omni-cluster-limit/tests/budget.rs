@@ -159,7 +159,7 @@ async fn dense_windows_with_concurrent_fleet_load() {
         return;
     };
     let _quiet = quiet().await;
-    let key = uuid::Uuid::new_v4().to_string();
+    let key = omni_crypto::codex::random_uuid_v4();
     // Exactly 301 occupied 5h minute buckets and 169 occupied 1w hour
     // buckets, including both partially covered edge buckets.
     let at = T0.div_euclid(HOUR) * HOUR + 30_000.0;

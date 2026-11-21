@@ -529,7 +529,7 @@ pub(crate) fn admit_call(
         let tok = l.tokens.as_ref();
         let sp = l.spend.as_ref();
         args.extend([
-            format!("{}-{}", js(now), uuid::Uuid::new_v4()),
+            format!("{}-{}", js(now), omni_crypto::codex::random_uuid_v4()),
             ask.holder.clone().unwrap_or_default(),
             ceiling_u(req.and_then(|w| w.one_minute)),
             // Judged only where the gauge was raised (admit) or read
@@ -662,7 +662,7 @@ impl ClusterLimiter {
                     .limits
                     .concurrency
                     .flatten()
-                    .map(|_| uuid::Uuid::new_v4().to_string());
+                    .map(|_| omni_crypto::codex::random_uuid_v4());
                 Ask {
                     scope: s.limits.clone(),
                     subject: s,

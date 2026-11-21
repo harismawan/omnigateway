@@ -637,13 +637,20 @@ fn stamp_date(res: &mut Response<Body>) {
         let mut c = c.borrow_mut();
         if c.0 != secs || c.1.is_none() {
             c.0 = secs;
-            c.1 = HeaderValue::from_str(&httpdate::fmt_http_date(now)).ok();
+            c.1 = HeaderValue::from_str(&http_date(now)).ok();
         }
         c.1.clone()
     });
     if let Some(v) = value {
         res.headers_mut().insert(hyper::header::DATE, v);
     }
+}
+
+/// IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`) for the `Date` header.
+fn http_date(t: std::time::SystemTime) -> String {
+    chrono::DateTime::<chrono::Utc>::from(t)
+        .format("%a, %d %b %Y %H:%M:%S GMT")
+        .to_string()
 }
 
 /// `/api/plugins` and everything below it: the plugin API, which this
@@ -690,13 +697,8 @@ fn metrics(app: &App, req: &Request<Incoming>) -> Response<Body> {
     };
     let supplied = header(req, "authorization").unwrap_or_default();
     let expected = format!("Bearer {token}");
-    // `timingSafeEqual` after a length check, as TS: `subtle`'s comparison
-    // is written to resist the optimizer turning it into an early exit.
-    let ok = supplied.len() == expected.len()
-        && bool::from(subtle::ConstantTimeEq::ct_eq(
-            supplied.as_bytes(),
-            expected.as_bytes(),
-        ));
+    // `timingSafeEqual` after a length check, as TS.
+    let ok = omni_crypto::ct_eq(supplied.as_bytes(), expected.as_bytes());
     if !ok {
         let mut res = Response::new(full(Bytes::new()));
         *res.status_mut() = StatusCode::UNAUTHORIZED;
@@ -2315,6 +2317,17 @@ async fn models(app: &App, req: &Request<Incoming>) -> Response<Body> {
 mod tests {
     use super::*;
     use http_body::Body as _;
+
+    /// IMF-fixdate, as `Date` must be sent (RFC 9110 §5.6.7).
+    #[test]
+    fn date_header_is_imf_fixdate() {
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(784_111_777);
+        assert_eq!(http_date(t), "Sun, 06 Nov 1994 08:49:37 GMT");
+        assert_eq!(
+            http_date(std::time::UNIX_EPOCH),
+            "Thu, 01 Jan 1970 00:00:00 GMT"
+        );
+    }
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

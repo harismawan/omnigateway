@@ -32,9 +32,6 @@ omni-ratelimit = { path = "../omni-ratelimit" }
 omni-router = { path = "../omni-router" }
 omni-store = { path = "../omni-store" }
 arc-swap = "1"
-foldhash = "0.2"
-httpdate = "1"
-subtle = "2.6"
 serde_json.workspace = true
 serde.workspace = true
 thiserror.workspace = true

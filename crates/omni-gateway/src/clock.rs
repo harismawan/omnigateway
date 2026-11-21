@@ -12,10 +12,7 @@ pub fn now_ms() -> i64 {
 
 /// `crypto.randomUUID()`: a v4 UUID in lowercase hex.
 pub fn uuid_v4() -> String {
-    let mut b: [u8; 16] = rand::random();
-    b[6] = (b[6] & 0x0f) | 0x40;
-    b[8] = (b[8] & 0x3f) | 0x80;
-    format_uuid(&b)
+    omni_crypto::codex::random_uuid_v4()
 }
 
 /// `req_` + an RFC 9562 UUIDv7, minted monotonically in this process.

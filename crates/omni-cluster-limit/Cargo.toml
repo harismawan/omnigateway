@@ -11,6 +11,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+omni-crypto = { path = "../omni-crypto" }
 omni-coord = { path = "../omni-coord" }
 omni-ratelimit = { path = "../omni-ratelimit" }
 async-trait = "0.1"
@@ -19,7 +20,6 @@ serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
-uuid = { version = "1", default-features = false, features = ["v4"] }
 # Same exact pin as omni-coord (its `Remote` takes and returns these types).
 redis = { version = "=1.4.0", default-features = false, features = ["tokio-comp", "script"] }
 

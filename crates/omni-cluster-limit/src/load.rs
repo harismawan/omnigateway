@@ -73,7 +73,7 @@ pub struct LoadOptions {
 impl Default for LoadOptions {
     fn default() -> Self {
         Self {
-            replica: uuid::Uuid::new_v4().to_string(),
+            replica: omni_crypto::codex::random_uuid_v4(),
             interval: Duration::from_millis(100),
             ttl: Duration::from_millis(1_000),
             max_keys: 4_096,

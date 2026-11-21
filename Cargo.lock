@@ -1455,6 +1455,7 @@ dependencies = [
  "async-trait",
  "futures-util",
  "omni-coord",
+ "omni-crypto",
  "omni-ir",
  "omni-ratelimit",
  "redis",
@@ -1464,7 +1465,6 @@ dependencies = [
  "tokio-postgres",
  "tracing",
  "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
@@ -1498,6 +1498,7 @@ version = "0.16.0"
 dependencies = [
  "async-trait",
  "futures-util",
+ "omni-crypto",
  "omni-ratelimit",
  "redis",
  "rustls",
@@ -1510,7 +1511,6 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
@@ -1530,7 +1530,6 @@ dependencies = [
  "sha1",
  "sha2 0.10.9",
  "thiserror",
- "xxhash-rust",
 ]
 
 [[package]]
@@ -1554,12 +1553,10 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "chrono",
- "foldhash",
  "futures-core",
  "futures-util",
  "http-body",
  "http-body-util",
- "httpdate",
  "hyper",
  "hyper-util",
  "mimalloc",
@@ -1582,7 +1579,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1",
- "subtle",
  "tempfile",
  "thiserror",
  "tokio",
@@ -1635,7 +1631,6 @@ dependencies = [
  "bytes",
  "chrono",
  "httparse",
- "httpdate",
  "memchr",
  "omni-crypto",
  "omni-dialects",
@@ -2815,7 +2810,6 @@ version = "1.29.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3c14b15dffa2f4bd712103e857140aa04a4f2ff6e955c77d7eb8e53ee02a3b64"
 dependencies = [
- "getrandom 0.4.3",
  "js-sys",
  "wasm-bindgen",
 ]

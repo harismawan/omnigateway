@@ -145,7 +145,7 @@ impl Drop for Lock<'_> {
 }
 
 async fn lock<'a>(inner: &'a Inner, name: String) -> Option<Lock<'a>> {
-    let token = uuid::Uuid::new_v4().to_string();
+    let token = omni_crypto::codex::random_uuid_v4();
     let mut guard = Lock {
         inner,
         name,
