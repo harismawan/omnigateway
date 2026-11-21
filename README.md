@@ -138,8 +138,8 @@ cluster installations (Postgres/Redis — follow the
 [cutover runbook](docs/rust-cutover-runbook.md)), units with drop-ins or a
 changed `ExecStart`, both a user and a system unit, another process holding the
 database, and a system unit when the update did not run as root. The reason is
-recorded in `~/.local/state/omnigateway/npm-migration.json` and every `omni`
-command repeats it on stderr until it is resolved.
+recorded in `~/.local/state/omnigateway/npm-migration.json`, and `omni doctor`
+and `omni status` repeat it on stderr until it is resolved.
 
 What stops working: plugins (their data stays), and accounts for Grok, Kimi,
 Kilo, Muse and Qoder, which this release does not serve; `omni doctor` lists

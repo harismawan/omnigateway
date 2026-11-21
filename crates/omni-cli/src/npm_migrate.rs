@@ -764,6 +764,12 @@ pub(crate) fn bridge(host: &dyn Host, paths: &Paths, now: i64) -> i32 {
     }
 }
 
+/// The commands an operator checks a service with. Only they print the
+/// banner; every other command's stderr stays identical to the frozen CLI.
+pub(crate) fn announces(command: &str) -> bool {
+    matches!(command, "doctor" | "status")
+}
+
 /// One stderr line while a migration needs attention, or a 0.x unit is
 /// still installed. `None` when there is nothing to say.
 pub(crate) fn banner(paths: &Paths) -> Option<String> {

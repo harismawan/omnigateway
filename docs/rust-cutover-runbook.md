@@ -257,7 +257,7 @@ backup, a database migrated by a newer build, or a system unit when not root or
 with a binary path that is not root-owned. It replaces only the `ExecStart=`
 line, saves the old unit under `<state>/pre-rust/`, and records the outcome in
 `<state>/npm-migration.json` (`~/.local/state/omnigateway` by default), which
-`omni` and `omni doctor` repeat until resolved. On a failed health check the
+`omni doctor` and `omni status` repeat on stderr until resolved. On a failed health check the
 service is left stopped with the rollback in the message. This replaces the
 maintenance window for that one shape only. It does not take step 6, so run it
 after the update.

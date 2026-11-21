@@ -526,3 +526,22 @@ fn bridge_refusal_exits_zero_so_systemd_does_not_loop() {
     let none = fixture(SINGLE);
     assert_eq!(bridge(&Fake::default(), &none.paths(), 1), 1);
 }
+
+/// Every other command stays byte-identical to the frozen CLI on stderr.
+#[test]
+fn only_doctor_and_status_announce() {
+    for command in ["doctor", "status"] {
+        assert!(announces(command), "{command}");
+    }
+    for command in [
+        "list",
+        "start",
+        "stop",
+        "db-backup",
+        "connect",
+        "logs",
+        "models-list",
+    ] {
+        assert!(!announces(command), "{command}");
+    }
+}

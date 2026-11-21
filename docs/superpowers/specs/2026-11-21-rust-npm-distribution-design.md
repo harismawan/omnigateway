@@ -254,14 +254,15 @@ the one-paragraph what-changed note.
 
 Because npm hides script output, the outcome is written to
 `<state dir>/npm-migration.json`, the CLI state dir from `service.rs:38–48`,
-holding the status, timestamps, backup id, versions and message. Every Rust
-`omni` invocation prints a one-line stderr banner while the status is
-`failed-*` or `skipped-*` (except `nothing-to-migrate`). `omni doctor` reports
-the same status as a problem. A later successful `omni service migrate` clears
+holding the status, timestamps, backup id, versions and message. `omni doctor`
+and `omni status` print a one-line stderr banner while the status is
+`failed-*` or `skipped-*`, or a legacy unit is still installed. Every other
+command's output stays byte-identical to the frozen CLI *(owner decision, after
+the keys-list conformance driver caught the banner on `keys list`)*. A later successful `omni service migrate` clears
 the banner. The README and release notes tell server operators to update with
-`--foreground-scripts`, so the report also shows live. When scripts never ran
-(`--ignore-scripts`), the first `omni` invocation that sees a legacy TS unit
-and no record prints the same banner, recommending `omni service migrate`.
+`--foreground-scripts`, so the report also shows live. When scripts never ran,
+those two commands print the same banner for a legacy TS unit, recommending
+`omni service migrate`.
 
 `postinstall` always exits 0. A non-zero exit would make npm fail the install
 while TS may already be stopped.

@@ -66,8 +66,8 @@ pub fn run(argv: Vec<String>) -> ExitCode {
         eprintln!("{command} is not yet available in the Rust CLI");
         return ExitCode::FAILURE;
     };
-    // Help and unknown commands above stay byte-identical to the frozen CLI.
-    if let Some(paths) = npm_migrate::Paths::current()
+    if npm_migrate::announces(&command)
+        && let Some(paths) = npm_migrate::Paths::current()
         && let Some(line) = npm_migrate::banner(&paths)
     {
         eprintln!("{line}");
