@@ -27,7 +27,7 @@ fn authorization_matches_frozen() {
         let mut responses = row["responses"].as_array().expect("responses").iter();
         let mut send = |request: omni_providers::oauth::AuthRequest, timeout: Option<u64>| {
             let mut value = serde_json::to_value(&request).expect("request");
-            value["body"] = format!("{:x}", Sha256::digest(request.body.as_bytes())).into();
+            value["body"] = omni_crypto::hex_lower(&Sha256::digest(request.body.as_bytes())).into();
             if let Some(timeout) = timeout {
                 value["timeoutMs"] = timeout.into();
             }

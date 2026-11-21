@@ -36,7 +36,7 @@ fn streamed_frames_match_frozen_runtime() {
         let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 3).unwrap();
         encoder.write_all(&raw).unwrap();
         let frame = encoder.finish().unwrap();
-        if format!("{:x}", Sha256::digest(&frame)) == row["hash"].as_str().unwrap() {
+        if omni_crypto::hex_lower(&Sha256::digest(&frame)) == row["hash"].as_str().unwrap() {
             identical += 1;
         } else {
             eprintln!(

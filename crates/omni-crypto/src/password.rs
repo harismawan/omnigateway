@@ -19,8 +19,9 @@
 //!   attempted: allocation failure aborts a Rust process, where Bun throws
 //!   (also "no"). Again only a hand edit could write one.
 
-use argon2::password_hash::{PasswordHash, PasswordHasher as _, PasswordVerifier as _, SaltString};
-use argon2::{Algorithm, Argon2, Params, Version};
+use argon2::{
+    Algorithm, Argon2, Params, PasswordHash, PasswordHasher as _, PasswordVerifier as _, Version,
+};
 use rand::RngCore as _;
 
 /// `ARGON2.memoryCost` (KiB).
@@ -60,9 +61,8 @@ pub fn hash(password: &str) -> Result<String, PasswordError> {
     }
     let mut salt = [0u8; SALT_BYTES];
     rand::rng().fill_bytes(&mut salt);
-    let salt = SaltString::encode_b64(&salt).map_err(|e| PasswordError::Hash(e.to_string()))?;
     Ok(hasher()?
-        .hash_password(password.as_bytes(), &salt)
+        .hash_password_with_salt(password.as_bytes(), &salt)
         .map_err(|e| PasswordError::Hash(e.to_string()))?
         .to_string())
 }
@@ -77,7 +77,7 @@ pub fn verify(stored: Option<&str>, password: &str) -> bool {
     let Ok(parsed) = PasswordHash::new(stored) else {
         return false;
     };
-    if Algorithm::try_from(parsed.algorithm).is_err() {
+    if Algorithm::try_from(parsed.algorithm.as_str()).is_err() {
         return false;
     }
     let Ok(params) = Params::try_from(&parsed) else {

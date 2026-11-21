@@ -28,7 +28,8 @@ pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     std::hint::black_box(diff) == 0
 }
 
-pub(crate) fn hex_lower(bytes: &[u8]) -> String {
+/// Lowercase hex of `bytes` (`Buffer.toString("hex")`).
+pub fn hex_lower(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
     for b in bytes {

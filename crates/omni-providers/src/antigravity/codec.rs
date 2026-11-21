@@ -129,10 +129,9 @@ fn encode(
         .cloned()
         .unwrap_or_else(|| {
             let project = project.to_utf8_lossy();
-            let h = format!(
-                "{:x}",
-                Sha256::digest(format!("omni-antigravity-req:{model}:{project}"))
-            );
+            let h = omni_crypto::hex_lower(&Sha256::digest(format!(
+                "omni-antigravity-req:{model}:{project}"
+            )));
             let variant = (u8::from_str_radix(&h[16..17], 16).expect("hex digest") & 3) | 8;
             format!(
                 "{}-{}-4{}-{:x}{}-{}",

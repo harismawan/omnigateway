@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 use std::process::Command;
 
 fn hash(s: &str) -> String {
-    format!("{:x}", Sha256::digest(s.as_bytes()))
+    omni_crypto::hex_lower(&Sha256::digest(s.as_bytes()))
 }
 
 #[test]

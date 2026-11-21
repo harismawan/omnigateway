@@ -1,6 +1,6 @@
 //! Codex's derived identifiers (`packages/providers/src/openai/codexIdentity.ts`).
 
-use hmac::{Hmac, Mac as _};
+use hmac::{Hmac, KeyInit as _, Mac as _};
 use sha1::Sha1;
 use sha2::{Digest as _, Sha256};
 

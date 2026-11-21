@@ -60,7 +60,7 @@ pub fn encrypt(key: &FieldKey, plaintext: &str) -> String {
     // below GCM's 64 GiB limit; a credential field is never near it.
     let sealed = key
         .cipher()
-        .encrypt(Nonce::from_slice(&iv), plaintext.as_bytes())
+        .encrypt(&Nonce::from(iv), plaintext.as_bytes())
         .unwrap_or_default();
     let split = sealed.len().saturating_sub(TAG_BYTES);
     let (body, tag) = sealed.split_at(split);
@@ -110,9 +110,10 @@ pub fn decrypt(key: &FieldKey, value: &str) -> Result<String, FieldError> {
     if iv.len() != IV_BYTES {
         return Err(FieldError::Malformed);
     }
+    let nonce = Nonce::try_from(iv.as_slice()).map_err(|_| FieldError::Malformed)?;
     let plain = key
         .cipher()
-        .decrypt(Nonce::from_slice(&iv), sealed.as_slice())
+        .decrypt(&nonce, sealed.as_slice())
         .map_err(|_| FieldError::Unauthentic)?;
     String::from_utf8(plain).map_err(|_| FieldError::NotUtf8)
 }

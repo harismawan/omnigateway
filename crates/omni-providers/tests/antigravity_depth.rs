@@ -110,7 +110,7 @@ fn compare(kind: &'static str) {
             let body = body(kind, 39_990);
             assert_eq!(json!(body.len()), row["length"], "{kind}");
             assert_eq!(
-                format!("{:x}", Sha256::digest(body.as_bytes())),
+                omni_crypto::hex_lower(&Sha256::digest(body.as_bytes())),
                 row["sha256"],
                 "{kind}"
             );
