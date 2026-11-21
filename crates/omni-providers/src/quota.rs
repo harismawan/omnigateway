@@ -13,6 +13,20 @@ pub fn request(
     data: &Value,
     body: Value,
 ) -> Option<QuotaRequest> {
+    if (provider, operation) == ("antigravity", "usage") {
+        if data["projectId"].as_str().unwrap_or("").trim().is_empty() {
+            return None;
+        }
+        // The captured App shape, shared with bootstrap; 15s as frozen.
+        return Some(QuotaRequest {
+            timeout: std::time::Duration::from_secs(15),
+            http: crate::antigravity::oauth::code_assist_request(
+                "retrieveUserQuotaSummary",
+                token,
+                encode(&json!({"project": data["projectId"]})),
+            ),
+        });
+    }
     let url = match (provider, operation) {
         ("openai", "usage") => "https://chatgpt.com/backend-api/wham/usage".into(),
         ("openai", "list") => {
@@ -30,15 +44,9 @@ pub fn request(
             "https://api.anthropic.com/api/organizations/{}/reset_rate_limits",
             data["organization"].as_str()?
         ),
-        ("antigravity", "usage") => {
-            if data["projectId"].as_str().unwrap_or("").trim().is_empty() {
-                return None;
-            }
-            "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary".into()
-        }
         _ => return None,
     };
-    let post = operation == "redeem" || provider == "antigravity";
+    let post = operation == "redeem";
     let mut headers = vec![
         ("Authorization".into(), format!("Bearer {token}")),
         ("Accept".into(), "application/json".into()),
@@ -65,23 +73,18 @@ pub fn request(
     }
     let headers = match provider {
         "openai" => crate::openai::profile::headers(headers),
-        "anthropic" => crate::anthropic::profile::headers(headers),
-        _ => crate::antigravity::profile::headers(headers),
+        _ => crate::anthropic::profile::headers(headers),
     };
     Some(QuotaRequest {
         // Frozen JSON GETs specify 15s. Redemption POSTs use the host's
-        // 30s ceiling; Antigravity's usage POST explicitly specifies 15s.
+        // 30s ceiling.
         timeout: std::time::Duration::from_secs(if operation == "redeem" { 30 } else { 15 }),
         http: AuthRequest {
             url,
             method: if post { "POST" } else { "GET" }.into(),
             headers,
             body: if post {
-                crate::quota::encode(&if provider == "antigravity" {
-                    json!({"project":data["projectId"]})
-                } else {
-                    body
-                })
+                crate::quota::encode(&body)
             } else {
                 String::new()
             },
@@ -329,7 +332,13 @@ mod tests {
                     .filter(|(name, _)| name.eq_ignore_ascii_case("accept"))
                     .map(|(_, value)| value.as_str())
                     .collect::<Vec<_>>();
-                assert_eq!(accept, ["application/json"]);
+                // The captured App quota RPC sends no `Accept`.
+                let want: &[&str] = if provider == "antigravity" {
+                    &[]
+                } else {
+                    &["application/json"]
+                };
+                assert_eq!(accept, want, "{provider} {operation}");
                 assert_eq!(
                     request.timeout.as_secs(),
                     if *operation == "redeem" { 30 } else { 15 }

@@ -718,6 +718,8 @@ const PROBE_STATE: Readonly<Record<string, Record<string, unknown>>> = {
  * back — so a third entry here should measure that property first.
  */
 const PROBE_METHOD: Readonly<Record<string, string>> = { antigravity: "POST", muse: "POST" };
+/** Probes whose captured client sends no `Accept` header. */
+const NO_ACCEPT: ReadonlySet<string> = new Set(["antigravity"]);
 
 test("every usage probe reads a usage endpoint, authenticated, and gates on status", async () => {
   for (const [id, provider] of Object.entries(OAUTH_PROVIDERS)) {
@@ -753,9 +755,11 @@ test("every usage probe reads a usage endpoint, authenticated, and gates on stat
       authed: call?.headers.some(([k]) => k?.toLowerCase() === "authorization"),
     }).toEqual({ id, authed: true });
     // `Accept` is added by the shared GET builder and had no pin anywhere.
+    // Antigravity states its exception: the captured App 2.34 quota RPC sends
+    // none (scripts/antigravity-capture), so its probe must not either.
     expect({ id, accepts: call?.headers.some(([k]) => k?.toLowerCase() === "accept") }).toEqual({
       id,
-      accepts: true,
+      accepts: !NO_ACCEPT.has(id),
     });
   }
 });

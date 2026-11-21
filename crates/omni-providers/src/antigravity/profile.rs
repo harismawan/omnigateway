@@ -33,6 +33,8 @@ fn env(name: &str, fallback: &str) -> String {
     raw(name).filter(|s| safe(s)).unwrap_or(fallback).into()
 }
 
+/// Token exchange and userinfo: not in the 2026-11-21 capture, so they keep
+/// the omniroute 3.8.49 identity.
 pub fn headers(extra: Vec<(String, String)>) -> Vec<(String, String)> {
     let version = env("OMNI_ANTIGRAVITY_IDE_VERSION", "2.12.2");
     let base = vec![
@@ -64,6 +66,43 @@ pub fn headers(extra: Vec<(String, String)>) -> Vec<(String, String)> {
 
 pub(super) const INFERENCE_HOST: &str = "daily-cloudcode-pa.googleapis.com";
 
+fn hub_user_agent() -> String {
+    let version = env("OMNI_ANTIGRAVITY_IDE_VERSION", "2.34.0");
+    env(
+        "OMNI_UA_ANTIGRAVITY",
+        &format!(
+            "antigravity/hub/{version} (aidev_client; os_type=linux; arch=amd64; cl=1026637980)"
+        ),
+    )
+}
+
+/// Bootstrap (`loadCodeAssist`, `onboardUser`) and quota
+/// (`retrieveUserQuotaSummary`) as App 2.34 / CLI 1.5.13 send them in the
+/// 2026-11-21 capture: on [`INFERENCE_HOST`], the Hub UA, and
+/// `Host, User-Agent, Content-Length, Authorization, Content-Type,
+/// Accept-Encoding`. No `Accept` or `X-Goog-Api-Client`; `Accept-Encoding: gzip`
+/// is not adopted (the readers do not decompress it). `Host` and
+/// `Content-Length` are written by the transport. Offline capture only: live
+/// acceptance is not yet measured. Same profile as the TS
+/// `antigravityBootstrapProfile`.
+pub(crate) fn bootstrap_headers(token: &str) -> Vec<(String, String)> {
+    ordered(
+        vec![
+            ("User-Agent".into(), hub_user_agent()),
+            ("Content-Type".into(), "application/json".into()),
+        ],
+        vec![("Authorization".into(), format!("Bearer {token}"))],
+        &[
+            "Host",
+            "User-Agent",
+            "Content-Length",
+            "Authorization",
+            "Content-Type",
+            "Accept-Encoding",
+        ],
+    )
+}
+
 /// App 2.34.0 Linux Hub identity, from the same fixture as the TS profile.
 /// omniroute reported that Google refused a non-Mac identity; this offline
 /// capture neither confirms nor disproves that report. Live acceptance of the
@@ -71,19 +110,10 @@ pub(super) const INFERENCE_HOST: &str = "daily-cloudcode-pa.googleapis.com";
 /// `antigravity/ide/2.12.2 darwin/arm64` to restore the old UA only, not the old
 /// header order, framing, or envelope.
 pub(super) fn inference_headers(token: &str) -> Vec<(String, String)> {
-    let version = env("OMNI_ANTIGRAVITY_IDE_VERSION", "2.34.0");
     ordered(
         vec![
             ("Host".into(), INFERENCE_HOST.into()),
-            (
-                "User-Agent".into(),
-                env(
-                    "OMNI_UA_ANTIGRAVITY",
-                    &format!(
-                        "antigravity/hub/{version} (aidev_client; os_type=linux; arch=amd64; cl=1026637980)"
-                    ),
-                ),
-            ),
+            ("User-Agent".into(), hub_user_agent()),
             ("Transfer-Encoding".into(), "chunked".into()),
             ("Content-Type".into(), "application/json".into()),
         ],

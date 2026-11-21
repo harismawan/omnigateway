@@ -92,11 +92,21 @@ report, and live acceptance of the Linux Hub default is untested. To restore
 the old UA, set `OMNI_UA_ANTIGRAVITY='antigravity/ide/2.12.2 darwin/arm64'`.
 That restores only the UA, not the previous header order, framing or envelope.
 
-**Open: bootstrap parity.** The App/CLI recordings used `daily-cloudcode-pa`
-for `loadCodeAssist` and `onboardUser`; onboarding used `tierId`. The CLI's
-quota summary also used `daily-cloudcode-pa`; no App quota summary was seen.
-Keep the existing OAuth/bootstrap profile, `cloudcode-pa` and `tier_id` pending
-separate verification; the offline capture does not invalidate the prior live probe.
+**Bootstrap and quota follow the same capture** *(owner decision,
+2026-11-21)*. `loadCodeAssist`, `onboardUser` and `retrieveUserQuotaSummary`
+go to `daily-cloudcode-pa`, as App 2.34 / CLI 1.5.13 sent them, with the Hub
+UA, no `Accept` or `X-Goog-Api-Client`, and the captured order `Host,
+User-Agent, Content-Length, Authorization, Content-Type, Accept-Encoding`
+(`Accept-Encoding: gzip` not adopted, as for inference). `onboardUser` sends
+`{"tierId":…,"metadata":{"ideType":"ANTIGRAVITY"}}` — the App spelling; the old
+`tier_id` came from omniroute. The quota RPC's host is from the CLI recording
+only (no App quota summary was seen). Token exchange and userinfo were not
+captured and keep the omniroute identity. **Live acceptance is not yet
+measured**: the earlier live probe found bootstrap and quota working on
+`cloudcode-pa`; whether `daily-cloudcode-pa` accepts them for every tier is the
+next live check. Profiles: TS `antigravityBootstrapProfile`, Rust
+`profile::bootstrap_headers`; pins: `packages/control/test/oauth/antigravity.test.ts`,
+`crates/omni-providers/tests/antigravity_bootstrap.rs`.
 
 ## OAuth
 

@@ -142,15 +142,16 @@ pub fn project_result(status: u16, text: &str) -> (String, String) {
         .unwrap_or_else(|| "legacy-tier".into());
     (project(&body), tier)
 }
-fn code_assist_request(operation: &str, access: &str, body: String) -> AuthRequest {
+/// One Cloud Code RPC in the captured App shape (bootstrap and quota share
+/// inference's host there). Also used by `crate::quota`.
+pub(crate) fn code_assist_request(operation: &str, access: &str, body: String) -> AuthRequest {
     AuthRequest {
-        url: format!("https://cloudcode-pa.googleapis.com/v1internal:{operation}"),
+        url: format!(
+            "https://{}/v1internal:{operation}",
+            super::profile::INFERENCE_HOST
+        ),
         method: "POST".into(),
-        headers: super::profile::headers(vec![
-            ("Content-Type".into(), "application/json".into()),
-            ("Accept".into(), "application/json".into()),
-            ("Authorization".into(), format!("Bearer {access}")),
-        ]),
+        headers: super::profile::bootstrap_headers(access),
         body,
     }
 }
@@ -166,7 +167,8 @@ pub fn onboard_request(access: &str, tier: &str) -> AuthRequest {
         "onboardUser",
         access,
         format!(
-            "{{\"tier_id\":{},\"metadata\":{{\"ideType\":\"ANTIGRAVITY\"}}}}",
+            // `tierId`, the captured App spelling; `tier_id` came from omniroute.
+            "{{\"tierId\":{},\"metadata\":{{\"ideType\":\"ANTIGRAVITY\"}}}}",
             omni_ir::jsjson::to_string(&Value::String(tier.into()))
         ),
     )

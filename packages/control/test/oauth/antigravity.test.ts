@@ -20,9 +20,11 @@ const CLIENT_ID = ANTIGRAVITY_CLIENT_ID;
 
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const USERINFO_URL = "https://www.googleapis.com/oauth2/v1/userinfo?alt=json";
-const LOAD_URL = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
-const ONBOARD_URL = "https://cloudcode-pa.googleapis.com/v1internal:onboardUser";
-const QUOTA_URL = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
+// App 2.34 / CLI 1.5.13 send bootstrap and quota to `daily-cloudcode-pa`, as
+// inference (capture 2026-11-21, scripts/antigravity-capture).
+const LOAD_URL = "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
+const ONBOARD_URL = "https://daily-cloudcode-pa.googleapis.com/v1internal:onboardUser";
+const QUOTA_URL = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
 
 const pending = { verifier: "", challenge: "", state: "s", redirectUri: REDIRECT };
 
@@ -187,7 +189,10 @@ test("an account with no project is onboarded, and the project read from that an
 
   // The tier `loadCodeAssist` named, not the fallback: onboarding an account
   // onto the wrong tier is the difference between a working plan and a refusal.
-  expect(JSON.parse(http.to(ONBOARD_URL)?.body ?? "{}").tier_id).toBe("free-tier");
+  // The captured App body, byte for byte: `tierId`, then the IDE metadata.
+  expect(http.to(ONBOARD_URL)?.body).toBe(
+    '{"tierId":"free-tier","metadata":{"ideType":"ANTIGRAVITY"}}',
+  );
   // `cloudaicompanionProject` came back as an object here and as a string above.
   expect(result.providerData.projectId).toBe("projects/new");
 });
@@ -348,4 +353,28 @@ test("a refused probe reports nothing rather than judging the credential", async
     projectId: "projects/p-1",
   });
   expect(report).toBeNull();
+});
+
+test("bootstrap and quota requests wear the captured App identity and header order", async () => {
+  const http = stubHttp({
+    [TOKEN_URL]: OK_TOKEN,
+    [USERINFO_URL]: OK_EMAIL,
+    [LOAD_URL]: { status: 200, body: { allowedTiers: [{ id: "free-tier", isDefault: true }] } },
+    [ONBOARD_URL]: { status: 200, body: { done: false } },
+    [QUOTA_URL]: { status: 200, body: SUMMARY },
+  });
+  await antigravityOAuth.exchange({ code: "abc#s", pending }, deps(http));
+  await antigravityOAuth.usage?.({ accessToken: "test-token-1" }, deps(http), {
+    projectId: "projects/p-1",
+  });
+  for (const url of [LOAD_URL, ONBOARD_URL, QUOTA_URL]) {
+    const req = http.to(url);
+    const names = (req?.headers ?? []).map(([n]) => n);
+    // Host and Content-Length are the transport's; the rest is the request's.
+    expect(names).toEqual(["User-Agent", "Authorization", "Content-Type"]);
+    const ua = (req?.headers ?? []).find(([n]) => n === "User-Agent")?.[1] ?? "";
+    expect(ua).toMatch(
+      /^antigravity\/hub\/2\.34\.0 \(aidev_client; os_type=linux; arch=amd64; cl=1026637980\)$/,
+    );
+  }
 });

@@ -36,7 +36,41 @@ export const antigravityInferenceProfile: ClientProfile = {
   ]),
 };
 
-/** Legacy OAuth/bootstrap identity from omniroute 3.8.49, not App agent traffic. */
+/**
+ * Bootstrap (`loadCodeAssist`, `onboardUser`) and quota
+ * (`retrieveUserQuotaSummary`) as App 2.34 / CLI 1.5.13 send them in the same
+ * 2026-11-21 capture: on `daily-cloudcode-pa`, the Hub UA, and
+ * `Host, User-Agent, Content-Length, Authorization, Content-Type,
+ * Accept-Encoding`. No `Accept` or `X-Goog-Api-Client`; `Accept-Encoding: gzip`
+ * is not adopted for the same reason as inference (the readers do not
+ * decompress it). `Host` and `Content-Length` are written by the transport.
+ * Offline capture only: live acceptance of this identity is not yet measured.
+ */
+export const antigravityBootstrapProfile: ClientProfile = {
+  headers: [
+    [
+      "User-Agent",
+      env(
+        "OMNI_UA_ANTIGRAVITY",
+        `antigravity/hub/${HUB_VERSION} (aidev_client; os_type=linux; arch=amd64; cl=1026637980)`,
+      ),
+    ],
+    ["Content-Type", "application/json"],
+  ],
+  order: envOrder("OMNI_ORDER_ANTIGRAVITY", [
+    "Host",
+    "User-Agent",
+    "Content-Length",
+    "Authorization",
+    "Content-Type",
+    "Accept-Encoding",
+  ]),
+};
+
+/**
+ * Token exchange and userinfo: not in the 2026-11-21 capture (the recorder
+ * answered them with a stub), so they keep the omniroute 3.8.49 identity.
+ */
 export const antigravityProfile: ClientProfile = {
   headers: [
     [

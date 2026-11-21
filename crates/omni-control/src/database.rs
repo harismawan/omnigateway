@@ -1282,7 +1282,7 @@ mod tests {
     #[test]
     fn forced_undo_inside_restore_guard_preserves_old_snapshot() {
         let _serial = TEST_LOCK.lock().unwrap();
-        let root = tempfile::tempdir_in("/tmp/opencode/e1-e5").unwrap();
+        let root = tempfile::tempdir().unwrap();
         let path = root.path().join("db");
         let store = omni_store::SqliteStore::open(&path, 0).unwrap();
         store.connection().execute_batch("CREATE TABLE sentinel(value); INSERT INTO sentinel VALUES (42); INSERT INTO settings (key,value) VALUES ('settings','{\"snapshotKeepLatest\":0,\"snapshotMaxAgeDays\":0}')")
