@@ -216,6 +216,7 @@ pub fn parse_command(args: &[String], command: &str) -> Result<ParsedCommand, St
                 || crate::observability::bool_option(command, name)
                 || (command == "credentials-health" && name == "all")
                 || (command == "status" && name == "system")
+                || (command == "health" && name == "env-only")
                 || (matches!(
                     command,
                     "start" | "doctor" | "service-install" | "service-uninstall"

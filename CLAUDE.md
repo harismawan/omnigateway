@@ -644,7 +644,8 @@ Detailed compatibility rules + measured client behavior belong in `docs/superpow
 - Console read only captured stdout: `OMNI_LOG_FILE`, journald, or none. `OMNI_LOG_FILE` name
   existing capture; not create one.
 - Docker `scratch` runtime contain gateway + built console, no shell; non-root `bun`, `HEALTHCHECK`
-  via `omni health`. npm package contain CLI, gateway, dashboard. Kustomize base in `k8s/`; `secret.yaml`
+  via `omni health --env-only` (gateway ignores root `.env`). npm package contain CLI, gateway,
+  dashboard. Kustomize base in `k8s/`; `secret.yaml`
   gitignored, `secret.example.yaml` committed.
 - OpenAI OAuth route to narrower Codex surface. OAuth-specific encoding stay behind existing `oauth`
   flag.

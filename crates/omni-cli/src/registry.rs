@@ -5,7 +5,11 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
         "status",
         "Show the gateway process, its accounts, and their quota",
     ),
-    ("health", "health", "Probe the gateway's /health endpoint"),
+    (
+        "health",
+        "health [--env-only]",
+        "Probe the gateway's /health endpoint (--env-only skips the root .env)",
+    ),
     (
         "start",
         "start [--foreground]",

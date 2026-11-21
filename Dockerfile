@@ -61,6 +61,7 @@ FROM --platform=$BUILDPLATFORM alpine:3.22 AS rootfs
 RUN apk add --no-cache ca-certificates \
  && mkdir -p /out/etc/ssl/certs /out/data/plugins /out/tmp /out/usr/local/bin \
  && cp /etc/ssl/certs/ca-certificates.crt /out/etc/ssl/certs/ \
+ && ln -s certs/ca-certificates.crt /out/etc/ssl/cert.pem \
  && printf 'bun:x:1000:1000::/data:/sbin/nologin\n' > /out/etc/passwd \
  && printf 'bun:x:1000:\n' > /out/etc/group \
  && chown -R 1000:1000 /out/data \
@@ -85,11 +86,9 @@ COPY --from=rootfs /out/ /
 COPY --from=artifacts /omnigateway /app/omnigateway
 COPY --from=artifacts /public /app/public
 
-# Plugins are read from `$OMNI_ROOT/plugins` at boot. On one node that is the
-# data volume, so `omni plugin install` against it survives a restart; in a
-# fleet, bake them in — `COPY plugins/ /data/plugins/` in a derived image — so
-# every replica holds the same set. The rootfs supplies the directory, so the
-# boot line names a path rather than an absence.
+# Keep `$OMNI_ROOT/plugins` on the data volume. A derived image can stage files
+# with `COPY plugins/ /data/plugins/`, without a shell. This Rust release does
+# not load plugins or support plugin installation.
 USER bun
 
 # The tag is handed in by the release workflow, independently of compilation.
@@ -110,9 +109,9 @@ EXPOSE 9000
 
 # `/health` is unauthenticated liveness and stays live through a restore; it
 # answers `ok` before the store is asked anything, which is what a liveness
-# probe should read.
+# probe should read. Use only process env, like the gateway entrypoint.
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
-  CMD ["/usr/local/bin/omni", "health"]
+  CMD ["/usr/local/bin/omni", "health", "--env-only"]
 
 # OMNI_ENCRYPTION_KEY is deliberately not set. The gateway refuses to boot
 # without it, which is the intended behaviour: baking a key into an image

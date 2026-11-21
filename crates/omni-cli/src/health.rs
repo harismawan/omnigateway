@@ -3,12 +3,18 @@ use omni_ir::js::trim;
 use std::{
     collections::HashMap,
     io::{self, Read, Write},
-    net::{TcpStream, ToSocketAddrs},
+    net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs},
+    sync::mpsc,
+    thread,
     time::{Duration, Instant},
 };
 
 pub fn run(flags: &HashMap<String, String>) -> Result<String, String> {
-    let env = crate::context::resolve(flags).map_or_else(|_| process_env(), |ctx| ctx.env);
+    let env = if flags.contains_key("env-only") {
+        process_env()
+    } else {
+        crate::context::resolve(flags).map_or_else(|_| process_env(), |ctx| ctx.env)
+    };
     let (host, port) = address(&env)?;
     probe(host, port, Duration::from_secs(2)).map_err(|e| format!("health check failed: {e}"))?;
     Ok("healthy".into())
@@ -40,11 +46,39 @@ fn remaining(deadline: Instant) -> io::Result<Duration> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "probe timed out"))
 }
 
+fn resolve(
+    host: &str,
+    port: u16,
+    deadline: Instant,
+    lookup: impl FnOnce(String, u16) -> io::Result<Vec<SocketAddr>> + Send + 'static,
+) -> io::Result<Vec<SocketAddr>> {
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Ok(vec![SocketAddr::new(ip, port)]);
+    }
+    let host = host.to_owned();
+    let (tx, rx) = mpsc::channel();
+    // The OS lookup is blocking and may not return. Detach instead of joining
+    // it; the one-shot CLI exits when the probe's deadline expires.
+    thread::Builder::new().spawn(move || {
+        let _result = tx.send(lookup(host, port));
+    })?;
+    rx.recv_timeout(remaining(deadline)?).map_err(|e| match e {
+        mpsc::RecvTimeoutError::Timeout => {
+            io::Error::new(io::ErrorKind::TimedOut, "hostname resolution timed out")
+        }
+        mpsc::RecvTimeoutError::Disconnected => io::Error::other("hostname resolution failed"),
+    })?
+}
+
 fn probe(host: &str, port: u16, timeout: Duration) -> io::Result<()> {
     let deadline = Instant::now() + timeout;
+    let addresses = resolve(host, port, deadline, |host, port| {
+        (host.as_str(), port)
+            .to_socket_addrs()
+            .map(Iterator::collect)
+    })?;
     let mut connection = Err(io::Error::other("no address found for OMNI_HOST"));
-    // Hostname resolution uses the OS resolver; the socket operations share one deadline.
-    for addr in (host, port).to_socket_addrs()? {
+    for addr in addresses {
         connection = TcpStream::connect_timeout(&addr, remaining(deadline)?);
         if connection.is_ok() {
             break;
@@ -102,7 +136,7 @@ fn check_status(line: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{net::TcpListener, sync::mpsc, thread};
+    use std::net::TcpListener;
 
     fn response(bytes: &'static [u8]) -> io::Result<()> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
@@ -173,6 +207,43 @@ mod tests {
             io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
         ));
         assert!(elapsed < Duration::from_secs(1), "took {elapsed:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_stalled_hostname_lookup_times_out_without_joining_the_worker() {
+        let (release, blocked) = mpsc::channel::<()>();
+        let (finished, completion) = mpsc::channel();
+        let result = resolve(
+            "gateway.test",
+            9000,
+            Instant::now() + Duration::from_millis(40),
+            move |_, _| {
+                // Remain blocked until the caller returns, with a backstop
+                // so a regression to synchronous lookup cannot hang the test.
+                let _released = blocked.recv_timeout(Duration::from_secs(2));
+                let _sent = finished.send(());
+                Ok(vec![SocketAddr::from(([127, 0, 0, 1], 9000))])
+            },
+        );
+        let error = result.expect_err("stalled lookup must fail");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(completion.try_recv(), Err(mpsc::TryRecvError::Empty));
+        drop(release);
+        completion
+            .recv_timeout(Duration::from_secs(2))
+            .expect("released resolver exits");
+    }
+
+    #[test]
+    fn numeric_addresses_do_not_enter_the_resolver() -> io::Result<()> {
+        let addresses = resolve("::1", 9000, Instant::now(), |_, _| {
+            panic!("numeric IP must not need a resolver")
+        })?;
+        assert_eq!(
+            addresses,
+            [SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, 9000))]
+        );
         Ok(())
     }
 

@@ -190,8 +190,9 @@ docker run --rm \
 ```
 
 The container listens on `0.0.0.0:9000`, serves the console, and keeps its
-database and plugins under `/data`. The `scratch` image runs as the unprivileged
-`bun` user (UID 1000), and its `HEALTHCHECK` runs `omni health`. Use
+database under `/data`. The `scratch` image runs as the unprivileged
+`bun` user (UID 1000), and its `HEALTHCHECK` runs `omni health --env-only` so
+it uses the same process environment as the gateway, not `/data/.env`. Use
 `docker exec <container> omni …` to run CLI commands; the image has no shell,
 so `docker exec <container> sh` does not work.
 
@@ -220,18 +221,13 @@ that writes binary body artifacts is deployed, never set `newTag` below v0.13.5,
 v0.13.5 on the way up: an older replica beside a new one calls every new body unreadable
 (see [Recording bodies](operations.md#recording-bodies)).
 
-Plugins in a fleet are baked into the image so every replica holds the same
-set: `COPY plugins/ /data/plugins/` in a derived Dockerfile still works because
-`COPY` does not need a shell. The image is public, so no pull secret is
-configured; a private fork adds
-`imagePullSecrets` to the Deployment.
+A derived image can stage plugin files with `COPY plugins/ /data/plugins/`,
+which does not need a shell. The directory can also hold files on the data
+volume, but this Rust release does not load or install plugins. The image is
+public, so no pull secret is configured; a private fork adds `imagePullSecrets`
+to the Deployment.
 
 Give the container a restart policy — `--restart unless-stopped` — if you want a
 restart request to bring it back. A container cannot read its own policy, so
 without one an exit is simply the end of the installation until you start it
 again from the host.
-
-**In Docker**, a plugin is mounted at `<root>/plugins/<id>` on a volume — the same
-layout `install` writes — and the container restarted; read-write, not `:ro`,
-because a plugin declaring `files` writes its cache inside its own directory.
-See [plugins.md](plugins.md) and [writing-a-plugin.md](writing-a-plugin.md).
