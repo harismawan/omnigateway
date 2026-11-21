@@ -641,8 +641,15 @@ async fn antigravity_bootstrap_reaches_the_wire_in_the_captured_order() {
         body_encoding: None,
         request_id: None,
     };
-    assert_eq!(client.send(req).await.expect("send").status, 200);
-    let (_, bytes) = rx.recv().await.expect("capture");
+    // Bounded: a wrong length would stall the capture server and `send`.
+    let sent = tokio::time::timeout(Duration::from_secs(5), client.send(req))
+        .await
+        .expect("send within 5s (a framing regression stalls here)");
+    assert_eq!(sent.expect("send").status, 200);
+    let (_, bytes) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("capture within 5s")
+        .expect("capture");
     let text = latin1(&bytes);
     let head = text.split("\r\n\r\n").next().expect("head");
     let names: Vec<&str> = head
@@ -691,8 +698,16 @@ async fn antigravity_bootstrap_frames_a_non_ascii_body_by_its_utf8_bytes() {
         body_encoding: None,
         request_id: None,
     };
-    assert_eq!(Client::new().send(req).await.expect("send").status, 200);
-    let (_, bytes) = rx.recv().await.expect("capture");
+    // Bounded: a wrong length would leave the capture server waiting for
+    // bytes that never come and `send` waiting for its answer.
+    let sent = tokio::time::timeout(Duration::from_secs(5), Client::new().send(req))
+        .await
+        .expect("send within 5s (a framing regression stalls here)");
+    assert_eq!(sent.expect("send").status, 200);
+    let (_, bytes) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("capture within 5s")
+        .expect("capture");
     let split = find(&bytes, b"\r\n\r\n").expect("head");
     let head = latin1(&bytes[..split]);
     assert!(

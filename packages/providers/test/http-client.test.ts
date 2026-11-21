@@ -499,10 +499,11 @@ test("an unmarked request goes out as the bytes it was given", async () => {
 });
 
 /**
- * Antigravity's bootstrap and quota RPCs as they reach the socket — not the
- * header list handed to the transport — in the order App 2.34 sent them:
+ * Antigravity's bootstrap RPCs as they reach the socket — not the header list
+ * handed to the transport — in the order App 2.34 sent them for bootstrap:
  * `Host, User-Agent, Content-Length, Authorization, Content-Type` (its
  * `Accept-Encoding: gzip` is not adopted), then the transport's `Connection`.
+ * The quota RPC reuses this captured bootstrap order (seen only from the CLI).
  */
 test("antigravity bootstrap reaches the wire in the captured order", async () => {
   const s = rawServer();
@@ -545,32 +546,33 @@ test("antigravity bootstrap frames a non-ASCII body by its UTF-8 bytes", async (
   const bytes = Buffer.from(body, "utf8");
   expect(bytes.length).not.toBe(body.length);
   let received = Buffer.alloc(0);
-  const done = new Promise<void>((resolve) => {
-    const server = Bun.listen({
-      hostname: "127.0.0.1",
-      port: 0,
-      socket: {
-        data(socket, data) {
-          received = Buffer.concat([received, Buffer.from(data)]);
-          if (received.includes(bytes)) {
-            socket.write("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-            socket.end();
-            server.stop(true);
-            resolve();
-          }
-        },
+  // Answer once the head has arrived: a wrong length must fail the
+  // assertions below, not leave this test waiting for bytes that never come.
+  const server = Bun.listen({
+    hostname: "127.0.0.1",
+    port: 0,
+    socket: {
+      data(socket, data) {
+        received = Buffer.concat([received, Buffer.from(data)]);
+        if (received.includes("\r\n\r\n") && received.length > received.indexOf("\r\n\r\n") + 4) {
+          socket.write("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+          socket.end();
+        }
       },
-    });
-    void nodeHttpClient()({
+    },
+  });
+  try {
+    await nodeHttpClient()({
       provider: "antigravity",
       url: `http://127.0.0.1:${server.port}/v1internal:onboardUser`,
       method: built.method,
       headers: built.headers,
       body: built.body ?? "",
-      signal: new AbortController().signal,
+      signal: AbortSignal.timeout(5_000),
     });
-  });
-  await done;
+  } finally {
+    server.stop(true);
+  }
   const split = received.indexOf("\r\n\r\n");
   expect(received.subarray(0, split).toString("latin1")).toContain(
     `\r\nContent-Length: ${bytes.length}\r\n`,

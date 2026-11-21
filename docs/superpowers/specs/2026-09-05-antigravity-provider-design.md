@@ -114,7 +114,8 @@ on both runtimes. Token exchange and userinfo were not
 captured and keep the omniroute identity. **Live acceptance is not yet
 measured**: the earlier live probe found bootstrap and quota working on
 `cloudcode-pa`; whether `daily-cloudcode-pa` accepts them for every tier is the
-next live check. Profiles: TS `antigravityBootstrapProfile`, Rust
+next live check. Builders: TS `antigravityBootstrapRequest` (order
+`antigravityBootstrapOrder`), Rust `oauth::code_assist_request` /
 `profile::bootstrap_headers`; pins: `packages/control/test/oauth/antigravity.test.ts`,
 `crates/omni-providers/tests/antigravity_bootstrap.rs`.
 
