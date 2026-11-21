@@ -269,13 +269,24 @@ lock fails while another connection holds a shared lock (any connection that
 has read and not finished) and keeps new readers out while held; it does not
 see a process that opened the file and never read it. The lock is held across
 the backup and the `ExecStart=` rewrite and released just before the start. A
-start is accepted only when `/health` answers, the listening socket belongs to
-systemd's `MainPID` (or the bridge's child), that process runs this binary, and
-no other process has the database open. Any failure after the stop leaves the
+start is accepted only when `/health` answers, the listening socket serving the
+probed address belongs to systemd's `MainPID` (or the bridge's child), that
+process runs this binary and has the backed-up database open, and no other
+process visible in `/proc` has it open.
+
+**Accepted limitation (owner ruling):** this is not an exclusive handoff.
+Between releasing the lock and Rust opening the database there is a short
+window, and the TS gateway takes no lock that Rust could wait on. A second TS
+gateway on the same SQLite file (another installation, another supervisor)
+starting in that window would write alongside Rust; the post-start check catches
+it only if it is visible in `/proc` (same user, same path) and then stops the
+service after both have run. Automatic migration assumes no other gateway uses
+this database; if one might, stop it first or migrate by hand. Any failure after the stop leaves the
 service stopped if systemd confirms it, or says it could not be confirmed and
 gives the stop command first, with rollback steps for that branch. A recorded
-failure, with its backup and saved unit, stays until the service is seen running
-this binary. The outcome is recorded in `<state>/npm-migration.json`
+failure, with its backup and saved unit, is kept as `pendingFailure` across
+later attempts — refused, current or otherwise — until the service is seen
+running this binary. The outcome is recorded in `<state>/npm-migration.json`
 (`~/.local/state/omnigateway` by default); `omni doctor` and `omni status` print
 its reason until resolved. This replaces the maintenance window for that one
 shape only. It does not take step 6, so run it after the update.

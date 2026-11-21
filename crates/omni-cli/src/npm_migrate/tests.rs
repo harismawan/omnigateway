@@ -64,6 +64,8 @@ struct Fake {
     foreign_listener: bool,
     /// `(pid, exe)` of a native child of MainPID (the bridge's gateway).
     bridge_child: RefCell<Option<(u32, PathBuf)>>,
+    /// The started gateway holds the database that was backed up.
+    rust_holds_db: bool,
 }
 
 impl Fake {
@@ -109,6 +111,7 @@ impl Fake {
             late_holder: false,
             foreign_listener: false,
             bridge_child: RefCell::new(None),
+            rust_holds_db: true,
         }
     }
     fn log(&self) -> Vec<String> {
@@ -205,11 +208,11 @@ impl Host for Fake {
             vec![]
         };
         found.extend(self.extra_holder);
-        if *self.main_pid.borrow() == Some(4242) {
+        if *self.main_pid.borrow() == Some(4242) && self.rust_holds_db {
             found.push(4242);
         }
         // The bridge's child, once spawned, holds the database.
-        if self.log.borrow().iter().any(|l| l.starts_with("spawn")) {
+        if self.rust_holds_db && self.log.borrow().iter().any(|l| l.starts_with("spawn")) {
             found.push(5151);
         }
         if self.late_holder && self.log.borrow().iter().any(|l| l == "unlock") {
@@ -246,8 +249,8 @@ impl Host for Fake {
         self.log.borrow_mut().push(format!("health {base}"));
         self.healthy
     }
-    fn answers_now(&self, base: &str) -> bool {
-        self.log.borrow_mut().push(format!("probe {base}"));
+    fn occupied(&self, addr: std::net::SocketAddr) -> bool {
+        self.log.borrow_mut().push(format!("probe {addr}"));
         self.port_taken
     }
     fn native_child(&self, parent: u32, binary: &Path) -> Option<(u32, PathBuf)> {
@@ -256,7 +259,7 @@ impl Host for Fake {
             .then(|| self.bridge_child.borrow().clone())
             .flatten()
     }
-    fn listener_pid(&self, _port: u16) -> Option<u32> {
+    fn listener_pid(&self, _addr: std::net::SocketAddr) -> Option<u32> {
         if self.foreign_listener {
             return Some(31338);
         }
@@ -1243,4 +1246,141 @@ fn bridge_tree_is_judged_by_its_native_child() {
     *host.bridge_child.borrow_mut() =
         Some((5151, PathBuf::from(format!("{} (deleted)", bin.display()))));
     assert_eq!(migrate(&host, &f.paths(), 2).status, Status::Restarted);
+}
+
+// ------------------------------------------------- second rereview
+
+/// Finding 1: systemd reads `\ `, `$X` and quotes differently from the CLI;
+/// a value that could differ for the keys that pick the database or mode is
+/// refused rather than guessed.
+#[test]
+fn values_systemd_could_read_differently_are_refused_for_db_and_mode_keys() {
+    for line in [
+        "OMNI_DB_PATH=/srv/data\\ store/live.db",
+        "OMNI_DB_PATH=$HOME/live.db",
+        "OMNI_DB_PATH=\"/srv/a\"b.db",
+        "OMNI_DB_PATH='/srv/a",
+        "OMNI_CLUSTER_MODE=${MODE}",
+    ] {
+        let f = fixture(&format!(
+            "OMNI_ENCRYPTION_KEY=kkkkkkkkkkkkkkkkkkkk\n{line}\n"
+        ));
+        f.write_user(&legacy_unit(&f.root, ""));
+        refused_before_stop(&f, &f.host(), Status::SkippedUnit);
+    }
+    // A plain value is fine.
+    let f = fixture("OMNI_ENCRYPTION_KEY=kkkkkkkkkkkkkkkkkkkk\nOMNI_DB_PATH=data/live.db\n");
+    f.write_user(&legacy_unit(&f.root, ""));
+    fs::create_dir_all(f.root.join("data")).unwrap();
+    assert_eq!(migrate(&f.host(), &f.paths(), 1).status, Status::Migrated);
+}
+
+/// Finding 1: the system manager's DefaultEnvironment reaches system units.
+#[test]
+fn system_manager_environment_with_omni_settings_is_refused() {
+    let f = fixture(SINGLE);
+    f.write_system(&legacy_unit(&f.root, ""));
+    let host = Fake {
+        euid_root: true,
+        unit_file: f.system_unit.clone(),
+        manager_env: vec!["OMNI_REDIS_URL=redis://x".into()],
+        ..f.host()
+    };
+    let outcome = migrate(&host, &f.paths(), 1);
+    assert_eq!(outcome.status, Status::SkippedUnit, "{}", outcome.message);
+    assert!(!host.did("systemctl system stop"));
+}
+
+/// Finding 1: the started gateway must be holding the database that was
+/// backed up, not another one.
+#[test]
+fn rust_not_holding_the_backed_up_database_fails() {
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    let host = Fake {
+        rust_holds_db: false,
+        ..f.host()
+    };
+    let outcome = migrate(&host, &f.paths(), 1);
+    assert_eq!(outcome.status, Status::FailedStart, "{}", outcome.message);
+    assert!(
+        outcome.message.contains("does not have"),
+        "{}",
+        outcome.message
+    );
+}
+
+/// Finding 4: any later attempt — refused, current, or another failure —
+/// keeps the unresolved failure and its rollback until positive recovery.
+#[test]
+fn an_unresolved_failure_survives_every_later_attempt() {
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    migrate(
+        &Fake {
+            healthy: false,
+            ..f.host()
+        },
+        &f.paths(),
+        1,
+    );
+    let failed = f.record();
+    // A refused retry (pending daemon-reload).
+    let host = Fake {
+        need_reload: true,
+        ..rust_host(&f, None)
+    };
+    assert_eq!(migrate(&host, &f.paths(), 2).status, Status::SkippedUnit);
+    assert_eq!(f.record()["pendingFailure"]["backup"], failed["backup"]);
+    assert_eq!(
+        f.record()["pendingFailure"]["savedUnit"],
+        failed["savedUnit"]
+    );
+    assert!(banner(&f.paths()).unwrap().contains("failed"));
+    // An active run whose executable cannot be read is not recovery.
+    let host = Fake {
+        exe_unreadable: true,
+        ..rust_host(&f, None)
+    };
+    migrate(&host, &f.paths(), 3);
+    assert_eq!(f.record()["pendingFailure"]["backup"], failed["backup"]);
+    assert!(banner(&f.paths()).unwrap().contains("failed"));
+    // Verified running our binary: recovered.
+    let host = rust_host(&f, Some(f.binary.clone()));
+    assert_eq!(migrate(&host, &f.paths(), 4).status, Status::Current);
+    assert!(f.record().get("pendingFailure").is_none_or(Value::is_null));
+    assert_eq!(banner(&f.paths()), None);
+}
+
+/// Finding 4: an unparseable MainPID is not "stopped".
+#[test]
+fn stopped_requires_an_explicit_zero_main_pid() {
+    let facts: Facts = [("ActiveState", "inactive"), ("MainPID", "")]
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+        .collect();
+    assert!(!stopped(&facts));
+    let facts: Facts = [("ActiveState", "inactive"), ("MainPID", "0")]
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+        .collect();
+    assert!(stopped(&facts));
+}
+
+/// Finding 4: a stop that systemd never confirms gives stop-first steps.
+#[test]
+fn unconfirmed_ts_stop_gives_the_stop_command_first() {
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    let host = Fake {
+        stop_sticks: false,
+        ..f.host()
+    };
+    let outcome = migrate(&host, &f.paths(), 1);
+    let stop = outcome
+        .message
+        .find("systemctl --user stop omnigateway.service")
+        .unwrap();
+    let npm = outcome.message.find("npm i -g omnigateway@0.15.5").unwrap();
+    assert!(stop < npm, "{}", outcome.message);
 }

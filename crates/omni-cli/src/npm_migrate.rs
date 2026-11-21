@@ -204,10 +204,12 @@ pub(crate) trait Host {
     fn sleep(&self, duration: Duration);
     /// `/health` answers 2xx within the deadline.
     fn healthy(&self, base: &str) -> bool;
-    /// Anything answers on `base` right now (one quick probe).
-    fn answers_now(&self, base: &str) -> bool;
-    /// The process holding the listening TCP socket on `port`, if visible.
-    fn listener_pid(&self, port: u16) -> Option<u32>;
+    /// Anything accepts a TCP connection at `addr` right now.
+    fn occupied(&self, addr: std::net::SocketAddr) -> bool;
+    /// The single process holding the listening socket that serves `addr`
+    /// (bound to it or to its wildcard); `None` when there is none, several,
+    /// or one whose owner cannot be seen.
+    fn listener_pid(&self, addr: std::net::SocketAddr) -> Option<u32>;
     /// A child of `parent` whose executable is (or was, `(deleted)`) `binary`.
     fn native_child(&self, parent: u32, binary: &Path) -> Option<(u32, PathBuf)>;
     /// Free space and writability of the snapshot directory, a readable
@@ -272,7 +274,7 @@ fn stopped(facts: &Facts) -> bool {
     facts
         .get("ActiveState")
         .is_some_and(|s| s == "inactive" || s == "failed")
-        && main_pid(facts).is_none()
+        && facts.get("MainPID").is_some_and(|p| p.trim() == "0")
 }
 fn main_pid(facts: &Facts) -> Option<u32> {
     facts
@@ -421,8 +423,20 @@ fn local_base(env: &std::collections::HashMap<String, String>) -> String {
     };
     format!("http://{host}:{}", port(env))
 }
-fn port_number(env: &std::collections::HashMap<String, String>) -> u16 {
-    port(env).parse().unwrap_or(9000)
+/// The address the health probe connects to.
+fn probe_addr(env: &std::collections::HashMap<String, String>) -> std::net::SocketAddr {
+    let port: u16 = port(env).parse().unwrap_or(9000);
+    let host = env
+        .get("OMNI_HOST")
+        .map(|h| h.trim().trim_start_matches('[').trim_end_matches(']'))
+        .filter(|h| !h.is_empty())
+        .unwrap_or("127.0.0.1");
+    let ip = match host {
+        "0.0.0.0" | "::" => std::net::IpAddr::from([127, 0, 0, 1]),
+        "localhost" => std::net::IpAddr::from([127, 0, 0, 1]),
+        h => h.parse().unwrap_or(std::net::IpAddr::from([127, 0, 0, 1])),
+    };
+    std::net::SocketAddr::new(ip, port)
 }
 fn port(env: &std::collections::HashMap<String, String>) -> String {
     env.get("OMNI_PORT")
@@ -474,17 +488,51 @@ fn previous_record(paths: &Paths) -> Option<Value> {
     serde_json::from_str(&fs::read_to_string(paths.state.join(RECORD)).ok()?).ok()
 }
 
+/// The failure a later attempt must not erase: the latest `failed-*`
+/// record's message and rollback data, carried as `pendingFailure`.
+fn pending_failure(previous: Option<&Value>) -> Option<Value> {
+    let previous = previous?;
+    if let Some(pending) = previous.get("pendingFailure").filter(|p| !p.is_null()) {
+        return Some(pending.clone());
+    }
+    let status = previous["status"].as_str()?;
+    status.starts_with("failed-").then(|| {
+        json!({
+            "status": status,
+            "at": previous["at"],
+            "message": previous["message"],
+            "backup": previous["backup"],
+            "savedUnit": previous["savedUnit"],
+            "unit": previous["unit"],
+        })
+    })
+}
+
+/// Records this attempt. The last version known to have run healthy and any
+/// unresolved failure survive it; `extra["recovered"] = true` (set only when
+/// the service is seen running this binary) clears the failure.
 fn outcome(paths: &Paths, now: i64, status: Status, message: String, extra: Value) -> Outcome {
     let mut extra = extra;
-    // The last version known to have run healthy survives every attempt.
-    let running =
-        previous_record(paths).and_then(|r| r["runningVersion"].as_str().map(str::to_owned));
+    let previous = previous_record(paths);
+    let running = previous
+        .as_ref()
+        .and_then(|r| r["runningVersion"].as_str().map(str::to_owned));
+    let pending = if status.name().starts_with("failed-") {
+        // This attempt is the failure now; it carries its own rollback data.
+        None
+    } else {
+        pending_failure(previous.as_ref())
+    };
     if let Some(obj) = extra.as_object_mut() {
+        let recovered = obj.remove("recovered").is_some_and(|v| v == true);
         obj.insert("message".into(), json!(message));
         if !obj.contains_key("runningVersion")
             && let Some(running) = running
         {
             obj.insert("runningVersion".into(), json!(running));
+        }
+        if !recovered && let Some(pending) = pending {
+            obj.insert("pendingFailure".into(), pending);
         }
     }
     record(paths, now, status, extra);
@@ -649,7 +697,9 @@ fn preflight(host: &dyn Host, paths: &Paths) -> Result<Plan, (Status, String)> {
         ));
     }
     // The user manager's own environment reaches the service too.
-    if unit.scope == Scope::User {
+    // The service manager's own environment (user manager exports, or the
+    // system manager's DefaultEnvironment) reaches the service too.
+    {
         let manager = host
             .systemctl(unit.scope, &["show-environment"])
             .map_err(|e| {
@@ -664,7 +714,12 @@ fn preflight(host: &dyn Host, paths: &Paths) -> Result<Plan, (Status, String)> {
             .collect();
         if !names.is_empty() {
             return Err(left_alone(format!(
-                "the user service manager exports {} to it",
+                "the {} service manager exports {} to it",
+                if unit.scope == Scope::User {
+                    "user"
+                } else {
+                    "system"
+                },
                 names.join(", ")
             )));
         }
@@ -678,6 +733,29 @@ fn preflight(host: &dyn Host, paths: &Paths) -> Result<Plan, (Status, String)> {
             "{} continues a line with \\, which the CLI reads differently from systemd",
             env_file.display()
         )));
+    }
+    // For the keys that choose the database and the mode, accept only values
+    // systemd and the CLI read identically: no `\\`, `$`, quote or space.
+    for line in text.lines() {
+        let line = line.trim();
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if matches!(
+            key,
+            "OMNI_DB_PATH" | "OMNI_DATABASE_URL" | "OMNI_REDIS_URL" | "OMNI_CLUSTER_MODE"
+        ) && value
+            .trim()
+            .chars()
+            .any(|c| matches!(c, '\\' | '$' | '"' | '\'' | ' ' | '\t' | '`'))
+        {
+            return Err(left_alone(format!(
+                "{key} in {} uses quoting or escapes systemd may read differently; write it as a plain value",
+                env_file.display()
+            )));
+        }
     }
     let env = crate::context::parse_env(&text);
     if clustered(&env) {
@@ -776,22 +854,28 @@ fn serving_is(host: &dyn Host, plan: &Plan, pid: u32, binary: &Path) -> Result<(
     if host.process_exe(pid).is_none_or(|e| e != binary) {
         return Err(format!("process {pid} is not {}", binary.display()));
     }
-    let port = port_number(&plan.env);
-    match host.listener_pid(port) {
+    let addr = probe_addr(&plan.env);
+    match host.listener_pid(addr) {
         Some(owner) if owner == pid => {}
         Some(owner) => {
             return Err(format!(
-                "port {port} is held by process {owner}, not the gateway"
+                "{addr} is served by process {owner}, not the gateway"
             ));
         }
         None => {
             return Err(format!(
-                "no listener on port {port} could be attributed to the gateway"
+                "the listener on {addr} could not be attributed to the gateway"
             ));
         }
     }
-    let others: Vec<String> = host
-        .holders(&plan.db)
+    let holders = host.holders(&plan.db);
+    if !holders.contains(&pid) {
+        return Err(format!(
+            "the gateway does not have {} open, so it is not serving the database that was backed up",
+            plan.db.display()
+        ));
+    }
+    let others: Vec<String> = holders
         .into_iter()
         .filter(|p| *p != pid)
         .map(|p| p.to_string())
@@ -818,10 +902,10 @@ fn started_is_ours(host: &dyn Host, plan: &Plan, binary: &Path) -> Result<(), St
 /// With TS stopped, nothing may answer on the gateway's port: a server there
 /// would answer the health check in Rust's place.
 fn port_free(host: &dyn Host, plan: &Plan) -> Result<(), String> {
-    let base = local_base(&plan.env);
-    if host.answers_now(&base) {
+    let addr = probe_addr(&plan.env);
+    if host.occupied(addr) {
         Err(format!(
-            "something still answers on {base} with the old gateway stopped"
+            "something still listens on {addr} with the old gateway stopped"
         ))
     } else {
         Ok(())
@@ -859,7 +943,9 @@ pub(crate) fn migrate(host: &dyn Host, paths: &Paths, now: i64) -> Outcome {
             now,
             Status::FailedWriter,
             format!(
-                "{e}. Nothing was changed.\n{}",
+                "{e}; it could not be confirmed stopped. Nothing was changed. First run: {}systemctl{} stop {UNIT_NAME}\n{}",
+                sudo(scope),
+                scope.flag(),
                 rollback_steps(&plan, None, None)
             ),
             json!({}),
@@ -1055,6 +1141,7 @@ fn convert_as(
     let mut done = extra.clone();
     if starter != Starter::None {
         done["runningVersion"] = json!(paths.version);
+        done["recovered"] = json!(true);
     }
     (
         outcome(
@@ -1084,12 +1171,9 @@ fn refresh(host: &dyn Host, paths: &Paths, plan: &Plan, now: i64) -> Outcome {
         .as_ref()
         .and_then(|r| r["runningVersion"].as_str().map(str::to_owned));
     let mut extra = json!({"unit": plan.unit.path});
-    // A failure's recovery details (backup, saved unit) survive later runs.
-    let pending_failure = previous.as_ref().filter(|r| {
-        r["status"]
-            .as_str()
-            .is_some_and(|s| s.starts_with("failed-"))
-    });
+    // An unresolved failure's recovery details survive until recovery.
+    let failure = pending_failure(previous.as_ref());
+    let pending_failure = failure.as_ref();
     if let Some(failure) = pending_failure {
         for key in ["backup", "savedUnit"] {
             if let Some(v) = failure.get(key).filter(|v| !v.is_null()) {
@@ -1133,9 +1217,10 @@ fn refresh(host: &dyn Host, paths: &Paths, plan: &Plan, now: i64) -> Outcome {
     });
     if !replaced {
         let verified = exe.as_ref().is_some_and(|e| *e == paths.binary);
-        if verified && pending_failure.is_some() {
-            // Recovered: running our binary. The failure no longer applies.
+        if verified {
+            // Seen running our binary: any recorded failure is resolved.
             extra["runningVersion"] = json!(paths.version);
+            extra["recovered"] = json!(true);
         }
         let _ = pid;
         return outcome(
@@ -1169,6 +1254,7 @@ fn refresh(host: &dyn Host, paths: &Paths, plan: &Plan, now: i64) -> Outcome {
     let Err(mut why) = verdict else {
         let mut done = extra;
         done["runningVersion"] = json!(paths.version);
+        done["recovered"] = json!(true);
         return outcome(
             paths,
             now,
@@ -1287,7 +1373,13 @@ pub(crate) fn announces(command: &str) -> bool {
 /// One stderr line while a migration needs attention, or a 0.x unit is
 /// still installed. `None` when there is nothing to say.
 pub(crate) fn banner(paths: &Paths) -> Option<String> {
-    if let Some(record) = previous_record(paths)
+    let latest = previous_record(paths);
+    // An unresolved failure outranks whatever the latest attempt said.
+    let shown = latest
+        .as_ref()
+        .and_then(|r| r.get("pendingFailure").filter(|p| !p.is_null()).cloned())
+        .or(latest);
+    if let Some(record) = shown
         && let Some(status) = record["status"].as_str()
         && Status::needs_attention(status)
     {

@@ -217,8 +217,13 @@ other-writable. Otherwise the tool prints the exact
 7. **Rewrite `ExecStart=`** only (temp file + rename), `daemon-reload`, then
    release the lock.
 8. **Start** (only if it was active) and accept it only when `/health` answers,
-   the listening socket on the port belongs to systemd's `MainPID`, that process
-   runs this binary, and no other process has the database open. *(finding 3, 5)*
+   the listening socket serving the probed address belongs to systemd's
+   `MainPID`, that process runs this binary and holds the backed-up database,
+   and no other visible process holds it. *(finding 3, 5)*
+   **Accepted limitation (owner, 2026-11-21):** not an exclusive handoff — a
+   second TS gateway on the same file starting between unlock and Rust's open
+   is detected only when `/proc` shows it, and only after both ran. Auto
+   migration assumes no other gateway uses the database.
 9. **Failure after step 4 leaves the service stopped** (npm already removed the
    TS files, so TS cannot be restarted): stop again and confirm (when it cannot
    be confirmed, say so and give the stop command first), record `failed-*` —
