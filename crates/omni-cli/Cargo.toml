@@ -24,7 +24,7 @@ omni-ir = { path = "../omni-ir" }
 omni-store = { path = "../omni-store" }
 omni-router = { path = "../omni-router" }
 serde_json.workspace = true
-rusqlite = { version = "0.41", default-features = false, features = ["bundled"] }
+rusqlite = { version = "0.43", default-features = false, features = ["bundled"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 
 [dev-dependencies]

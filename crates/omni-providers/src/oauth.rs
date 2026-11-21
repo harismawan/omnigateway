@@ -13,7 +13,7 @@ pub fn pkce_challenge(verifier: &str) -> String {
 /// 256 bits from the OS-seeded cryptographic RNG, encoded without padding.
 pub fn random_state() -> String {
     use base64::Engine as _;
-    use rand::RngCore as _;
+    use rand::Rng as _;
     let mut bytes = [0u8; 32];
     rand::rng().fill_bytes(&mut bytes);
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)

@@ -17,7 +17,7 @@ use crate::error::StoreError;
 use aes_gcm::aead::{Aead as _, KeyInit as _, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
 use omni_crypto::field::FieldKey;
-use rand::RngCore as _;
+use rand::Rng as _;
 use sha2::{Digest as _, Sha256};
 
 /// `MAX_ARTIFACT_BYTES`.

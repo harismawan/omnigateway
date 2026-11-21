@@ -21,7 +21,7 @@ thiserror.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 # Same exact pin as omni-coord (its `Remote` takes and returns these types).
-redis = { version = "=1.4.0", default-features = false, features = ["tokio-comp", "script"] }
+redis = { version = "=1.8.2", default-features = false, features = ["tokio-comp", "script"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros", "process", "io-util", "net"] }

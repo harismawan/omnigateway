@@ -22,7 +22,7 @@
 use argon2::{
     Algorithm, Argon2, Params, PasswordHash, PasswordHasher as _, PasswordVerifier as _, Version,
 };
-use rand::RngCore as _;
+use rand::Rng as _;
 
 /// `ARGON2.memoryCost` (KiB).
 pub const MEMORY_KIB: u32 = 19_456;

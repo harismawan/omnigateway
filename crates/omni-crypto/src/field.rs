@@ -7,7 +7,7 @@
 
 use aes_gcm::aead::{Aead as _, KeyInit as _};
 use aes_gcm::{Aes256Gcm, Nonce};
-use rand::RngCore as _;
+use rand::Rng as _;
 
 const KDF_SALT: &[u8] = b"omnigateway-field-encryption-v1";
 const KDF_ITERATIONS: u32 = 210_000;

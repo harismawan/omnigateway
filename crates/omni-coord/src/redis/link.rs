@@ -1111,7 +1111,7 @@ fn request(conn: &MultiplexedConnection, req: &Wire) -> BoxFuture<Result<Value, 
 /// `Some(reply)` if it completed outright, `None` once it is waiting on its
 /// reply.
 ///
-/// Why one poll suffices (redis-rs 1.4.0, `MultiplexedConnection`, no
+/// Why one poll suffices (redis-rs 1.8.2, `MultiplexedConnection`, no
 /// concurrency limiter, no client cache, response timeout off — all as
 /// `connect` configures it): `query_async` → `send_packed_command(s)` →
 /// `Pipeline::send_recv`, whose first await is `mpsc::Sender::send` on the
@@ -1132,7 +1132,9 @@ fn request(conn: &MultiplexedConnection, req: &Wire) -> BoxFuture<Result<Value, 
 /// takes over its original's charge only after the original's reply.
 ///
 /// This is an assumption about redis-rs internals, so it is pinned: the
-/// exact `redis = "=1.4.0"` in `Cargo.toml` (an upgrade must re-check it),
+/// exact `redis = "=1.8.2"` in `Cargo.toml` (an upgrade must re-check it;
+/// 1.4.0 → 1.8.2 was: `send_recv`, `send_packed_command(s)` and both
+/// `query_async`s are unchanged but for formatting),
 /// and the regression tests
 /// `round2::releases_precede_later_admissions_under_concurrent_load`,
 /// `round3::release_then_immediate_reacquire_of_the_same_key_under_backpressure`

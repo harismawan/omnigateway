@@ -15,7 +15,7 @@ omni-ir = { path = "../omni-ir" }
 omni-ratelimit = { path = "../omni-ratelimit" }
 serde_json.workspace = true
 sha2 = "0.11"
-rand = "0.9"
+rand = "0.10"
 
 [dev-dependencies]
 serde_json.workspace = true
