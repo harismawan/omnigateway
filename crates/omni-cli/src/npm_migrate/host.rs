@@ -220,55 +220,139 @@ impl Host for System {
     }
 
     fn run_gateway(&self, binary: &Path, root: &Path) -> Result<Child, String> {
-        Command::new(binary)
+        let child = Command::new(binary)
             .current_dir(root)
             .stdin(Stdio::null())
             .spawn()
-            .map(Child::Real)
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        // Relay termination to the gateway from the moment it exists, not
+        // only once it has passed its health check.
+        relay_signals(child.id());
+        Ok(Child::Real(child))
+    }
+
+    fn answers_now(&self, base: &str) -> bool {
+        crate::service::healthy_within(base, Duration::from_millis(800))
+    }
+
+    fn listener_pid(&self, port: u16) -> Option<u32> {
+        let inodes = listening_inodes(port);
+        if inodes.is_empty() {
+            return None;
+        }
+        let mut owners = vec![];
+        for entry in fs::read_dir("/proc").ok()?.flatten() {
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|n| n.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            let Ok(fds) = fs::read_dir(entry.path().join("fd")) else {
+                continue;
+            };
+            let owns = fds
+                .flatten()
+                .filter_map(|fd| fs::read_link(fd.path()).ok())
+                .any(|t| {
+                    t.to_str()
+                        .and_then(|t| t.strip_prefix("socket:[")?.strip_suffix(']'))
+                        .is_some_and(|i| inodes.iter().any(|n| n == i))
+                });
+            if owns {
+                owners.push(pid);
+            }
+        }
+        // One owner, or it is not attributable.
+        match owners.as_slice() {
+            [one] => Some(*one),
+            _ => None,
+        }
+    }
+
+    fn native_child(&self, parent: u32, binary: &Path) -> Option<(u32, PathBuf)> {
+        // Any thread of `parent` may have spawned it.
+        let mut children = String::new();
+        for task in fs::read_dir(format!("/proc/{parent}/task")).ok()?.flatten() {
+            if let Ok(list) = fs::read_to_string(task.path().join("children")) {
+                children.push_str(&list);
+                children.push(' ');
+            }
+        }
+        children
+            .split_whitespace()
+            .filter_map(|c| c.parse::<u32>().ok())
+            .find_map(|pid| {
+                let exe = fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+                let shown = exe.display().to_string();
+                (exe == binary
+                    || shown.trim_end_matches(" (deleted)") == binary.display().to_string())
+                .then_some((pid, exe))
+            })
     }
 }
 
-/// Serve as the bridge: relay termination signals to the gateway and exit
-/// with its status, so systemd sees the gateway's own outcome.
+/// Inodes of sockets listening on `port`, IPv4 and IPv6 (`/proc/net/tcp*`,
+/// state `0A`).
+fn listening_inodes(port: u16) -> Vec<String> {
+    let want = format!(":{port:04X}");
+    ["/proc/net/tcp", "/proc/net/tcp6"]
+        .iter()
+        .filter_map(|f| fs::read_to_string(f).ok())
+        .flat_map(|t| t.lines().skip(1).map(str::to_owned).collect::<Vec<_>>())
+        .filter_map(|line| {
+            let cols: Vec<&str> = line.split_whitespace().collect();
+            (cols.get(1)?.ends_with(&want) && *cols.get(3)? == "0A")
+                .then(|| cols.get(9).map(|s| (*s).to_owned()))?
+        })
+        .collect()
+}
+
+/// A thread with its own runtime that forwards TERM/INT/HUP to `pid` for the
+/// life of this process (the bridge), so the gateway always gets them.
+fn relay_signals(pid: u32) {
+    std::thread::spawn(move || {
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return;
+        };
+        runtime.block_on(async move {
+            use tokio::signal::unix::{SignalKind, signal};
+            let (Ok(mut term), Ok(mut int), Ok(mut hup)) = (
+                signal(SignalKind::terminate()),
+                signal(SignalKind::interrupt()),
+                signal(SignalKind::hangup()),
+            ) else {
+                return;
+            };
+            loop {
+                let sig = tokio::select! {
+                    _ = term.recv() => rustix::process::Signal::TERM,
+                    _ = int.recv() => rustix::process::Signal::INT,
+                    _ = hup.recv() => rustix::process::Signal::HUP,
+                };
+                if let Some(pid) = rustix::process::Pid::from_raw(pid as i32) {
+                    let _sent = rustix::process::kill_process(pid, sig);
+                }
+            }
+        });
+    });
+}
+
+/// Serve as the bridge: wait for the gateway (signals are already relayed by
+/// [`relay_signals`]) and exit with its status, so systemd sees the gateway's
+/// own outcome.
 pub(crate) fn serve(child: Child) -> std::process::ExitCode {
     use std::process::ExitCode;
     let Some(mut child) = child.into_real() else {
         return ExitCode::FAILURE;
     };
-    let pid = child.id();
-    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    else {
-        let _killed = child.kill();
-        return ExitCode::FAILURE;
-    };
-    runtime.spawn(async move {
-        use tokio::signal::unix::{SignalKind, signal};
-        let (Ok(mut term), Ok(mut int), Ok(mut hup)) = (
-            signal(SignalKind::terminate()),
-            signal(SignalKind::interrupt()),
-            signal(SignalKind::hangup()),
-        ) else {
-            return;
-        };
-        loop {
-            let sig = tokio::select! {
-                _ = term.recv() => rustix::process::Signal::TERM,
-                _ = int.recv() => rustix::process::Signal::INT,
-                _ = hup.recv() => rustix::process::Signal::HUP,
-            };
-            if let Some(pid) = rustix::process::Pid::from_raw(pid as i32) {
-                let _sent = rustix::process::kill_process(pid, sig);
-            }
-        }
-    });
-    let status =
-        runtime.block_on(async { tokio::task::spawn_blocking(move || child.wait()).await });
-    match status {
-        Ok(Ok(status)) => ExitCode::from(u8::try_from(status.code().unwrap_or(1)).unwrap_or(1)),
-        _ => ExitCode::FAILURE,
+    match child.wait() {
+        Ok(status) => ExitCode::from(u8::try_from(status.code().unwrap_or(1)).unwrap_or(1)),
+        Err(_) => ExitCode::FAILURE,
     }
 }
 
@@ -341,6 +425,33 @@ mod tests {
             .preflight_db(&bare, &dir.path().join("snapshots"))
             .unwrap_err();
         assert!(err.contains("migration ledger"), "{err}");
+    }
+
+    #[test]
+    fn the_listener_is_attributed_to_the_process_that_holds_it() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert_eq!(System.listener_pid(port), Some(std::process::id()));
+        drop(listener);
+        assert_eq!(System.listener_pid(port), None);
+    }
+
+    #[test]
+    fn a_native_child_is_found_under_its_parent() {
+        let sleep = PathBuf::from("/bin/sleep");
+        let real = fs::canonicalize(&sleep).unwrap();
+        let mut child = Command::new(&sleep).arg("5").spawn().unwrap();
+        let found = (0..50).find_map(|_| {
+            std::thread::sleep(Duration::from_millis(20));
+            System.native_child(std::process::id(), &real)
+        });
+        let _killed = child.kill();
+        let _reaped = child.wait();
+        assert_eq!(found.map(|(pid, _)| pid), Some(child.id()));
+        assert_eq!(
+            System.native_child(std::process::id(), Path::new("/nope")),
+            None
+        );
     }
 
     #[test]

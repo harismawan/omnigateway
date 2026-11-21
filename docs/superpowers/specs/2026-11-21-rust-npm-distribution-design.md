@@ -204,20 +204,26 @@ other-writable. Otherwise the tool prints the exact
    database free; the ledger is readable and has no unknown id; the binary runs
    `omni --version`.
 4. **Stop TS** and confirm through systemd (`inactive`/`failed`, `MainPID=0`).
-5. **Exclusivity:** open the database, `PRAGMA locking_mode=EXCLUSIVE; BEGIN
-   EXCLUSIVE` with no busy wait. It fails while *any* other connection is open
-   (another user, a hard link) and blocks every later opener, so this is the
-   proof `/proc` cannot give. Held through steps 6–7. *(review finding 3)*
+5. **Exclusivity, as far as SQLite can show it:** with systemd confirming the
+   stop, nothing may answer on the port; then `PRAGMA locking_mode=EXCLUSIVE;
+   BEGIN EXCLUSIVE` with no busy wait. It fails while another connection holds
+   a shared lock (any that has read and not finished, whatever user or link) and
+   keeps every new reader out while held. It cannot see a process that opened
+   the file and never read it; that is closed after the start instead (step 8).
+   Held through steps 6–7. *(review finding 3)*
 6. **Back up** through the locked connection (`VACUUM INTO`) into
    `<db dir>/snapshots/db_<stamp>_preRust.sqlite`; save the old unit under
    `<state>/pre-rust/`.
 7. **Rewrite `ExecStart=`** only (temp file + rename), `daemon-reload`, then
    release the lock.
-8. **Start** (only if it was active) and accept it only when `/health` answers
-   **and** systemd's `MainPID` is alive running this binary. *(finding 5)*
+8. **Start** (only if it was active) and accept it only when `/health` answers,
+   the listening socket on the port belongs to systemd's `MainPID`, that process
+   runs this binary, and no other process has the database open. *(finding 3, 5)*
 9. **Failure after step 4 leaves the service stopped** (npm already removed the
-   TS files, so TS cannot be restarted): stop again and confirm, record
-   `failed-*`, and print branch-specific rollback — no restore step when nothing
+   TS files, so TS cannot be restarted): stop again and confirm (when it cannot
+   be confirmed, say so and give the stop command first), record `failed-*` —
+   kept, with its backup and saved unit, until a later run sees the service
+   running this binary — and print branch-specific rollback — no restore step when nothing
    was written, `omni db restore --root <root> <id>` and copying the saved unit
    back when it was. *(finding 4)*
 10. **Idempotent.** A unit already migrated takes the Rust→Rust path.

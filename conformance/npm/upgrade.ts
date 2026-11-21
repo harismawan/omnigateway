@@ -269,6 +269,12 @@ try {
   assert.equal(dashboard.status, 200, "console served from the platform package's public/");
   assert.equal(sh(["omni", "doctor", "--json"]).stderr, "", "no banner after migration");
   if (scenario === "blocked") {
+    // The bridge tree (bun → migrator → gateway) is judged by its native
+    // child: unchanged, so `omni service migrate` must not restart it.
+    const bridgePid = servicePid();
+    const same = sh(["omni", "service", "migrate"]);
+    assert.match(same.stderr, /no restart needed/);
+    assert.equal(servicePid(), bridgePid, "bridge tree left running");
     // The bridge ran Rust for that one start; the next start is the binary.
     sh(["systemctl", "--user", "restart", "omnigateway.service"]);
     assert(await healthy());

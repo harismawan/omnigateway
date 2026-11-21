@@ -49,6 +49,21 @@ struct Fake {
     stop_sticks: bool,
     spawned_code: i32,
     bridge_parent_is_main: bool,
+    /// `systemctl show-environment`: the manager's own environment.
+    manager_env: Vec<String>,
+    /// Something already answers `/health` while our gateway is not running.
+    port_taken: bool,
+    state_override: Option<&'static str>,
+    omit_need_reload: bool,
+    working_directory: Option<PathBuf>,
+    cleanup_stop_fails: bool,
+    stops: Cell<u32>,
+    /// A process other than the started gateway holds the DB after start.
+    late_holder: bool,
+    /// The listener on the port after start is someone else.
+    foreign_listener: bool,
+    /// `(pid, exe)` of a native child of MainPID (the bridge's gateway).
+    bridge_child: RefCell<Option<(u32, PathBuf)>>,
 }
 
 impl Fake {
@@ -84,6 +99,16 @@ impl Fake {
             stop_sticks: true,
             spawned_code: 0,
             bridge_parent_is_main: true,
+            manager_env: vec!["HOME=/home/u".into(), "PATH=/usr/bin".into()],
+            port_taken: false,
+            state_override: None,
+            omit_need_reload: false,
+            working_directory: None,
+            cleanup_stop_fails: false,
+            stops: Cell::new(0),
+            late_holder: false,
+            foreign_listener: false,
+            bridge_child: RefCell::new(None),
         }
     }
     fn log(&self) -> Vec<String> {
@@ -107,6 +132,10 @@ impl Host for Fake {
             .push(format!("systemctl {} {}", scope.name(), args.join(" ")));
         match args.first().copied() {
             Some("stop") => {
+                self.stops.set(self.stops.get() + 1);
+                if self.cleanup_stop_fails && self.stops.get() > 1 {
+                    return Err("Job failed".into());
+                }
                 if self.stop_sticks {
                     *self.active.borrow_mut() = false;
                     *self.main_pid.borrow_mut() = None;
@@ -121,6 +150,7 @@ impl Host for Fake {
                 *self.main_pid.borrow_mut() = Some(4242);
                 *self.running_exe.borrow_mut() = None;
             }
+            Some("show-environment") => return Ok(self.manager_env.join("\n") + "\n"),
             Some("show") => {
                 let files = self
                     .environment_files
@@ -128,13 +158,21 @@ impl Host for Fake {
                     .unwrap_or_else(|| format!("{}/.env (ignore_errors=no)", self.root.display()));
                 let argv = self.exec.borrow().clone();
                 let path = argv.split(' ').next().unwrap_or_default().to_owned();
+                let reload = if self.omit_need_reload {
+                    String::new()
+                } else {
+                    format!(
+                        "NeedDaemonReload={}\n",
+                        if self.need_reload { "yes" } else { "no" }
+                    )
+                };
                 return Ok(format!(
-                    "ActiveState={}\nUnitFileState=enabled\nMainPID={}\nDropInPaths={}\nFragmentPath={}\nNeedDaemonReload={}\nEnvironment={}\nEnvironmentFiles={files}\nWorkingDirectory={}\nExecStart={{ path={path} ; argv[]={argv} ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }}\n",
-                    if *self.active.borrow() {
+                    "ActiveState={}\nUnitFileState=enabled\nMainPID={}\nDropInPaths={}\nFragmentPath={}\n{reload}Environment={}\nEnvironmentFiles={files}\nWorkingDirectory={}\nExecStart={{ path={path} ; argv[]={argv} ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }}\n",
+                    self.state_override.unwrap_or(if *self.active.borrow() {
                         "active"
                     } else {
                         "inactive"
-                    },
+                    }),
                     self.main_pid.borrow().unwrap_or(0),
                     if self.drop_ins {
                         "/etc/systemd/system/omnigateway.service.d/x.conf"
@@ -142,9 +180,11 @@ impl Host for Fake {
                         ""
                     },
                     self.fragment.as_ref().unwrap_or(&self.unit_file).display(),
-                    if self.need_reload { "yes" } else { "no" },
                     self.environment,
-                    self.root.display(),
+                    self.working_directory
+                        .as_ref()
+                        .unwrap_or(&self.root)
+                        .display(),
                 ));
             }
             Some("daemon-reload") => {
@@ -165,6 +205,16 @@ impl Host for Fake {
             vec![]
         };
         found.extend(self.extra_holder);
+        if *self.main_pid.borrow() == Some(4242) {
+            found.push(4242);
+        }
+        // The bridge's child, once spawned, holds the database.
+        if self.log.borrow().iter().any(|l| l.starts_with("spawn")) {
+            found.push(5151);
+        }
+        if self.late_holder && self.log.borrow().iter().any(|l| l == "unlock") {
+            found.push(31337);
+        }
         found
     }
     fn lock_exclusive(&self, db: &Path) -> Result<Lock, String> {
@@ -187,7 +237,7 @@ impl Host for Fake {
         }
         match pid {
             4242 if self.impostor => Some(PathBuf::from("/usr/bin/other-server")),
-            4242 => Some(self.binary.clone()),
+            4242 | 5151 => Some(self.binary.clone()),
             _ => Some(PathBuf::from(BUN)),
         }
     }
@@ -195,6 +245,27 @@ impl Host for Fake {
     fn healthy(&self, base: &str) -> bool {
         self.log.borrow_mut().push(format!("health {base}"));
         self.healthy
+    }
+    fn answers_now(&self, base: &str) -> bool {
+        self.log.borrow_mut().push(format!("probe {base}"));
+        self.port_taken
+    }
+    fn native_child(&self, parent: u32, binary: &Path) -> Option<(u32, PathBuf)> {
+        let _ = binary;
+        (parent == 777)
+            .then(|| self.bridge_child.borrow().clone())
+            .flatten()
+    }
+    fn listener_pid(&self, _port: u16) -> Option<u32> {
+        if self.foreign_listener {
+            return Some(31338);
+        }
+        // The gateway we started (MainPID 4242, or the bridge's child 5151).
+        Some(if *self.main_pid.borrow() == Some(4242) {
+            4242
+        } else {
+            5151
+        })
     }
     fn preflight_db(&self, _db: &Path, _snapshots: &Path) -> Result<(), String> {
         if self.low_disk {
@@ -233,6 +304,7 @@ impl Host for Fake {
             .borrow_mut()
             .push(format!("spawn {} in {}", binary.display(), root.display()));
         Ok(Child::Fake {
+            pid: 5151,
             code: self.spawned_code,
             exited_early: self.child_exits_early,
         })
@@ -723,6 +795,8 @@ fn migrated_fixture() -> (Fixture, PathBuf) {
 
 fn rust_host(f: &Fixture, exe: Option<PathBuf>) -> Fake {
     let host = f.host();
+    // Rust (4242) holds the database now, not TS.
+    host.ts_holds_db.set(false);
     *host.exec.borrow_mut() = f.binary.display().to_string();
     *host.main_pid.borrow_mut() = Some(4242);
     *host.running_exe.borrow_mut() = exe;
@@ -923,4 +997,250 @@ fn run_bridge(host: &Fake, paths: &Paths) -> i32 {
         Bridge::Exit(code) => code,
         Bridge::Serve(child) => child.wait_fake(),
     }
+}
+
+// ------------------------------------------------- rereview (npm-review.md)
+
+/// Finding 1: the user manager's environment reaches the service without
+/// appearing in the unit or `.env`.
+#[test]
+fn manager_environment_with_omni_settings_is_refused() {
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    let host = Fake {
+        manager_env: vec!["OMNI_DB_PATH=/srv/live.db".into()],
+        ..f.host()
+    };
+    let outcome = refused_before_stop(&f, &host, Status::SkippedUnit);
+    assert!(outcome.message.contains("OMNI_DB_PATH") && !outcome.message.contains("/srv/live.db"));
+}
+
+/// Finding 1: systemd joins `\`-continued lines; the CLI's parser does not.
+#[test]
+fn env_file_continuation_lines_are_refused() {
+    let f = fixture("OMNI_ENCRYPTION_KEY=kkkkkkkkkkkkkkkkkkkk\nOMNI_DB_PATH=/srv/a\\\nb.db\n");
+    f.write_user(&legacy_unit(&f.root, ""));
+    refused_before_stop(&f, &f.host(), Status::SkippedUnit);
+}
+
+/// Finding 1 (disclosure): a rejected directive's value can be a secret.
+#[test]
+fn rejected_directive_values_are_never_recorded_or_printed() {
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(
+        &f.root,
+        "Environment=OMNI_ENCRYPTION_KEY=s3cr3t-value\n",
+    ));
+    let outcome = migrate(&f.host(), &f.paths(), 1);
+    assert_eq!(outcome.status, Status::SkippedUnit);
+    let record = fs::read_to_string(f.paths().state.join(RECORD)).unwrap();
+    assert!(
+        !record.contains("s3cr3t") && !outcome.message.contains("s3cr3t"),
+        "{record}"
+    );
+    assert!(!banner(&f.paths()).unwrap().contains("s3cr3t"));
+    assert!(
+        outcome.message.contains("Environment"),
+        "{}",
+        outcome.message
+    );
+}
+
+/// Finding 2.
+#[test]
+fn incomplete_or_mismatched_loaded_facts_are_refused() {
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    refused_before_stop(
+        &f,
+        &Fake {
+            omit_need_reload: true,
+            ..f.host()
+        },
+        Status::SkippedUnit,
+    );
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    let host = Fake {
+        working_directory: Some(PathBuf::from("/srv/other")),
+        ..f.host()
+    };
+    refused_before_stop(&f, &host, Status::SkippedUnit);
+}
+
+/// Finding 2: an output path inside the package npm replaced.
+#[test]
+fn a_line_naming_the_old_package_is_refused() {
+    let f = fixture(SINGLE);
+    let pkg = GATEWAY_JS.trim_end_matches("/gateway.js");
+    f.write_user(&legacy_unit(
+        &f.root,
+        &format!("StandardOutput=append:{pkg}/gateway.log\n"),
+    ));
+    refused_before_stop(&f, &f.host(), Status::SkippedUnit);
+}
+
+/// Finding 3: a pending auto-restart (`activating`, MainPID 0) would start TS
+/// in the middle of the conversion.
+#[test]
+fn transitional_states_are_refused_before_stop() {
+    for state in ["activating", "deactivating", "reloading"] {
+        let f = fixture(SINGLE);
+        f.write_user(&legacy_unit(&f.root, ""));
+        let host = Fake {
+            state_override: Some(state),
+            ..f.host()
+        };
+        refused_before_stop(&f, &host, Status::SkippedUnit);
+    }
+}
+
+/// Finding 3: after the start, the database is held by our gateway alone.
+#[test]
+fn a_late_opener_after_start_fails_the_migration() {
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    let host = Fake {
+        late_holder: true,
+        ..f.host()
+    };
+    let outcome = migrate(&host, &f.paths(), 1);
+    assert_eq!(outcome.status, Status::FailedStart, "{}", outcome.message);
+    assert!(outcome.message.contains("31337"), "{}", outcome.message);
+}
+
+/// Finding 5: the port is checked free once TS has stopped, before anything
+/// is written; a server still answering there is not ours.
+#[test]
+fn another_server_on_the_port_fails_before_anything_is_written() {
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    let host = Fake {
+        port_taken: true,
+        ..f.host()
+    };
+    let outcome = migrate(&host, &f.paths(), 1);
+    assert_eq!(outcome.status, Status::FailedPort, "{}", outcome.message);
+    assert!(host.at("systemctl user stop") < host.at("probe"));
+    assert!(!host.did("backup") && !host.did("systemctl user start"));
+    assert_eq!(f.unit(), legacy_unit(&f.root, ""));
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    let host = Fake {
+        port_taken: true,
+        ..bridge_host(&f)
+    };
+    assert_eq!(run_bridge(&host, &f.paths()), 0);
+    assert!(!host.did("backup") && !host.did("spawn"));
+    assert_eq!(f.record()["status"], "failed-port");
+}
+
+/// Finding 5: health counts only when the listening socket is the started
+/// process's own.
+#[test]
+fn health_with_a_foreign_listener_is_not_success() {
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    let host = Fake {
+        foreign_listener: true,
+        ..f.host()
+    };
+    assert_eq!(migrate(&host, &f.paths(), 1).status, Status::FailedStart);
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    let host = Fake {
+        foreign_listener: true,
+        ..bridge_host(&f)
+    };
+    assert_eq!(run_bridge(&host, &f.paths()), 0);
+    assert_eq!(f.record()["status"], "failed-start");
+}
+
+/// Finding 4: only a confirmed stop is reported as stopped.
+#[test]
+fn unconfirmed_cleanup_stop_is_not_called_stopped() {
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    let host = Fake {
+        healthy: false,
+        cleanup_stop_fails: true,
+        ..f.host()
+    };
+    let outcome = migrate(&host, &f.paths(), 1);
+    assert_eq!(outcome.status, Status::FailedStart);
+    assert!(
+        !outcome.message.contains("left stopped"),
+        "{}",
+        outcome.message
+    );
+    assert!(
+        outcome.message.contains("could not be confirmed stopped"),
+        "{}",
+        outcome.message
+    );
+    assert!(
+        outcome
+            .message
+            .contains("systemctl --user stop omnigateway.service"),
+        "{}",
+        outcome.message
+    );
+}
+
+/// Finding 4: a later run must not erase a recorded failure until the
+/// service is verified running this binary.
+#[test]
+fn a_recorded_failure_survives_until_the_service_runs() {
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    migrate(
+        &Fake {
+            healthy: false,
+            ..f.host()
+        },
+        &f.paths(),
+        1,
+    );
+    let failed = f.record();
+    assert_eq!(failed["status"], "failed-start");
+    let host = rust_host(&f, None);
+    *host.active.borrow_mut() = false;
+    *host.main_pid.borrow_mut() = None;
+    let outcome = migrate(&host, &f.paths(), 2);
+    assert_eq!(outcome.status, Status::FailedStart, "{}", outcome.message);
+    let kept = f.record();
+    assert_eq!(kept["backup"], failed["backup"]);
+    assert_eq!(kept["savedUnit"], failed["savedUnit"]);
+    assert!(banner(&f.paths()).is_some());
+    let host = rust_host(&f, Some(f.binary.clone()));
+    assert_eq!(migrate(&host, &f.paths(), 3).status, Status::Current);
+    assert_eq!(banner(&f.paths()), None);
+}
+
+/// Finding 6: a unit with no usable MainPID is a recorded refusal, exit 0.
+#[test]
+fn bridge_without_a_main_pid_is_a_recorded_zero_exit() {
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    let host = bridge_host(&f);
+    *host.main_pid.borrow_mut() = None;
+    assert_eq!(run_bridge(&host, &f.paths()), 0);
+    assert_eq!(f.record()["status"], "skipped-unit");
+}
+
+/// Finding 7: the first bridge start leaves Bun as MainPID and the gateway as
+/// its child. An unchanged child is current; a replaced one restarts.
+#[test]
+fn bridge_tree_is_judged_by_its_native_child() {
+    let (f, bin) = migrated_fixture();
+    let host = rust_host(&f, None);
+    *host.main_pid.borrow_mut() = Some(777);
+    *host.bridge_child.borrow_mut() = Some((5151, bin.clone()));
+    assert_eq!(migrate(&host, &f.paths(), 2).status, Status::Current);
+    assert!(!host.did("systemctl user restart"));
+    let host = rust_host(&f, None);
+    *host.main_pid.borrow_mut() = Some(777);
+    *host.bridge_child.borrow_mut() =
+        Some((5151, PathBuf::from(format!("{} (deleted)", bin.display()))));
+    assert_eq!(migrate(&host, &f.paths(), 2).status, Status::Restarted);
 }

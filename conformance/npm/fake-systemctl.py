@@ -76,6 +76,11 @@ if verb == 'show':
 elif verb == 'is-active':
     print('active' if pid() else 'inactive')
     sys.exit(0 if pid() else 3)
+elif verb == 'show-environment':
+    # The manager's environment: what a real `systemd --user` would hand on.
+    for k in ('HOME', 'PATH', 'XDG_STATE_HOME', 'FAKE_SYSTEMD'):
+        if k in os.environ:
+            print(f"{k}={os.environ[k]}")
 elif verb == 'daemon-reload':
     (state / 'loaded').write_text(unit.read_text())
 elif verb == 'enable':

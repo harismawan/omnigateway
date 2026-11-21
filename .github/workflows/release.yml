@@ -277,7 +277,8 @@ jobs:
             local_integrity="sha512-$(openssl dgst -sha512 -binary "$tarball" | base64 -w0)"
             published=$(npm view "$name@$version" dist.integrity 2>/dev/null || true)
             if [ -z "$published" ]; then
-              (cd "dist/npm/$dir" && npm publish --access public)
+              # The verified tarball itself, not a repack of the directory.
+              npm publish --access public "$tarball"
             elif [ "$published" = "$local_integrity" ]; then
               echo "$name@$version is already published with these exact bytes; skipping"
             else
@@ -286,6 +287,13 @@ jobs:
               exit 1
             fi
           done
+          # `npm update -g` follows `latest`. A skipped main publish (a rerun)
+          # must already be there; never retag silently.
+          latest=$(npm view omnigateway dist-tags.latest)
+          if [ "$latest" != "$version" ]; then
+            echo "omnigateway@$version is published but latest is $latest; move it by hand (npm dist-tag add omnigateway@$version latest) if that is intended" >&2
+            exit 1
+          fi
 
       # After the publish, never before. A release created first would announce
       # a version that a failing publish then never puts on npm, and the fix

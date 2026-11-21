@@ -140,8 +140,9 @@ follow the [cutover runbook](docs/rust-cutover-runbook.md)), units that differ
 from the one `omni service install` wrote (drop-ins, `Environment=`, other
 directives, another `ExecStart`), both a user and a system unit, another process
 holding the database, and a system unit when the update did not run as root.
-During the update such a service keeps running the old gateway; when the check
-happens at the service's next start instead, the service is **left stopped**.
+When it is refused during the update, before anything is stopped, the old
+gateway keeps running; when the check happens at the service's next start, or
+after the old gateway was stopped, the service is **left stopped**.
 Either way the reason is recorded in
 `~/.local/state/omnigateway/npm-migration.json`, and `omni doctor` and
 `omni status` print it on stderr until it is resolved.
@@ -187,9 +188,6 @@ Connect an account. The CLI prints a URL to open, and waits:
 ```bash
 omni connect anthropic     # or: openai, antigravity
 ```
-
-An installed [plugin](#plugins) that supplies its own provider is connected the
-same way, under its plugin id.
 
 Every provider also takes a plain API key, if that is what you hold rather than
 a subscription:

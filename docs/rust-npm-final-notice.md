@@ -24,6 +24,8 @@ Not migrated automatically: cluster (Postgres/Redis) installations, customised
 units, and system units updated without root. See the cutover runbook.
 No longer served: plugins, and Grok/Kimi/Kilo/Muse/Qoder accounts.
 Windows: stay on omnigateway@0.15.5 (npm refuses 1.x there).
-Rollback: npm i -g omnigateway@0.15.5, omni db restore <preRust id>,
-omni service install --force, start the service.
+Rollback: the failure message (also in ~/.local/state/omnigateway/
+npm-migration.json) lists the exact steps: npm i -g omnigateway@0.15.5,
+omni db restore --root <root> <preRust id>, copy the saved unit back from
+~/.local/state/omnigateway/pre-rust/, daemon-reload, start.
 ```

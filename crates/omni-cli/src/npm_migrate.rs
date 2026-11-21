@@ -51,6 +51,7 @@ pub(crate) enum Status {
     SkippedBinary,
     SkippedForeground,
     FailedWriter,
+    FailedPort,
     FailedBackup,
     FailedStart,
 }
@@ -69,6 +70,7 @@ impl Status {
             Self::SkippedBinary => "skipped-binary",
             Self::SkippedForeground => "skipped-foreground",
             Self::FailedWriter => "failed-writer",
+            Self::FailedPort => "failed-port",
             Self::FailedBackup => "failed-backup",
             Self::FailedStart => "failed-start",
         }
@@ -117,11 +119,19 @@ pub(crate) enum Child {
     Real(std::process::Child),
     #[cfg(test)]
     Fake {
+        pid: u32,
         code: i32,
         exited_early: bool,
     },
 }
 impl Child {
+    fn pid(&self) -> u32 {
+        match self {
+            Self::Real(child) => child.id(),
+            #[cfg(test)]
+            Self::Fake { pid, .. } => *pid,
+        }
+    }
     /// Still running (it did not exit while we waited for /health).
     fn running(&mut self) -> bool {
         match self {
@@ -194,6 +204,12 @@ pub(crate) trait Host {
     fn sleep(&self, duration: Duration);
     /// `/health` answers 2xx within the deadline.
     fn healthy(&self, base: &str) -> bool;
+    /// Anything answers on `base` right now (one quick probe).
+    fn answers_now(&self, base: &str) -> bool;
+    /// The process holding the listening TCP socket on `port`, if visible.
+    fn listener_pid(&self, port: u16) -> Option<u32>;
+    /// A child of `parent` whose executable is (or was, `(deleted)`) `binary`.
+    fn native_child(&self, parent: u32, binary: &Path) -> Option<(u32, PathBuf)>;
     /// Free space and writability of the snapshot directory, a readable
     /// ledger this build knows. Nothing is stopped yet.
     fn preflight_db(&self, db: &Path, snapshots: &Path) -> Result<(), String>;
@@ -299,10 +315,13 @@ fn template_shape(text: &str) -> Result<(String, String), String> {
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
-            return Err(format!("line {line:?} is not Key=Value"));
+            return Err("a line is not Key=Value".into());
         };
         if key.is_empty() || key.trim() != key || value.trim() != value || line.ends_with('\\') {
-            return Err(format!("line {line:?} is not in the template's form"));
+            return Err(format!(
+                "the {} line is not in the template's form",
+                key.trim()
+            ));
         }
         let expected_section = match key {
             "Description" | "After" | "Wants" => "Unit",
@@ -318,7 +337,9 @@ fn template_shape(text: &str) -> Result<(String, String), String> {
         ) || ALLOWED.contains(&key)
             || FIXED.iter().any(|(k, v)| *k == key && *v == value);
         if !allowed {
-            return Err(format!("{key}={value} is not in the template"));
+            return Err(format!(
+                "{key}= is not in the template, or has a value the template does not"
+            ));
         }
         if seen.insert(key, value).is_some() {
             return Err(format!("{key} appears twice"));
@@ -348,6 +369,7 @@ fn classify(text: &str, binary: &Path) -> Result<(Kind, PathBuf), String> {
         return Ok((Kind::Rust, PathBuf::from(root)));
     }
     if let [interpreter, script] = exec.split(' ').collect::<Vec<_>>().as_slice()
+        && text.matches(script.trim_end_matches("/gateway.js")).count() == 1
         && interpreter.starts_with('/')
         && Path::new(interpreter)
             .file_name()
@@ -357,7 +379,8 @@ fn classify(text: &str, binary: &Path) -> Result<(Kind, PathBuf), String> {
     {
         return Ok((Kind::Legacy, PathBuf::from(root)));
     }
-    Err(format!("ExecStart={exec} is not a unit this updater wrote"))
+    let _ = exec;
+    Err("its ExecStart is not one this updater wrote".into())
 }
 
 /// The two paths the TS CLI wrote. A path that exists but cannot be read
@@ -397,6 +420,9 @@ fn local_base(env: &std::collections::HashMap<String, String>) -> String {
         h => h,
     };
     format!("http://{host}:{}", port(env))
+}
+fn port_number(env: &std::collections::HashMap<String, String>) -> u16 {
+    port(env).parse().unwrap_or(9000)
 }
 fn port(env: &std::collections::HashMap<String, String>) -> String {
     env.get("OMNI_PORT")
@@ -562,6 +588,32 @@ fn preflight(host: &dyn Host, paths: &Paths) -> Result<Plan, (Status, String)> {
             "systemd loaded {UNIT_NAME} from {fragment:?}"
         )));
     }
+    // Every fact must be present: a missing one is not evidence of anything.
+    for key in [
+        "ActiveState",
+        "MainPID",
+        "NeedDaemonReload",
+        "WorkingDirectory",
+        "ExecStart",
+    ] {
+        if !facts.contains_key(key) {
+            return Err(left_alone(format!("systemd did not report {key}")));
+        }
+    }
+    if !matches!(
+        facts["ActiveState"].as_str(),
+        "active" | "inactive" | "failed"
+    ) {
+        return Err(left_alone(format!(
+            "it is {}; run this again once it has settled",
+            facts["ActiveState"]
+        )));
+    }
+    if Path::new(&facts["WorkingDirectory"]) != root {
+        return Err(left_alone(
+            "the WorkingDirectory systemd loaded differs from the file".into(),
+        ));
+    }
     if facts.get("NeedDaemonReload").is_some_and(|v| v != "no") {
         return Err(left_alone(
             "the file changed since systemd loaded it (run systemctl daemon-reload)".into(),
@@ -596,9 +648,38 @@ fn preflight(host: &dyn Host, paths: &Paths) -> Result<Plan, (Status, String)> {
             "the ExecStart systemd loaded differs from the file".into(),
         ));
     }
-    let env = fs::read_to_string(&env_file)
-        .map(|t| crate::context::parse_env(&t))
+    // The user manager's own environment reaches the service too.
+    if unit.scope == Scope::User {
+        let manager = host
+            .systemctl(unit.scope, &["show-environment"])
+            .map_err(|e| {
+                left_alone(format!(
+                    "cannot read the service manager's environment: {e}"
+                ))
+            })?;
+        let names: Vec<&str> = manager
+            .lines()
+            .filter_map(|l| l.split_once('=').map(|(k, _)| k))
+            .filter(|k| k.starts_with("OMNI_"))
+            .collect();
+        if !names.is_empty() {
+            return Err(left_alone(format!(
+                "the user service manager exports {} to it",
+                names.join(", ")
+            )));
+        }
+    }
+    let text = fs::read_to_string(&env_file)
         .map_err(|e| left_alone(format!("cannot read {}: {e}", env_file.display())))?;
+    // systemd joins a line ending in `\` with the next; the CLI does not, so
+    // the two would read different values.
+    if text.lines().any(|l| l.trim_end().ends_with('\\')) {
+        return Err(left_alone(format!(
+            "{} continues a line with \\, which the CLI reads differently from systemd",
+            env_file.display()
+        )));
+    }
+    let env = crate::context::parse_env(&text);
     if clustered(&env) {
         return Err((
             Status::SkippedCluster,
@@ -689,16 +770,62 @@ fn stop_confirmed(host: &dyn Host, scope: Scope) -> Result<(), String> {
     Err(format!("systemd does not report {UNIT_NAME} stopped"))
 }
 
-/// The process systemd now runs is our binary and is still alive after
-/// `/health` answered — not some other server on the port.
-fn started_is_ours(host: &dyn Host, scope: Scope, binary: &Path) -> bool {
-    let Ok(facts) = show(host, scope, "ActiveState,MainPID") else {
-        return false;
-    };
-    active(&facts)
-        && main_pid(&facts)
-            .and_then(|p| host.process_exe(p))
-            .is_some_and(|e| e == binary)
+/// After `/health` answered: the answering socket belongs to `pid`, `pid`
+/// runs this binary, and nothing but `pid` has the database open.
+fn serving_is(host: &dyn Host, plan: &Plan, pid: u32, binary: &Path) -> Result<(), String> {
+    if host.process_exe(pid).is_none_or(|e| e != binary) {
+        return Err(format!("process {pid} is not {}", binary.display()));
+    }
+    let port = port_number(&plan.env);
+    match host.listener_pid(port) {
+        Some(owner) if owner == pid => {}
+        Some(owner) => {
+            return Err(format!(
+                "port {port} is held by process {owner}, not the gateway"
+            ));
+        }
+        None => {
+            return Err(format!(
+                "no listener on port {port} could be attributed to the gateway"
+            ));
+        }
+    }
+    let others: Vec<String> = host
+        .holders(&plan.db)
+        .into_iter()
+        .filter(|p| *p != pid)
+        .map(|p| p.to_string())
+        .collect();
+    if !others.is_empty() {
+        return Err(format!(
+            "{} is also open in process {} besides the gateway",
+            plan.db.display(),
+            others.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+/// The systemd-started gateway, checked as [`serving_is`].
+fn started_is_ours(host: &dyn Host, plan: &Plan, binary: &Path) -> Result<(), String> {
+    let facts = show(host, plan.unit.scope, "ActiveState,MainPID")?;
+    match main_pid(&facts).filter(|_| active(&facts)) {
+        Some(pid) => serving_is(host, plan, pid, binary),
+        None => Err(format!("{UNIT_NAME} is not running after start")),
+    }
+}
+
+/// With TS stopped, nothing may answer on the gateway's port: a server there
+/// would answer the health check in Rust's place.
+fn port_free(host: &dyn Host, plan: &Plan) -> Result<(), String> {
+    let base = local_base(&plan.env);
+    if host.answers_now(&base) {
+        Err(format!(
+            "something still answers on {base} with the old gateway stopped"
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 pub(crate) fn migrate(host: &dyn Host, paths: &Paths, now: i64) -> Outcome {
@@ -733,6 +860,18 @@ pub(crate) fn migrate(host: &dyn Host, paths: &Paths, now: i64) -> Outcome {
             Status::FailedWriter,
             format!(
                 "{e}. Nothing was changed.\n{}",
+                rollback_steps(&plan, None, None)
+            ),
+            json!({}),
+        );
+    }
+    if let Err(e) = port_free(host, &plan) {
+        return outcome(
+            paths,
+            now,
+            Status::FailedPort,
+            format!(
+                "{e}; the service is stopped and nothing was changed. Stop whatever listens there, then run omni service migrate.\n{}",
                 rollback_steps(&plan, None, None)
             ),
             json!({}),
@@ -821,18 +960,30 @@ fn convert_as(
     let saved = paths.state.join("pre-rust").join(UNIT_NAME);
     let extra = json!({"backup": backup, "unit": plan.unit.path, "savedUnit": saved});
     let journal = format!("journalctl{} -u {UNIT_NAME}", scope.flag());
-    let fail = |why: String, rewritten: bool| {
+    let s = sudo(scope);
+    // `stopped` is whether the service is confirmed not running; only then
+    // does the message say so.
+    let fail_as = |why: String, rewritten: bool, stopped: bool| {
+        let state = if stopped {
+            "The service is left stopped".to_owned()
+        } else {
+            format!(
+                "The service could not be confirmed stopped: run {s}systemctl{} stop {UNIT_NAME} first",
+                scope.flag()
+            )
+        };
         outcome(
             paths,
             now,
             Status::FailedStart,
             format!(
-                "{why}. The service is left stopped; see {journal}.\nBackup: {backup}\n{}",
+                "{why}. {state}; see {journal}.\nBackup: {backup}\n{}",
                 rollback_steps(plan, Some(&backup), rewritten.then_some(saved.as_path()))
             ),
             extra.clone(),
         )
     };
+    let fail = |why: String, rewritten: bool| fail_as(why, rewritten, true);
     if let Err(e) = fs::create_dir_all(paths.state.join("pre-rust"))
         .and_then(|()| fs::write(&saved, &plan.unit.text))
     {
@@ -864,9 +1015,16 @@ fn convert_as(
         Starter::None => {}
         Starter::Bridge => match host.run_gateway(&paths.binary, &plan.root) {
             Ok(mut started) => {
-                if !host.healthy(&base) || !started.running() {
+                let verdict = if !host.healthy(&base) {
+                    Err(health.to_owned())
+                } else if !started.running() {
+                    Err("the Rust gateway exited during startup".to_owned())
+                } else {
+                    serving_is(host, plan, started.pid(), &paths.binary)
+                };
+                if let Err(why) = verdict {
                     started.kill();
-                    return (fail(health.into(), true), None);
+                    return (fail(why, true), None);
                 }
                 child = Some(started);
             }
@@ -878,22 +1036,19 @@ fn convert_as(
             }
         },
         Starter::Systemd => {
-            let started = host.systemctl(scope, &["start", UNIT_NAME]);
-            let ok = started.is_ok()
-                && host.healthy(&base)
-                && started_is_ours(host, scope, &paths.binary);
-            if !ok {
-                let why = match started {
-                    Err(e) => format!("systemctl start failed: {e}"),
-                    Ok(_) => health.into(),
-                };
-                let why = match stop_confirmed(host, scope) {
-                    Ok(()) => why,
-                    Err(e) => format!(
-                        "{why}; stopping it again also failed ({e}), so check {UNIT_NAME} by hand"
+            let verdict = match host.systemctl(scope, &["start", UNIT_NAME]) {
+                Err(e) => Err(format!("systemctl start failed: {e}")),
+                Ok(_) if !host.healthy(&base) => Err(health.to_owned()),
+                Ok(_) => started_is_ours(host, plan, &paths.binary),
+            };
+            if let Err(why) = verdict {
+                return match stop_confirmed(host, scope) {
+                    Ok(()) => (fail(why, true), None),
+                    Err(e) => (
+                        fail_as(format!("{why} (stopping it: {e})"), true, false),
+                        None,
                     ),
                 };
-                return (fail(why, true), None);
             }
         }
     }
@@ -920,13 +1075,39 @@ fn convert_as(
 }
 
 /// Rust → Rust: restart an active service only on positive evidence that npm
-/// replaced its binary.
+/// replaced its binary. A recorded failure is kept until the service is seen
+/// running this binary.
 fn refresh(host: &dyn Host, paths: &Paths, plan: &Plan, now: i64) -> Outcome {
     let scope = plan.unit.scope;
-    let last_good =
-        previous_record(paths).and_then(|r| r["runningVersion"].as_str().map(str::to_owned));
-    let extra = json!({"unit": plan.unit.path});
-    let Some(pid) = main_pid(&plan.facts).filter(|_| active(&plan.facts)) else {
+    let previous = previous_record(paths);
+    let last_good = previous
+        .as_ref()
+        .and_then(|r| r["runningVersion"].as_str().map(str::to_owned));
+    let mut extra = json!({"unit": plan.unit.path});
+    // A failure's recovery details (backup, saved unit) survive later runs.
+    let pending_failure = previous.as_ref().filter(|r| {
+        r["status"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("failed-"))
+    });
+    if let Some(failure) = pending_failure {
+        for key in ["backup", "savedUnit"] {
+            if let Some(v) = failure.get(key).filter(|v| !v.is_null()) {
+                extra[key] = v.clone();
+            }
+        }
+    }
+    let running = main_pid(&plan.facts).filter(|_| active(&plan.facts));
+    let Some(pid) = running else {
+        if let Some(failure) = pending_failure {
+            return outcome(
+                paths,
+                now,
+                Status::FailedStart,
+                failure["message"].as_str().unwrap_or_default().to_owned(),
+                extra,
+            );
+        }
         return outcome(
             paths,
             now,
@@ -938,15 +1119,25 @@ fn refresh(host: &dyn Host, paths: &Paths, plan: &Plan, now: i64) -> Outcome {
             extra,
         );
     };
-    let replaced = match host.process_exe(pid) {
-        Some(exe) => {
-            let text = exe.display().to_string();
-            text.ends_with(" (deleted)") || exe != paths.binary
-        }
-        // Unreadable is not evidence of anything.
-        None => false,
+    // The first bridge start leaves the launcher as MainPID and the gateway
+    // as its child: judge the gateway.
+    let (pid, exe) = match host.process_exe(pid) {
+        Some(exe) if exe == paths.binary => (pid, Some(exe)),
+        other => match host.native_child(pid, &paths.binary) {
+            Some((child, exe)) => (child, Some(exe)),
+            None => (pid, other),
+        },
     };
+    let replaced = exe.as_ref().is_some_and(|exe| {
+        exe.display().to_string().ends_with(" (deleted)") || *exe != paths.binary
+    });
     if !replaced {
+        let verified = exe.as_ref().is_some_and(|e| *e == paths.binary);
+        if verified && pending_failure.is_some() {
+            // Recovered: running our binary. The failure no longer applies.
+            extra["runningVersion"] = json!(paths.version);
+        }
+        let _ = pid;
         return outcome(
             paths,
             now,
@@ -961,14 +1152,21 @@ fn refresh(host: &dyn Host, paths: &Paths, plan: &Plan, now: i64) -> Outcome {
     }
     let s = sudo(scope);
     let back = match &last_good {
-        Some(v) => format!("To go back: {s}npm i -g omnigateway@{v} && {s}systemctl{} start {UNIT_NAME}", scope.flag()),
+        Some(v) => format!(
+            "To go back: {s}npm i -g omnigateway@{v} && {s}systemctl{} start {UNIT_NAME}",
+            scope.flag()
+        ),
         None => "The previous version is not recorded; reinstall the version you ran before (npm i -g omnigateway@<version>) and start the service.".into(),
     };
-    let restarted = host.systemctl(scope, &["restart", UNIT_NAME]);
-    if restarted.is_ok()
-        && host.healthy(&local_base(&plan.env))
-        && started_is_ours(host, scope, &paths.binary)
-    {
+    let verdict = match host.systemctl(scope, &["restart", UNIT_NAME]) {
+        Err(e) => Err(format!("systemctl restart failed: {e}")),
+        Ok(_) if !host.healthy(&local_base(&plan.env)) => Err(format!(
+            "omnigateway {} did not answer /health within 30 s",
+            paths.version
+        )),
+        Ok(_) => started_is_ours(host, plan, &paths.binary),
+    };
+    let Err(mut why) = verdict else {
         let mut done = extra;
         done["runningVersion"] = json!(paths.version);
         return outcome(
@@ -978,18 +1176,12 @@ fn refresh(host: &dyn Host, paths: &Paths, plan: &Plan, now: i64) -> Outcome {
             format!("restarted {UNIT_NAME} on omnigateway {}", paths.version),
             done,
         );
-    }
-    let mut why = match restarted {
-        Err(e) => format!("systemctl restart failed: {e}"),
-        Ok(_) => format!(
-            "omnigateway {} did not answer /health within 30 s",
-            paths.version
-        ),
     };
     match stop_confirmed(host, scope) {
         Ok(()) => why.push_str("; the service is left stopped"),
         Err(e) => why.push_str(&format!(
-            "; stopping it also failed ({e}), so check {UNIT_NAME} by hand"
+            "; it could not be confirmed stopped ({e}): run {s}systemctl{} stop {UNIT_NAME} first",
+            scope.flag()
         )),
     }
     outcome(
@@ -1039,17 +1231,31 @@ pub(crate) fn bridge(host: &dyn Host, paths: &Paths, now: i64) -> Bridge {
         return Bridge::Exit(0);
     }
     // Only as the unit's own start: systemd's MainPID is our ancestor.
-    let Some(main) = main_pid(&plan.facts).filter(|p| host.bridge_invoked_by(*p)) else {
+    let Some(main) = main_pid(&plan.facts) else {
+        return refuse(
+            Status::SkippedUnit,
+            format!(
+                "systemd reports no main process for {UNIT_NAME}; the service was not migrated and is left stopped"
+            ),
+        );
+    };
+    if !host.bridge_invoked_by(main) {
         eprintln!(
             "gateway.js is the migration bridge systemd runs for {UNIT_NAME}; run `omni service migrate` instead"
         );
         return Bridge::Exit(1);
-    };
+    }
     let allowed = [main, std::process::id()];
     if let Err((status, message)) = preflight_data(host, paths, &plan, &allowed) {
         return refuse(
             status,
             format!("{message}; the service was not migrated and is left stopped"),
+        );
+    }
+    if let Err(e) = port_free(host, &plan) {
+        return refuse(
+            Status::FailedPort,
+            format!("{e}; the service was not migrated and is left stopped"),
         );
     }
     let lock = match host.lock_exclusive(&plan.db) {
