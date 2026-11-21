@@ -75,11 +75,44 @@ installs it.
 - npm hides lifecycle-script output for a successful script unless
   `--foreground-scripts`. Output alone cannot be relied on to reach the user.
 - A failing `postinstall` fails the install. That is why the hook always exits 0.
+- **npm 12 blocks install scripts by default, for global installs too.** It
+  was measured on npm 12.0.2: `npm i -g` of a package with a `postinstall`
+  prints `install scripts blocked … not covered by allowScripts`, and the script
+  runs only with `--allow-scripts=<name>` or the matching config. So
+  `postinstall` cannot be the only migration trigger; see the bridge below.
+
+## The `gateway.js` bridge *(owner decision)*
+
+`omnigateway@1.x` ships a file at the old path `gateway.js`, so a 0.x unit's
+`ExecStart=<bun> …/node_modules/omnigateway/gateway.js` still finds something
+the next time systemd starts it (restart, reboot, crash restart). That file is a
+dependency-free script, runnable by Bun or Node. It runs
+`<platform binary> omni service migrate --bridge` with inherited stdio, env and
+cwd, forwards signals, and exits with that process's code.
+
+In bridge mode the migration runs **as** the service, not against it:
+
+- TS is not running (the bridge took its place), so there is no stop step.
+- The writer check still applies: nothing may hold the database open.
+- After the backup and unit rewrite, the migrator itself spawns the Rust
+  gateway as its child, applies the same health check, records the outcome,
+  then waits on the child and exits with its code. For this one run the process
+  tree is bridge → migrator → gateway. The next restart of the rewritten unit is
+  pure Rust, and the Rust→Rust check below restarts it at the next npm update.
+- Every refusal or failure exits **0**, so `Restart=on-failure` does not loop
+  and the service is left stopped with the record written.
+- Started outside systemd (no legacy unit found), the bridge prints that
+  `gateway.js` is a migration bridge, points at `omni start`, and exits 1.
+
+So the migration is automatic either at install time (scripts allowed) or at
+the service's next start (scripts blocked). Until then the TS process keeps
+serving from memory, and the CLI banner says a migration is pending.
 
 ## Packages
 
 - `omnigateway@1.0.0`, the main package: `bin/omni` and `bin/omnigateway`
-  (Node launcher, no dependencies), `postinstall.js`, README, LICENSE.
+  (Node launcher, no dependencies), `postinstall.js`, the `gateway.js` bridge,
+  README, LICENSE.
   `optionalDependencies` lists the four platform packages at the exact version.
   `os: ["linux","darwin"]` and `cpu: ["x64","arm64"]`, so Windows and other
   hosts get `EBADPLATFORM` and keep what they have. `engines.node >= 18`.
@@ -117,9 +150,11 @@ installs it.
 ## `omni service migrate`
 
 A new CLI subcommand that does the migration. `postinstall` runs it as
-`<binary> omni service migrate --from-npm`, only for global installs
-(`npm_config_global=true`) on Linux. Operators can also run it by hand. On macOS
-it records and prints the what-changed note only.
+`<binary> omni service migrate --from-npm` for global installs
+(`npm_config_global=true`), the bridge runs it with `--bridge`, and operators
+can run it by hand. Without units it records `nothing-to-migrate` (macOS always).
+It is transitional, so `omni --help` does not list it (keeping the frozen help
+surface unchanged); `omni service migrate --help` and the docs describe it.
 
 ### Which units it may change *(controller call)*
 
@@ -130,18 +165,24 @@ It looks only at the two paths the TS CLI ever wrote:
 
 A unit is **legacy TS** only when all of these hold:
 
-- it matches that template line for line, with any `Description`,
-  `ExecStart=<abs bun> <abs path>/node_modules/omnigateway/gateway.js`, and the
-  `WorkingDirectory`/`EnvironmentFile=<root>/.env` pair;
-- `systemctl cat` shows no drop-ins (`omnigateway.service.d/`);
+- exactly one `ExecStart=` line, of the form
+  `ExecStart=<abs bun> <abs path>/node_modules/omnigateway/gateway.js`, and no
+  other line names that package directory;
+- `WorkingDirectory=<root>` and `EnvironmentFile=<root>/.env`, so the CLI and the
+  service read the same configuration;
+- systemd reports no drop-ins (`DropInPaths` is empty);
 - only one of the two scopes has a unit.
 
-A unit is **npm Rust** when it equals `render_unit(root, <this install's
-platform binary>)`.
+The migration **replaces only the `ExecStart=` line** and keeps every other line
+byte for byte, so operator additions such as `StandardOutput=append:` survive
+(the owner's own unit has them).
 
-Anything else is left alone, and the user is told the manual steps: a
-customised unit, drop-ins, both scopes present, or a Rust unit pointing outside
-this install. System scope additionally needs euid 0, and the platform binary
+A unit is **npm Rust** when its single `ExecStart=` is this install's platform
+binary.
+
+Anything else is left alone, and the user is told the manual steps: drop-ins,
+both scopes present, an unrecognised `ExecStart`, or a Rust unit pointing
+outside this install (`foreign-unit`, informational only). System scope additionally needs euid 0, and the platform binary
 and every parent directory must be root-owned and not group- or
 other-writable. Otherwise the tool prints the exact
 `sudo <abs binary> omni service migrate` command and changes nothing.
@@ -170,11 +211,13 @@ other-writable. Otherwise the tool prints the exact
    **Backup failure:** Rust has not opened the database, so TS data is
    unchanged. Record `failed-backup`, leave the service stopped (TS can no
    longer start: its files are gone), and print the rollback steps.
-6. **Rewrite the unit** with `render_unit` for the same root and scope.
-   `daemon-reload`. Start it only if it was active before; enablement is kept,
-   since the unit name and `WantedBy` are unchanged.
-7. **Health:** `/health` must answer `ok:true` with `mode:"single"` within 30 s
-   (existing `healthy` helper). *(controller call)*
+6. **Rewrite the unit's `ExecStart=`** to the platform binary (written to a
+   temporary file, then renamed), then `daemon-reload`. Start it only if it was
+   active before. Enablement is kept, since the unit name and `WantedBy` are
+   unchanged.
+7. **Health:** `/health` on `http://<OMNI_HOST>:<OMNI_PORT>` (a wildcard host
+   probes loopback) must answer 2xx within 30 s. It is never probed on
+   `OMNI_BASE_URL`, which may be a public proxy. *(controller call)*
 8. **Record and report.**
    - Success: record `migrated` with the backup id, binary path and version.
      Print what `omni doctor` says no longer runs (deferred-provider accounts,

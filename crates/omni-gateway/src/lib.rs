@@ -112,8 +112,12 @@ pub fn spawn_preseeder(
 /// The default dashboard directory: the first of `<exe dir>/public` and the
 /// checkout's `apps/dashboard/dist` that exists, else the latter.
 fn default_static_dir() -> String {
-    let exe_dir = std::env::current_exe()
-        .ok()
+    static_dir_for(std::env::current_exe().ok())
+}
+
+fn static_dir_for(exe: Option<std::path::PathBuf>) -> String {
+    let exe_dir = exe
+        .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
         .and_then(|p| p.parent().map(std::path::Path::to_path_buf));
     let mut candidates = Vec::new();
     if let Some(d) = &exe_dir {
@@ -922,6 +926,26 @@ mod tests {
     use std::time::Duration;
 
     use tokio::io::AsyncWriteExt as _;
+
+    /// npm links `<prefix>/bin/omnigateway` to the platform package's binary,
+    /// and macOS reports the invoked (symlink) path as the executable.
+    #[cfg(unix)]
+    #[test]
+    fn static_dir_follows_symlinked_executable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pkg = dir.path().join("pkg");
+        std::fs::create_dir_all(pkg.join("public")).expect("public");
+        std::fs::write(pkg.join("omnigateway"), b"").expect("binary");
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).expect("bin");
+        std::os::unix::fs::symlink(pkg.join("omnigateway"), bin.join("omnigateway"))
+            .expect("link");
+        let found = super::static_dir_for(Some(bin.join("omnigateway")));
+        assert_eq!(
+            std::fs::canonicalize(found).expect("found"),
+            std::fs::canonicalize(pkg.join("public")).expect("public")
+        );
+    }
 
     #[test]
     fn auth_refusal_id_is_no_later_than_logged_start() {
