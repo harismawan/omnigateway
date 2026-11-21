@@ -2078,3 +2078,32 @@ fn a_hook_for_another_scope_is_refused() {
     assert!(!host.did("health"));
     assert_eq!(f.record()["status"], "verifying", "not judged");
 }
+
+/// The banner announces an unreadable record only when one is known to exist:
+/// an unsearchable state directory with no record says nothing (as the TS CLI
+/// does), a present record that cannot be read is announced.
+#[test]
+fn the_banner_announces_only_a_record_known_to_exist() {
+    if rustix::process::geteuid().is_root() {
+        return;
+    }
+    let mode = |path: &Path, m: u32| {
+        let mut perms = fs::metadata(path).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, m);
+        fs::set_permissions(path, perms).unwrap();
+    };
+    let f = fixture(SINGLE);
+    let state = f.paths().state;
+    fs::create_dir_all(&state).unwrap();
+    mode(&state, 0);
+    let shown = banner(&f.paths());
+    mode(&state, 0o755);
+    assert!(shown.is_none(), "{shown:?}");
+    // A record that exists and cannot be read is announced.
+    let file = state.join(RECORD);
+    fs::write(&file, "{}").unwrap();
+    mode(&file, 0);
+    let shown = banner(&f.paths());
+    mode(&file, 0o644);
+    assert!(shown.unwrap().contains("cannot be read"));
+}

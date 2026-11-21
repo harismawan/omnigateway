@@ -1850,7 +1850,12 @@ pub(crate) fn announces(command: &str) -> bool {
 /// One stderr line while a migration needs attention, or a 0.x unit is
 /// still installed. `None` when there is nothing to say.
 pub(crate) fn banner(paths: &Paths) -> Option<String> {
-    if let Err(e) = read_record(paths) {
+    // Announce an unreadable record only when one is known to exist: every
+    // `doctor`/`status` call reads this, and a state directory it cannot
+    // search (no migration ever ran there) must stay as quiet as the TS CLI.
+    // The verifier and `migrate` still refuse on any read error.
+    let exists = fs::symlink_metadata(paths.state.join(RECORD)).is_ok();
+    if exists && let Err(e) = read_record(paths) {
         return Some(format!(
             "omnigateway: the npm migration record cannot be read ({e}); a migration may be unverified. Inspect it, then run omni service migrate."
         ));
