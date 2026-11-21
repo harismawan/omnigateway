@@ -19,7 +19,7 @@ service scope and backup location in the change record. Keep secrets out of it.
 | D4 (`7c2d7adc`) integrated Postgres and Redis in the gateway and verified live PG17/Valkey8, TLS, fleet fanout, shared health and writer/seed/drain. | Confirm the release artifact and the installation's transport, topology and recovery plan. Do not downgrade TLS. |
 | Migration design requires in-place upgrade with no Rust-only migrations in the first release. | SQLite **and** Postgres TS→Rust and Rust→TS cross-reads on the candidate, including credentials, passwords and bodies; production-copy rehearsals in both shapes. |
 | X1 (`35409ef6`) and X2 (`aeccaf84`) closed the parked stream/usage and credential-expiry carrier gaps. A9 was accepted with Linux-only evidence. | Record full F3 conformance against the frozen oracles, plus the controller's admin-route differential. Native macOS console behavior and polling latency remain unvalidated. |
-| P1 measured single-node and two-replica release performance against unchanged targets. | Record the measured limitations below and the P2 disposition; P1 is not an all-target pass. |
+| P1 measured single-node and two-replica release performance against unchanged targets. | Record the accepted boot and memory limitations below; P1 is not an all-target pass. |
 
 The release owner must attach the completed gate evidence or an explicit,
 documented scope decision; this runbook does not waive a gate. In particular,
@@ -88,13 +88,28 @@ the fleet. Targets did not change.
 
 - **Boot (P1, Nov 20 ruling):** the 210,000-round KDF is a storage contract
   (~21.5 ms on single-node); it was not weakened to meet the target.
-- **Memory — release disposition pending:** P2's fresh cluster control on the
-  same release reproduced held peaks of 126.34/133.03 MiB and early-cancel
-  increases of +46.88/+43.28 MiB per replica at about 10 s
-  (`/tmp/opencode/p2/report.md`, matched cluster arms). Neither tested change
-  was retained; P2 did not replace the P1 single-node result. Keep these misses
-  open until the release owner accepts them or newer qualification evidence
-  supersedes them. Elevated RSS after load is not by itself proof of a leak.
+- **Memory — accepted release limitation (Nov 21 ruling):** the held-stream and
+  cluster early-cancel targets are unchanged; the P1 values above are still
+  misses. Held RSS peaked at 92.95 MiB single-node and 133.90/132.71 MiB per
+  cluster replica. Cluster early-cancel RSS was +29.29/+23.76 MiB estimated per
+  PID and +53.05 MiB fleet-wide at about 10 s. P2's control on the same release
+  reproduced the misses: 126.34/133.03 MiB held and +46.88/+43.28 MiB per
+  replica after early cancel (`/tmp/opencode/p2/report.md`).
+  - **Held streams:** the P2 cluster census measured about 32 MiB in live
+    connection and request allocations per 500 streams on each replica, on
+    top of an elevated post-load baseline that included about 20 MiB of live
+    Postgres driver buffers per replica. The single-node run has no PG pool;
+    P2 did not break down its elevated baseline.
+  - **Early cancel:** in the P2 census, the transient writer backlog cleared
+    and tracked live allocations were back at baseline by +5 s, but anonymous
+    RSS remained elevated, consistent with allocator retention. No crashes
+    were observed, and the measurements did not show an unbounded leak.
+  - PG pool LIFO lowered held RSS but did not meet the target and worsened
+    rate-limited p99. `MIMALLOC_PURGE_EXTEND_DELAY=0` lowered late early-cancel
+    RSS but still missed the target and reduced throughput on other workloads.
+    Neither change was adopted.
+  - **Sizing:** budget RSS per replica for its expected concurrent held streams,
+    with headroom above the measured post-load baseline.
 - **Postgres drain overload (P1, Nov 20 ruling):** Rust may shed optional
   Begin/Route events rather than wait as TS does. Interim pending/route visibility
   and the corresponding live invalidations may be absent; Finish accounting,
