@@ -4,8 +4,9 @@ use omni_providers::codec::{CodecInput, Credentials, ProviderCodec};
 use omni_providers::openai::OpenAiCodec;
 
 #[test]
-fn oauth_codec_matches_frozen_ts() {
+fn oauth_codec_matches_ts() {
     let out = std::process::Command::new("bun")
+        .arg("--no-env-file")
         .arg("tests/openai-oauth-request-reference.ts")
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
@@ -16,7 +17,7 @@ fn oauth_codec_matches_frozen_ts() {
         String::from_utf8_lossy(&out.stderr)
     );
     let rows: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(rows.as_array().unwrap().len(), 573);
+    assert_eq!(rows.as_array().unwrap().len(), 577);
     let mut note_mismatches = Vec::new();
     for (i, row) in rows.as_array().unwrap().iter().enumerate() {
         let request = if let Some(dialect) = row["dialect"].as_str() {
@@ -97,7 +98,7 @@ fn oauth_codec_matches_frozen_ts() {
         );
         if serde_json::json!(got.degradations) != row["notes"] {
             note_mismatches.push(format!(
-                "notes {i}: Rust {:?}; frozen {}",
+                "notes {i}: Rust {:?}; TS {}",
                 got.degradations, row["notes"]
             ));
         }

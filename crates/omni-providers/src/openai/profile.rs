@@ -43,7 +43,10 @@ pub(super) fn originator() -> String {
 
 pub(crate) fn headers(extra: Vec<(String, String)>) -> Vec<(String, String)> {
     initialize();
-    let version = env("OMNI_OPENAI_CLI_VERSION", "0.165.0");
+    let version = env(
+        "OMNI_OPENAI_CLI_VERSION",
+        super::oauth::CODEX_CATALOG_RELEASE,
+    );
     let origin = originator();
     let platform = env("OMNI_OPENAI_UA_PLATFORM", "Windows 10.0.26200");
     let arch = env("OMNI_OPENAI_UA_ARCH", "x86_64");

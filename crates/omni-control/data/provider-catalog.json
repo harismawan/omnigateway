@@ -124,6 +124,32 @@
       "authTypes": ["oauth", "apiKey"],
       "models": [
         {
+          "id": "gpt-6.2-astra",
+          "label": "GPT-6.2 Astra",
+          "pricing": {
+            "input": 8,
+            "output": 40,
+            "cacheRead": 0.4,
+            "cacheWrite5m": 10,
+            "cacheWrite1h": 0
+          },
+          "limits": { "contextWindow": 922000, "maxOutputTokens": 128000 },
+          "oauthLimits": { "contextWindow": 272000, "maxOutputTokens": 128000 }
+        },
+        {
+          "id": "gpt-6.2-sol",
+          "label": "GPT-6.2 Sol",
+          "pricing": {
+            "input": 2,
+            "output": 10,
+            "cacheRead": 0.1,
+            "cacheWrite5m": 2.5,
+            "cacheWrite1h": 0
+          },
+          "limits": { "contextWindow": 922000, "maxOutputTokens": 128000 },
+          "oauthLimits": { "contextWindow": 500000, "maxOutputTokens": 128000 }
+        },
+        {
           "id": "gpt-6-astra",
           "label": "GPT-6 Astra",
           "pricing": {

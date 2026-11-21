@@ -10,7 +10,7 @@ const META: &str = "internal_chat_message_metadata_passthrough";
 
 fn fixture() -> Value {
     serde_json::from_str(include_str!(
-        "../../../packages/providers/test/fixtures/codex-0.165.0.json"
+        "../../../packages/providers/test/fixtures/codex-0.170.0.json"
     ))
     .unwrap()
 }
@@ -121,10 +121,10 @@ fn captured_headers_and_metadata() {
         ("authorization", "Bearer oa-tok"),
         ("chatgpt-account-id", "acct-9"),
         ("x-codex-routing-hint", "model=gpt-6-astra"),
-        ("version", "0.165.0"),
+        ("version", "0.170.0"),
         (
             "user-agent",
-            "codex-tui/0.165.0 (Windows 10.0.26200; x86_64) WindowsTerminal (codex-tui; 0.165.0)",
+            "codex-tui/0.170.0 (Windows 10.0.26200; x86_64) WindowsTerminal (codex-tui; 0.170.0)",
         ),
     ] {
         assert_eq!(header(&b, n), Some(v));
@@ -257,6 +257,8 @@ fn catalog_and_non_lite_literals() {
         json!([{"provenance":{"type":"user"}}])
     );
     for (model, lite, verbosity, effort, review) in [
+        ("gpt-6.2-sol", true, "low", "low", true),
+        ("gpt-6.2-astra", true, "low", "low", true),
         ("gpt-6-astra", true, "low", "low", true),
         ("gpt-6.1-sol", true, "low", "low", true),
         ("gpt-6.1-terra", true, "low", "low", true),
@@ -318,7 +320,13 @@ fn catalog_and_non_lite_literals() {
             assert_eq!(header(&b, "x-codex-routing-hint"), Some("model=gpt-5.5"));
         }
     }
-    for model in ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra"] {
+    for model in [
+        "gpt-6.2-sol",
+        "gpt-6.2-astra",
+        "gpt-6-astra",
+        "gpt-6.1-sol",
+        "gpt-6.1-terra",
+    ] {
         let mut r = request();
         r["reasoning"] = json!({"mode":"adaptive","effort":"high"});
         let v = body(&build(r, model));
