@@ -1241,26 +1241,43 @@ async fn a_pinned_reader_lets_the_wal_grow_past_the_trigger() {
     };
     batch(0);
     handle.flush().await.expect("barrier");
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let pinned = std::fs::metadata(&wal).expect("wal").len();
+    let pinned = std::fs::read(&wal).expect("wal");
     assert!(
-        pinned > 50 * 4096 * 4,
-        "with a reader pinned the WAL grows past the 50-page trigger: {pinned} bytes"
+        pinned.len() > 50 * 4096 * 4,
+        "with a reader pinned the WAL grows past the 50-page trigger: {} bytes",
+        pinned.len()
     );
     reader.execute_batch("COMMIT").expect("unpin");
     drop(reader);
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    // Unpinned, the WAL is checkpointed in full and reused from its start:
-    // the next writes do not make the file grow.
+    // Observe the periodic checkpoint without doing one ourselves. NOOP reports
+    // the log and backfill frame counts without copying or resetting anything.
+    let observer = Connection::open(&db).expect("checkpoint observer");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let (busy, frames, backfilled): (i64, i64, i64) = observer
+                .query_row("PRAGMA wal_checkpoint(NOOP)", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })
+                .expect("read WAL backfill status");
+            if busy == 0 && frames > 0 && frames == backfilled {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("checkpoint copied the pinned rows after the reader left");
+    // A single write must restart the WAL; its header salt changes when SQLite
+    // reuses the file. Comparing two full batches' file sizes is not evidence
+    // of reuse: different batch boundaries and page splits can change the size.
+    assert!(handle.send(LogEvent::Finish(done("probe", T0, None, "sonnet", 0))));
+    handle.flush().await.expect("probe barrier");
+    let reused = std::fs::read(&wal).expect("reused wal");
+    assert_ne!(&pinned[16..24], &reused[16..24], "WAL salt did not change");
+    assert!(reused.len() <= pinned.len(), "one write grew the WAL");
     batch(2000);
     handle.flush().await.expect("barrier");
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let after = std::fs::metadata(&wal).expect("wal").len();
-    assert!(
-        after <= pinned,
-        "reused after the reader left: {after} > {pinned}"
-    );
-    assert_eq!(count(&db, "SELECT COUNT(*) FROM request_logs"), 4000);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM request_logs"), 4001);
     writer.close().await.expect("close");
 }
 

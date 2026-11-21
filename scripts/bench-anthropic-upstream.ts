@@ -29,7 +29,7 @@ Bun.serve({
       return Response.json({ error: { message: "injected upstream 500" } }, { status: 500 });
     if (path === "/backend-api/wham/usage") return Response.json({});
     if (["/v1/responses", "/backend-api/codex/responses"].includes(path) && req.method === "POST") {
-      let bytes = new Uint8Array(await req.arrayBuffer());
+      let bytes: Uint8Array<ArrayBufferLike> = new Uint8Array(await req.arrayBuffer());
       if (req.headers.get("content-encoding") === "zstd") bytes = Bun.zstdDecompressSync(bytes);
       const body = JSON.parse(new TextDecoder().decode(bytes));
       const match = /^mock-c(\d+)-d0$/.exec(body.model ?? "");

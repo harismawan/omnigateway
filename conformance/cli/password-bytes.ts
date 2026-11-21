@@ -76,13 +76,12 @@ for (const parts of cases) {
     } | null;
     const state = databaseState(db).map(([name, rows]) => [
       name,
-      rows
-        .map((r) => {
-          const value = r as Record<string, unknown>;
-          return name === "settings" && value.key === "adminPasswordHash"
-            ? { ...value, value: "<verified hash>" }
-            : value;
-        }),
+      rows.map((r) => {
+        const value = r as Record<string, unknown>;
+        return name === "settings" && value.key === "adminPasswordHash"
+          ? { ...value, value: "<verified hash>" }
+          : value;
+      }),
     ]);
     db.close();
     // Compare hashes by checking both against the independently decoded TS input.
@@ -165,4 +164,5 @@ for (const rust of [false, true]) {
 }
 assert.deepEqual(mismatch[1], mismatch[0]);
 console.log("PASS UTF16 lone-surrogate versus replacement confirmation mismatch");
+
 import { databaseState } from "./database-state.ts";

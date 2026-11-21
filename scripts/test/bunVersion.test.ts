@@ -20,15 +20,21 @@ describe("the Bun development and build toolchain", () => {
 
   test.each(["ci", "release"])("the %s workflow pins Bun 1.4.4", (workflow) => {
     const source = readFileSync(join(repoRoot, `.github/workflows/${workflow}.yml`), "utf8");
-    const versions = [...source.matchAll(/^\s*bun-version:\s*(\S+)\s*$/gm)].map(
-      (match) => match[1],
-    );
-    expect(versions).toEqual(["1.4.4"]);
+    const { jobs } = Bun.YAML.parse(source) as {
+      jobs: Record<string, { steps?: { uses?: string; with?: { "bun-version"?: string } }[] }>;
+    };
+    const versions = Object.values(jobs)
+      .flatMap((job) => job.steps ?? [])
+      .filter((step) => step.uses?.startsWith("oven-sh/setup-bun@"))
+      .map((step) => step.with?.["bun-version"]);
+    expect(versions).toEqual(["1.4.4", "1.4.4"]);
   });
 
   test("the Docker build pins Bun 1.4.4", () => {
     const source = readFileSync(join(repoRoot, "Dockerfile"), "utf8");
-    const images = [...source.matchAll(/^FROM\s+oven\/bun:(\S+)/gim)].map((match) => match[1]);
+    const images = [...source.matchAll(/^FROM\s+(?:--\S+\s+)*oven\/bun:(\S+)/gim)].map(
+      (match) => match[1],
+    );
     expect(images).toEqual(["1.4.4-alpine"]);
   });
 });

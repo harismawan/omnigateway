@@ -26,14 +26,8 @@
         "kernel": "6.12.0-211.69.1.el10_2.x86_64"
       },
       "config": {
-        "gateway": [
-          "sh",
-          "/home/homebrew/code/omnigateway/scripts/run-rust-gateway.sh"
-        ],
-        "cli": [
-          "bun",
-          "apps/cli/src/index.ts"
-        ],
+        "gateway": ["sh", "/home/homebrew/code/omnigateway/scripts/run-rust-gateway.sh"],
+        "cli": ["bun", "apps/cli/src/index.ts"],
         "duration": "20s",
         "warmup": "3s",
         "gatewayCpus": "0-3",
@@ -41,9 +35,7 @@
         "loadCpus": "6-7",
         "mode": "single",
         "replicas": 1,
-        "cpuSets": [
-          "0-3"
-        ]
+        "cpuSets": ["0-3"]
       },
       "binaryBytes": null,
       "boot": {
@@ -82,16 +74,7 @@
           "6": 536,
           "7": 528
         },
-        "mhzUnderLoad": [
-          2496,
-          2496,
-          2496,
-          2496,
-          2496,
-          2496,
-          2496,
-          2496
-        ],
+        "mhzUnderLoad": [2496, 2496, 2496, 2496, 2496, 2496, 2496, 2496],
         "foreignCoresBefore": 0.18
       },
       "writerDropped": null,
@@ -143,12 +126,7 @@
           },
           "foreignCores": 0.42,
           "windowFrom": 1794245118068,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
+          "gatewayMhz": [2496, 2496, 2496, 2496],
           "threads": {
             "tokio-rt-worker": {
               "cpu": 20,
@@ -223,12 +201,7 @@
           },
           "foreignCores": 0.92,
           "windowFrom": 1794245142713,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
+          "gatewayMhz": [2496, 2496, 2496, 2496],
           "threads": {
             "tokio-rt-worker": {
               "cpu": 65,
@@ -307,12 +280,7 @@
           },
           "foreignCores": 0.76,
           "windowFrom": 1794245167796,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
+          "gatewayMhz": [2496, 2496, 2496, 2496],
           "threads": {
             "tokio-rt-worker": {
               "cpu": 69,
@@ -391,12 +359,7 @@
           },
           "foreignCores": 0.86,
           "windowFrom": 1794245192986,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
+          "gatewayMhz": [2496, 2496, 2496, 2496],
           "threads": {
             "tokio-rt-worker": {
               "cpu": 67,
@@ -475,12 +438,7 @@
           },
           "foreignCores": 0.39,
           "windowFrom": 1794245218196,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
+          "gatewayMhz": [2496, 2496, 2496, 2496],
           "threads": {
             "tokio-rt-worker": {
               "cpu": 96,
@@ -555,12 +513,7 @@
           },
           "foreignCores": 0.41,
           "windowFrom": 1794245242821,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
+          "gatewayMhz": [2496, 2496, 2496, 2496],
           "threads": {
             "tokio-rt-worker": {
               "cpu": 98,
@@ -636,12 +589,7 @@
           },
           "foreignCores": 0.84,
           "windowFrom": 1794245267416,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
+          "gatewayMhz": [2496, 2496, 2496, 2496],
           "threads": {
             "tokio-rt-worker": {
               "cpu": 68,
@@ -720,12 +668,7 @@
           },
           "foreignCores": 0.15,
           "windowFrom": 1794245292608,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
+          "gatewayMhz": [2496, 2496, 2496, 2496],
           "threads": {}
         },
         {
@@ -787,12 +730,7 @@
           },
           "foreignCores": 0.14,
           "windowFrom": 1794245325790,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
+          "gatewayMhz": [2496, 2496, 2496, 2496],
           "threads": {}
         },
         {
@@ -856,12 +794,7 @@
           },
           "foreignCores": 1.1,
           "windowFrom": 1794245356313,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
+          "gatewayMhz": [2496, 2496, 2496, 2496],
           "threads": {
             "tokio-rt-worker": {
               "cpu": 69,
@@ -905,14 +838,8 @@
         "kernel": "6.12.0-211.69.1.el10_2.x86_64"
       },
       "config": {
-        "gateway": [
-          "sh",
-          "/home/homebrew/code/omnigateway/scripts/run-rust-gateway.sh"
-        ],
-        "cli": [
-          "bun",
-          "apps/cli/src/index.ts"
-        ],
+        "gateway": ["sh", "/home/homebrew/code/omnigateway/scripts/run-rust-gateway.sh"],
+        "cli": ["bun", "apps/cli/src/index.ts"],
         "duration": "20s",
         "warmup": "3s",
         "gatewayCpus": "0-3",
@@ -920,9 +847,7 @@
         "loadCpus": "6-7",
         "mode": "single",
         "replicas": 1,
-        "cpuSets": [
-          "0-3"
-        ]
+        "cpuSets": ["0-3"]
       },
       "binaryBytes": null,
       "boot": {
@@ -961,16 +886,7 @@
           "6": 537,
           "7": 542
         },
-        "mhzUnderLoad": [
-          2496,
-          2496,
-          2496,
-          2496,
-          2496,
-          2496,
-          2496,
-          2496
-        ],
+        "mhzUnderLoad": [2496, 2496, 2496, 2496, 2496, 2496, 2496, 2496],
         "foreignCoresBefore": 0.18
       },
       "writerDropped": null,
@@ -1022,12 +938,7 @@
           },
           "foreignCores": 0.37,
           "windowFrom": 1794245427549,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
+          "gatewayMhz": [2496, 2496, 2496, 2496],
           "threads": {
             "tokio-rt-worker": {
               "cpu": 17,
@@ -1102,12 +1013,7 @@
           },
           "foreignCores": 0.86,
           "windowFrom": 1794245452194,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
+          "gatewayMhz": [2496, 2496, 2496, 2496],
           "threads": {
             "tokio-rt-worker": {
               "cpu": 67,
@@ -1186,12 +1092,7 @@
           },
           "foreignCores": 0.79,
           "windowFrom": 1794245477394,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
+          "gatewayMhz": [2496, 2496, 2496, 2496],
           "threads": {
             "tokio-rt-worker": {
               "cpu": 68,
@@ -1270,12 +1171,7 @@
           },
           "foreignCores": 0.87,
           "windowFrom": 1794245502588,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
+          "gatewayMhz": [2496, 2496, 2496, 2496],
           "threads": {
             "tokio-rt-worker": {
               "cpu": 68,
@@ -1354,12 +1250,7 @@
           },
           "foreignCores": 0.39,
           "windowFrom": 1794245527785,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
+          "gatewayMhz": [2496, 2496, 2496, 2496],
           "threads": {
             "tokio-rt-worker": {
               "cpu": 97,
@@ -1434,12 +1325,7 @@
           },
           "foreignCores": 0.36,
           "windowFrom": 1794245552416,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
+          "gatewayMhz": [2496, 2496, 2496, 2496],
           "threads": {
             "tokio-rt-worker": {
               "cpu": 98,
@@ -1515,12 +1401,7 @@
           },
           "foreignCores": 0.86,
           "windowFrom": 1794245577027,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
+          "gatewayMhz": [2496, 2496, 2496, 2496],
           "threads": {
             "tokio-rt-worker": {
               "cpu": 68,
@@ -1599,12 +1480,7 @@
           },
           "foreignCores": 0.18,
           "windowFrom": 1794245602209,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
+          "gatewayMhz": [2496, 2496, 2496, 2496],
           "threads": {}
         },
         {
@@ -1666,12 +1542,7 @@
           },
           "foreignCores": 0.15,
           "windowFrom": 1794245635390,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
+          "gatewayMhz": [2496, 2496, 2496, 2496],
           "threads": {}
         },
         {
@@ -1735,12 +1606,7 @@
           },
           "foreignCores": 1.1,
           "windowFrom": 1794245665909,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
+          "gatewayMhz": [2496, 2496, 2496, 2496],
           "threads": {
             "tokio-rt-worker": {
               "cpu": 67,
@@ -1784,14 +1650,8 @@
         "kernel": "6.12.0-211.69.1.el10_2.x86_64"
       },
       "config": {
-        "gateway": [
-          "sh",
-          "/home/homebrew/code/omnigateway/scripts/run-rust-gateway.sh"
-        ],
-        "cli": [
-          "bun",
-          "apps/cli/src/index.ts"
-        ],
+        "gateway": ["sh", "/home/homebrew/code/omnigateway/scripts/run-rust-gateway.sh"],
+        "cli": ["bun", "apps/cli/src/index.ts"],
         "duration": "20s",
         "warmup": "3s",
         "gatewayCpus": "0-3",
@@ -1799,9 +1659,7 @@
         "loadCpus": "6-7",
         "mode": "single",
         "replicas": 1,
-        "cpuSets": [
-          "0-3"
-        ]
+        "cpuSets": ["0-3"]
       },
       "binaryBytes": null,
       "boot": {
@@ -1840,16 +1698,7 @@
           "6": 526,
           "7": 527
         },
-        "mhzUnderLoad": [
-          2496,
-          2496,
-          2496,
-          2496,
-          2496,
-          2496,
-          2496,
-          2496
-        ],
+        "mhzUnderLoad": [2496, 2496, 2496, 2496, 2496, 2496, 2496, 2496],
         "foreignCoresBefore": 0.21
       },
       "writerDropped": null,
@@ -1901,12 +1750,7 @@
           },
           "foreignCores": 0.38,
           "windowFrom": 1794245737841,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
+          "gatewayMhz": [2496, 2496, 2496, 2496],
           "threads": {
             "tokio-rt-worker": {
               "cpu": 18,
@@ -1981,12 +1825,7 @@
           },
           "foreignCores": 0.87,
           "windowFrom": 1794245762488,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
+          "gatewayMhz": [2496, 2496, 2496, 2496],
           "threads": {
             "tokio-rt-worker": {
               "cpu": 66,
@@ -2065,12 +1904,7 @@
           },
           "foreignCores": 0.78,
           "windowFrom": 1794245787675,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
+          "gatewayMhz": [2496, 2496, 2496, 2496],
           "threads": {
             "tokio-rt-worker": {
               "cpu": 67,
@@ -2149,12 +1983,7 @@
           },
           "foreignCores": 0.88,
           "windowFrom": 1794245812974,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
+          "gatewayMhz": [2496, 2496, 2496, 2496],
           "threads": {
             "tokio-rt-worker": {
               "cpu": 67,
@@ -2233,12 +2062,7 @@
           },
           "foreignCores": 0.39,
           "windowFrom": 1794245838167,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
+          "gatewayMhz": [2496, 2496, 2496, 2496],
           "threads": {
             "tokio-rt-worker": {
               "cpu": 97,
@@ -2313,12 +2137,7 @@
           },
           "foreignCores": 0.36,
           "windowFrom": 1794245862797,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
+          "gatewayMhz": [2496, 2496, 2496, 2496],
           "threads": {
             "tokio-rt-worker": {
               "cpu": 98,
@@ -2394,12 +2213,7 @@
           },
           "foreignCores": 0.87,
           "windowFrom": 1794245887401,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
+          "gatewayMhz": [2496, 2496, 2496, 2496],
           "threads": {
             "tokio-rt-worker": {
               "cpu": 69,
@@ -2478,12 +2292,7 @@
           },
           "foreignCores": 0.17,
           "windowFrom": 1794245912582,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
+          "gatewayMhz": [2496, 2496, 2496, 2496],
           "threads": {}
         },
         {
@@ -2545,12 +2354,7 @@
           },
           "foreignCores": 0.14,
           "windowFrom": 1794245945765,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
+          "gatewayMhz": [2496, 2496, 2496, 2496],
           "threads": {}
         },
         {
@@ -2614,12 +2418,7 @@
           },
           "foreignCores": 1.11,
           "windowFrom": 1794245976286,
-          "gatewayMhz": [
-            2496,
-            2496,
-            2496,
-            2496
-          ],
+          "gatewayMhz": [2496, 2496, 2496, 2496],
           "threads": {
             "tokio-rt-worker": {
               "cpu": 67,
@@ -2664,14 +2463,8 @@
       "kernel": "6.12.0-211.69.1.el10_2.x86_64"
     },
     "config": {
-      "gateway": [
-        "sh",
-        "/home/homebrew/code/omnigateway/scripts/run-rust-gateway.sh"
-      ],
-      "cli": [
-        "bun",
-        "apps/cli/src/index.ts"
-      ],
+      "gateway": ["sh", "/home/homebrew/code/omnigateway/scripts/run-rust-gateway.sh"],
+      "cli": ["bun", "apps/cli/src/index.ts"],
       "duration": "20s",
       "warmup": "3s",
       "gatewayCpus": "0-3",
@@ -2679,9 +2472,7 @@
       "loadCpus": "6-7",
       "mode": "single",
       "replicas": 1,
-      "cpuSets": [
-        "0-3"
-      ]
+      "cpuSets": ["0-3"]
     },
     "binaryBytes": null,
     "boot": {
@@ -2720,16 +2511,7 @@
         "6": 534,
         "7": 529
       },
-      "mhzUnderLoad": [
-        2496,
-        2496,
-        2496,
-        2496,
-        2496,
-        2496,
-        2496,
-        2496
-      ],
+      "mhzUnderLoad": [2496, 2496, 2496, 2496, 2496, 2496, 2496, 2496],
       "foreignCoresBefore": 0.21
     },
     "writerDropped": null,
@@ -2781,12 +2563,7 @@
         },
         "foreignCores": 0.17,
         "windowFrom": 1794246037500,
-        "gatewayMhz": [
-          2496,
-          2496,
-          2496,
-          2496
-        ],
+        "gatewayMhz": [2496, 2496, 2496, 2496],
         "threads": {}
       }
     ]
@@ -2955,12 +2732,7 @@
         "min": 1794245118068,
         "max": 1794245737841
       },
-      "gatewayMhz": [
-        2496,
-        2496,
-        2496,
-        2496
-      ],
+      "gatewayMhz": [2496, 2496, 2496, 2496],
       "threads": {
         "tokio-rt-worker": {
           "cpu": {
@@ -3187,12 +2959,7 @@
         "min": 1794245142713,
         "max": 1794245762488
       },
-      "gatewayMhz": [
-        2496,
-        2496,
-        2496,
-        2496
-      ],
+      "gatewayMhz": [2496, 2496, 2496, 2496],
       "threads": {
         "tokio-rt-worker": {
           "cpu": {
@@ -3443,12 +3210,7 @@
         "min": 1794245167796,
         "max": 1794245787675
       },
-      "gatewayMhz": [
-        2496,
-        2496,
-        2496,
-        2496
-      ],
+      "gatewayMhz": [2496, 2496, 2496, 2496],
       "threads": {
         "tokio-rt-worker": {
           "cpu": {
@@ -3699,12 +3461,7 @@
         "min": 1794245192986,
         "max": 1794245812974
       },
-      "gatewayMhz": [
-        2496,
-        2496,
-        2496,
-        2496
-      ],
+      "gatewayMhz": [2496, 2496, 2496, 2496],
       "threads": {
         "tokio-rt-worker": {
           "cpu": {
@@ -3955,12 +3712,7 @@
         "min": 1794245218196,
         "max": 1794245838167
       },
-      "gatewayMhz": [
-        2496,
-        2496,
-        2496,
-        2496
-      ],
+      "gatewayMhz": [2496, 2496, 2496, 2496],
       "threads": {
         "tokio-rt-worker": {
           "cpu": {
@@ -4199,12 +3951,7 @@
         "min": 1794245242821,
         "max": 1794245862797
       },
-      "gatewayMhz": [
-        2496,
-        2496,
-        2496,
-        2496
-      ],
+      "gatewayMhz": [2496, 2496, 2496, 2496],
       "threads": {
         "tokio-rt-worker": {
           "cpu": {
@@ -4448,12 +4195,7 @@
         "min": 1794245267416,
         "max": 1794245887401
       },
-      "gatewayMhz": [
-        2496,
-        2496,
-        2496,
-        2496
-      ],
+      "gatewayMhz": [2496, 2496, 2496, 2496],
       "threads": {
         "tokio-rt-worker": {
           "cpu": {
@@ -4704,12 +4446,7 @@
         "min": 1794245292608,
         "max": 1794245912582
       },
-      "gatewayMhz": [
-        2496,
-        2496,
-        2496,
-        2496
-      ],
+      "gatewayMhz": [2496, 2496, 2496, 2496],
       "threads": {}
     },
     "client-cancel": {
@@ -4891,12 +4628,7 @@
         "min": 1794245325790,
         "max": 1794245945765
       },
-      "gatewayMhz": [
-        2496,
-        2496,
-        2496,
-        2496
-      ],
+      "gatewayMhz": [2496, 2496, 2496, 2496],
       "threads": {}
     },
     "early-cancel": {
@@ -5112,12 +4844,7 @@
         "min": 1794245356313,
         "max": 1794245976286
       },
-      "gatewayMhz": [
-        2496,
-        2496,
-        2496,
-        2496
-      ],
+      "gatewayMhz": [2496, 2496, 2496, 2496],
       "threads": {
         "tokio-rt-worker": {
           "cpu": {
@@ -5238,51 +4965,15 @@
     }
   },
   "targets": [
-    [
-      "Chat throughput/p99",
-      ">=10000/s; <=10ms",
-      "met every run"
-    ],
-    [
-      "Overhead p50/p99",
-      "<=0.3/1ms",
-      "met every run"
-    ],
-    [
-      "Many-chunks CPU",
-      "<=1.5ms/request",
-      "met every run"
-    ],
-    [
-      "Idle RSS",
-      "<=20MiB",
-      "met every run"
-    ],
-    [
-      "Held RSS",
-      "<=80MiB",
-      "met every run"
-    ],
-    [
-      "Launcher-inclusive boot p50",
-      "<=30ms",
-      "met every run"
-    ],
-    [
-      "Cancellation",
-      "zero crashes; <=+20MiB by10s",
-      "met every run"
-    ],
-    [
-      "TS CLI",
-      "<=15ms",
-      "MISSED"
-    ],
-    [
-      "Rust CLI/admin/cluster",
-      "later scope",
-      "deferred"
-    ]
+    ["Chat throughput/p99", ">=10000/s; <=10ms", "met every run"],
+    ["Overhead p50/p99", "<=0.3/1ms", "met every run"],
+    ["Many-chunks CPU", "<=1.5ms/request", "met every run"],
+    ["Idle RSS", "<=20MiB", "met every run"],
+    ["Held RSS", "<=80MiB", "met every run"],
+    ["Launcher-inclusive boot p50", "<=30ms", "met every run"],
+    ["Cancellation", "zero crashes; <=+20MiB by10s", "met every run"],
+    ["TS CLI", "<=15ms", "MISSED"],
+    ["Rust CLI/admin/cluster", "later scope", "deferred"]
   ],
   "verification": {
     "passed": 523,

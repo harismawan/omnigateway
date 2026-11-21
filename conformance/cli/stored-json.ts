@@ -12,7 +12,9 @@ const secret = "stored-json-golden-secret";
 const store = await createStore({ path, encryptionKey: await deriveKey(secret) });
 store.close();
 const db = new Database(path);
-db.run("INSERT INTO api_keys(id,label,prefix,hash,model_allowlist,created_at) VALUES('k','k','p','h','broken',1)");
+db.run(
+  "INSERT INTO api_keys(id,label,prefix,hash,model_allowlist,created_at) VALUES('k','k','p','h','broken',1)",
+);
 db.run("INSERT INTO virtual_models VALUES('v','broken','weighted',0)");
 const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("OMNI_")));
 Object.assign(env, { HOME: root, OMNI_ENCRYPTION_KEY: secret, NO_COLOR: "1" });
@@ -27,12 +29,28 @@ for (const args of [
   ["setup", "claude"],
 ]) {
   const results = [];
-  for (const cmd of [["bun", "--no-env-file", resolve("apps/cli/src/index.ts")], [resolve(process.env.OMNI_CLI_BIN ?? "target/debug/omni")]]) {
-    const child = goldenSpawn([...cmd, "--root", root, "--db", "db", ...args, "--json"], { cwd: root, env, stdout: "pipe", stderr: "pipe" });
-    results.push({ out: await new Response(child.stdout).text(), err: await new Response(child.stderr).text(), code: await child.exited });
+  for (const cmd of [
+    ["bun", "--no-env-file", resolve("apps/cli/src/index.ts")],
+    [resolve(process.env.OMNI_CLI_BIN ?? "target/debug/omni")],
+  ]) {
+    const child = goldenSpawn([...cmd, "--root", root, "--db", "db", ...args, "--json"], {
+      cwd: root,
+      env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    results.push({
+      out: await new Response(child.stdout).text(),
+      err: await new Response(child.stderr).text(),
+      code: await child.exited,
+    });
   }
   assert.deepEqual(results[1], results[0], args.join(" "));
-  assert.deepEqual(results[0], { out: "", err: 'JSON Parse error: Unexpected identifier "broken"\n', code: 1 });
+  assert.deepEqual(results[0], {
+    out: "",
+    err: 'JSON Parse error: Unexpected identifier "broken"\n',
+    code: 1,
+  });
   count++;
 }
 db.close();

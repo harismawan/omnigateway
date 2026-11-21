@@ -13,10 +13,11 @@
  *
  * Nothing in the frozen tree is modified; this file only imports it.
  */
+
+import { redisCoord } from "../../../../apps/gateway/src/coord/redis.ts";
 import { createAdminAuth } from "../../../../packages/control/src/adminAuth.ts";
 import { createPendingFlows } from "../../../../packages/control/src/oauth/pending.ts";
 import { memoryStore } from "../../../../packages/testkit/src/index.ts";
-import { redisCoord } from "../../../../apps/gateway/src/coord/redis.ts";
 
 const url = process.argv[2];
 if (url === undefined) throw new Error("usage: agent.ts <redis-url>");
