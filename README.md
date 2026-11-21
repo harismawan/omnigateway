@@ -19,7 +19,7 @@ Postgres and Redis when you need a fleet, and never logs the contents of your
 prompts or replies.
 
 ```bash
-bun install -g omnigateway
+npm i -g omnigateway
 omni start
 ```
 
@@ -88,19 +88,70 @@ boundary, and the background loops.
 
 ## Requirements
 
-- [Bun](https://bun.sh/) 1.4.4 or later. Bun is the runtime, not just the
-  installer, so a Node-only machine cannot run OmniGateway.
+- Linux (x86_64 or aarch64) or macOS (Intel or Apple silicon). The gateway is
+  a native binary; npm (Node 18 or later) only installs it. There is no Windows
+  build: Windows stays on the last TypeScript release, `omnigateway@0.15.5`.
 - A directory that persists, for the SQLite database.
 - At least one Anthropic, OpenAI, Kimi Coding, Kilo, or xAI account to connect.
 
 ## Install
 
 ```bash
-bun install -g omnigateway     # or: npm i -g omnigateway
+npm i -g omnigateway
 ```
 
 One package carries the `omni` CLI, the gateway server, and the admin console
-the server hosts.
+the server hosts. npm picks the matching native build
+(`@omnigateway/<os>-<cpu>`); the same binaries are attached to each
+[GitHub release](https://github.com/harismawan/omnigateway/releases).
+
+npm 12 blocks install scripts by default. Allowing this package's lets it link
+`omni` straight to the binary and restart the service after an update:
+
+```bash
+npm i -g omnigateway --allow-scripts=omnigateway
+# or once: npm config set allow-scripts=omnigateway --location=user
+```
+
+Without it everything still works, through a small Node launcher.
+
+### Upgrading from 0.x
+
+`1.0.0` replaces the TypeScript gateway with the Rust one under the same
+package name; `npm update -g omnigateway` is the upgrade. On servers, run it as
+`npm update -g omnigateway --allow-scripts=omnigateway --foreground-scripts` to
+watch it. Your database, `.env`, encryption key and captured bodies are read in
+place.
+
+A systemd service written by `omni service install` (user or system scope) is
+migrated for you: the old gateway is stopped, the database is backed up to
+`snapshots/db_<time>_preRust.sqlite`, the unit's `ExecStart` is pointed at the
+native binary (every other line is kept), and the service is started and
+checked on `/health`. With install scripts allowed this happens during the
+update; otherwise the old process keeps serving until its next restart, which
+runs the migration instead of the old gateway. `omni service migrate` does the
+same on demand, and every later npm update restarts the service onto the new
+binary.
+
+What is **not** migrated automatically, and is left running as it was:
+cluster installations (Postgres/Redis — follow the
+[cutover runbook](docs/rust-cutover-runbook.md)), units with drop-ins or a
+changed `ExecStart`, both a user and a system unit, another process holding the
+database, and a system unit when the update did not run as root. The reason is
+recorded in `~/.local/state/omnigateway/npm-migration.json` and every `omni`
+command repeats it on stderr until it is resolved.
+
+What stops working: plugins (their data stays), and accounts for Grok, Kimi,
+Kilo, Muse and Qoder, which this release does not serve; `omni doctor` lists
+what it found. If the Rust gateway fails its health check the service is left
+stopped, and the message names the way back:
+
+```bash
+npm i -g omnigateway@0.15.5
+omni db restore db_<time>_preRust.sqlite
+omni service install --force        # add --system for a system unit
+systemctl --user start omnigateway   # or: sudo systemctl start omnigateway
+```
 
 ## Getting started
 

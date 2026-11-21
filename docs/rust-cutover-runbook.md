@@ -59,9 +59,10 @@ checks, not manual Redis repairs an operator should improvise.
   an installation's dependency on the dropped feature before the window.
 - The CLI administers local SQLite only. Use authenticated admin HTTP and the
   database's own tooling for a Postgres fleet.
-- Rust ships as release binaries and the container image, **not a Bun/npm
-  runtime upgrade**. The final TS npm package stays published. Windows is not a
-  Rust release target; Linux and macOS targets are listed below.
+- Rust ships as release binaries, the container image, and npm
+  `omnigateway@1.x` (a native binary per platform; Node only installs it). The
+  TS `0.15.5` npm release stays published for rollback and Windows, which is
+  not a Rust release target; Linux and macOS targets are listed below.
 
 ### Measured performance and overload behavior
 
@@ -157,8 +158,8 @@ Keep these siblings together:
 <release>/LICENSE
 ```
 
-Invoke the **absolute new** `<release>/omni` path during cutover, not an old
-globally linked npm `omni`. Service installation resolves the symlink and writes
+For a release archive, invoke the **absolute new** `<release>/omni` path during
+cutover, not an old globally linked npm `omni` (npm installs: see below). Service installation resolves the symlink and writes
 the canonical `<release>/omnigateway` into `ExecStart`. A standalone CLI requires
 an adjacent `omnigateway` companion; it does not build or launch Bun. Keep the
 release directory in place for the lifetime of that unit. The dashboard defaults
@@ -241,6 +242,29 @@ encrypted accounts and key hashes; treat it and body archives as sensitive.
 5. Perform step 6 with external traffic still paused. A successful start or
    `/health` alone does not accept the cutover. If diagnostics report the wrong
    root/binary, unreadable accounts or an unexpected migration, **stop**.
+
+### npm installations (`omnigateway` 0.x → 1.x)
+
+`npm update -g omnigateway` performs steps 1–2 above for a **single-node**
+service the TS CLI wrote, through `omni service migrate` (design:
+[npm distribution](superpowers/specs/2026-11-21-rust-npm-distribution-design.md)).
+It runs from `postinstall` when npm allows the package's scripts
+(`--allow-scripts=omnigateway`; npm 12 blocks them by default), otherwise from
+the `gateway.js` bridge on the old unit's next start. Either way it refuses,
+before stopping anything, for cluster `.env` settings, drop-ins, an unrecognised
+`ExecStart`, both scopes, a foreign database holder, too little disk for the
+backup, a database migrated by a newer build, or a system unit when not root or
+with a binary path that is not root-owned. It replaces only the `ExecStart=`
+line, saves the old unit under `<state>/pre-rust/`, and records the outcome in
+`<state>/npm-migration.json` (`~/.local/state/omnigateway` by default), which
+`omni` and `omni doctor` repeat until resolved. On a failed health check the
+service is left stopped with the rollback in the message. This replaces the
+maintenance window for that one shape only. It does not take step 6, so run it
+after the update.
+
+The bridge serves the migrating start as its own child, so that one run's
+process tree is `bun gateway.js` → `omnigateway omni service migrate --bridge`
+→ `omnigateway`; the next restart is the binary alone.
 
 ## 5. Postgres + Redis fleet maintenance window
 
