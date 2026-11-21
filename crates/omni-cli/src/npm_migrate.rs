@@ -22,11 +22,17 @@ pub(crate) enum Scope {
     System,
 }
 impl Scope {
-    #[cfg(test)]
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::User => "user",
             Self::System => "system",
+        }
+    }
+    fn parse(name: &str) -> Option<Self> {
+        match name {
+            "user" => Some(Self::User),
+            "system" => Some(Self::System),
+            _ => None,
         }
     }
     fn flag(self) -> &'static str {
@@ -54,6 +60,7 @@ pub(crate) enum Status {
     FailedWriter,
     FailedPort,
     FailedBackup,
+    FailedRecord,
     FailedStart,
 }
 impl Status {
@@ -74,18 +81,22 @@ impl Status {
             Self::FailedWriter => "failed-writer",
             Self::FailedPort => "failed-port",
             Self::FailedBackup => "failed-backup",
+            Self::FailedRecord => "failed-record",
             Self::FailedStart => "failed-start",
         }
     }
-    /// Outcomes the CLI keeps announcing until a later run clears them.
+    /// Outcomes the CLI keeps announcing until a later run clears them; a
+    /// handoff whose start was not (yet) verified is one.
     fn needs_attention(name: &str) -> bool {
-        name.starts_with("failed-") || name.starts_with("skipped-")
+        name.starts_with("failed-") || name.starts_with("skipped-") || name == "verifying"
     }
 }
 
 pub(crate) struct Outcome {
     pub(crate) status: Status,
     pub(crate) message: String,
+    /// The record reached disk (written, synced, renamed into place).
+    pub(crate) persisted: bool,
 }
 
 /// Where things are. Production values come from [`Paths::current`].
@@ -468,7 +479,8 @@ fn clustered(env: &std::collections::HashMap<String, String>) -> bool {
             .is_some_and(|v| !matches!(v.trim(), "" | "false" | "0"))
 }
 
-fn record(paths: &Paths, now: i64, status: Status, extra: Value) {
+fn record(paths: &Paths, now: i64, status: Status, extra: Value) -> Result<(), String> {
+    use std::io::Write as _;
     let mut value = json!({
         "status": status.name(),
         "at": now,
@@ -479,15 +491,25 @@ fn record(paths: &Paths, now: i64, status: Status, extra: Value) {
         target.extend(extra.clone());
     }
     let file = paths.state.join(RECORD);
-    let temp = paths.state.join(format!("{RECORD}.tmp"));
+    // Per-process temp name: the verifier and an operator's run may overlap.
+    let temp = paths
+        .state
+        .join(format!("{RECORD}.{}.tmp", std::process::id()));
     let written = fs::create_dir_all(&paths.state)
-        .and_then(|()| fs::write(&temp, format!("{value:#}\n")))
-        .and_then(|()| fs::rename(&temp, &file));
-    if let Err(e) = written {
-        eprintln!("could not write {}: {e}", file.display());
-    }
+        .and_then(|()| {
+            let mut out = fs::File::create(&temp)?;
+            out.write_all(format!("{value:#}\n").as_bytes())?;
+            out.sync_all()
+        })
+        .and_then(|()| fs::rename(&temp, &file))
+        .and_then(|()| fs::File::open(&paths.state)?.sync_all());
+    written.map_err(|e| {
+        let _unlinked = fs::remove_file(&temp);
+        let e = format!("could not write {}: {e}", file.display());
+        eprintln!("{e}");
+        e
+    })
 }
-
 fn previous_record(paths: &Paths) -> Option<Value> {
     serde_json::from_str(&fs::read_to_string(paths.state.join(RECORD)).ok()?).ok()
 }
@@ -495,11 +517,20 @@ fn previous_record(paths: &Paths) -> Option<Value> {
 /// The latest record as a failure summary, if it is one.
 fn as_failure(record: &Value) -> Option<Value> {
     let status = record["status"].as_str()?;
-    status.starts_with("failed-").then(|| {
+    // A handoff with no verdict is unresolved: its rollback stays visible.
+    let message = if status == "verifying" {
+        json!(format!(
+            "the Rust gateway's start after the migration has not been verified.\n{}",
+            record["message"].as_str().unwrap_or_default()
+        ))
+    } else {
+        record["message"].clone()
+    };
+    (status.starts_with("failed-") || status == "verifying").then(|| {
         json!({
             "status": status,
             "at": record["at"],
-            "message": record["message"],
+            "message": message,
             "backup": record["backup"],
             "savedUnit": record["savedUnit"],
             "unit": record["unit"],
@@ -542,13 +573,19 @@ fn outcome(paths: &Paths, now: i64, status: Status, message: String, extra: Valu
         .as_ref()
         .and_then(|r| r["runningVersion"].as_str().map(str::to_owned));
     let mut pending = pending_failure(previous.as_ref());
-    // This attempt, if it failed with rollback, supersedes an artifact-free one.
+    // This attempt, if it failed with rollback, supersedes an artifact-free
+    // failure, and a handoff's verdict supersedes the handoff itself.
     if status.name().starts_with("failed-")
         && extra["backup"].as_str().is_some_and(|b| !b.is_empty())
-        && pending.as_ref().is_none_or(|p| !has_rollback(p))
+        && pending
+            .as_ref()
+            .is_none_or(|p| !has_rollback(p) || p["status"] == "verifying")
     {
         pending = None;
     }
+    let handoff = previous
+        .as_ref()
+        .and_then(|r| r.get("handoff").filter(|h| h.is_object()).cloned());
     let mut message = message;
     if let Some(obj) = extra.as_object_mut() {
         let recovered = obj.remove("recovered").is_some_and(|v| v == true);
@@ -570,9 +607,22 @@ fn outcome(paths: &Paths, now: i64, status: Status, message: String, extra: Valu
         if !recovered && let Some(pending) = pending {
             obj.insert("pendingFailure".into(), pending);
         }
+        // An armed handoff survives every attempt until a serving verdict;
+        // `"handoff": null` from the caller drops it explicitly.
+        if recovered {
+            obj.remove("handoff");
+        } else if !obj.contains_key("handoff")
+            && let Some(handoff) = handoff
+        {
+            obj.insert("handoff".into(), handoff);
+        }
     }
-    record(paths, now, status, extra);
-    Outcome { status, message }
+    let persisted = record(paths, now, status, extra).is_ok();
+    Outcome {
+        status,
+        message,
+        persisted,
+    }
 }
 
 fn sudo(scope: Scope) -> &'static str {
@@ -582,21 +632,25 @@ fn sudo(scope: Scope) -> &'static str {
 /// Back to TS. `backup` is `None` when nothing was changed (no restore step);
 /// `saved` is the original unit to copy back when it was rewritten.
 fn rollback_steps(plan: &Plan, backup: Option<&str>, saved: Option<&Path>) -> String {
-    let scope = plan.unit.scope;
+    rollback_for(plan.unit.scope, &plan.root, &plan.unit.path, backup, saved)
+}
+fn rollback_for(
+    scope: Scope,
+    root: &Path,
+    unit: &Path,
+    backup: Option<&str>,
+    saved: Option<&Path>,
+) -> String {
     let s = sudo(scope);
     let mut steps = vec![format!("{s}npm i -g omnigateway@{LAST_TS_VERSION}")];
     if let Some(backup) = backup {
         steps.push(format!(
             "omni db restore --root {} {backup}",
-            plan.root.display()
+            root.display()
         ));
     }
     if let Some(saved) = saved {
-        steps.push(format!(
-            "{s}cp {} {}",
-            saved.display(),
-            plan.unit.path.display()
-        ));
+        steps.push(format!("{s}cp {} {}", saved.display(), unit.display()));
     }
     steps.push(format!("{s}systemctl{} daemon-reload", scope.flag()));
     steps.push(format!("{s}systemctl{} start {UNIT_NAME}", scope.flag()));
@@ -883,10 +937,18 @@ fn stop_confirmed(host: &dyn Host, scope: Scope) -> Result<(), String> {
 /// After `/health` answered: the answering socket belongs to `pid`, `pid`
 /// runs this binary, and nothing but `pid` has the database open.
 fn serving_is(host: &dyn Host, plan: &Plan, pid: u32, binary: &Path) -> Result<(), String> {
+    serving_at(host, probe_addr(&plan.env), &plan.db, pid, binary)
+}
+fn serving_at(
+    host: &dyn Host,
+    addr: std::net::SocketAddr,
+    db: &Path,
+    pid: u32,
+    binary: &Path,
+) -> Result<(), String> {
     if host.process_exe(pid).is_none_or(|e| e != binary) {
         return Err(format!("process {pid} is not {}", binary.display()));
     }
-    let addr = probe_addr(&plan.env);
     match host.listener_pid(addr) {
         Some(owner) if owner == pid => {}
         Some(owner) => {
@@ -900,11 +962,11 @@ fn serving_is(host: &dyn Host, plan: &Plan, pid: u32, binary: &Path) -> Result<(
             ));
         }
     }
-    let holders = host.holders(&plan.db);
+    let holders = host.holders(db);
     if !holders.contains(&pid) {
         return Err(format!(
             "the gateway does not have {} open, so it is not serving the database that was backed up",
-            plan.db.display()
+            db.display()
         ));
     }
     let others: Vec<String> = holders
@@ -915,7 +977,7 @@ fn serving_is(host: &dyn Host, plan: &Plan, pid: u32, binary: &Path) -> Result<(
     if !others.is_empty() {
         return Err(format!(
             "{} is also open in process {} besides the gateway",
-            plan.db.display(),
+            db.display(),
             others.join(", ")
         ));
     }
@@ -1075,6 +1137,7 @@ fn convert(
     let saved = paths.state.join("pre-rust").join(UNIT_NAME);
     let extra =
         json!({"backup": backup, "unit": plan.unit.path, "savedUnit": saved, "root": plan.root});
+    // A handoff stays armed only when this run armed a verifier on disk.
     let failure = |why: String, rewritten: bool, stopped: bool| {
         start_failure(
             paths,
@@ -1082,7 +1145,10 @@ fn convert(
             &backup,
             rewritten.then_some(saved.as_path()),
             why,
-            stopped,
+            Left {
+                stopped,
+                armed: rewritten && starter == Starter::Bridge,
+            },
             now,
         )
     };
@@ -1095,6 +1161,48 @@ fn convert(
             false,
             true,
         );
+    }
+    // The bridge arms a verifier only once the handoff it judges against —
+    // the database backed up, the address, the unit — is durably recorded.
+    let handoff = Handoff {
+        scope,
+        unit: plan.unit.path.clone(),
+        root: plan.root.clone(),
+        db: plan.db.clone(),
+        addr: probe_addr(&plan.env),
+        backup: backup.clone(),
+        saved: saved.clone(),
+    };
+    if starter == Starter::Bridge {
+        let mut pending = extra.clone();
+        pending["handoff"] = handoff.to_json();
+        let handed = outcome(
+            paths,
+            now,
+            Status::Verifying,
+            format!(
+                "migrated {} to the Rust gateway {}; systemd is restarting it and will verify the start.\nBackup: {backup}\n{}",
+                plan.unit.path.display(),
+                paths.version,
+                rollback_steps(plan, Some(&backup), Some(&saved))
+            ),
+            pending,
+        );
+        if !handed.persisted {
+            host.release(lock);
+            let mut failed = outcome(
+                paths,
+                now,
+                Status::FailedRecord,
+                format!(
+                    "could not record the migration in {}, so the start could not be verified; the unit was not changed and the service is left stopped. Fix the state directory, then run omni service migrate.\nBackup: {backup}",
+                    paths.state.join(RECORD).display()
+                ),
+                json!({"backup": backup, "unit": plan.unit.path, "root": plan.root, "handoff": null}),
+            );
+            failed.persisted = false;
+            return failed;
+        }
     }
     let post = (starter == Starter::Bridge).then(|| verifier_line(&paths.binary));
     if let Err(e) = rewrite_exec(&plan.unit, &paths.binary, post.as_deref()) {
@@ -1110,26 +1218,20 @@ fn convert(
         Starter::None => {}
         Starter::Bridge => {
             // We are this unit's main process: the restart stops us and
-            // starts Rust; the verifier records the outcome. Record the
-            // handoff first — the stop may end this process at any point
-            // after the request.
-            let mut pending = extra.clone();
-            pending["handoff"] = json!(true);
-            let handed = outcome(
-                paths,
-                now,
-                Status::Verifying,
-                format!(
+            // starts Rust; the armed verifier records the outcome. Nothing
+            // follows the request, which may end this process at once.
+            if let Err(e) = host.systemctl(scope, &["restart", "--no-block", UNIT_NAME]) {
+                return failure(format!("systemctl restart failed: {e}"), true, true);
+            }
+            return Outcome {
+                status: Status::Verifying,
+                message: format!(
                     "migrated {} to the Rust gateway {}; systemd is restarting it and will verify the start.\nBackup: {backup}",
                     plan.unit.path.display(),
                     paths.version
                 ),
-                pending,
-            );
-            if let Err(e) = host.systemctl(scope, &["restart", "--no-block", UNIT_NAME]) {
-                return failure(format!("systemctl restart failed: {e}"), true, true);
-            }
-            return handed;
+                persisted: true,
+            };
         }
         Starter::Systemd => {
             let verdict = match host.systemctl(scope, &["start", UNIT_NAME]) {
@@ -1146,6 +1248,8 @@ fn convert(
         }
     }
     let mut done = extra.clone();
+    // No verifier: any earlier handoff is replaced by this conversion.
+    done["handoff"] = Value::Null;
     if starter != Starter::None {
         done["runningVersion"] = json!(paths.version);
         done["recovered"] = json!(true);
@@ -1167,6 +1271,15 @@ fn convert(
 
 const HEALTH: &str = "the Rust gateway did not answer /health within 30 s";
 
+/// The service's state after a failed start.
+#[derive(Clone, Copy)]
+struct Left {
+    /// systemd confirmed it stopped.
+    stopped: bool,
+    /// The unit carries an armed verifier for this run's handoff.
+    armed: bool,
+}
+
 /// A failed start after the unit was (possibly) rewritten.
 fn start_failure(
     paths: &Paths,
@@ -1174,7 +1287,7 @@ fn start_failure(
     backup: &str,
     saved: Option<&Path>,
     why: String,
-    stopped: bool,
+    Left { stopped, armed }: Left,
     now: i64,
 ) -> Outcome {
     let scope = plan.unit.scope;
@@ -1197,101 +1310,193 @@ fn start_failure(
             scope.flag(),
             rollback_steps(plan, Some(backup), saved)
         ),
-        json!({"backup": backup, "unit": plan.unit.path, "savedUnit": saved_unit, "root": plan.root}),
+        {
+            let mut extra = json!({"backup": backup, "unit": plan.unit.path, "savedUnit": saved_unit, "root": plan.root});
+            if !armed {
+                extra["handoff"] = Value::Null;
+            }
+            extra
+        },
     )
 }
 
+/// What the bridge backed up and armed a verifier for. The verifier and any
+/// later recovery judge against this, never against the current `.env`.
+struct Handoff {
+    scope: Scope,
+    unit: PathBuf,
+    root: PathBuf,
+    db: PathBuf,
+    addr: std::net::SocketAddr,
+    backup: String,
+    saved: PathBuf,
+}
+impl Handoff {
+    fn to_json(&self) -> Value {
+        json!({
+            "scope": self.scope.name(),
+            "unit": self.unit,
+            "root": self.root,
+            "db": self.db,
+            "addr": self.addr.to_string(),
+            "backup": self.backup,
+            "savedUnit": self.saved,
+        })
+    }
+    fn read(value: &Value) -> Option<Self> {
+        let text = |k: &str| value[k].as_str().filter(|v| !v.is_empty());
+        Some(Self {
+            scope: Scope::parse(text("scope")?)?,
+            unit: PathBuf::from(text("unit")?),
+            root: PathBuf::from(text("root")?),
+            db: PathBuf::from(text("db")?),
+            addr: text("addr")?.parse().ok()?,
+            backup: text("backup")?.to_owned(),
+            saved: PathBuf::from(text("savedUnit")?),
+        })
+    }
+    fn rollback(&self) -> String {
+        rollback_for(
+            self.scope,
+            &self.root,
+            &self.unit,
+            Some(&self.backup),
+            Some(&self.saved),
+        )
+    }
+}
+
+/// The armed handoff in `record`: `None` when there is none, `Some(Err)`
+/// when one is armed but unreadable.
+fn armed(record: Option<&Value>) -> Option<Result<Handoff, ()>> {
+    let value = record?.get("handoff").filter(|h| !h.is_null())?;
+    Some(Handoff::read(value).ok_or(()))
+}
+
 /// `--verify-start`, run by systemd as the bridge-rewritten unit's
-/// `ExecStartPost` once Rust is up (`MAINPID` is its pid). Removes itself
-/// from the unit whatever the outcome, records it, and exits non-zero on
-/// failure so systemd fails (and stops) the unit.
+/// `ExecStartPost` once Rust is up (`MAINPID` is its pid), on every start
+/// until it records a durable verdict.
+///
+/// - No record, or one with no armed handoff: a stale hook, exit 0.
+/// - An unreadable record or handoff: fail closed (stop, exit 1).
+/// - Serving the backed-up database on the recorded address: record
+///   `migrated`, then (only once that is on disk) remove its own line.
+/// - Otherwise: record `failed-start` with rollback, then queue a stop and
+///   exit 1. The line stays armed, so a `Restart=on-failure` restart (if the
+///   stop could not be queued) is judged again rather than trusted. Nothing
+///   follows the stop request: systemd may kill this process at once.
 pub(crate) fn verify_start(host: &dyn Host, paths: &Paths, main: u32, now: i64) -> i32 {
-    let Some(previous) = previous_record(paths).filter(|r| r["handoff"] == true) else {
-        return 0;
+    let file = paths.state.join(RECORD);
+    let previous = match fs::read_to_string(&file) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return 0,
+        Err(e) => Err(format!("cannot read {}: {e}", file.display())),
+        Ok(text) => serde_json::from_str::<Value>(&text)
+            .map_err(|e| format!("cannot parse {}: {e}", file.display())),
     };
-    let Ok(plan) = preflight_for_verify(host, paths) else {
-        // The unit is no longer the one we rewrote: nothing of ours to judge.
-        return 0;
+    let handoff = match previous.as_ref().map(|r| armed(Some(r))) {
+        Ok(None) => return 0,
+        Ok(Some(Ok(handoff))) => handoff,
+        Ok(Some(Err(()))) => {
+            return stop_unjudged(
+                host,
+                paths,
+                &format!("{} holds an unreadable handoff", file.display()),
+            );
+        }
+        Err(e) => return stop_unjudged(host, paths, e.as_str()),
     };
-    let backup = previous["backup"].as_str().unwrap_or_default().to_owned();
-    // Remove the verifier first, so no later start runs it again.
-    let without: String = plan
-        .unit
-        .text
-        .split_inclusive('\n')
-        .filter(|l| l.trim_end() != verifier_line(&paths.binary))
-        .collect();
-    let removed = fs::write(&plan.unit.path, without)
-        .map_err(|e| e.to_string())
-        .and_then(|()| {
-            host.systemctl(plan.unit.scope, &["daemon-reload"])
-                .map(drop)
-        });
-    let verdict = if !host.healthy(&local_base(&plan.env)) {
+    let verdict = if main == 0 {
+        Err("systemd did not pass the gateway's MAINPID".to_owned())
+    } else if !host.healthy(&format!("http://{}", handoff.addr)) {
         Err(HEALTH.to_owned())
     } else {
-        serving_is(host, &plan, main, &paths.binary)
+        serving_at(host, handoff.addr, &handoff.db, main, &paths.binary)
     };
-    let saved = paths.state.join("pre-rust").join(UNIT_NAME);
+    let extra = json!({
+        "backup": handoff.backup,
+        "unit": handoff.unit,
+        "savedUnit": handoff.saved,
+        "root": handoff.root,
+    });
     match verdict {
-        Ok(()) if removed.is_ok() => {
-            let mut done = json!({"backup": backup, "unit": plan.unit.path, "savedUnit": saved, "root": plan.root});
+        Ok(()) => {
+            let mut done = extra;
             done["runningVersion"] = json!(paths.version);
             done["recovered"] = json!(true);
-            outcome(
+            let recorded = outcome(
                 paths,
                 now,
                 Status::Migrated,
                 format!(
-                    "migrated {} to the Rust gateway {} ({}).\nBackup: {backup}\nOld unit saved at {}.",
-                    plan.unit.path.display(),
+                    "migrated {} to the Rust gateway {} ({}).\nBackup: {}\nOld unit saved at {}.",
+                    handoff.unit.display(),
                     paths.version,
                     paths.binary.display(),
-                    saved.display()
+                    handoff.backup,
+                    handoff.saved.display()
                 ),
                 done,
             );
+            if recorded.persisted {
+                // Disarm. A failure here leaves a stale hook, which no-ops.
+                if let Err(e) = disarm(host, &handoff, &paths.binary) {
+                    eprintln!(
+                        "the verifier could not remove itself from {}: {e}",
+                        handoff.unit.display()
+                    );
+                }
+            }
             0
         }
-        result => {
-            let why = match (result, removed) {
-                (Err(why), _) => why,
-                (Ok(()), Err(e)) => format!("could not remove the verifier from the unit: {e}"),
-                (Ok(()), Ok(())) => unreachable!(),
-            };
-            // Record first: the stop below ends this process. Exiting
-            // non-zero alone would let `Restart=on-failure` start Rust again,
-            // unverified (measured on systemd 257); a queued stop leaves the
-            // unit failed and stopped.
-            let stopped = host
-                .systemctl(plan.unit.scope, &["stop", "--no-block", UNIT_NAME])
-                .is_ok();
-            start_failure(paths, &plan, &backup, Some(&saved), why, stopped, now);
+        Err(why) => {
+            let s = sudo(handoff.scope);
+            let flag = handoff.scope.flag();
+            outcome(
+                paths,
+                now,
+                Status::FailedStart,
+                format!(
+                    "{why}. systemd was asked to stop {UNIT_NAME}; if {s}systemctl{flag} status {UNIT_NAME} still shows it running, run {s}systemctl{flag} stop {UNIT_NAME} first; see journalctl{flag} -u {UNIT_NAME}.\nBackup: {}\n{}",
+                    handoff.backup,
+                    handoff.rollback()
+                ),
+                extra,
+            );
+            let _queued = host.systemctl(handoff.scope, &["stop", "--no-block", UNIT_NAME]);
             1
         }
     }
 }
 
-/// The rewritten unit, re-read for the verifier: our binary's `ExecStart`.
-fn preflight_for_verify(host: &dyn Host, paths: &Paths) -> Result<Plan, ()> {
-    let units = find_units(paths).map_err(drop)?;
-    let [unit] = <[Unit; 1]>::try_from(units).map_err(drop)?;
-    let (kind, root) = classify(&unit.text, &paths.binary).map_err(drop)?;
-    if kind != Kind::Rust {
-        return Err(());
+/// The verifier cannot judge: stop every unit that carries it, exit 1.
+fn stop_unjudged(host: &dyn Host, paths: &Paths, why: &str) -> i32 {
+    eprintln!(
+        "omnigateway: {why}; the Rust gateway's start cannot be verified, so {UNIT_NAME} is being stopped. Run omni service migrate."
+    );
+    for unit in find_units(paths).unwrap_or_default() {
+        if unit.text.lines().any(|l| l == verifier_line(&paths.binary)) {
+            let _queued = host.systemctl(unit.scope, &["stop", "--no-block", UNIT_NAME]);
+        }
     }
-    let env_text = fs::read_to_string(root.join(".env")).map_err(drop)?;
-    let env = crate::context::parse_env(&env_text);
-    let db = database_path(&root, &env);
-    let facts = show(host, unit.scope, "ActiveState,MainPID").unwrap_or_default();
-    Ok(Plan {
-        unit,
-        kind,
-        root,
-        env,
-        db,
-        facts,
-    })
+    1
+}
+
+/// Remove the verifier line from the handoff's unit and reload.
+fn disarm(host: &dyn Host, handoff: &Handoff, binary: &Path) -> Result<(), String> {
+    let text = fs::read_to_string(&handoff.unit).map_err(|e| e.to_string())?;
+    let line = verifier_line(binary);
+    if !text.lines().any(|l| l == line) {
+        return Ok(());
+    }
+    let without: String = text
+        .split_inclusive('\n')
+        .filter(|l| l.trim_end_matches('\n') != line)
+        .collect();
+    let temp = handoff.unit.with_extension("service.omni-tmp");
+    fs::write(&temp, without)
+        .and_then(|()| fs::rename(&temp, &handoff.unit))
+        .map_err(|e| e.to_string())?;
+    host.systemctl(handoff.scope, &["daemon-reload"]).map(drop)
 }
 
 /// Rust → Rust: restart an active service only on positive evidence that npm
@@ -1314,13 +1519,42 @@ fn refresh(host: &dyn Host, paths: &Paths, plan: &Plan, now: i64) -> Outcome {
             }
         }
     }
+    // An armed handoff is judged against what was backed up, never the
+    // current `.env`; an unreadable one is never judged recovered.
+    let handoff = armed(previous.as_ref());
+    let judge = |pid: u32| -> Result<(), String> {
+        match &handoff {
+            None => {
+                if host.healthy(&local_base(&plan.env)) {
+                    serving_is(host, plan, pid, &paths.binary)
+                } else {
+                    Err(HEALTH.to_owned())
+                }
+            }
+            Some(Ok(h)) => {
+                if host.healthy(&format!("http://{}", h.addr)) {
+                    serving_at(host, h.addr, &h.db, pid, &paths.binary)
+                } else {
+                    Err(HEALTH.to_owned())
+                }
+            }
+            Some(Err(())) => Err("the recorded handoff is unreadable".to_owned()),
+        }
+    };
+    let unresolved = pending_failure.is_some() || handoff.is_some();
     let running = main_pid(&plan.facts).filter(|_| active(&plan.facts));
     let Some(pid) = running else {
         if let Some(failure) = pending_failure {
+            // Re-reported, not judged: an unverified handoff stays one.
+            let status = if failure["status"] == "verifying" {
+                Status::Verifying
+            } else {
+                Status::FailedStart
+            };
             return outcome(
                 paths,
                 now,
-                Status::FailedStart,
+                status,
                 failure["message"].as_str().unwrap_or_default().to_owned(),
                 extra,
             );
@@ -1343,12 +1577,9 @@ fn refresh(host: &dyn Host, paths: &Paths, plan: &Plan, now: i64) -> Outcome {
     if !replaced {
         // Recovery means serving: answering /health on the probed address
         // from this process, which runs this binary and holds the database.
-        let serving = exe.as_ref().is_some_and(|e| *e == paths.binary)
-            && pending_failure.is_some()
-            && host.healthy(&local_base(&plan.env))
-            && serving_is(host, plan, pid, &paths.binary).is_ok();
-        if serving || exe.as_ref().is_some_and(|e| *e == paths.binary) && pending_failure.is_none()
-        {
+        let serving =
+            exe.as_ref().is_some_and(|e| *e == paths.binary) && unresolved && judge(pid).is_ok();
+        if serving || exe.as_ref().is_some_and(|e| *e == paths.binary) && !unresolved {
             extra["runningVersion"] = json!(paths.version);
         }
         if serving {
@@ -1376,11 +1607,12 @@ fn refresh(host: &dyn Host, paths: &Paths, plan: &Plan, now: i64) -> Outcome {
     };
     let verdict = match host.systemctl(scope, &["restart", UNIT_NAME]) {
         Err(e) => Err(format!("systemctl restart failed: {e}")),
-        Ok(_) if !host.healthy(&local_base(&plan.env)) => Err(format!(
-            "omnigateway {} did not answer /health within 30 s",
-            paths.version
-        )),
-        Ok(_) => started_is_ours(host, plan, &paths.binary),
+        Ok(_) => show(host, scope, "ActiveState,MainPID").and_then(|facts| {
+            match main_pid(&facts).filter(|_| active(&facts)) {
+                Some(pid) => judge(pid),
+                None => Err(format!("{UNIT_NAME} is not running after start")),
+            }
+        }),
     };
     let Err(mut why) = verdict else {
         let mut done = extra;
@@ -1514,6 +1746,8 @@ pub(crate) fn banner(paths: &Paths) -> Option<String> {
             "omnigateway: the npm migration to the Rust gateway {} ({status}): {reason}\nSee {} or run omni service migrate.",
             if status.starts_with("failed-") {
                 "failed"
+            } else if status == "verifying" {
+                "is not verified"
             } else {
                 "did not run"
             },

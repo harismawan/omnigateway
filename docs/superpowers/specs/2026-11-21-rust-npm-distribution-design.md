@@ -94,21 +94,37 @@ In bridge mode the migration runs **as** the service, not against it:
 
 - TS is not running (the bridge took its place), so there is no stop step.
 - The writer check still applies: nothing may hold the database open.
-- The rewrite also adds one line after `ExecStart=`:
-  `ExecStartPost=<binary> omni service migrate --verify-start`. The migrator
-  records `verifying` (with `handoff: true`), releases the lock, asks
-  `systemctl restart --no-block omnigateway.service` and exits 0. systemd
-  stops the bridge and starts the binary as a plain `MainPID`; the bridge
-  never spawns, relays signals to, or waits on the gateway. *(owner decision,
-  fourth rereview: a child gateway could not tell a slow boot from a drain)*
-- The verifier runs once the binary is up (`MAINPID` set by systemd). It first
-  removes its own line and reloads, then applies the same check as any start
-  (`/health`, listener attribution to `MAINPID`, the backed-up database held,
-  no other holder). Success records `migrated`. Failure records `failed-start`
-  with rollback, queues `systemctl stop --no-block` (a non-zero exit alone
-  would let `Restart=on-failure` start Rust again unverified — measured on
-  systemd 257) and exits 1, so the unit ends failed and stopped. Without a
-  pending handoff, or once the unit is no longer ours, it does nothing.
+- After the backup, and **before** the unit is touched, the migrator durably
+  records `verifying` with a `handoff` object: scope, unit, root, the database
+  path it backed up, the probe address, the backup id and the saved unit
+  (written, fsynced, renamed, directory fsynced). If that record cannot be
+  written it records `failed-record` where it can, leaves the unit unchanged
+  and the service stopped, and exits 0. Only then does the rewrite add one line
+  after `ExecStart=`: `ExecStartPost=<binary> omni service migrate
+  --verify-start`. It reloads, releases the lock, and its **last** act is
+  `systemctl restart --no-block omnigateway.service`; it exits 0. systemd stops
+  the bridge and starts the binary as a plain `MainPID`; the bridge never
+  spawns, relays signals to, or waits on the gateway. *(owner decision, fourth
+  rereview: a child gateway could not tell a slow boot from a drain)*
+- The verifier runs on every start while the line is there (`MAINPID` set by
+  systemd). It judges against the **recorded** handoff, never the current
+  `.env`: `/health` at the recorded address, listener attribution to
+  `MAINPID`, the backed-up database held, no other holder. Success records
+  `migrated` and only once that is on disk removes its own line and reloads.
+  Failure records `failed-start` with the handoff's rollback first, and its
+  last act is queueing `systemctl stop --no-block` (a non-zero exit alone lets
+  `Restart=on-failure` start Rust again — measured on systemd 257; with the
+  queued stop the unit ends failed and inactive); it exits 1 and the line
+  stays, so a restart that the stop did not prevent is judged again, never
+  trusted. A queued stop is not reported as a confirmed stop: the message
+  says to check `systemctl status` first. No record file, or a record with no
+  armed handoff, is a stale hook: exit 0. An armed handoff it cannot read (bad
+  JSON, missing fields, no `MAINPID`) fails closed: stop, exit 1.
+- An unverified handoff (`verifying`, e.g. a verifier that was killed) is an
+  unresolved state like a failure: `omni doctor`/`status` announce it, its
+  rollback is carried as `pendingFailure`, later runs keep the handoff, and
+  only a serving verdict against the recorded database (by the verifier or by
+  `omni service migrate` seeing the service serve it) clears it.
 - Every bridge refusal exits **0**, so `Restart=on-failure` does not loop
   and the service is left stopped with the record written.
 - Started outside systemd (no legacy unit found), the bridge prints that
@@ -219,7 +235,12 @@ other-writable. Otherwise the tool prints the exact
    an IP or `localhost`, and that one address is used for occupancy, `/health`
    and listener attribution. `localhost` resolves as the gateway's bind does:
    the resolver's first address (`::1` on an IPv6-first host). A wildcard bind
-   is probed on its family's loopback.
+   is probed on its family's loopback. **Conservative attribution:** for an
+   IPv4 probe, a listener on `[::]:port` also counts as serving it, because
+   `/proc/net/tcp6` does not say whether that socket is `IPV6_V6ONLY`. If such
+   a socket belongs to another process, attribution fails and the migrated
+   service is stopped with rollback even when it was serving — a refusal, never
+   a false success. Free the port or bind the other server elsewhere.
 3. **Preflight, nothing touched yet:** no process other than `MainPID` visible
    holding the database; the snapshot directory exists, is writable, has 1.1× the
    database free; the ledger is readable and has no unknown id; the binary runs
@@ -270,8 +291,9 @@ blocked nothing runs at update time; `omni service migrate` does the restart.
 The migrator runs as the bridge only when systemd's `MainPID` is one of its
 ancestors (it was started by the unit, not by hand). It skips the stop, holds
 the same lock, and after the rewrite hands the start to systemd as above. The
-`verifying` record is written before the restart request, since the restart
-may end the bridge at any point after it. A unit still carrying the verifier
+`verifying` record is durable before the verifier is armed, and the restart
+request is the bridge's last act, since it may end the bridge at once. A unit
+still carrying the verifier
 line (the verifier never ran) is still classified as ours. Every refusal, and
 every launcher failure in `gateway.js` (missing or non-executable platform
 binary), exits **0**, so `Restart=on-failure` does not loop. *(finding 6)*

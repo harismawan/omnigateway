@@ -298,11 +298,25 @@ probed address from this binary, holding the database). The outcome is recorded 
 its reason until resolved. This replaces the maintenance window for that one
 shape only. It does not take step 6, so run it after the update.
 
-The bridge never runs the gateway itself: after the backup and rewrite it asks
-systemd to restart the unit, which starts the binary as `MainPID`. A one-shot
-`ExecStartPost=… omni service migrate --verify-start`, added by the rewrite,
-checks that start, removes its own line, and records `migrated`, or records
-`failed-start` with rollback and stops the unit. With scripts blocked, later Rust updates are not restarted
+The bridge never runs the gateway itself. After the backup it durably records
+the handoff (the database it backed up, the address, the unit) — or, if it
+cannot, records `failed-record` and leaves the unit untouched and stopped —
+then rewrites the unit with an
+`ExecStartPost=… omni service migrate --verify-start` line and asks systemd to
+restart it, so systemd starts the binary as `MainPID`. The verifier judges each
+start against the recorded handoff, not the current `.env`. On success it
+records `migrated`, then removes its own line. On failure it records
+`failed-start` with rollback, then asks systemd to stop the unit; the line
+stays, so any further start is judged again. If a start is never verified
+(the verifier was killed), the record stays `verifying`: `omni doctor` and
+`omni status` announce it with the rollback until `omni service migrate` sees
+the service serving the backed-up database. To recover by hand, check
+`systemctl --user status omnigateway.service`, then either roll back with the
+recorded steps or start the service and run `omni service migrate`.
+
+For an IPv4 `OMNI_HOST`, a listener on `[::]:<port>` owned by another process
+counts against the migration (`/proc` cannot tell an IPv6-only socket), so the
+migrated service is stopped with rollback; free the port first. With scripts blocked, later Rust updates are not restarted
 automatically: run `omni service migrate` after `npm update`.
 
 ## 5. Postgres + Redis fleet maintenance window

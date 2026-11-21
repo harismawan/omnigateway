@@ -51,17 +51,26 @@ def start():
     (state / 'starts').open('a').write(directive('ExecStart') + '\n')
     # ExecStartPost runs once the main process is up, with MAINPID set; a
     # non-zero exit fails the unit, which systemd then stops.
+    # It is in the unit's cgroup: a stop kills it too (see stop()).
     post = directive('ExecStartPost', required=False)
     if post:
         time.sleep(0.3)
-        r = subprocess.run(post.split(' '), cwd=directive('WorkingDirectory'),
-                           env=env | {'MAINPID': str(p.pid)}, stdin=subprocess.DEVNULL,
-                           stdout=log, stderr=log)
-        (state / 'posts').open('a').write(f"{post} exit={r.returncode}\n")
-        if r.returncode != 0:
+        r = subprocess.Popen(post.split(' '), cwd=directive('WorkingDirectory'),
+                             env=env | {'MAINPID': str(p.pid)}, stdin=subprocess.DEVNULL,
+                             stdout=log, stderr=log, start_new_session=True)
+        (state / 'postpid').write_text(str(r.pid))
+        code = r.wait()
+        (state / 'postpid').unlink(missing_ok=True)
+        (state / 'posts').open('a').write(f"{post} exit={code}\n")
+        if code != 0:
             stop()
 
 def stop():
+    # systemd kills the whole cgroup, including a running ExecStartPost.
+    try:
+        os.killpg(int((state / 'postpid').read_text()), signal.SIGTERM)
+    except (OSError, ValueError):
+        pass
     p = pid()
     if p:
         os.killpg(p, signal.SIGTERM)
@@ -102,7 +111,12 @@ elif verb == 'enable':
 elif verb == 'start':
     start()
 elif verb == 'stop':
-    stop()
+    if no_block:
+        subprocess.Popen([sys.executable, __file__, 'stop'], env=os.environ,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    else:
+        stop()
 elif verb == 'restart':
     if no_block:
         # Queued: returns now; the job runs once this caller (perhaps the

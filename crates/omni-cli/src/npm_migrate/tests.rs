@@ -62,6 +62,8 @@ struct Fake {
     foreign_listener: bool,
     /// The started gateway holds the database that was backed up.
     rust_holds_db: bool,
+    /// The database the started gateway opened, when not the original.
+    rust_db: Option<PathBuf>,
 }
 
 impl Fake {
@@ -105,6 +107,7 @@ impl Fake {
             late_holder: false,
             foreign_listener: false,
             rust_holds_db: true,
+            rust_db: None,
         }
     }
     fn log(&self) -> Vec<String> {
@@ -194,7 +197,14 @@ impl Host for Fake {
         }
         Ok(String::new())
     }
-    fn holders(&self, _db: &Path) -> Vec<u32> {
+    fn holders(&self, db: &Path) -> Vec<u32> {
+        if let Some(opened) = &self.rust_db {
+            return if opened == db && *self.main_pid.borrow() == Some(4242) {
+                vec![4242]
+            } else {
+                vec![]
+            };
+        }
         let mut found: Vec<u32> = if self.ts_holds_db.get() {
             vec![777]
         } else {
@@ -940,12 +950,16 @@ fn verify_start_records_migrated_and_removes_itself() {
     let f = fixture(SINGLE);
     f.write_user(&legacy_unit(&f.root, ""));
     bridge(&bridge_host(&f), &f.paths(), 1);
+    assert_eq!(f.record()["status"], "verifying");
     let host = rust_host(&f, None);
     assert_eq!(verify_start(&host, &f.paths(), 4242, 2), 0);
     assert!(!f.unit().contains("ExecStartPost="), "{}", f.unit());
     assert!(host.did("systemctl user daemon-reload"));
     let record = f.record();
     assert_eq!(record["status"], "migrated");
+    assert!(record.get("handoff").is_none(), "{record:#}");
+    assert!(record.get("pendingFailure").is_none(), "{record:#}");
+    assert!(banner(&f.paths()).is_none());
     assert_eq!(record["runningVersion"], "1.0.0");
     assert_eq!(
         record["backup"],
@@ -965,9 +979,15 @@ fn verify_start_failure_fails_the_unit_with_rollback() {
         ..rust_host(&f, None)
     };
     assert_ne!(verify_start(&host, &f.paths(), 4242, 2), 0);
-    assert!(!f.unit().contains("ExecStartPost="));
-    // Without a stop, Restart=on-failure would start Rust again unverified.
+    // Still armed: a Restart=on-failure restart is judged again.
+    assert!(f.unit().contains("ExecStartPost="));
+    // Without a stop, Restart=on-failure would start Rust again unverified;
+    // the verdict is on disk before the stop is requested.
     assert!(host.did("systemctl user stop --no-block omnigateway.service"));
+    assert_eq!(
+        host.log().last().unwrap(),
+        "systemctl user stop --no-block omnigateway.service"
+    );
     let record = f.record();
     assert_eq!(record["status"], "failed-start");
     let message = record["message"].as_str().unwrap();
@@ -1623,4 +1643,211 @@ fn a_leftover_verifier_line_is_still_a_rust_unit() {
     assert!(f.unit().contains("ExecStartPost="));
     let host = rust_host(&f, None);
     assert_ne!(migrate(&host, &f.paths(), 2).status, Status::SkippedUnit);
+}
+
+// ------------------------------------------------- fifth rereview
+
+/// Finding 1: the verifier judges the database that was backed up, from the
+/// record, not whatever `.env` names now.
+#[test]
+fn verifier_judges_the_backed_up_database_not_the_edited_env() {
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    bridge(&bridge_host(&f), &f.paths(), 1);
+    let handoff = &f.record()["handoff"];
+    assert_eq!(
+        handoff["db"].as_str().unwrap(),
+        f.root.join("omnigateway.db").display().to_string()
+    );
+    // The operator points .env at another database before the start; Rust
+    // opens that one, so the backed-up one is not held.
+    fs::write(
+        f.root.join(".env"),
+        format!("{SINGLE}OMNI_DB_PATH=other.db\n"),
+    )
+    .unwrap();
+    let host = Fake {
+        rust_db: Some(f.root.join("other.db")),
+        ..rust_host(&f, None)
+    };
+    assert_ne!(verify_start(&host, &f.paths(), 4242, 2), 0);
+    assert_eq!(f.record()["status"], "failed-start");
+    // The edited database is the one Rust holds, so a verifier reading the
+    // current .env would pass; the recorded one fails it.
+    // And the address probed is the recorded one.
+    assert!(host.did(&format!(
+        "health http://{}",
+        handoff["addr"].as_str().unwrap()
+    )));
+}
+
+/// Finding 1: an armed handoff the verifier cannot read fails closed.
+#[test]
+fn verifier_with_an_unreadable_handoff_stops_the_unit() {
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    bridge(&bridge_host(&f), &f.paths(), 1);
+    let file = f.paths().state.join(RECORD);
+    let mut record = f.record();
+    record["handoff"]["db"] = json!(null);
+    fs::write(&file, record.to_string()).unwrap();
+    let host = rust_host(&f, None);
+    assert_ne!(verify_start(&host, &f.paths(), 4242, 2), 0);
+    assert!(host.did("systemctl user stop --no-block omnigateway.service"));
+    assert!(!host.did("health"));
+    // A corrupt record file likewise.
+    fs::write(&file, "{not json").unwrap();
+    let host = rust_host(&f, None);
+    assert_ne!(verify_start(&host, &f.paths(), 4242, 3), 0);
+    assert!(host.did("systemctl user stop --no-block omnigateway.service"));
+    // No MAINPID from systemd: not judged serving.
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    bridge(&bridge_host(&f), &f.paths(), 1);
+    assert_ne!(verify_start(&rust_host(&f, None), &f.paths(), 0, 2), 0);
+    assert_eq!(f.record()["status"], "failed-start");
+}
+
+/// Finding 4: the handoff must be on disk before the verifier is armed or
+/// the restart requested.
+#[test]
+fn bridge_refuses_to_arm_without_a_durable_handoff() {
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    let before = f.unit();
+    // The record path is a directory: the rename into place fails.
+    fs::create_dir_all(f.paths().state.join(RECORD)).unwrap();
+    let host = bridge_host(&f);
+    assert_eq!(bridge(&host, &f.paths(), 1), 0);
+    assert!(host.did("backup"));
+    assert_eq!(f.unit(), before, "unit untouched");
+    assert!(!host.did("systemctl user daemon-reload"));
+    assert!(!host.did("systemctl user restart"));
+    assert!(host.at("unlock") > host.at("backup"));
+}
+
+/// Finding 4: the handoff is recorded before the unit is rewritten, and the
+/// restart request is the last thing the bridge does.
+#[test]
+fn bridge_records_the_handoff_before_arming_and_requests_restart_last() {
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    let host = bridge_host(&f);
+    bridge(&host, &f.paths(), 1);
+    assert_eq!(
+        host.log().last().unwrap(),
+        "systemctl user restart --no-block omnigateway.service"
+    );
+    let record = f.record();
+    assert_eq!(record["status"], "verifying");
+    for key in ["scope", "unit", "root", "db", "addr", "backup", "savedUnit"] {
+        assert!(record["handoff"][key].is_string(), "{key}: {record:#}");
+    }
+}
+
+/// Finding 4: an unverified handoff is announced, survives later runs, and
+/// is resolved only by a serving verdict against the recorded database.
+#[test]
+fn an_unverified_handoff_is_announced_and_survives_later_runs() {
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    bridge(&bridge_host(&f), &f.paths(), 1);
+    let shown = banner(&f.paths()).unwrap();
+    assert!(shown.contains("verifying"), "{shown}");
+    // The verifier was interrupted; the service is inactive; migrate again.
+    let host = rust_host(&f, None);
+    *host.active.borrow_mut() = false;
+    *host.main_pid.borrow_mut() = None;
+    migrate(&host, &f.paths(), 2);
+    let record = f.record();
+    assert!(record["handoff"].is_object(), "{record:#}");
+    assert_eq!(record["pendingFailure"]["status"], "verifying");
+    assert!(
+        record["message"]
+            .as_str()
+            .unwrap()
+            .contains("omni db restore"),
+        "{record:#}"
+    );
+    assert!(banner(&f.paths()).is_some());
+    // Running, but serving another database (the edited .env's): still
+    // unresolved.
+    fs::write(
+        f.root.join(".env"),
+        format!("{SINGLE}OMNI_DB_PATH=other.db\n"),
+    )
+    .unwrap();
+    let host = Fake {
+        rust_db: Some(f.root.join("other.db")),
+        ..rust_host(&f, Some(f.binary.clone()))
+    };
+    migrate(&host, &f.paths(), 3);
+    assert!(f.record()["handoff"].is_object());
+    // Serving the backed-up database: resolved.
+    fs::write(f.root.join(".env"), SINGLE).unwrap();
+    let host = rust_host(&f, Some(f.binary.clone()));
+    migrate(&host, &f.paths(), 4);
+    let record = f.record();
+    assert!(record.get("handoff").is_none(), "{record:#}");
+    assert!(record.get("pendingFailure").is_none(), "{record:#}");
+    assert!(banner(&f.paths()).is_none());
+}
+
+/// Finding 6: a failed verdict, then a Restart=on-failure restart (the stop
+/// could not be queued): the still-armed verifier judges again.
+#[test]
+fn a_restart_after_a_failed_verdict_is_judged_again() {
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    bridge(&bridge_host(&f), &f.paths(), 1);
+    let host = Fake {
+        healthy: false,
+        ..rust_host(&f, None)
+    };
+    assert_ne!(verify_start(&host, &f.paths(), 4242, 2), 0);
+    let failed = f.record();
+    assert!(failed["handoff"].is_object());
+    let host = Fake {
+        healthy: false,
+        ..rust_host(&f, None)
+    };
+    assert_ne!(verify_start(&host, &f.paths(), 4242, 3), 0);
+    let record = f.record();
+    assert_eq!(record["status"], "failed-start");
+    assert_eq!(record["backup"], failed["backup"]);
+    // A later serving start resolves it and disarms.
+    assert_eq!(verify_start(&rust_host(&f, None), &f.paths(), 4242, 4), 0);
+    assert!(!f.unit().contains("ExecStartPost="));
+}
+
+/// Finding 6: success disarms only once `migrated` is on disk.
+#[test]
+fn verifier_disarms_only_after_recording_success() {
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    bridge(&bridge_host(&f), &f.paths(), 1);
+    let file = f.paths().state.join(RECORD);
+    let armed = fs::read_to_string(&file).unwrap();
+    // Make the record unwritable: a read-only copy of the state directory.
+    let ro = f.dir.path().join("ro-state");
+    fs::create_dir_all(&ro).unwrap();
+    fs::write(ro.join(RECORD), &armed).unwrap();
+    let mut perms = fs::metadata(&ro).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o555);
+    fs::set_permissions(&ro, perms).unwrap();
+    let paths = Paths {
+        state: ro.clone(),
+        ..f.paths()
+    };
+    let host = rust_host(&f, None);
+    let code = verify_start(&host, &paths, 4242, 2);
+    let mut perms = fs::metadata(&ro).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    fs::set_permissions(&ro, perms).unwrap();
+    // Root ignores the read-only mode; everyone else cannot record.
+    if !rustix::process::geteuid().is_root() {
+        assert_eq!(fs::read_to_string(ro.join(RECORD)).unwrap(), armed);
+        assert_eq!(code, 0);
+        assert!(f.unit().contains("ExecStartPost="), "disarmed unrecorded");
+    }
 }
