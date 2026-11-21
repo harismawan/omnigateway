@@ -14,6 +14,10 @@ use std::{
 /// The last TS release: rollback target and the Windows version.
 pub(crate) const LAST_TS_VERSION: &str = "0.15.5";
 pub(crate) const RECORD: &str = "npm-migration.json";
+/// The in-flight bridge handoff, in the install root (the unit's
+/// `WorkingDirectory`): the verifier finds it from its working directory and
+/// the operator CLI through the unit, so no environment can split them.
+pub(crate) const HANDOFF: &str = "npm-handoff.json";
 const UNIT_NAME: &str = "omnigateway.service";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -511,8 +515,7 @@ fn record(paths: &Paths, now: i64, status: Status, extra: Value) -> Result<(), S
     })
 }
 /// The migration record: `Ok(None)` when absent, `Err` when present but
-/// unreadable, unparseable, not an object, or holding a `handoff` that is
-/// neither null nor a readable handoff. Every reader uses this one rule.
+/// unreadable, unparseable or not an object. Every reader uses this rule.
 fn read_record_at(file: &Path) -> Result<Option<Value>, String> {
     let text = match fs::read_to_string(file) {
         Ok(text) => text,
@@ -523,11 +526,6 @@ fn read_record_at(file: &Path) -> Result<Option<Value>, String> {
         serde_json::from_str(&text).map_err(|e| format!("cannot parse {}: {e}", file.display()))?;
     if !value.is_object() {
         return Err(format!("{} is not a migration record", file.display()));
-    }
-    if let Some(h) = value.get("handoff").filter(|h| !h.is_null())
-        && Handoff::read(h).is_none()
-    {
-        return Err(format!("{} holds an unreadable handoff", file.display()));
     }
     Ok(Some(value))
 }
@@ -622,9 +620,6 @@ fn outcome(paths: &Paths, now: i64, status: Status, message: String, extra: Valu
     {
         pending = None;
     }
-    let handoff = previous
-        .as_ref()
-        .and_then(|r| r.get("handoff").filter(|h| h.is_object()).cloned());
     let mut message = message;
     if let Some(obj) = extra.as_object_mut() {
         let recovered = obj.remove("recovered").is_some_and(|v| v == true);
@@ -646,15 +641,6 @@ fn outcome(paths: &Paths, now: i64, status: Status, message: String, extra: Valu
         if !recovered && let Some(pending) = pending {
             obj.insert("pendingFailure".into(), pending);
         }
-        // An armed handoff survives every attempt until a serving verdict;
-        // `"handoff": null` from the caller drops it explicitly.
-        if recovered {
-            obj.remove("handoff");
-        } else if !obj.contains_key("handoff")
-            && let Some(handoff) = handoff
-        {
-            obj.insert("handoff".into(), handoff);
-        }
     }
     let persisted = record(paths, now, status, extra).is_ok();
     Outcome {
@@ -662,6 +648,30 @@ fn outcome(paths: &Paths, now: i64, status: Status, message: String, extra: Valu
         message,
         persisted,
     }
+}
+
+/// `path` as one POSIX shell word.
+fn shq(path: &Path) -> String {
+    let text = path.display().to_string();
+    if !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-+@:,=".contains(c))
+    {
+        text
+    } else {
+        format!("'{}'", text.replace('\'', "'\\''"))
+    }
+}
+/// A path systemd puts in a command line verbatim: no whitespace, quoting,
+/// escapes, `%` specifiers or `$` expansion.
+fn systemd_plain(path: &Path) -> bool {
+    path.is_absolute()
+        && path
+            .display()
+            .to_string()
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-+@".contains(c))
 }
 
 fn sudo(scope: Scope) -> &'static str {
@@ -696,23 +706,23 @@ fn rollback_for(
     if let Some(backup) = backup {
         steps.push(format!(
             "omni db restore --root {} --db {} {backup}",
-            root.display(),
-            db.display()
+            shq(root),
+            shq(db)
         ));
     }
     if let Some(saved) = saved {
-        steps.push(format!("{s}cp {} {}", saved.display(), unit.display()));
+        steps.push(format!("{s}cp {} {}", shq(saved), shq(unit)));
+    }
+    if backup.is_some() {
+        steps.push(format!(
+            "# before starting: {} must point OMNI_DB_PATH at {}, as when it was backed up",
+            shq(&root.join(".env")),
+            shq(db)
+        ));
     }
     steps.push(format!("{s}systemctl{} daemon-reload", scope.flag()));
     steps.push(format!("{s}systemctl{} start {UNIT_NAME}", scope.flag()));
     let mut text = format!("To go back to the TS gateway:\n  {}", steps.join("\n  "));
-    if backup.is_some() {
-        text.push_str(&format!(
-            "\nBefore starting it, make sure {} still points OMNI_DB_PATH at {} (as when it was backed up).",
-            root.join(".env").display(),
-            db.display()
-        ));
-    }
     if backup.is_some() {
         text.push_str("\nRows written after the migration are lost by the restore.");
     }
@@ -931,6 +941,22 @@ fn preflight(host: &dyn Host, paths: &Paths) -> Result<Plan, (Status, String)> {
     })
 }
 
+/// The binary and root go into the unit verbatim (`ExecStart=`,
+/// `ExecStartPost=`, `WorkingDirectory=`); refuse anything systemd would
+/// split, unquote or expand, before anything is stopped or written.
+fn systemd_safe(plan: &Plan, paths: &Paths) -> Result<(), String> {
+    for (what, path) in [("binary", &paths.binary), ("installation root", &plan.root)] {
+        if !systemd_plain(path) {
+            return Err(format!(
+                "{} was left alone: the {what} path {} has characters (whitespace, quotes, %, $, \\) a unit line cannot carry verbatim; move it to a plain path and run omni service migrate",
+                plan.unit.path.display(),
+                shq(path)
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn snapshots_dir(db: &Path) -> PathBuf {
     db.parent()
         .unwrap_or_else(|| Path::new("."))
@@ -1086,6 +1112,9 @@ pub(crate) fn migrate(host: &dyn Host, paths: &Paths, now: i64) -> Outcome {
         return refresh(host, paths, &plan, now);
     }
     let scope = plan.unit.scope;
+    if let Err(e) = systemd_safe(&plan, paths) {
+        return outcome(paths, now, Status::SkippedUnit, e, json!({}));
+    }
     let was_active = active(&plan.facts);
     let allowed: Vec<u32> = main_pid(&plan.facts).into_iter().collect();
     if let Err((status, message)) = preflight_data(host, paths, &plan, &allowed) {
@@ -1161,26 +1190,22 @@ enum Starter {
 }
 
 /// The line the bridge adds so systemd runs the verifier after Rust starts.
-/// It names the record and scope it was armed with, so the verifier never
-/// recomputes them from an environment that may have changed since.
-fn verifier_line(binary: &Path, record: &Path, scope: Scope) -> String {
+/// It carries no path: the verifier reads the handoff in its working
+/// directory, the unit's `WorkingDirectory`. `binary` is `systemd_plain`.
+fn verifier_line(binary: &Path, scope: Scope) -> String {
     format!(
-        "ExecStartPost={} omni service migrate --verify-start --record {} --scope {}",
+        "ExecStartPost={} omni service migrate --verify-start --scope {}",
         binary.display(),
-        record.display(),
         scope.name()
     )
 }
-/// `(record, scope)` of a verifier line for `binary`, if `line` is one.
-fn parse_verifier_line(line: &str, binary: &Path) -> Option<(PathBuf, Scope)> {
-    let rest = line
+/// The scope of a verifier line for `binary`, if `line` is one.
+fn parse_verifier_line(line: &str, binary: &Path) -> Option<Scope> {
+    let scope = line
         .strip_prefix("ExecStartPost=")?
         .strip_prefix(&binary.display().to_string())?
-        .strip_prefix(" omni service migrate --verify-start --record ")?;
-    let (record, scope) = rest.rsplit_once(" --scope ")?;
-    let record = PathBuf::from(record);
-    (record.is_absolute() && !record.as_os_str().is_empty()).then_some(())?;
-    Some((record, Scope::parse(scope)?))
+        .strip_prefix(" omni service migrate --verify-start --scope ")?;
+    Scope::parse(scope)
 }
 
 /// Under the held lock: back up, save and rewrite the unit, reload; then
@@ -1251,9 +1276,21 @@ fn convert(
         saved: saved.clone(),
     };
     if starter == Starter::Bridge {
-        let mut pending = extra.clone();
-        pending["handoff"] = handoff.to_json();
-        let handed = outcome(
+        // The handoff file is what arms the verifier; the state record is
+        // only the operator's log of it.
+        if let Err(e) = write_handoff(&handoff) {
+            host.release(lock);
+            return outcome(
+                paths,
+                now,
+                Status::FailedRecord,
+                format!(
+                    "{e}, so the start could not be verified; the unit was not changed and the service is left stopped. Fix it, then run omni service migrate.\nBackup: {backup}"
+                ),
+                json!({"backup": backup, "unit": plan.unit.path, "root": plan.root}),
+            );
+        }
+        outcome(
             paths,
             now,
             Status::Verifying,
@@ -1263,26 +1300,10 @@ fn convert(
                 paths.version,
                 rollback_steps(plan, Some(&backup), Some(&saved))
             ),
-            pending,
+            extra.clone(),
         );
-        if !handed.persisted {
-            host.release(lock);
-            let mut failed = outcome(
-                paths,
-                now,
-                Status::FailedRecord,
-                format!(
-                    "could not record the migration in {}, so the start could not be verified; the unit was not changed and the service is left stopped. Fix the state directory, then run omni service migrate.\nBackup: {backup}",
-                    paths.state.join(RECORD).display()
-                ),
-                json!({"backup": backup, "unit": plan.unit.path, "root": plan.root, "handoff": null}),
-            );
-            failed.persisted = false;
-            return failed;
-        }
     }
-    let post = (starter == Starter::Bridge)
-        .then(|| verifier_line(&paths.binary, &paths.state.join(RECORD), scope));
+    let post = (starter == Starter::Bridge).then(|| verifier_line(&paths.binary, scope));
     if let Err(e) = rewrite_exec(&plan.unit, &paths.binary, post.as_deref()) {
         host.release(lock);
         return failure(e, false, true);
@@ -1326,8 +1347,6 @@ fn convert(
         }
     }
     let mut done = extra.clone();
-    // No verifier: any earlier handoff is replaced by this conversion.
-    done["handoff"] = Value::Null;
     if starter != Starter::None {
         done["runningVersion"] = json!(paths.version);
         done["recovered"] = json!(true);
@@ -1389,11 +1408,11 @@ fn start_failure(
             rollback_steps(plan, Some(backup), saved)
         ),
         {
-            let mut extra = json!({"backup": backup, "unit": plan.unit.path, "savedUnit": saved_unit, "root": plan.root});
+            // A failure that did not arm a verifier leaves no handoff behind.
             if !armed {
-                extra["handoff"] = Value::Null;
+                let _cleared = clear_handoff(&plan.root);
             }
-            extra
+            json!({"backup": backup, "unit": plan.unit.path, "savedUnit": saved_unit, "root": plan.root})
         },
     )
 }
@@ -1445,25 +1464,69 @@ impl Handoff {
     }
 }
 
-/// The armed handoff in `record`: `None` when there is none, `Some(Err)`
-/// when one is armed but unreadable.
-fn armed(record: Option<&Value>) -> Option<Result<Handoff, ()>> {
-    let value = record?.get("handoff").filter(|h| !h.is_null())?;
-    Some(Handoff::read(value).ok_or(()))
+/// The armed handoff in `root`: `Ok(None)` only when the file does not
+/// exist; any other read error, bad JSON, or a handoff missing a field is
+/// `Err` — never "absent".
+fn read_handoff(root: &Path) -> Result<Option<Handoff>, String> {
+    let file = root.join(HANDOFF);
+    let text = match fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("cannot read {}: {e}", file.display())),
+    };
+    let value: Value =
+        serde_json::from_str(&text).map_err(|e| format!("cannot parse {}: {e}", file.display()))?;
+    Handoff::read(&value)
+        .map(Some)
+        .ok_or_else(|| format!("{} is not a readable handoff", file.display()))
+}
+/// Durably write the handoff into `root` (temp + fsync + rename + dir fsync).
+fn write_handoff(handoff: &Handoff) -> Result<(), String> {
+    use std::io::Write as _;
+    let file = handoff.root.join(HANDOFF);
+    let temp = handoff
+        .root
+        .join(format!("{HANDOFF}.{}.tmp", std::process::id()));
+    let written = (|| {
+        let mut out = fs::File::create(&temp)?;
+        out.write_all(format!("{:#}\n", handoff.to_json()).as_bytes())?;
+        out.sync_all()?;
+        fs::rename(&temp, &file)?;
+        fs::File::open(&handoff.root)?.sync_all()
+    })();
+    written.map_err(|e| {
+        let _unlinked = fs::remove_file(&temp);
+        format!("could not write {}: {e}", file.display())
+    })
+}
+/// Remove the handoff once a serving verdict is durable.
+fn clear_handoff(root: &Path) -> Result<(), String> {
+    let file = root.join(HANDOFF);
+    match fs::remove_file(&file) {
+        Ok(()) => fs::File::open(root)
+            .and_then(|d| d.sync_all())
+            .map_err(|e| e.to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("could not remove {}: {e}", file.display())),
+    }
 }
 
 /// `--verify-start`, run by systemd as the bridge-rewritten unit's
 /// `ExecStartPost` once Rust is up (`MAINPID` is its pid), on every start
-/// until it records a durable verdict.
+/// until it records a durable verdict. Its working directory is the unit's
+/// `WorkingDirectory` (the install root), where the bridge left the handoff.
 ///
-/// - No record, or one with no armed handoff: a stale hook, exit 0.
-/// - An unreadable record or handoff: fail closed (stop, exit 1).
+/// - No handoff file: a stale hook, exit 0.
+/// - An unreadable handoff, or one for another root or scope: fail closed
+///   (stop this scope's unit, exit 1).
 /// - Serving the backed-up database on the recorded address: record
-///   `migrated`, then (only once that is on disk) remove its own line.
+///   `migrated`, remove the handoff, then (only once both are done) remove
+///   its own line.
 /// - Otherwise: record `failed-start` with rollback, then queue a stop and
-///   exit 1. The line stays armed, so a `Restart=on-failure` restart (if the
-///   stop could not be queued) is judged again rather than trusted. Nothing
-///   follows the stop request: systemd may kill this process at once.
+///   exit 1. The handoff and the line stay, so a `Restart=on-failure`
+///   restart (if the stop could not be queued) is judged again rather than
+///   trusted. Nothing follows the stop request: systemd may kill this
+///   process at once.
 pub(crate) fn verify_start(
     host: &dyn Host,
     paths: &Paths,
@@ -1471,48 +1534,22 @@ pub(crate) fn verify_start(
     main: u32,
     now: i64,
 ) -> i32 {
-    // The record the hook was armed with, not one recomputed from today's
-    // environment; outcomes are written there too.
-    let state = hook
-        .record
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_default();
-    let paths = &Paths {
-        state,
-        user_unit: paths.user_unit.clone(),
-        system_unit: paths.system_unit.clone(),
-        binary: paths.binary.clone(),
-        version: paths.version.clone(),
-    };
-    if hook.record.file_name().is_none_or(|n| n != RECORD) {
-        return stop_unjudged(
-            host,
-            hook.scope,
-            &format!("{} is not a migration record path", hook.record.display()),
-        );
-    }
-    let handoff = match read_record_at(&hook.record) {
+    let handoff = match read_handoff(&hook.root) {
         Ok(None) => return 0,
-        Ok(Some(record)) => match armed(Some(&record)) {
-            None => return 0,
-            Some(Ok(handoff)) => handoff,
-            Some(Err(())) => {
-                let why = format!("{} holds an unreadable handoff", hook.record.display());
-                return stop_unjudged(host, hook.scope, &why);
-            }
-        },
+        Ok(Some(handoff)) => handoff,
         Err(e) => return stop_unjudged(host, hook.scope, &e),
     };
-    if handoff.scope != hook.scope {
+    if handoff.scope != hook.scope || handoff.root != hook.root {
         return stop_unjudged(
             host,
             hook.scope,
             &format!(
-                "the handoff in {} is for the {} unit, not this {} one",
-                hook.record.display(),
+                "the handoff in {} is for the {} unit at {}, not this {} one at {}",
+                hook.root.join(HANDOFF).display(),
                 handoff.scope.name(),
-                hook.scope.name()
+                handoff.root.display(),
+                hook.scope.name(),
+                hook.root.display()
             ),
         );
     }
@@ -1548,14 +1585,12 @@ pub(crate) fn verify_start(
                 ),
                 done,
             );
+            // Disarm only once the verdict is durable: first the handoff
+            // (after which the hook is stale and no-ops), then the line.
             if recorded.persisted {
-                // Disarm. A failure here leaves a stale hook, which no-ops.
-                if let Err(e) = disarm(host, &handoff, &paths.binary) {
-                    eprintln!(
-                        "the verifier could not remove itself from {}: {e}",
-                        handoff.unit.display()
-                    );
-                }
+                resolve_handoff(host, &handoff, &paths.binary);
+            } else {
+                eprintln!("the verifier stays armed: the verdict was not recorded");
             }
             0
         }
@@ -1595,10 +1630,25 @@ fn stop_unjudged(host: &dyn Host, scope: Scope, why: &str) -> i32 {
     1
 }
 
-/// What the armed `ExecStartPost` line carries.
+/// Where the verifier runs: its scope (from its command line) and the
+/// install root (its working directory, set by systemd).
 pub(crate) struct Hook {
-    pub(crate) record: PathBuf,
+    pub(crate) root: PathBuf,
     pub(crate) scope: Scope,
+}
+
+/// After a durable serving verdict: remove the handoff (from then on the
+/// hook is stale and no-ops), then the verifier line. Either failing leaves
+/// the verifier armed or harmless, never trusting an unjudged start.
+fn resolve_handoff(host: &dyn Host, handoff: &Handoff, binary: &Path) {
+    if let Err(e) = clear_handoff(&handoff.root) {
+        eprintln!("the verifier stays armed: {e}");
+    } else if let Err(e) = disarm(host, handoff, binary) {
+        eprintln!(
+            "could not remove the verifier from {}: {e}",
+            handoff.unit.display()
+        );
+    }
 }
 
 /// Remove the verifier line from the handoff's unit and reload.
@@ -1636,9 +1686,10 @@ fn refresh(host: &dyn Host, paths: &Paths, plan: &Plan, now: i64) -> Outcome {
             }
         }
     }
-    // An armed handoff is judged against what was backed up, never the
-    // current `.env`; an unreadable one is never judged recovered.
-    let handoff = armed(previous.as_ref());
+    // An armed handoff (found through the unit, in its root) is judged
+    // against what was backed up, never the current `.env`; an unreadable
+    // one is never judged recovered.
+    let handoff = read_handoff(&plan.root).transpose();
     let judge = |pid: u32| -> Result<(), String> {
         match &handoff {
             None => {
@@ -1655,12 +1706,43 @@ fn refresh(host: &dyn Host, paths: &Paths, plan: &Plan, now: i64) -> Outcome {
                     Err(HEALTH.to_owned())
                 }
             }
-            Some(Err(())) => Err("the recorded handoff is unreadable".to_owned()),
+            Some(Err(e)) => Err(e.clone()),
         }
     };
     let unresolved = pending_failure.is_some() || handoff.is_some();
+    // An unreadable handoff: nothing is restarted, judged or recorded over
+    // it; the operator is told where it is.
+    if let Some(Err(e)) = &handoff {
+        return outcome(
+            paths,
+            now,
+            Status::FailedRecord,
+            format!(
+                "{e}; the start after the migration cannot be verified, so nothing was changed. Repair it (do not delete it: that would let the next start pass unverified), or roll back with the service stopped."
+            ),
+            extra,
+        );
+    }
+    // An armed handoff with no verdict yet is reported as such.
+    let verifying = matches!(handoff, Some(Ok(_)));
     let running = main_pid(&plan.facts).filter(|_| active(&plan.facts));
     let Some(pid) = running else {
+        if verifying && pending_failure.is_none_or(|f| f["status"] == "verifying") {
+            let rollback = handoff
+                .as_ref()
+                .and_then(|h| h.as_ref().ok())
+                .map(Handoff::rollback)
+                .unwrap_or_default();
+            return outcome(
+                paths,
+                now,
+                Status::Verifying,
+                format!(
+                    "the Rust gateway's start after the migration has not been verified and {UNIT_NAME} is not running.\n{rollback}"
+                ),
+                extra,
+            );
+        }
         if let Some(failure) = pending_failure {
             // Re-reported, not judged: an unverified handoff stays one.
             let status = if failure["status"] == "verifying" {
@@ -1702,7 +1784,7 @@ fn refresh(host: &dyn Host, paths: &Paths, plan: &Plan, now: i64) -> Outcome {
         if serving {
             extra["recovered"] = json!(true);
         }
-        return outcome(
+        let current = outcome(
             paths,
             now,
             Status::Current,
@@ -1713,6 +1795,14 @@ fn refresh(host: &dyn Host, paths: &Paths, plan: &Plan, now: i64) -> Outcome {
             ),
             extra,
         );
+        if serving
+            && verifying
+            && current.persisted
+            && let Ok(Some(h)) = read_handoff(&plan.root)
+        {
+            resolve_handoff(host, &h, &paths.binary);
+        }
+        return current;
     }
     let s = sudo(scope);
     let back = match &last_good {
@@ -1735,13 +1825,20 @@ fn refresh(host: &dyn Host, paths: &Paths, plan: &Plan, now: i64) -> Outcome {
         let mut done = extra;
         done["runningVersion"] = json!(paths.version);
         done["recovered"] = json!(true);
-        return outcome(
+        let restarted = outcome(
             paths,
             now,
             Status::Restarted,
             format!("restarted {UNIT_NAME} on omnigateway {}", paths.version),
             done,
         );
+        if verifying
+            && restarted.persisted
+            && let Ok(Some(h)) = read_handoff(&plan.root)
+        {
+            resolve_handoff(host, &h, &paths.binary);
+        }
+        return restarted;
     };
     match stop_confirmed(host, scope) {
         Ok(()) => why.push_str("; the service is left stopped"),
@@ -1811,6 +1908,12 @@ pub(crate) fn bridge(host: &dyn Host, paths: &Paths, now: i64) -> i32 {
         );
         return 1;
     }
+    if let Err(e) = systemd_safe(&plan, paths) {
+        return refuse(
+            Status::SkippedUnit,
+            format!("{e}; the service is left stopped"),
+        );
+    }
     let allowed = [main, std::process::id()];
     if let Err((status, message)) = preflight_data(host, paths, &plan, &allowed) {
         return refuse(
@@ -1854,6 +1957,26 @@ pub(crate) fn banner(paths: &Paths) -> Option<String> {
     // `doctor`/`status` call reads this, and a state directory it cannot
     // search (no migration ever ran there) must stay as quiet as the TS CLI.
     // The verifier and `migrate` still refuse on any read error.
+    // An armed handoff lives in the unit's root, whatever state directory
+    // this shell uses: announce it (or that it cannot be read) first. With
+    // no readable unit or no handoff this says nothing, like the TS CLI.
+    for unit in find_units(paths).unwrap_or_default() {
+        if let Ok((Kind::Rust, root)) = classify(&unit.text, &paths.binary) {
+            let file = root.join(HANDOFF);
+            if fs::symlink_metadata(&file).is_err() {
+                continue;
+            }
+            return Some(match read_handoff(&root) {
+                Ok(_) => format!(
+                    "omnigateway: the npm migration to the Rust gateway is not verified: {} is armed and no verdict was recorded. Run omni service migrate.",
+                    file.display()
+                ),
+                Err(e) => format!(
+                    "omnigateway: the npm migration handoff cannot be read ({e}); the start cannot be verified. Repair it, or roll back with the service stopped; do not delete it."
+                ),
+            });
+        }
+    }
     let exists = fs::symlink_metadata(paths.state.join(RECORD)).is_ok();
     if exists && let Err(e) = read_record(paths) {
         return Some(format!(
@@ -1911,17 +2034,14 @@ gateway.js runs it on the service's next start (--bridge).
 ";
 
 /// `omni service migrate [--from-npm|--bridge] [--json]`.
-/// `--record <path> --scope <user|system>` from the hook's command line.
-fn hook_args(flags: &[String]) -> Option<Hook> {
-    let value = |name: &str| {
-        let i = flags.iter().position(|f| f == name)?;
-        flags.get(i + 1).cloned()
-    };
-    let record = PathBuf::from(value("--record")?);
-    record.is_absolute().then_some(())?;
+/// `--scope <user|system>` from the hook's command line; the root is the
+/// working directory systemd gave it.
+fn hook_args(flags: &[String], cwd: Option<PathBuf>) -> Option<Hook> {
+    let i = flags.iter().position(|f| f == "--scope")?;
+    let root = cwd.filter(|c| c.is_absolute())?;
     Some(Hook {
-        record,
-        scope: Scope::parse(&value("--scope")?)?,
+        root,
+        scope: Scope::parse(flags.get(i + 1)?)?,
     })
 }
 
@@ -1931,7 +2051,7 @@ pub(crate) fn command(flags: &[String]) -> std::process::ExitCode {
         print!("{HELP}");
         return ExitCode::SUCCESS;
     }
-    let values = ["--record", "--scope"];
+    let values = ["--scope"];
     let mut skip = false;
     if let Some(bad) = flags.iter().find(|f| {
         if std::mem::take(&mut skip) {
@@ -1940,7 +2060,7 @@ pub(crate) fn command(flags: &[String]) -> std::process::ExitCode {
         skip = values.contains(&f.as_str());
         !matches!(
             f.as_str(),
-            "--from-npm" | "--bridge" | "--verify-start" | "--json" | "--record" | "--scope"
+            "--from-npm" | "--bridge" | "--verify-start" | "--json" | "--scope"
         )
     }) {
         eprintln!("unknown option for omni service migrate: {bad}\n{HELP}");
@@ -1967,10 +2087,8 @@ pub(crate) fn command(flags: &[String]) -> std::process::ExitCode {
             .ok()
             .and_then(|p| p.trim().parse::<u32>().ok())
             .unwrap_or(0);
-        let Some(hook) = hook_args(flags) else {
-            eprintln!(
-                "omni service migrate --verify-start needs --record <path> --scope user|system"
-            );
+        let Some(hook) = hook_args(flags, std::env::current_dir().ok()) else {
+            eprintln!("omni service migrate --verify-start needs --scope user|system");
             return ExitCode::FAILURE;
         };
         let code = verify_start(&host::System, &paths, &hook, main, now);

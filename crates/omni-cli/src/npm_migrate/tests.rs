@@ -340,6 +340,9 @@ impl Fixture {
     fn record(&self) -> Value {
         serde_json::from_str(&fs::read_to_string(self.paths().state.join(RECORD)).unwrap()).unwrap()
     }
+    fn handoff(&self) -> Value {
+        serde_json::from_str(&fs::read_to_string(self.root.join(HANDOFF)).unwrap()).unwrap()
+    }
     fn unit(&self) -> String {
         fs::read_to_string(&self.user_unit).unwrap()
     }
@@ -936,9 +939,8 @@ fn bridge_migrates_under_lock_and_hands_over_to_systemd() {
     assert!(unit.contains(&format!("ExecStart={}\n", f.binary.display())));
     assert!(
         unit.contains(&format!(
-            "ExecStartPost={} omni service migrate --verify-start --record {} --scope user\n",
-            f.binary.display(),
-            f.paths().state.join(RECORD).display()
+            "ExecStartPost={} omni service migrate --verify-start --scope user\n",
+            f.binary.display()
         )),
         "{unit}"
     );
@@ -954,10 +956,7 @@ fn verify_start_records_migrated_and_removes_itself() {
     bridge(&bridge_host(&f), &f.paths(), 1);
     assert_eq!(f.record()["status"], "verifying");
     let host = rust_host(&f, None);
-    assert_eq!(
-        verify_start(&host, &f.paths(), &hook_of(&f.paths()), 4242, 2),
-        0
-    );
+    assert_eq!(verify_start(&host, &f.paths(), &hook_of(&f), 4242, 2), 0);
     assert!(!f.unit().contains("ExecStartPost="), "{}", f.unit());
     assert!(host.did("systemctl user daemon-reload"));
     let record = f.record();
@@ -983,10 +982,7 @@ fn verify_start_failure_fails_the_unit_with_rollback() {
         healthy: false,
         ..rust_host(&f, None)
     };
-    assert_ne!(
-        verify_start(&host, &f.paths(), &hook_of(&f.paths()), 4242, 2),
-        0
-    );
+    assert_ne!(verify_start(&host, &f.paths(), &hook_of(&f), 4242, 2), 0);
     // Still armed: a Restart=on-failure restart is judged again.
     assert!(f.unit().contains("ExecStartPost="));
     // Without a stop, Restart=on-failure would start Rust again unverified;
@@ -1009,10 +1005,7 @@ fn verify_start_failure_fails_the_unit_with_rollback() {
         foreign_listener: true,
         ..rust_host(&f, None)
     };
-    assert_ne!(
-        verify_start(&host, &f.paths(), &hook_of(&f.paths()), 4242, 2),
-        0
-    );
+    assert_ne!(verify_start(&host, &f.paths(), &hook_of(&f), 4242, 2), 0);
 }
 
 /// Without a pending bridge handoff the verifier does nothing (and succeeds).
@@ -1020,10 +1013,7 @@ fn verify_start_failure_fails_the_unit_with_rollback() {
 fn verify_start_without_a_handoff_is_a_no_op() {
     let f = fixture(SINGLE);
     let host = rust_host(&f, None);
-    assert_eq!(
-        verify_start(&host, &f.paths(), &hook_of(&f.paths()), 4242, 1),
-        0
-    );
+    assert_eq!(verify_start(&host, &f.paths(), &hook_of(&f), 4242, 1), 0);
     assert!(!host.did("health"));
 }
 
@@ -1069,10 +1059,10 @@ fn bridge_restart_refused_by_systemd_is_a_failure() {
     );
 }
 
-/// The hook the bridge armed for a user unit with these paths.
-fn hook_of(paths: &Paths) -> Hook {
+/// The hook systemd runs for the fixture's user unit: in its root.
+fn hook_of(f: &Fixture) -> Hook {
     Hook {
-        record: paths.state.join(RECORD),
+        root: f.root.clone(),
         scope: Scope::User,
     }
 }
@@ -1676,7 +1666,7 @@ fn verifier_judges_the_backed_up_database_not_the_edited_env() {
     let f = fixture(SINGLE);
     f.write_user(&legacy_unit(&f.root, ""));
     bridge(&bridge_host(&f), &f.paths(), 1);
-    let handoff = &f.record()["handoff"];
+    let handoff = &f.handoff();
     assert_eq!(
         handoff["db"].as_str().unwrap(),
         f.root.join("omnigateway.db").display().to_string()
@@ -1692,10 +1682,7 @@ fn verifier_judges_the_backed_up_database_not_the_edited_env() {
         rust_db: Some(f.root.join("other.db")),
         ..rust_host(&f, None)
     };
-    assert_ne!(
-        verify_start(&host, &f.paths(), &hook_of(&f.paths()), 4242, 2),
-        0
-    );
+    assert_ne!(verify_start(&host, &f.paths(), &hook_of(&f), 4242, 2), 0);
     assert_eq!(f.record()["status"], "failed-start");
     // The edited database is the one Rust holds, so a verifier reading the
     // current .env would pass; the recorded one fails it.
@@ -1712,31 +1699,25 @@ fn verifier_with_an_unreadable_handoff_stops_the_unit() {
     let f = fixture(SINGLE);
     f.write_user(&legacy_unit(&f.root, ""));
     bridge(&bridge_host(&f), &f.paths(), 1);
-    let file = f.paths().state.join(RECORD);
-    let mut record = f.record();
-    record["handoff"]["db"] = json!(null);
-    fs::write(&file, record.to_string()).unwrap();
+    let file = f.root.join(HANDOFF);
+    let mut handoff = f.handoff();
+    handoff["db"] = json!(null);
+    fs::write(&file, handoff.to_string()).unwrap();
     let host = rust_host(&f, None);
-    assert_ne!(
-        verify_start(&host, &f.paths(), &hook_of(&f.paths()), 4242, 2),
-        0
-    );
+    assert_ne!(verify_start(&host, &f.paths(), &hook_of(&f), 4242, 2), 0);
     assert!(host.did("systemctl user stop --no-block omnigateway.service"));
     assert!(!host.did("health"));
     // A corrupt record file likewise.
     fs::write(&file, "{not json").unwrap();
     let host = rust_host(&f, None);
-    assert_ne!(
-        verify_start(&host, &f.paths(), &hook_of(&f.paths()), 4242, 3),
-        0
-    );
+    assert_ne!(verify_start(&host, &f.paths(), &hook_of(&f), 4242, 3), 0);
     assert!(host.did("systemctl user stop --no-block omnigateway.service"));
     // No MAINPID from systemd: not judged serving.
     let f = fixture(SINGLE);
     f.write_user(&legacy_unit(&f.root, ""));
     bridge(&bridge_host(&f), &f.paths(), 1);
     assert_ne!(
-        verify_start(&rust_host(&f, None), &f.paths(), &hook_of(&f.paths()), 0, 2),
+        verify_start(&rust_host(&f, None), &f.paths(), &hook_of(&f), 0, 2),
         0
     );
     assert_eq!(f.record()["status"], "failed-start");
@@ -1794,8 +1775,9 @@ fn bridge_records_the_handoff_before_arming_and_requests_restart_last() {
     );
     let record = f.record();
     assert_eq!(record["status"], "verifying");
+    let handoff = f.handoff();
     for key in ["scope", "unit", "root", "db", "addr", "backup", "savedUnit"] {
-        assert!(record["handoff"][key].is_string(), "{key}: {record:#}");
+        assert!(handoff[key].is_string(), "{key}: {handoff:#}");
     }
 }
 
@@ -1807,15 +1789,15 @@ fn an_unverified_handoff_is_announced_and_survives_later_runs() {
     f.write_user(&legacy_unit(&f.root, ""));
     bridge(&bridge_host(&f), &f.paths(), 1);
     let shown = banner(&f.paths()).unwrap();
-    assert!(shown.contains("verifying"), "{shown}");
+    assert!(shown.contains("not verified"), "{shown}");
     // The verifier was interrupted; the service is inactive; migrate again.
     let host = rust_host(&f, None);
     *host.active.borrow_mut() = false;
     *host.main_pid.borrow_mut() = None;
-    migrate(&host, &f.paths(), 2);
+    assert_eq!(migrate(&host, &f.paths(), 2).status, Status::Verifying);
     let record = f.record();
-    assert!(record["handoff"].is_object(), "{record:#}");
-    assert_eq!(record["pendingFailure"]["status"], "verifying");
+    assert!(f.root.join(HANDOFF).is_file());
+    assert_eq!(record["status"], "verifying");
     assert!(
         record["message"]
             .as_str()
@@ -1836,13 +1818,13 @@ fn an_unverified_handoff_is_announced_and_survives_later_runs() {
         ..rust_host(&f, Some(f.binary.clone()))
     };
     migrate(&host, &f.paths(), 3);
-    assert!(f.record()["handoff"].is_object());
+    assert!(f.root.join(HANDOFF).is_file());
     // Serving the backed-up database: resolved.
     fs::write(f.root.join(".env"), SINGLE).unwrap();
     let host = rust_host(&f, Some(f.binary.clone()));
     migrate(&host, &f.paths(), 4);
     let record = f.record();
-    assert!(record.get("handoff").is_none(), "{record:#}");
+    assert!(!f.root.join(HANDOFF).exists(), "{record:#}");
     assert!(record.get("pendingFailure").is_none(), "{record:#}");
     assert!(banner(&f.paths()).is_none());
 }
@@ -1858,32 +1840,20 @@ fn a_restart_after_a_failed_verdict_is_judged_again() {
         healthy: false,
         ..rust_host(&f, None)
     };
-    assert_ne!(
-        verify_start(&host, &f.paths(), &hook_of(&f.paths()), 4242, 2),
-        0
-    );
+    assert_ne!(verify_start(&host, &f.paths(), &hook_of(&f), 4242, 2), 0);
     let failed = f.record();
-    assert!(failed["handoff"].is_object());
+    assert!(f.root.join(HANDOFF).is_file(), "still armed");
     let host = Fake {
         healthy: false,
         ..rust_host(&f, None)
     };
-    assert_ne!(
-        verify_start(&host, &f.paths(), &hook_of(&f.paths()), 4242, 3),
-        0
-    );
+    assert_ne!(verify_start(&host, &f.paths(), &hook_of(&f), 4242, 3), 0);
     let record = f.record();
     assert_eq!(record["status"], "failed-start");
     assert_eq!(record["backup"], failed["backup"]);
     // A later serving start resolves it and disarms.
     assert_eq!(
-        verify_start(
-            &rust_host(&f, None),
-            &f.paths(),
-            &hook_of(&f.paths()),
-            4242,
-            4
-        ),
+        verify_start(&rust_host(&f, None), &f.paths(), &hook_of(&f), 4242, 4),
         0
     );
     assert!(!f.unit().contains("ExecStartPost="));
@@ -1909,7 +1879,7 @@ fn verifier_disarms_only_after_recording_success() {
         ..f.paths()
     };
     let host = rust_host(&f, None);
-    let code = verify_start(&host, &paths, &hook_of(&paths), 4242, 2);
+    let code = verify_start(&host, &paths, &hook_of(&f), 4242, 2);
     let mut perms = fs::metadata(&ro).unwrap().permissions();
     std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
     fs::set_permissions(&ro, perms).unwrap();
@@ -1922,50 +1892,6 @@ fn verifier_disarms_only_after_recording_success() {
 }
 
 // ------------------------------------------------- sixth rereview
-
-/// Finding 1: the hook names its record, so a changed XDG_STATE_HOME cannot
-/// make it look elsewhere and pass as a stale hook.
-#[test]
-fn the_hook_judges_the_record_it_was_armed_with() {
-    let f = fixture(SINGLE);
-    f.write_user(&legacy_unit(&f.root, ""));
-    bridge(&bridge_host(&f), &f.paths(), 1);
-    let line = f
-        .unit()
-        .lines()
-        .find(|l| l.starts_with("ExecStartPost="))
-        .unwrap()
-        .to_owned();
-    let (record, scope) = parse_verifier_line(&line, &f.binary).unwrap();
-    assert_eq!(record, f.paths().state.join(RECORD));
-    assert_eq!(scope, Scope::User);
-    // The verifier now runs with a different state directory: it still
-    // judges the armed record (here: unhealthy → failure, not a no-op).
-    let moved = Paths {
-        state: f.dir.path().join("elsewhere"),
-        ..f.paths()
-    };
-    let host = Fake {
-        healthy: false,
-        ..rust_host(&f, None)
-    };
-    let hook = Hook { record, scope };
-    assert_ne!(verify_start(&host, &moved, &hook, 4242, 2), 0);
-    assert_eq!(f.record()["status"], "failed-start");
-    assert!(!moved.state.join(RECORD).exists());
-    // The command line is required: without --record it refuses.
-    assert!(hook_args(&["--verify-start".into()]).is_none());
-    assert!(
-        hook_args(&[
-            "--verify-start".into(),
-            "--record".into(),
-            "rel".into(),
-            "--scope".into(),
-            "user".into()
-        ])
-        .is_none()
-    );
-}
 
 /// Finding 1: rollback pins the backed-up database with `--db`.
 #[test]
@@ -1982,20 +1908,14 @@ fn rollback_names_the_backed_up_database() {
         rust_db: Some(f.root.join("other/live.db")),
         ..rust_host(&f, None)
     };
-    assert_ne!(
-        verify_start(&host, &f.paths(), &hook_of(&f.paths()), 4242, 2),
-        0
-    );
+    assert_ne!(verify_start(&host, &f.paths(), &hook_of(&f), 4242, 2), 0);
     let message = f.record()["message"].as_str().unwrap().to_owned();
     let db = f.root.join("omnigateway.db");
     assert!(
         message.contains(&format!("--db {} db_", db.display())),
         "{message}"
     );
-    assert!(
-        message.contains("still points OMNI_DB_PATH at"),
-        "{message}"
-    );
+    assert!(message.contains("must point OMNI_DB_PATH at"), "{message}");
 }
 
 /// Finding 4: refusal on an unreadable record, then a manual retry, then the
@@ -2010,14 +1930,11 @@ fn an_unreadable_armed_record_survives_a_manual_retry() {
         let f = fixture(SINGLE);
         f.write_user(&legacy_unit(&f.root, ""));
         bridge(&bridge_host(&f), &f.paths(), 1);
-        let file = f.paths().state.join(RECORD);
+        let file = f.root.join(HANDOFF);
         fs::write(&file, corrupt).unwrap();
         // 1. The verifier refuses and queues a stop of its own scope.
         let host = rust_host(&f, None);
-        assert_ne!(
-            verify_start(&host, &f.paths(), &hook_of(&f.paths()), 4242, 2),
-            0
-        );
+        assert_ne!(verify_start(&host, &f.paths(), &hook_of(&f), 4242, 2), 0);
         assert_eq!(
             host.log().last().unwrap(),
             "systemctl user stop --no-block omnigateway.service"
@@ -2028,55 +1945,20 @@ fn an_unreadable_armed_record_survives_a_manual_retry() {
         *host.main_pid.borrow_mut() = None;
         assert_eq!(migrate(&host, &f.paths(), 3).status, Status::FailedRecord);
         assert_eq!(fs::read_to_string(&file).unwrap(), corrupt, "{corrupt}");
-        assert!(!host.did("systemctl"), "{:?}", host.log());
+        assert!(
+            !host
+                .log()
+                .iter()
+                .any(|l| l.starts_with("systemctl") && !l.contains(" show")),
+            "{:?}",
+            host.log()
+        );
         // doctor/status say so.
         assert!(banner(&f.paths()).unwrap().contains("cannot be read"));
         // 3. The next start is refused again, not passed as a stale hook.
         let host = rust_host(&f, None);
-        assert_ne!(
-            verify_start(&host, &f.paths(), &hook_of(&f.paths()), 4242, 4),
-            0
-        );
+        assert_ne!(verify_start(&host, &f.paths(), &hook_of(&f), 4242, 4), 0);
     }
-}
-
-/// Finding 6: the unjudged stop needs no unit file at all — the scope comes
-/// from the hook — and an unreadable other-scope unit does not matter.
-#[test]
-fn an_unjudged_stop_uses_the_hooks_scope() {
-    let f = fixture(SINGLE);
-    f.write_user(&legacy_unit(&f.root, ""));
-    bridge(&bridge_host(&f), &f.paths(), 1);
-    fs::write(f.paths().state.join(RECORD), "{bad").unwrap();
-    // The other scope's unit is a directory (unreadable as a file).
-    fs::create_dir_all(&f.system_unit).unwrap();
-    let host = rust_host(&f, None);
-    let hook = Hook {
-        record: f.paths().state.join(RECORD),
-        scope: Scope::System,
-    };
-    assert_ne!(verify_start(&host, &f.paths(), &hook, 4242, 2), 0);
-    assert_eq!(
-        host.log().last().unwrap(),
-        "systemctl system stop --no-block omnigateway.service"
-    );
-}
-
-/// Finding 1: a hook whose scope disagrees with the recorded handoff is not
-/// judged as that handoff.
-#[test]
-fn a_hook_for_another_scope_is_refused() {
-    let f = fixture(SINGLE);
-    f.write_user(&legacy_unit(&f.root, ""));
-    bridge(&bridge_host(&f), &f.paths(), 1);
-    let hook = Hook {
-        record: f.paths().state.join(RECORD),
-        scope: Scope::System,
-    };
-    let host = rust_host(&f, None);
-    assert_ne!(verify_start(&host, &f.paths(), &hook, 4242, 2), 0);
-    assert!(!host.did("health"));
-    assert_eq!(f.record()["status"], "verifying", "not judged");
 }
 
 /// The banner announces an unreadable record only when one is known to exist:
@@ -2106,4 +1988,179 @@ fn the_banner_announces_only_a_record_known_to_exist() {
     let shown = banner(&f.paths());
     mode(&file, 0o644);
     assert!(shown.unwrap().contains("cannot be read"));
+}
+
+// ------------------------------------------------- seventh rereview
+
+/// Finding 1/4: the handoff lives in the install root and the hook carries
+/// only its scope; a different state directory changes nothing.
+#[test]
+fn the_handoff_lives_in_the_root_and_the_hook_carries_no_path() {
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    bridge(&bridge_host(&f), &f.paths(), 1);
+    assert!(f.root.join(HANDOFF).is_file());
+    let line = f
+        .unit()
+        .lines()
+        .find(|l| l.starts_with("ExecStartPost="))
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        line,
+        format!(
+            "ExecStartPost={} omni service migrate --verify-start --scope user",
+            f.binary.display()
+        )
+    );
+    // The verifier runs with another state directory: still judged.
+    let moved = Paths {
+        state: f.dir.path().join("elsewhere"),
+        ..f.paths()
+    };
+    let host = Fake {
+        healthy: false,
+        ..rust_host(&f, None)
+    };
+    assert_ne!(verify_start(&host, &moved, &hook_of(&f), 4242, 2), 0);
+    assert!(host.did("systemctl user stop --no-block"));
+    assert!(f.root.join(HANDOFF).is_file(), "still armed");
+    // hook_args takes the scope from argv and the root from the cwd.
+    let flags = [
+        "--verify-start".to_owned(),
+        "--scope".to_owned(),
+        "user".to_owned(),
+    ];
+    assert!(hook_args(&flags, None).is_none());
+    assert!(hook_args(&flags, Some(PathBuf::from("rel"))).is_none());
+    assert_eq!(
+        hook_args(&flags, Some(f.root.clone())).unwrap().root,
+        f.root
+    );
+}
+
+/// Finding 4: the operator's CLI uses a different state directory than the
+/// service; migrate and the banner still find the armed handoff via the
+/// unit, and an unreadable one is refused and announced there too.
+#[test]
+fn the_operator_finds_the_handoff_through_the_unit() {
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    bridge(&bridge_host(&f), &f.paths(), 1);
+    let shell = Paths {
+        state: f.dir.path().join("operator-state"),
+        ..f.paths()
+    };
+    assert!(
+        banner(&shell).unwrap().contains("not verified"),
+        "{:?}",
+        banner(&shell)
+    );
+    // Inactive: reported as an unverified handoff, with its rollback.
+    let host = rust_host(&f, None);
+    *host.active.borrow_mut() = false;
+    *host.main_pid.borrow_mut() = None;
+    let out = migrate(&host, &shell, 2);
+    assert_eq!(out.status, Status::Verifying, "{}", out.message);
+    assert!(out.message.contains("omni db restore"), "{}", out.message);
+    // Unreadable: refused, untouched, announced; no systemctl, no restart.
+    fs::write(f.root.join(HANDOFF), "{bad").unwrap();
+    let host = rust_host(&f, Some(PathBuf::from("/old/omnigateway (deleted)")));
+    let out = migrate(&host, &shell, 3);
+    assert_eq!(out.status, Status::FailedRecord, "{}", out.message);
+    assert!(out.message.contains("do not delete it"), "{}", out.message);
+    assert!(!host.did("systemctl user restart"), "{:?}", host.log());
+    assert_eq!(fs::read_to_string(f.root.join(HANDOFF)).unwrap(), "{bad");
+    assert!(banner(&shell).unwrap().contains("cannot be read"));
+    // And the next start refuses again.
+    let host = rust_host(&f, None);
+    assert_ne!(verify_start(&host, &shell, &hook_of(&f), 4242, 4), 0);
+    assert_eq!(
+        host.log().last().unwrap(),
+        "systemctl user stop --no-block omnigateway.service"
+    );
+}
+
+/// Finding 4: a serving verdict seen by `omni service migrate` resolves the
+/// handoff and disarms, like the verifier's.
+#[test]
+fn a_serving_service_resolves_the_handoff_from_the_operator_cli() {
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    bridge(&bridge_host(&f), &f.paths(), 1);
+    let host = rust_host(&f, Some(f.binary.clone()));
+    assert_eq!(migrate(&host, &f.paths(), 2).status, Status::Current);
+    assert!(!f.root.join(HANDOFF).exists());
+    assert!(!f.unit().contains("ExecStartPost="), "{}", f.unit());
+    assert!(banner(&f.paths()).is_none());
+}
+
+/// Finding 6: a handoff for another root or scope is refused, not judged.
+#[test]
+fn a_hook_for_another_root_or_scope_is_refused() {
+    let f = fixture(SINGLE);
+    f.write_user(&legacy_unit(&f.root, ""));
+    bridge(&bridge_host(&f), &f.paths(), 1);
+    let host = rust_host(&f, None);
+    let hook = Hook {
+        root: f.root.clone(),
+        scope: Scope::System,
+    };
+    assert_ne!(verify_start(&host, &f.paths(), &hook, 4242, 2), 0);
+    assert!(!host.did("health"));
+    assert_eq!(
+        host.log().last().unwrap(),
+        "systemctl system stop --no-block omnigateway.service"
+    );
+    let copy = f.dir.path().join("copy");
+    fs::create_dir_all(&copy).unwrap();
+    fs::copy(f.root.join(HANDOFF), copy.join(HANDOFF)).unwrap();
+    let host = rust_host(&f, None);
+    let hook = Hook {
+        root: copy,
+        scope: Scope::User,
+    };
+    assert_ne!(verify_start(&host, &f.paths(), &hook, 4242, 3), 0);
+    assert!(!host.did("health"));
+}
+
+/// Finding 1: paths a unit line cannot carry verbatim are refused before
+/// anything is stopped; rollback quotes the paths it prints.
+#[test]
+fn unit_unsafe_paths_are_refused_and_rollback_is_shell_quoted() {
+    for bad in ["my install", "pct%h", "dollar$x"] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(bad);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join(".env"), SINGLE).unwrap();
+        fs::write(root.join("omnigateway.db"), b"").unwrap();
+        let mut f = fixture(SINGLE);
+        f.root = root;
+        f.write_user(&legacy_unit(&f.root, ""));
+        let host = f.host();
+        let status = migrate(&host, &f.paths(), 1).status;
+        assert!(matches!(status, Status::SkippedUnit), "{bad}: {status:?}");
+        assert!(!host.did("systemctl user stop"), "{bad}");
+        drop(dir);
+    }
+    assert_eq!(shq(Path::new("/a/b.db")), "/a/b.db");
+    assert_eq!(shq(Path::new("/a/live store.db")), "'/a/live store.db'");
+    assert_eq!(shq(Path::new("/a/it's")), "'/a/it'\\''s'");
+    // A database path with a space (allowed in .env) is quoted in rollback,
+    // and the OMNI_DB_PATH note comes before the start step.
+    let f = fixture(&format!("{SINGLE}OMNI_DB_PATH=\"data/live store.db\"\n"));
+    fs::create_dir_all(f.root.join("data")).unwrap();
+    fs::write(f.root.join("data/live store.db"), b"").unwrap();
+    f.write_user(&legacy_unit(&f.root, ""));
+    let host = Fake {
+        healthy: false,
+        ..f.host()
+    };
+    let out = migrate(&host, &f.paths(), 1);
+    assert_eq!(out.status, Status::FailedStart, "{}", out.message);
+    let quoted = format!("--db '{}'", f.root.join("data/live store.db").display());
+    assert!(out.message.contains(&quoted), "{}", out.message);
+    let note = out.message.find("must point OMNI_DB_PATH").unwrap();
+    let start = out.message.find("systemctl --user start").unwrap();
+    assert!(note < start, "{}", out.message);
 }

@@ -139,7 +139,9 @@ What is **not** migrated automatically: cluster installations (Postgres/Redis â€
 follow the [cutover runbook](docs/rust-cutover-runbook.md)), units that differ
 from the one `omni service install` wrote (drop-ins, `Environment=`, other
 directives, another `ExecStart`), both a user and a system unit, another process
-holding the database, and a system unit when the update did not run as root.
+holding the database, a system unit when the update did not run as root, and an
+installation or npm prefix whose path has spaces, quotes, `%` or `$` (a unit line
+cannot carry it verbatim).
 When it is refused during the update, before anything is stopped, the old
 gateway keeps running; when the check happens at the service's next start, or
 after the old gateway was stopped, the service is **left stopped**.

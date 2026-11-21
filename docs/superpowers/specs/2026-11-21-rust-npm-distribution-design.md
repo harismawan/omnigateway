@@ -94,50 +94,63 @@ In bridge mode the migration runs **as** the service, not against it:
 
 - TS is not running (the bridge took its place), so there is no stop step.
 - The writer check still applies: nothing may hold the database open.
+- **The handoff lives in the install root** *(owner decision, seventh
+  rereview)*: `<root>/npm-handoff.json`, where `<root>` is the unit's
+  `WorkingDirectory`. systemd and the CLI read that from the same unit file,
+  so no environment (`XDG_STATE_HOME`, a shell's `HOME`, `.env`) can make
+  the verifier and the operator look in different places. The state record
+  `<state>/npm-migration.json` stays the operator's log, not the arming.
+- Before anything is stopped, the binary path and the root must be
+  `systemd_plain` — absolute, ASCII letters, digits and `/._-+@` only — since
+  they go into `ExecStart=`, `ExecStartPost=` and `WorkingDirectory=`
+  verbatim. Anything with whitespace, quotes, `%` specifiers, `$` or `\\` is
+  `skipped-unit` with the path named.
 - After the backup, and **before** the unit is touched, the migrator durably
-  records `verifying` with a `handoff` object: scope, unit, root, the database
-  path it backed up, the probe address, the backup id and the saved unit
-  (written, fsynced, renamed, directory fsynced). If that record cannot be
-  written it records `failed-record` where it can, leaves the unit unchanged
-  and the service stopped, and exits 0. Only then does the rewrite add one line
-  after `ExecStart=`: `ExecStartPost=<binary> omni service migrate
-  --verify-start --record <state>/npm-migration.json --scope user|system`. The
-  hook names its record and scope, so the verifier never recomputes them from
-  an environment (`XDG_STATE_HOME`, `.env`) that may have changed since; a
-  hook without them, with a relative path, or whose scope disagrees with the
-  recorded handoff is refused. It reloads, releases the lock, and its **last** act is
-  `systemctl restart --no-block omnigateway.service`; it exits 0. systemd stops
-  the bridge and starts the binary as a plain `MainPID`; the bridge never
-  spawns, relays signals to, or waits on the gateway. *(owner decision, fourth
-  rereview: a child gateway could not tell a slow boot from a drain)*
-- The verifier runs on every start while the line is there (`MAINPID` set by
-  systemd). It judges against the **recorded** handoff, never the current
-  `.env`: `/health` at the recorded address, listener attribution to
-  `MAINPID`, the backed-up database held, no other holder. Success records
-  `migrated` and only once that is on disk removes its own line and reloads.
-  Failure records `failed-start` with the handoff's rollback first, and its
-  last act is queueing `systemctl stop --no-block` (a non-zero exit alone lets
+  writes the handoff — scope, unit, root, the database path it backed up, the
+  probe address, the backup id and the saved unit (temp, fsync, rename,
+  directory fsync). If it cannot, it records `failed-record`, leaves the unit
+  unchanged and the service stopped, and exits 0. Only then does the rewrite
+  add one line after `ExecStart=`: `ExecStartPost=<binary> omni service
+  migrate --verify-start --scope user|system` — no path. It records
+  `verifying`, reloads, releases the lock, and its **last** act is
+  `systemctl restart --no-block omnigateway.service`; it exits 0. systemd
+  stops the bridge and starts the binary as a plain `MainPID`; the bridge
+  never spawns, relays signals to, or waits on the gateway. *(owner
+  decision, fourth rereview: a child gateway could not tell a slow boot from
+  a drain)*
+- The verifier runs on every start while the line is there, in the unit's
+  working directory (`MAINPID` set by systemd). It reads the handoff there,
+  and judges against it, never the current `.env`: `/health` at the recorded
+  address, listener attribution to `MAINPID`, the backed-up database held, no
+  other holder. Success records `migrated`, then removes the handoff (from
+  then on the hook is stale), then its own line. Failure records
+  `failed-start` with the handoff's rollback first, and its last act is
+  queueing `systemctl stop --no-block` (a non-zero exit alone lets
   `Restart=on-failure` start Rust again — measured on systemd 257; with the
-  queued stop the unit ends failed and inactive); it exits 1 and the line
-  stays, so a restart that the stop did not prevent is judged again, never
-  trusted. A queued stop is not reported as a confirmed stop: the message
-  says to check `systemctl status` first. No record file at the named path,
-  or a record with no armed handoff, is a stale hook: exit 0. A record it
-  cannot read (permissions, bad JSON, not an object, a `handoff` that is not
-  null and not a readable handoff) or no `MAINPID` fails closed: it queues a
-  stop of its own scope's unit as its last act (taken from its command line,
-  no unit file read) and exits 1; if the stop cannot be queued it says so.
-- **One record reader.** Every reader — bridge, migrate, refresh, verifier,
-  `doctor`/`status` banner — distinguishes absent, unreadable and valid. Over
-  an unreadable record nothing is judged, stopped or rewritten, and no outcome
-  overwrites it: `omni service migrate` reports `failed-record` and leaves the
-  file as it is, and the banner says the record cannot be read. The operator
-  inspects or removes it by hand.
-- An unverified handoff (`verifying`, e.g. a verifier that was killed) is an
-  unresolved state like a failure: `omni doctor`/`status` announce it, its
-  rollback is carried as `pendingFailure`, later runs keep the handoff, and
-  only a serving verdict against the recorded database (by the verifier or by
-  `omni service migrate` seeing the service serve it) clears it.
+  queued stop the unit ends failed and inactive); it exits 1 and the handoff
+  and line stay, so a restart that the stop did not prevent is judged again,
+  never trusted. A queued stop is not reported as a confirmed stop: the
+  message says to check `systemctl status` first. No handoff file is a stale
+  hook: exit 0. A handoff it cannot read (permissions, bad JSON, a missing
+  field), one for another root or scope, or no `MAINPID` fails closed: it
+  queues a stop of its own scope's unit as its last act (scope from its
+  command line, no unit file read) and exits 1, saying so if the stop could
+  not be queued.
+- **The operator finds the handoff through the unit.** `omni service
+  migrate`, `doctor` and `status` look for `<root>/npm-handoff.json` of the
+  recognised Rust unit, whatever their own state directory. An armed one is
+  announced as unverified (with its rollback); with the service inactive
+  `migrate` reports `verifying`, not `current`. An unreadable one is
+  announced, and `migrate` reports `failed-record` and restarts, judges and
+  rewrites nothing. Only a serving verdict against the recorded database —
+  by the verifier, or by `migrate` seeing the service serve it — removes the
+  handoff and the line. Recovery from an unreadable handoff is to repair it,
+  or roll back with the service stopped; **deleting it is not a recovery
+  step**, since a missing handoff makes the hook a stale no-op.
+- The state record stays readable-or-refused: over a present, unreadable
+  `npm-migration.json` nothing is judged or overwritten (`failed-record`),
+  and the banner announces it only when the file exists, so a state
+  directory the CLI cannot search stays as quiet as the TS CLI.
 - Every bridge refusal exits **0**, so `Restart=on-failure` does not loop
   and the service is left stopped with the record written.
 - Started outside systemd (no legacy unit found), the bridge prints that
@@ -288,8 +301,9 @@ other-writable. Otherwise the tool prints the exact
    was written, `omni db restore --root <root> --db <backed-up db> <id>` and
    copying the saved unit back when it was. `--db` pins both the file the
    restore replaces and the `snapshots/` directory beside it to the database
-   that was backed up, whatever `.env` says by then; the message also says to
-   point `OMNI_DB_PATH` back at it before starting. *(finding 4)*
+   that was backed up, whatever `.env` says by then; every printed path is
+   shell-quoted, and the step saying `OMNI_DB_PATH` must point at it comes
+   before the start command. *(finding 4)*
 10. **Idempotent.** A unit already migrated takes the Rust→Rust path.
 
 ### Rust → Rust (later npm updates)

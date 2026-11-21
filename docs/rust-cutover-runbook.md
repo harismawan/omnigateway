@@ -298,31 +298,36 @@ probed address from this binary, holding the database). The outcome is recorded 
 its reason until resolved. This replaces the maintenance window for that one
 shape only. It does not take step 6, so run it after the update.
 
-The bridge never runs the gateway itself. After the backup it durably records
-the handoff (the database it backed up, the address, the unit) — or, if it
-cannot, records `failed-record` and leaves the unit untouched and stopped —
-then rewrites the unit with an
-`ExecStartPost=… omni service migrate --verify-start --record <file> --scope <scope>`
-line and asks systemd to restart it, so systemd starts the binary as `MainPID`.
-The hook names its own record, so changing `XDG_STATE_HOME` cannot make it look
-elsewhere. The verifier judges each
-start against the recorded handoff, not the current `.env`. On success it
-records `migrated`, then removes its own line. On failure it records
-`failed-start` with rollback, then asks systemd to stop the unit; the line
-stays, so any further start is judged again. If a start is never verified
-(the verifier was killed), the record stays `verifying`: `omni doctor` and
-`omni status` announce it with the rollback until `omni service migrate` sees
-the service serving the backed-up database. To recover by hand, check
-`systemctl --user status omnigateway.service`, then either roll back with the
-recorded steps or start the service and run `omni service migrate`. The
-rollback's `omni db restore … --db <path>` names the database that was backed
-up; keep (or put back) `OMNI_DB_PATH` pointing at it. Two states differ:
-*no handoff* (no record, or none armed) means the hook is stale and does
-nothing; *a record that cannot be read* means the start is refused and the
-unit stopped, and `omni service migrate` reports `failed-record` without
-touching the file. Inspect `~/.local/state/omnigateway/npm-migration.json`
-(or the path in the unit's `ExecStartPost=`), fix or remove it, then run
-`omni service migrate`.
+The bridge never runs the gateway itself. The install root and the binary must
+be plain paths (letters, digits, `/._-+@`); anything a unit line cannot carry
+verbatim (spaces, quotes, `%`, `$`) is refused before anything is stopped.
+After the backup the bridge durably writes the handoff to
+`<root>/npm-handoff.json` (the database it backed up, the address, the unit) —
+or, if it cannot, records `failed-record` and leaves the unit untouched and
+stopped — then rewrites the unit with an
+`ExecStartPost=… omni service migrate --verify-start --scope <scope>` line and
+asks systemd to restart it, so systemd starts the binary as `MainPID`. The
+verifier runs in the unit's `WorkingDirectory` and reads the handoff there,
+so no environment can send it elsewhere; it judges each start against the
+handoff, not the current `.env`. On success it records `migrated`, removes the
+handoff, then its own line. On failure it records `failed-start` with
+rollback, then asks systemd to stop the unit; the handoff and line stay, so
+any further start is judged again.
+
+`omni doctor`, `omni status` and `omni service migrate` find the handoff
+through the unit, whatever state directory your shell uses. If a start is
+never verified (the verifier was killed), they announce it with the rollback
+until `omni service migrate` sees the service serving the backed-up database.
+To recover by hand, check `systemctl --user status omnigateway.service`, then
+either roll back with the recorded steps or start the service and run
+`omni service migrate`. The rollback's `omni db restore … --db <path>` names
+the database that was backed up; keep (or put back) `OMNI_DB_PATH` pointing at
+it before starting. Two states differ: *no handoff file* means the hook is
+stale and does nothing; *a handoff that cannot be read* means every start is
+refused and the unit stopped, and `omni service migrate` reports
+`failed-record` without touching it. **Repair that file, or roll back with the
+service stopped — do not delete it**: a missing handoff turns the hook into a
+no-op and the next start would go unverified.
 
 For an IPv4 `OMNI_HOST`, a listener on `[::]:<port>` owned by another process
 counts against the migration (`/proc` cannot tell an IPv6-only socket), so the

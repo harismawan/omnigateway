@@ -274,10 +274,10 @@ try {
     // and the binary is MainPID. Nothing left to restart.
     const posts = readFileSync(join(fake, "posts"), "utf8").trim().split("\n");
     assert.equal(posts.length, 1, posts.join("\n"));
-    assert.match(
-      posts[0] ?? "",
-      /omni service migrate --verify-start --record \S+\/npm-migration\.json --scope user exit=0$/,
-    );
+    assert.match(posts[0] ?? "", /omni service migrate --verify-start --scope user exit=0$/);
+    // Resolved: the handoff in the root is gone, and so is the hook.
+    assert(!existsSync(join(root, "npm-handoff.json")), "handoff left behind");
+    assert(!readFileSync(unitPath, "utf8").includes("ExecStartPost="), "hook left behind");
     const servingPid = servicePid();
     const same = sh(["omni", "service", "migrate"]);
     assert.match(same.stderr, /no restart needed/);
