@@ -10,6 +10,7 @@ mod doctor;
 mod limits;
 mod models;
 mod mutations;
+mod npm_migrate;
 mod oauth;
 mod observability;
 mod output;
@@ -28,6 +29,13 @@ pub fn run(argv: Vec<String>) -> ExitCode {
     if argv.iter().any(|s| s == "--version") {
         println!("{}", option_env!("OMNI_CLI_VERSION").unwrap_or("0.0.0-dev"));
         return ExitCode::SUCCESS;
+    }
+    // Transitional npm 0.x → Rust command, outside the frozen registry/help.
+    if let [service, migrate, flags @ ..] = argv.as_slice()
+        && service == "service"
+        && migrate == "migrate"
+    {
+        return npm_migrate::command(flags);
     }
     let help = argv.iter().any(|s| matches!(s.as_str(), "--help" | "-h"));
     let Some((command, rest)) = args::resolve(&argv) else {
@@ -58,6 +66,12 @@ pub fn run(argv: Vec<String>) -> ExitCode {
         eprintln!("{command} is not yet available in the Rust CLI");
         return ExitCode::FAILURE;
     };
+    // Help and unknown commands above stay byte-identical to the frozen CLI.
+    if let Some(paths) = npm_migrate::Paths::current()
+        && let Some(line) = npm_migrate::banner(&paths)
+    {
+        eprintln!("{line}");
+    }
     if command != "list" {
         let result = args::parse_command(&rest, &command)
             .map_err(|e| (2, e))

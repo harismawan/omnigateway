@@ -36,8 +36,10 @@ pub(crate) fn unit(flags: &Flags) -> PathBuf {
     }
 }
 pub(crate) fn state(ctx: &Context) -> PathBuf {
-    ctx.env
-        .get("XDG_STATE_HOME")
+    state_in(&ctx.env)
+}
+pub(crate) fn state_in(env: &HashMap<String, String>) -> PathBuf {
+    env.get("XDG_STATE_HOME")
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -96,7 +98,23 @@ pub(crate) fn render_unit(root: &Path, executable: &Path) -> String {
         executable.display()
     )
 }
+/// `/health` answers 2xx before `deadline` passes (the npm migration's check).
+pub(crate) fn healthy_within(base: &str, deadline: Duration) -> bool {
+    if url::Url::parse(base).is_err() {
+        return false;
+    }
+    let until = std::time::Instant::now() + deadline;
+    while std::time::Instant::now() < until {
+        if probe(base, 1) {
+            return true;
+        }
+    }
+    false
+}
 fn healthy(base: &str) -> bool {
+    probe(base, 50)
+}
+fn probe(base: &str, attempts: usize) -> bool {
     let Ok(mut url) = url::Url::parse(base) else {
         return false;
     };
@@ -111,7 +129,7 @@ fn healthy(base: &str) -> bool {
     };
     runtime.block_on(async {
         let client = omni_providers::http::Client::new();
-        for _ in 0..50 {
+        for _ in 0..attempts {
             let request = omni_providers::http::HttpRequest {
                 provider: String::new(),
                 url: url.to_string(),

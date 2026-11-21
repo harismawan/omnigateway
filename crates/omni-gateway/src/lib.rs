@@ -938,8 +938,7 @@ mod tests {
         std::fs::write(pkg.join("omnigateway"), b"").expect("binary");
         let bin = dir.path().join("bin");
         std::fs::create_dir(&bin).expect("bin");
-        std::os::unix::fs::symlink(pkg.join("omnigateway"), bin.join("omnigateway"))
-            .expect("link");
+        std::os::unix::fs::symlink(pkg.join("omnigateway"), bin.join("omnigateway")).expect("link");
         let found = super::static_dir_for(Some(bin.join("omnigateway")));
         assert_eq!(
             std::fs::canonicalize(found).expect("found"),

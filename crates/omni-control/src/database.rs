@@ -329,6 +329,29 @@ pub fn create_snapshot_with_free_bytes(
     write_snapshot(conn, path, now, retention, free_bytes, false)
 }
 
+/// The npm migration's backup, `db_<stamp>_preRust.sqlite`: an id the frozen
+/// TS `omni db restore` accepts, written without a retention pass so taking it
+/// never deletes an operator's older snapshots.
+pub fn create_pre_rust_snapshot(
+    conn: &rusqlite::Connection,
+    path: &Path,
+    now: &dyn Fn() -> i64,
+) -> Result<Value, String> {
+    let _exclusive = EXCLUSIVE.enter("a snapshot")?;
+    write_snapshot_as(
+        conn,
+        path,
+        now,
+        &|| Ok((f64::INFINITY, f64::INFINITY)),
+        &|dir| {
+            rustix::fs::statfs(dir)
+                .ok()
+                .map(|s| s.f_bavail * s.f_bsize as u64)
+        },
+        "preRust",
+    )
+}
+
 // The restore caller already holds the exclusive guard. Its forced undo must
 // survive even a retention policy that would immediately prune every snapshot.
 fn write_snapshot(
@@ -339,12 +362,29 @@ fn write_snapshot(
     free_bytes: &dyn Fn(&Path) -> Option<u64>,
     force: bool,
 ) -> Result<Value, String> {
+    write_snapshot_as(
+        conn,
+        path,
+        now,
+        retention,
+        free_bytes,
+        if force { "preRestore" } else { "manual" },
+    )
+}
+
+fn write_snapshot_as(
+    conn: &rusqlite::Connection,
+    path: &Path,
+    now: &dyn Fn() -> i64,
+    retention: &dyn Fn() -> Result<(f64, f64), String>,
+    free_bytes: &dyn Fn(&Path) -> Option<u64>,
+    reason: &str,
+) -> Result<Value, String> {
     let at = now();
     let stamp = chrono::DateTime::from_timestamp_millis(at)
         .ok_or("invalid snapshot time")?
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
         .replace([':', '.'], "-");
-    let reason = if force { "preRestore" } else { "manual" };
     let name = format!("db_{stamp}_{reason}.sqlite");
     let dir = path
         .parent()
@@ -368,7 +408,7 @@ fn write_snapshot(
         return Err(error.to_string());
     }
     let result = json!({"id":name,"filename":name,"createdAt":at,"sizeBytes":crate::database_fs::stat(&target).map_or(0, |s| s.len()),"reason":reason});
-    if !force {
+    if reason != "preRestore" {
         let (keep_latest, max_age_days) = retention()?;
         prune(&dir, at, keep_latest, max_age_days)?;
     }
@@ -1387,6 +1427,31 @@ mod tests {
             conn.query_row("SELECT value FROM sentinel", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
             42
+        );
+    }
+    /// The npm migration's backup: a TS-restorable id (alphabetic reason) and
+    /// no retention pass at write time; later sweeps treat it as any snapshot.
+    #[test]
+    fn pre_rust_snapshot_is_restorable_and_prunes_nothing() {
+        let _serial = TEST_LOCK.lock().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("db");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE sentinel(value); INSERT INTO sentinel VALUES (7)")
+            .unwrap();
+        let dir = root.path().join("snapshots");
+        std::fs::create_dir(&dir).unwrap();
+        let old = dir.join("db_2000-01-01T00-00-00-000Z_manual.sqlite");
+        std::fs::write(&old, b"older").unwrap();
+        let made = create_pre_rust_snapshot(&conn, &path, &|| 1_700_000_000_000).unwrap();
+        assert_eq!(made["id"], "db_2023-11-14T22-13-20-000Z_preRust.sqlite");
+        assert_eq!(made["reason"], "preRust");
+        assert!(old.exists(), "no retention pass at migration time");
+        let copy = rusqlite::Connection::open(dir.join(made["id"].as_str().unwrap())).unwrap();
+        assert_eq!(
+            copy.query_row("SELECT value FROM sentinel", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            7
         );
     }
 }
