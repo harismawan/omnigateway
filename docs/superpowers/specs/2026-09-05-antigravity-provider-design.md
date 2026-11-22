@@ -525,31 +525,52 @@ Note also that `fetchAvailableModels` answers on `daily-cloudcode-pa` and its
 `models` field is an **object keyed by id**, not an array — reading it as an
 array silently yields an empty comparison that looks like agreement.
 
-### Gemini 4 rows are from the public docs, not a probe
+### Gemini 4 is listed per tier, and not yet served
 
-Added 2026-11-22 at the operator's request, before 1.0.0, with no Antigravity
-account available to probe: `gemini-4-carbon`, `-argon`, `-neon` and
-`-hydrogen`, read from `ai.google.dev/gemini-api/docs/models` and `/pricing`.
-This is the source the catalog note says not to reason from, and it is used
-knowingly: the public API names one id per model with thinking as a request
-parameter, while `v1internal` has so far spelled every row its own way (tier
-suffixes, `gemini-pro-agent`). The rows therefore carry no tier suffix, and
-**whether `v1internal` serves these ids is unverified**. In `adaptive` mode the
-encoder sends no budget; `budget`, `off` and `betweenTools` still send
-`thinkingBudget`, which Google documents for Gemini 4 as levels instead. So a 400
-under one of these rows is either an id to correct or a budget this family
-refuses, and only a `fetchAvailableModels` probe plus a request settles which.
-The quota probe matches groups by `displayName` containing "gemini"; if Gemini 4
-arrives as a second such group, both write one `(credential, windowType)` row and
-the later overwrites the earlier — also unverified. The default stays
-`gemini-3.8-flash-high`, the probed row.
+A live `fetchAvailableModels` on 2026-11-22 (free-tier account, connected for
+the probe) lists Gemini 4 the way it lists 3.8 Flash: one id per family and
+thinking tier — `gemini-4-{carbon,argon,neon,hydrogen}-{high,medium,low}`, plus
+`gemini-4-neon-xhigh` and `gemini-4-hydrogen-xhigh` — and recommends
+`gemini-4-neon-high` as its default. The catalog carries those fourteen. Left
+out: `gemini-4-hydrogen-tiered-{high,xhigh}`, which pick their own depth like
+every `-tiered` id; `gemini-4-hydrogen-sonar`, which has no `displayName`; and
+`gemini-pro-orchestrator{,-argon,-neon}` with `gemini-flash-worker-agy`
+("Gemini 4 Hydrogen (Orchestrator)"), the IDE agent harness's planner and worker
+roles rather than chat models.
 
-Limits are the public ones: 1,048,576 context, 65,536 synchronous output (the
-1M long-decode ceiling is a separate API feature). Carbon and Argon carry the
-standard $4/$20 (cache $0.20), not the introductory $2/$10 that ends
-2026-11-30, by the same rule as the 3.8/3.7/3.6 Flash rows; Neon ($3/$15/$0.15)
-and Hydrogen ($1.50/$7.50/$0.075) have one rate. These models cache implicitly
-only, so there is no storage price to omit.
+**No request has reached one.** The same account answered every
+`streamGenerateContent` — Gemini 4 and the previously serving
+`gemini-3.8-flash-high` alike — with "This service has been disabled in this
+account for violation of Terms of Service", so the probe shows these ids are
+listed, not that they serve; `gemini-3.1-pro-high` above is the reason the two
+differ. The default therefore stays `gemini-3.8-flash-high`. The probe sent
+fourteen requests in one loop before stopping; a ban answer should end a probe
+at the first one.
+
+The probe advertises 262,144 output tokens on Carbon, Neon and Hydrogen and
+65,536 on Argon. The rows carry 65,536, the encoder's ceiling
+(`MAX_OUTPUT_TOKENS`, and the clamp in `wire.rs`); raising it per model is a
+wire change left for a probe that can also send a request. Prices are Google's
+public per-family list rates from `ai.google.dev/gemini-api/docs/pricing`, every
+tier of a family alike: Carbon and Argon carry the standard $4/$20 (cache $0.20),
+not the introductory $2/$10 that ends 2026-11-30, by the same rule as the 3.8
+Flash rows; Neon $3/$15/$0.15 and Hydrogen $1.50/$7.50/$0.075. They cache
+implicitly only.
+
+The quota probe matches groups by `displayName` containing "gemini"; whether
+Gemini 4 arrives as a separate group (and so overwrites one `(credential,
+windowType)` row) was not measured — `retrieveUserQuotaSummary` returned two
+windows for this account. The same `fetchAvailableModels` did **not** list 3.7
+or 3.6 Flash, `gemini-3-flash-agent`, `gemini-3.5-flash-low`/`-extra-low`,
+`gemini-pro-agent` or `gemini-3.1-pro-low`; the list is per account and this one
+was free tier, so those rows stay until a paid-tier probe says otherwise.
+
+#### History
+
+The first Gemini 4 edit (same day, before this probe) shipped the public API's
+bare ids `gemini-4-carbon`, `-argon`, `-neon`, `-hydrogen`, read from
+`ai.google.dev` with no account to probe. `v1internal` lists none of them. That
+is the failure the catalog note warns about, and the probe replaced them.
 
 ### Images are accepted on their bytes, not their declared type
 

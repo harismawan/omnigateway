@@ -102,56 +102,129 @@ const NO_CACHE_WRITE = { cacheWrite5m: 0, cacheWrite1h: 0 };
 const FREE = { input: 0, output: 0, cacheRead: 0, ...NO_CACHE_WRITE };
 const FLASH_LIMITS = { contextWindow: 1_048_576, maxOutputTokens: MAX_OUTPUT_TOKENS };
 const PRO_LIMITS = { contextWindow: 1_048_576, maxOutputTokens: PRO_MAX_OUTPUT_TOKENS };
-/** Gemini 4's public limits: 1M context, 65,536 synchronous output. */
+/** Gemini 4's limits: 1M context; output at the encoder's ceiling (see the rows). */
 const GEMINI_4_LIMITS = { contextWindow: 1_048_576, maxOutputTokens: MAX_OUTPUT_TOKENS };
+const GEMINI_4_CARBON = { input: 4, output: 20, cacheRead: 0.2, ...NO_CACHE_WRITE };
+const GEMINI_4_ARGON = GEMINI_4_CARBON;
+const GEMINI_4_NEON = { input: 3, output: 15, cacheRead: 0.15, ...NO_CACHE_WRITE };
+const GEMINI_4_HYDROGEN = { input: 1.5, output: 7.5, cacheRead: 0.075, ...NO_CACHE_WRITE };
 
 export const ANTIGRAVITY_MODELS: ProviderModelCatalogEntry = {
-  // The newest family's High tier, matching what the live catalog marks
-  // `recommended` and what Antigravity's own client defaults to.
+  // The last row known to serve. The live catalog's own default is now
+  // `gemini-4-neon-high`, but no Gemini 4 request has been served yet (see
+  // below), so a new target points at the probed row until one has.
   defaultModel: "gemini-3.8-flash-high",
   // OAuth only. There is no API key that reaches `v1internal`: the surface is
   // the IDE's, and it authenticates with a Google account.
   authTypes: ["oauth"],
   models: [
-    // **The four Gemini 4 rows are read from Google's public docs, not from a
-    // probe** — the one source the note above warns against, carried at the
-    // operator's request until a `fetchAvailableModels` probe confirms them.
-    // Ids, limits and rates read 2026-11-22 from `ai.google.dev/gemini-api/
-    // docs/models` and `/pricing`. The public API names one id per model with
-    // its thinking level as a request parameter, so these rows carry no tier
-    // suffix. In `adaptive` mode `wire.ts` sends no budget; `budget`, `off`
-    // and `betweenTools` still send `thinkingBudget`, which Google documents
-    // for these models as levels rather than a budget. So a 400 is either an
-    // id `v1internal` spells differently (as it does `gemini-pro-agent`) or a
-    // budget it refuses for this family — unknown until a probe.
+    // **Gemini 4, as the live catalog spells it.** Read 2026-11-22 from a
+    // `fetchAvailableModels` on a free-tier account: one id per family and
+    // thinking tier (`-low`/`-medium`/`-high`, plus `-xhigh` on Neon and
+    // Hydrogen), the same tier-as-model shape as 3.8 Flash. The public API's
+    // bare `gemini-4-neon` and friends are not in that catalog and an earlier
+    // edit that shipped them was wrong. Also listed and left out:
+    // `gemini-4-hydrogen-tiered-*` (picks its own depth, like every `-tiered`
+    // id above); `gemini-4-hydrogen-sonar` (no `displayName`, so nothing says
+    // what it is); and `gemini-pro-orchestrator{,-argon,-neon}` plus
+    // `gemini-flash-worker-agy` ("Gemini 4 Hydrogen (Orchestrator)"), which
+    // are the IDE agent harness's planner and worker roles, not chat models an
+    // operator picks. **Listed, not yet served**: the account was refused for
+    // every model (Terms of Service), so no request has reached one.
     //
-    // Carbon and Argon carry their **standard** rate ($4/$20), not the
-    // introductory $2/$10 that ends 2026-11-30, for the reason the 3.8 Flash
-    // rows below do. Neon and Hydrogen have one rate. The public API caches
-    // these implicitly only, so `cacheRead` is the cached-input rate and there
-    // is no storage price to leave out.
+    // The probe advertises 262,144 output on Carbon, Neon and Hydrogen and
+    // 65,536 on Argon; the rows carry 65,536 because that is the encoder's
+    // ceiling (`MAX_OUTPUT_TOKENS`) and a catalog advertising more than the
+    // encoder sends would mislead a client pacing itself by `/v1/models`.
+    //
+    // Prices are Google's public per-family rates (`ai.google.dev/gemini-api/
+    // docs/pricing`, 2026-11-22), every tier of a family alike, as the Flash
+    // rows are priced. Carbon and Argon carry their **standard** $4/$20, not
+    // the introductory $2/$10 that ends 2026-11-30, for the reason the 3.8
+    // Flash rows below do. These models cache implicitly only, so `cacheRead`
+    // is the cached-input rate and there is no storage price to leave out.
     {
-      id: "gemini-4-carbon",
-      label: "Gemini 4 Carbon",
-      pricing: { input: 4, output: 20, cacheRead: 0.2, ...NO_CACHE_WRITE },
+      id: "gemini-4-carbon-high",
+      label: "Gemini 4 Carbon (High)",
+      pricing: GEMINI_4_CARBON,
       limits: GEMINI_4_LIMITS,
     },
     {
-      id: "gemini-4-argon",
-      label: "Gemini 4 Argon",
-      pricing: { input: 4, output: 20, cacheRead: 0.2, ...NO_CACHE_WRITE },
+      id: "gemini-4-carbon-medium",
+      label: "Gemini 4 Carbon (Medium)",
+      pricing: GEMINI_4_CARBON,
       limits: GEMINI_4_LIMITS,
     },
     {
-      id: "gemini-4-neon",
-      label: "Gemini 4 Neon",
-      pricing: { input: 3, output: 15, cacheRead: 0.15, ...NO_CACHE_WRITE },
+      id: "gemini-4-carbon-low",
+      label: "Gemini 4 Carbon (Low)",
+      pricing: GEMINI_4_CARBON,
       limits: GEMINI_4_LIMITS,
     },
     {
-      id: "gemini-4-hydrogen",
-      label: "Gemini 4 Hydrogen",
-      pricing: { input: 1.5, output: 7.5, cacheRead: 0.075, ...NO_CACHE_WRITE },
+      id: "gemini-4-argon-high",
+      label: "Gemini 4 Argon (High)",
+      pricing: GEMINI_4_ARGON,
+      limits: GEMINI_4_LIMITS,
+    },
+    {
+      id: "gemini-4-argon-medium",
+      label: "Gemini 4 Argon (Medium)",
+      pricing: GEMINI_4_ARGON,
+      limits: GEMINI_4_LIMITS,
+    },
+    {
+      id: "gemini-4-argon-low",
+      label: "Gemini 4 Argon (Low)",
+      pricing: GEMINI_4_ARGON,
+      limits: GEMINI_4_LIMITS,
+    },
+    {
+      id: "gemini-4-neon-xhigh",
+      label: "Gemini 4 Neon (XHigh)",
+      pricing: GEMINI_4_NEON,
+      limits: GEMINI_4_LIMITS,
+    },
+    {
+      id: "gemini-4-neon-high",
+      label: "Gemini 4 Neon (High)",
+      pricing: GEMINI_4_NEON,
+      limits: GEMINI_4_LIMITS,
+    },
+    {
+      id: "gemini-4-neon-medium",
+      label: "Gemini 4 Neon (Medium)",
+      pricing: GEMINI_4_NEON,
+      limits: GEMINI_4_LIMITS,
+    },
+    {
+      id: "gemini-4-neon-low",
+      label: "Gemini 4 Neon (Low)",
+      pricing: GEMINI_4_NEON,
+      limits: GEMINI_4_LIMITS,
+    },
+    {
+      id: "gemini-4-hydrogen-xhigh",
+      label: "Gemini 4 Hydrogen (XHigh)",
+      pricing: GEMINI_4_HYDROGEN,
+      limits: GEMINI_4_LIMITS,
+    },
+    {
+      id: "gemini-4-hydrogen-high",
+      label: "Gemini 4 Hydrogen (High)",
+      pricing: GEMINI_4_HYDROGEN,
+      limits: GEMINI_4_LIMITS,
+    },
+    {
+      id: "gemini-4-hydrogen-medium",
+      label: "Gemini 4 Hydrogen (Medium)",
+      pricing: GEMINI_4_HYDROGEN,
+      limits: GEMINI_4_LIMITS,
+    },
+    {
+      id: "gemini-4-hydrogen-low",
+      label: "Gemini 4 Hydrogen (Low)",
+      pricing: GEMINI_4_HYDROGEN,
       limits: GEMINI_4_LIMITS,
     },
     {

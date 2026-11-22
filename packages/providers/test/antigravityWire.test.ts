@@ -1571,10 +1571,19 @@ describe("the catalog's list prices", () => {
     "Gemini 3.1 Pro": { input: 2, output: 12, cacheRead: 0.2 },
     "Gemini 3.1 Flash Lite": { input: 0.25, output: 1.5, cacheRead: 0.025 },
     "Gemini 2.5 Pro": { input: 1.25, output: 10, cacheRead: 0.125 },
+    // Read 2026-11-22; Carbon and Argon on their standard rate, not the
+    // introductory one that ends 2026-11-30.
+    "Gemini 4 Carbon": { input: 4, output: 20, cacheRead: 0.2 },
+    "Gemini 4 Argon": { input: 4, output: 20, cacheRead: 0.2 },
+    "Gemini 4 Neon": { input: 3, output: 15, cacheRead: 0.15 },
+    "Gemini 4 Hydrogen": { input: 1.5, output: 7.5, cacheRead: 0.075 },
   };
 
-  /** The family a row's label names, with any `(High)`/`(Low)` tier removed. */
-  const familyOf = (label: string) => label.replace(/\s*\((?:High|Medium|Low)\)$/, "");
+  /**
+   * The family a row's label names, with any `(XHigh)`/`(High)`/`(Medium)`/`(Low)` tier
+   * removed.
+   */
+  const familyOf = (label: string) => label.replace(/\s*\((?:XHigh|High|Medium|Low)\)$/, "");
 
   test("every row carries its family's published rate", () => {
     // A row priced from the wrong family is silent money: it reaches `cost_usd`
@@ -1589,6 +1598,15 @@ describe("the catalog's list prices", () => {
         cacheRead: model.pricing.cacheRead,
       });
     }
+  });
+
+  test("every priced row names a family the price table holds", () => {
+    // Without this the loop above skips an unknown family silently, which is
+    // how every Gemini 4 row once went unchecked.
+    const unmatched = ANTIGRAVITY_MODELS.models.filter(
+      (m) => PUBLISHED[familyOf(m.label)] === undefined,
+    );
+    expect(unmatched.map((m) => m.id)).toEqual(["gemini-3-flash"]);
   });
 
   test("the only unpriced row is the one the price list does not name", () => {
