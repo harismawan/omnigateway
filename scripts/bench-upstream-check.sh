@@ -2,9 +2,9 @@
 set -euo pipefail
 # Direct fixture capacity evidence, independent of gateway. TLS needs no hosts override.
 script_dir=$(cd -- "$(dirname -- "$0")" && pwd)
-out=${OUT:-/tmp/opencode/bench-matrix/upstreams}
+out=${OUT:-${TMPDIR:-/tmp}/bench-matrix/upstreams}
 mkdir -p "$out"
-scratch=$(mktemp -d /tmp/opencode/bench-upstream-XXXXXX)
+scratch=$(mktemp -d "${TMPDIR:-/tmp}"/bench-upstream-XXXXXX)
 pids=()
 trap 'kill "${pids[@]}" 2>/dev/null || true; rm -rf "$scratch"' EXIT
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=localhost' -keyout "$scratch/key" -out "$scratch/cert" 2>/dev/null

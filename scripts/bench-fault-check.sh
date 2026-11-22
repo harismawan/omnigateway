@@ -3,7 +3,7 @@ set -u
 # Functional regression: first upstream reply passes smoke, subsequent load lies.
 : "${TS_BINARY:?required}" "${OMNI_RUST_BINARY:?required}"
 dir=$(cd -- "$(dirname -- "$0")" && pwd)
-out=${OUT:-/tmp/opencode/bench-fault-check}
+out=${OUT:-${TMPDIR:-/tmp}/bench-fault-check}
 mkdir -p "$out"
 failed=0
 for side in ts rust; do

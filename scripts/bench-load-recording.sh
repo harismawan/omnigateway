@@ -2,7 +2,7 @@
 set -euo pipefail
 # Direct stub sanity, recording vs no recording, alternating order.
 dir=$(cd -- "$(dirname -- "$0")" && pwd)
-out=${OUT:-/tmp/opencode/bench-matrix-fix-rest/recording}
+out=${OUT:-${TMPDIR:-/tmp}/bench-matrix-fix-rest/recording}
 mkdir -p "$out"
 if find "$out" -mindepth 1 -print -quit | grep -q .; then
  echo 'refusing non-empty recording evidence directory' >&2

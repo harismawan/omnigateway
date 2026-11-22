@@ -2,7 +2,7 @@
 set -euo pipefail
 # A private network/mount namespace: fixed provider hosts cannot reach the internet.
 script_dir=$(cd -- "$(dirname -- "$0")" && pwd)
-scratch=$(mktemp -d /tmp/opencode/bench-matrix-tls-XXXXXX)
+scratch=$(mktemp -d "${TMPDIR:-/tmp}"/bench-matrix-tls-XXXXXX)
 trap 'rm -rf "$scratch"' EXIT
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=api.anthropic.com' \
   -addext 'subjectAltName=DNS:api.anthropic.com,DNS:console.anthropic.com,DNS:api.openai.com,DNS:chatgpt.com,DNS:auth.openai.com' \

@@ -2,7 +2,7 @@
 set -euo pipefail
 # BASE_GATEWAY/HEAD_GATEWAY are argv strings, CLI is the setup CLI argv string.
 : "${BASE_GATEWAY:?required}" "${HEAD_GATEWAY:?required}" "${CLI:?required}"
-out=${OUT:-/tmp/opencode/bench-matrix/rounds}
+out=${OUT:-${TMPDIR:-/tmp}/bench-matrix/rounds}
 mkdir -p "$out"
 if find "$out" -mindepth 1 -print -quit | grep -q .; then echo 'refusing non-empty OUT' >&2; exit 2; fi
 out=$(cd -- "$out" && pwd)

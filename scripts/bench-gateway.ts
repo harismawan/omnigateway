@@ -8,9 +8,9 @@
  * implementation that keeps the CLI and wire contracts — which is the point: it
  * is the baseline a rewrite is judged against.
  *
- *   bun scripts/build-binary.ts /tmp/opencode/bench/omnigateway
+ *   bun scripts/build-binary.ts /tmp/bench/omnigateway
  *   bun scripts/bench-gateway.ts \
- *     --gateway /tmp/opencode/bench/omnigateway \
+ *     --gateway /tmp/bench/omnigateway \
  *     --cli "bun apps/cli/src/index.ts" \
  *     --out docs/benchmarks/2026-11-07-ts-baseline.json
  *
@@ -89,7 +89,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { cpus, loadavg, release, totalmem } from "node:os";
+import { cpus, loadavg, release, tmpdir, totalmem } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import type { Subprocess } from "bun";
@@ -202,7 +202,7 @@ if (CLUSTER) {
 const CLK_TCK = 100;
 const PAGE_KB = 4;
 
-const root = mkdtempSync("/tmp/opencode/omni-bench-");
+const root = mkdtempSync(join(tmpdir(), "omni-bench-"));
 const env = {
   ...process.env,
   OMNI_ENCRYPTION_KEY: ENCRYPTION_KEY,
