@@ -4,26 +4,22 @@
   "type": "module",
   "packageManager": "bun@1.4.4",
   "workspaces": [
-    "packages/*",
-    "apps/*"
+    "apps/dashboard"
   ],
   "scripts": {
-    "dev": "bun --watch apps/gateway/src/index.ts",
     "build:dashboard": "cd apps/dashboard && bun run build",
     "dev:dashboard": "cd apps/dashboard && bun run dev",
-    "start": "bun apps/gateway/src/index.ts",
-    "test": "bun test",
+    "test": "bun run test:scripts && bun run test:dashboard",
+    "test:scripts": "bun test scripts",
     "test:dashboard": "bun run --cwd apps/dashboard test",
-    "test:all": "bun test && bun run test:dashboard",
     "lint": "biome check .",
     "check:claims": "bun run scripts/stale-claims.ts",
     "check:dead": "bun run scripts/dead-exports.ts",
     "fmt": "biome format --write .",
-    "typecheck:core": "bun check --no-pretty -p tsconfig.json",
+    "typecheck:scripts": "bun check --no-pretty -p tsconfig.json",
     "typecheck:dashboard": "bun run --cwd apps/dashboard typecheck",
-    "typecheck": "bun run typecheck:core && bun run typecheck:dashboard",
-    "build:npm": "bun scripts/build-npm.ts",
-    "build:binary": "bun scripts/build-binary.ts"
+    "typecheck": "bun run typecheck:scripts && bun run typecheck:dashboard",
+    "build:npm": "bun scripts/build-npm.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.12",

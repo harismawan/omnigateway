@@ -78,17 +78,17 @@ committed**.
    ```
 
 6. **Compare against the gateway** and update, in one change:
-   - `packages/providers/src/openai/profile.ts` — version, originator, UA
+   - `crates/omni-providers/src/openai/profile.rs` — version, originator, UA
      shape, header order, body order;
-   - `packages/providers/src/openai/codexCatalog.ts` — per-model values from
+   - `crates/omni-providers/src/openai/oauth.rs` — per-model values from
      `codex-rs/models-manager/models.json` at the release tag, with the release
      noted in `CODEX_CATALOG_RELEASE`;
-   - `packages/providers/src/openai/codexLite.ts` — input item shapes, turn
-     metadata keys, `client_metadata` members;
+   - `crates/omni-providers/src/openai/lite.rs` and `wire.rs` — input item
+     shapes, turn metadata keys, `client_metadata` members;
    - `crates/omni-providers/tests/fixtures/codex-<version>.json` — a new
      hand-sanitized fixture: ids, timestamps and the installation id replaced
      with placeholders, Codex's own prompt items and tool inventory removed, no
-     paths. Point `openaiCodexFingerprint.test.ts` at it;
+     paths. Point `crates/omni-providers/tests/openai_fingerprint_literals.rs` at it;
    - the two specs' "current" tables (client-identity and the fingerprint spec).
 
    The version and the shape move together or not at all: a release that
