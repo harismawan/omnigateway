@@ -32,6 +32,15 @@ pub struct PendingFlow {
     pub challenge: String,
     pub state: String,
     pub redirect_uri: String,
+    /// Present only on device flows (RFC 8628); marks the flow as device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_code: Option<String>,
+    /// Device poll interval in seconds; the host owns the polling loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval: Option<f64>,
+    /// Provider-owned flow state (device identity, deadlines, machine ids).
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 #[derive(Clone, Serialize)]
@@ -39,6 +48,21 @@ pub struct PendingFlow {
 pub struct AuthorizeStart {
     pub authorize_url: String,
     pub pending: PendingFlow,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_code: Option<String>,
+}
+
+/// A device poll's outcome: `Pending` is control flow ("keep polling"), not a
+/// failure. Device poll parsers return `Result<FlowResult, DeviceError>`.
+#[derive(Debug)]
+pub enum DeviceError {
+    Pending,
+    Gateway(GatewayError),
+}
+impl From<GatewayError> for DeviceError {
+    fn from(error: GatewayError) -> Self {
+        Self::Gateway(error)
+    }
 }
 
 #[derive(Clone, Serialize)]

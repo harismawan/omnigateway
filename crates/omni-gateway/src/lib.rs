@@ -26,6 +26,7 @@ pub mod load;
 pub mod logging;
 pub mod maintenance;
 pub mod models;
+mod oauth_runner;
 pub mod otlp;
 mod output_budget;
 pub mod overlay;

@@ -10,7 +10,7 @@ use omni_ir::{
     error::{ErrorCode, GatewayError},
     jsjson::{JsValue, parse_js, stringify},
 };
-use omni_providers::oauth::{AuthorizeStart, PendingFlow};
+use omni_providers::oauth::{AuthorizeStart, DeviceError, FlowResult, PendingFlow};
 use std::sync::Arc;
 
 type Result<T> = std::result::Result<T, GatewayError>;
@@ -79,8 +79,16 @@ impl ConnectFlows {
                 let owner = self.clone();
                 let key = id.clone();
                 tokio::spawn(async move {
-                    let result = match owner.pending(&key, true).await {
-                        Ok(flow) => complete(host, holder, flow, "").await,
+                    let result = match owner.pending(&key, false).await {
+                        // Device flights peek: the flow must survive a pending
+                        // answer so the next poll can ask again.
+                        Ok(flow) if device_flow(&flow) => {
+                            owner.device_complete(&host, &holder, &key, flow).await
+                        }
+                        Ok(_) => match owner.pending(&key, true).await {
+                            Ok(flow) => complete(host, holder, flow, "").await,
+                            Err(e) => Err(e),
+                        },
                         Err(e) => Err(e),
                     };
                     owner
@@ -186,31 +194,59 @@ impl ConnectFlows {
         };
         let (verifier, challenge) = omni_providers::oauth::pkce();
         let state = omni_providers::oauth::random_state();
-        let AuthorizeStart {
-            authorize_url,
-            pending,
-        } = if *provider == "openai" {
+        let start = if *provider == "openai" {
             omni_providers::openai::oauth::start(redirect, &verifier, &challenge, &state)
         } else if *provider == "antigravity" {
             omni_providers::antigravity::oauth::start(&verifier, &challenge, &state)
         } else {
             omni_providers::anthropic::oauth::start(&verifier, &challenge, &state)
         };
+        self.store_flow(provider, label, credential, &start, "pkce", true)
+            .await
+    }
+
+    /// Stores the pending flow and builds the start reply, for pkce starts and
+    /// device `begin` results alike. Device begins carry deviceCode/interval/
+    /// extra on the pending plus a userCode; pkce leaves them unset and keeps
+    /// its existing reply bytes.
+    async fn store_flow(
+        &self,
+        provider: &str,
+        label: JsValue,
+        credential: Option<String>,
+        start: &AuthorizeStart,
+        kind: &str,
+        supports_manual_paste: bool,
+    ) -> Result<String> {
+        let pending = &start.pending;
+        let mut pending_fields = vec![
+            ("verifier", string(&pending.verifier)),
+            ("challenge", string(&pending.challenge)),
+            ("state", string(&pending.state)),
+            ("redirectUri", string(&pending.redirect_uri)),
+        ];
+        if let Some(code) = &pending.device_code {
+            pending_fields.push(("deviceCode", string(code)));
+        }
+        if let Some(interval) = pending.interval {
+            pending_fields.push(("interval", JsValue::Number(interval)));
+        }
+        if !pending.extra.is_empty() {
+            let extra = omni_ir::jsjson::to_string(&serde_json::Value::Object(
+                omni_ir::deep::clone_map(&pending.extra),
+            ));
+            pending_fields.push(("extra", parse_js(&extra).map_err(|_| internal())?));
+        }
         let mut fields = vec![
             ("provider", string(provider)),
             ("label", label),
-            (
-                "pending",
-                object(vec![
-                    ("verifier", string(&pending.verifier)),
-                    ("challenge", string(&pending.challenge)),
-                    ("state", string(&pending.state)),
-                    ("redirectUri", string(&pending.redirect_uri)),
-                ]),
-            ),
+            ("pending", object(pending_fields)),
         ];
         if let Some(id) = credential {
             fields.push(("credentialId", string(&id)));
+        }
+        if let Some(code) = &start.user_code {
+            fields.push(("userCode", string(code)));
         }
         let id = omni_providers::oauth::random_state();
         self.coord
@@ -223,13 +259,61 @@ impl ConnectFlows {
             .map_err(|_| internal())?;
         stringify(&object(vec![
             ("flowId", string(&id)),
-            ("authorizeUrl", string(&authorize_url)),
-            ("userCode", JsValue::Null),
-            ("kind", string("pkce")),
-            ("supportsManualPaste", JsValue::Bool(true)),
-            ("pollIntervalMs", JsValue::Number(5000.0)),
+            ("authorizeUrl", string(&start.authorize_url)),
+            (
+                "userCode",
+                start.user_code.as_deref().map_or(JsValue::Null, string),
+            ),
+            ("kind", string(kind)),
+            ("supportsManualPaste", JsValue::Bool(supports_manual_paste)),
+            (
+                "pollIntervalMs",
+                JsValue::Number(pending.interval.unwrap_or(5.0) * 1000.0),
+            ),
         ]))
         .ok_or_else(internal)
+    }
+
+    /// One device exchange per poll. Pending keeps the flow for the next poll;
+    /// completion takes it under the coordinator lock before persisting, and a
+    /// terminal failure consumes it.
+    async fn device_complete(
+        &self,
+        host: &Arc<crate::refresh::Refresher>,
+        holder: &Arc<omni_gateway_core::snapshot::SnapshotHolder>,
+        id: &str,
+        flow: JsValue,
+    ) -> Result<String> {
+        let provider = text(get(&flow, "provider")).ok_or_else(internal)?;
+        let pending = pending_value(&flow)?;
+        let reconnect = text(get(&flow, "credentialId"));
+        let prior = if let Some(credential) = &reconnect {
+            Some(
+                host.store
+                    .credential(&host.key, credential)
+                    .await
+                    .map_err(|_| internal())?
+                    .ok_or_else(|| bad("credential not found"))?,
+            )
+        } else {
+            None
+        };
+        let data = prior
+            .as_ref()
+            .filter(|c| c.provider == provider)
+            .map_or(&serde_json::Value::Null, |c| &c.provider_data);
+        match device_exchange(&provider, host, &pending, data).await {
+            Ok(result) => {
+                self.pending(id, true).await?;
+                persist_flow_result(host.clone(), holder.clone(), &flow, result).await
+            }
+            Err(DeviceError::Pending) => Err(pending_signal()),
+            Err(DeviceError::Gateway(error)) => {
+                // An already expired flow is gone either way.
+                drop(self.pending(id, true).await);
+                Err(error)
+            }
+        }
     }
 }
 pub async fn serve(
@@ -254,27 +338,83 @@ pub async fn serve(
             )
             .await
             .map(|id| serde_json::json!({"id":id}).to_string()),
-        _ => app
-            .connect
-            .poll(
-                app.deps.refresher.clone(),
-                app.deps.holder.clone(),
-                text(get(&body, "flowId")).unwrap_or_default(),
-            )
-            .await
-            .map(|id| serde_json::json!({"status":"complete","id":id}).to_string()),
+        _ => poll_reply(
+            app.connect
+                .poll(
+                    app.deps.refresher.clone(),
+                    app.deps.holder.clone(),
+                    text(get(&body, "flowId")).unwrap_or_default(),
+                )
+                .await,
+        ),
     };
     result.map(json_ok).map_err(ApiError::Gateway)
 }
 
+/// A device poll's "not approved yet" travels through the flight channel's
+/// `Result<String>` as a marked error (the TS `pendingError` marker); only
+/// `poll_reply` translates it, so pkce replies keep their exact bytes.
+const PENDING_MARKER: &str = "__omni_authorization_pending";
+fn pending_signal() -> GatewayError {
+    GatewayError::new(ErrorCode::Auth, PENDING_MARKER)
+}
+fn poll_reply(result: Result<String>) -> Result<String> {
+    match result {
+        Ok(id) => Ok(serde_json::json!({"status":"complete","id":id}).to_string()),
+        Err(e) if e.code == ErrorCode::Auth && e.message == PENDING_MARKER => {
+            Ok(serde_json::json!({"status":"pending"}).to_string())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Device exchange dispatch: exactly one provider poll per call; the caller
+/// owns the loop and deadline. Each device provider commit adds an arm here
+/// driving its oauth.rs builders through `crate::oauth_runner::ExchangeRunner`.
+#[allow(clippy::match_single_binding)] // provider arms land in later commits
+async fn device_exchange(
+    provider: &str,
+    host: &crate::refresh::Refresher,
+    pending: &PendingFlow,
+    prior: &serde_json::Value,
+) -> std::result::Result<FlowResult, DeviceError> {
+    match provider {
+        #[cfg(test)]
+        "device-fixture" => tests::device_fixture(host, pending, prior).await,
+        _ => {
+            let _ = (host, pending, prior);
+            Err(DeviceError::Gateway(internal()))
+        }
+    }
+}
+
 fn pending_value(flow: &JsValue) -> Result<PendingFlow> {
     let p = get(flow, "pending").ok_or_else(internal)?;
+    let extra = match get(p, "extra") {
+        Some(v) => {
+            serde_json::from_str(&stringify(v).ok_or_else(internal)?).map_err(|_| internal())?
+        }
+        None => serde_json::Map::new(),
+    };
     Ok(PendingFlow {
         verifier: text(get(p, "verifier")).ok_or_else(internal)?,
         challenge: text(get(p, "challenge")).ok_or_else(internal)?,
         state: text(get(p, "state")).ok_or_else(internal)?,
         redirect_uri: text(get(p, "redirectUri")).ok_or_else(internal)?,
+        device_code: text(get(p, "deviceCode")),
+        interval: match get(p, "interval") {
+            Some(JsValue::Number(n)) => Some(*n),
+            _ => None,
+        },
+        extra,
     })
+}
+/// A stored pending carrying a device code marks a device flow; the machinery
+/// keys on flow data, never on provider names.
+fn device_flow(flow: &JsValue) -> bool {
+    get(flow, "pending")
+        .and_then(|p| text(get(p, "deviceCode")))
+        .is_some()
 }
 fn normalize(provider: &str, pending: &PendingFlow, code: &str) -> Result<String> {
     let callback = PROVIDERS
@@ -405,6 +545,19 @@ async fn complete(
             omni_providers::anthropic::oauth::token_result(response.0, &response.1, None, now)?
         }
     };
+    persist_flow_result(host, holder, &flow, result).await
+}
+
+/// Persistence half of a completed exchange, shared by the pkce and device
+/// paths.
+async fn persist_flow_result(
+    host: Arc<crate::refresh::Refresher>,
+    holder: Arc<omni_gateway_core::snapshot::SnapshotHolder>,
+    flow: &JsValue,
+    result: FlowResult,
+) -> Result<String> {
+    let provider = text(get(flow, "provider")).ok_or_else(internal)?;
+    let reconnect = text(get(flow, "credentialId"));
     // Flow secrets are validated before persistence.
     if result
         .refresh_token
@@ -436,7 +589,7 @@ async fn complete(
     let id = reconnect.clone().unwrap_or_else(|| {
         omni_crypto::codex::uuid_v4_from(&omni_providers::oauth::random_state())
     });
-    let label = text(get(&flow, "label")).ok_or_else(internal)?;
+    let label = text(get(flow, "label")).ok_or_else(internal)?;
     host.store
         .save_oauth(
             &host.key,
@@ -755,6 +908,9 @@ mod tests {
             challenge: String::new(),
             state: "state".into(),
             redirect_uri: PROVIDERS[1].1.into(),
+            device_code: None,
+            interval: None,
+            extra: serde_json::Map::new(),
         };
         assert_eq!(
             normalize("openai", &p, "raw#state").expect("raw"),
@@ -791,6 +947,9 @@ mod tests {
             challenge: String::new(),
             state: "s".into(),
             redirect_uri: PROVIDERS[2].1.into(),
+            device_code: None,
+            interval: None,
+            extra: serde_json::Map::new(),
         };
         assert_eq!(
             normalize(
@@ -1045,5 +1204,359 @@ mod tests {
         );
         assert_eq!(http.0.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(flows.pending("test", false).await.is_err());
+    }
+
+    /// Synthetic one-request device exchange behind the `device-fixture`
+    /// dispatch arm: the fake HttpClient's answer decides pending / terminal /
+    /// success, so the device machinery is exercised without a real provider.
+    pub(super) async fn device_fixture(
+        host: &crate::refresh::Refresher,
+        pending: &PendingFlow,
+        prior: &serde_json::Value,
+    ) -> std::result::Result<FlowResult, DeviceError> {
+        let _ = (pending, prior);
+        let mut runner = crate::oauth_runner::ExchangeRunner::new(
+            host.http.as_ref(),
+            crate::oauth_runner::ExchangeConfig {
+                provider: "device-fixture",
+                step: "exchange",
+                max_requests: 1,
+                origins: crate::oauth_runner::Origins::Allowlist(&["https://device.fixture"]),
+            },
+        );
+        let response = runner
+            .send(
+                omni_providers::oauth::AuthRequest {
+                    url: "https://device.fixture/poll".into(),
+                    method: "POST".into(),
+                    headers: Vec::new(),
+                    body: "{}".into(),
+                },
+                30,
+            )
+            .await?;
+        let body: serde_json::Value = serde_json::from_str(&response.1).unwrap_or_default();
+        if body.get("pending").and_then(serde_json::Value::as_bool) == Some(true) {
+            return Err(DeviceError::Pending);
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let now = (host.now)() as f64;
+        omni_providers::anthropic::oauth::token_result(response.0, &response.1, None, now)
+            .map_err(DeviceError::from)
+    }
+
+    const DEVICE_FLOW: &str = r#"{"provider":"device-fixture","label":"device","pending":{"verifier":"","challenge":"","state":"","redirectUri":"","deviceCode":"dc","interval":3,"extra":{"deviceId":"machine"}}}"#;
+
+    struct Scripted {
+        status: u16,
+        body: &'static str,
+    }
+    impl omni_providers::http::HttpClient for Scripted {
+        fn send(
+            &self,
+            _: omni_providers::http::HttpRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = std::result::Result<
+                            omni_providers::http::HttpResponse,
+                            omni_providers::http::HttpError,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(async {
+                Ok(omni_providers::http::HttpResponse {
+                    status: self.status,
+                    headers: omni_providers::http::Headers::new(),
+                    body: omni_providers::http::ResponseBody::from_bytes(self.body),
+                })
+            })
+        }
+    }
+
+    async fn device_harness(
+        http: Arc<dyn omni_providers::http::HttpClient>,
+    ) -> (
+        tempfile::TempDir,
+        Arc<crate::refresh::Refresher>,
+        Arc<omni_gateway_core::snapshot::SnapshotHolder>,
+        Arc<ConnectFlows>,
+    ) {
+        let dir = tempfile::tempdir().expect("dir");
+        let store = Arc::new(
+            omni_store::Store::open(
+                omni_store::StoreConfig::Sqlite {
+                    path: dir.path().join("db"),
+                },
+                0,
+            )
+            .await
+            .expect("store"),
+        );
+        let key = omni_crypto::field::derive_key("test-key");
+        let holder = Arc::new(
+            omni_gateway_core::snapshot::SnapshotHolder::build(
+                &omni_store::SqliteStore::open(dir.path().join("db"), 0).expect("sqlite"),
+                key.clone(),
+                0.0,
+            )
+            .expect("snapshot"),
+        );
+        let host = Arc::new(crate::refresh::Refresher::new(
+            store,
+            key,
+            http,
+            crate::clock::now_ms,
+        ));
+        let flows = Arc::new(ConnectFlows::default());
+        flows
+            .coord
+            .kv_set("oauth:pending:dev", DEVICE_FLOW, 600_000)
+            .await
+            .expect("put");
+        (dir, host, holder, flows)
+    }
+
+    #[tokio::test]
+    async fn device_poll_pending_keeps_flow() {
+        let http = Arc::new(Scripted {
+            status: 200,
+            body: r#"{"pending":true}"#,
+        });
+        let (_dir, host, holder, flows) = device_harness(http).await;
+        let error = flows
+            .poll(host.clone(), holder.clone(), "dev".into())
+            .await
+            .expect_err("pending");
+        assert_eq!(error.message, PENDING_MARKER);
+        assert_eq!(
+            poll_reply(Err(error)).expect("reply"),
+            r#"{"status":"pending"}"#
+        );
+        let stored = flows.pending("dev", false).await.expect("kept");
+        let pending = pending_value(&stored).expect("pending");
+        assert_eq!(pending.device_code.as_deref(), Some("dc"));
+        assert_eq!(pending.interval, Some(3.0));
+        assert_eq!(
+            pending
+                .extra
+                .get("deviceId")
+                .and_then(serde_json::Value::as_str),
+            Some("machine")
+        );
+        // A second poll runs a fresh exchange against the kept flow.
+        assert!(flows.poll(host, holder, "dev".into()).await.is_err());
+        assert!(flows.pending("dev", false).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn device_poll_terminal_failure_consumes_flow() {
+        let http = Arc::new(Scripted {
+            status: 403,
+            body: "{}",
+        });
+        let (_dir, host, holder, flows) = device_harness(http).await;
+        let error = flows
+            .poll(host, holder, "dev".into())
+            .await
+            .expect_err("denied");
+        assert_eq!(error.code, ErrorCode::Auth);
+        assert_eq!(
+            error.message,
+            "token endpoint rejected the request: http_403"
+        );
+        assert!(poll_reply(Err(error)).is_err());
+        assert!(flows.pending("dev", false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn device_concurrent_poll_shares_exchange_and_consumes_failure() {
+        let http = Arc::new(Counting(std::sync::atomic::AtomicUsize::new(0)));
+        let (_dir, host, holder, flows) = device_harness(http.clone()).await;
+        let (a, b) = tokio::join!(
+            flows.poll(host.clone(), holder.clone(), "dev".into()),
+            flows.poll(host, holder, "dev".into())
+        );
+        assert_eq!(
+            a.expect_err("refused").message,
+            b.expect_err("refused").message
+        );
+        assert_eq!(http.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(flows.pending("dev", false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn device_poll_success_persists_and_consumes() {
+        let http = Arc::new(Scripted {
+            status: 200,
+            body: r#"{"access_token":"granted","refresh_token":"r","expires_in":3600}"#,
+        });
+        let (_dir, host, holder, flows) = device_harness(http).await;
+        let id = flows
+            .poll(host.clone(), holder.clone(), "dev".into())
+            .await
+            .expect("approved");
+        assert_eq!(
+            poll_reply(Ok(id.clone())).expect("reply"),
+            serde_json::json!({"status":"complete","id":id}).to_string()
+        );
+        let rows = host.store.list_credentials(&host.key).await.expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "device");
+        assert_eq!(rows[0].secrets.access_token.as_deref(), Some("granted"));
+        assert_eq!(holder.load().routing.credentials[0].id, id);
+        assert!(flows.pending("dev", false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn device_poll_survives_waiter_cancellation() {
+        struct Gated {
+            entered: tokio::sync::Notify,
+            release: tokio::sync::Notify,
+        }
+        impl omni_providers::http::HttpClient for Gated {
+            fn send(
+                &self,
+                _: omni_providers::http::HttpRequest,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = std::result::Result<
+                                omni_providers::http::HttpResponse,
+                                omni_providers::http::HttpError,
+                            >,
+                        > + Send
+                        + '_,
+                >,
+            > {
+                Box::pin(async {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                    Ok(omni_providers::http::HttpResponse {
+                        status: 200,
+                        headers: omni_providers::http::Headers::new(),
+                        body: omni_providers::http::ResponseBody::from_bytes(
+                            r#"{"access_token":"survived","refresh_token":"r","expires_in":3600}"#,
+                        ),
+                    })
+                })
+            }
+        }
+        let http = Arc::new(Gated {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let (_dir, host, holder, flows) = device_harness(http.clone()).await;
+        let owner = flows.clone();
+        let waiter_host = host.clone();
+        let waiter =
+            tokio::spawn(async move { owner.poll(waiter_host, holder, "dev".into()).await });
+        http.entered.notified().await;
+        waiter.abort();
+        assert!(waiter.await.expect_err("cancelled").is_cancelled());
+        http.release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let rows = flows.coord.kv_get("oauth:pending:dev").await.expect("peek");
+                let stored = host.store.list_credentials(&host.key).await.expect("rows");
+                if let Some(row) = stored.first() {
+                    if rows.is_some() {
+                        tokio::task::yield_now().await;
+                        continue;
+                    }
+                    assert_eq!(stored.len(), 1);
+                    assert_eq!(row.label, "device");
+                    assert_eq!(row.secrets.access_token.as_deref(), Some("survived"));
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached device completion persisted and consumed");
+    }
+
+    #[tokio::test]
+    async fn device_begin_reply_and_pkce_bytes_are_stable() {
+        let flows = ConnectFlows::default();
+        let start = AuthorizeStart {
+            authorize_url: "https://device.fixture/activate".into(),
+            pending: PendingFlow {
+                verifier: String::new(),
+                challenge: String::new(),
+                state: String::new(),
+                redirect_uri: String::new(),
+                device_code: Some("dc".into()),
+                interval: Some(3.0),
+                extra: serde_json::from_str(r#"{"deviceId":"machine"}"#).expect("extra"),
+            },
+            user_code: Some("ABCD-1234".into()),
+        };
+        let reply = flows
+            .store_flow(
+                "device-fixture",
+                string("device"),
+                None,
+                &start,
+                "device",
+                false,
+            )
+            .await
+            .expect("reply");
+        let value: serde_json::Value = serde_json::from_str(&reply).expect("json");
+        assert_eq!(value["kind"], "device");
+        assert_eq!(value["userCode"], "ABCD-1234");
+        assert_eq!(value["supportsManualPaste"], false);
+        assert_eq!(value["pollIntervalMs"], 3000);
+        assert_eq!(value["authorizeUrl"], "https://device.fixture/activate");
+        let flow = flows
+            .pending(value["flowId"].as_str().expect("id"), false)
+            .await
+            .expect("stored");
+        assert!(device_flow(&flow));
+        assert_eq!(text(get(&flow, "userCode")).as_deref(), Some("ABCD-1234"));
+        let pending = pending_value(&flow).expect("pending");
+        assert_eq!(pending.device_code.as_deref(), Some("dc"));
+        assert_eq!(pending.interval, Some(3.0));
+        assert_eq!(
+            pending
+                .extra
+                .get("deviceId")
+                .and_then(serde_json::Value::as_str),
+            Some("machine")
+        );
+        let pkce = AuthorizeStart {
+            authorize_url: "https://pkce.fixture/authorize".into(),
+            pending: PendingFlow {
+                verifier: "v".into(),
+                challenge: "c".into(),
+                state: "s".into(),
+                redirect_uri: "r".into(),
+                device_code: None,
+                interval: None,
+                extra: serde_json::Map::new(),
+            },
+            user_code: None,
+        };
+        let reply = flows
+            .store_flow("fixture", string("fixture"), None, &pkce, "pkce", true)
+            .await
+            .expect("reply");
+        let value: serde_json::Value = serde_json::from_str(&reply).expect("json");
+        assert_eq!(value["userCode"], serde_json::Value::Null);
+        assert_eq!(value["kind"], "pkce");
+        assert_eq!(value["supportsManualPaste"], true);
+        assert_eq!(value["pollIntervalMs"], 5000);
+        let flow = flows
+            .pending(value["flowId"].as_str().expect("id"), false)
+            .await
+            .expect("stored");
+        assert!(!device_flow(&flow));
+        assert_eq!(
+            stringify(get(&flow, "pending").expect("pending")).expect("json"),
+            r#"{"verifier":"v","challenge":"c","state":"s","redirectUri":"r"}"#
+        );
     }
 }

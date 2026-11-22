@@ -49,7 +49,11 @@ pub fn start(verifier: &str, challenge: &str, state: &str) -> AuthorizeStart {
             challenge: challenge.into(),
             state: state.into(),
             redirect_uri: redirect.into(),
+            device_code: None,
+            interval: None,
+            extra: serde_json::Map::new(),
         },
+        user_code: None,
     }
 }
 
