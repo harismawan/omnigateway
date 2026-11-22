@@ -1,11 +1,11 @@
-//! Postgres migrations, shared byte-for-byte with `packages/store/src/postgres/db.ts`.
+//! Postgres migrations.
 //!
-//! The SQL is the TS files themselves (`include_str!`), each run whole as one
-//! simple-protocol batch inside its own transaction (Bun's `unsafe` with no
-//! parameters is the same protocol), recorded in the same
+//! The SQL lives in `crates/omni-store/migrations/postgres/` (`include_str!`),
+//! byte-for-byte the files the TS store shipped, each run whole as one
+//! simple-protocol batch inside its own transaction, recorded in the same
 //! `migrations(id, applied_at)` ledger, under the same session advisory lock.
-//! A database is therefore at the same migration id whichever build last
-//! opened it, and either build continues from wherever the other stopped.
+//! Installed databases record applied ids, so a shipped file is frozen: never
+//! edit one, add the next.
 
 use crate::error::StoreError;
 use std::collections::HashSet;
@@ -24,7 +24,7 @@ macro_rules! migration_sql {
     ($file:literal) => {
         include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../packages/store/src/postgres/migrations/",
+            "/migrations/postgres/",
             $file
         ))
     };

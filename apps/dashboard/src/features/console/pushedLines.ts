@@ -1,5 +1,5 @@
-import { LEVELS } from "@omni/ir";
 import type { ConsoleLine } from "../../api/types.ts";
+import { LEVELS } from "../../lib/domain.ts";
 
 /**
  * The client half of a `stream:console` frame: reading one, and judging its
@@ -7,19 +7,17 @@ import type { ConsoleLine } from "../../api/types.ts";
  *
  * ## Why the filter is written twice
  *
- * `packages/control/src/console.ts` holds the original — `parseConsoleLines`,
- * extracted precisely so the REST read and the gateway's stream source select
- * and filter identically. This console cannot call it: rule 12 in `CLAUDE.md`
- * lists what a dashboard may import, `@omni/control` is not on it, and every
- * `@omni/*` package is unpublished, so reaching for one from here is the same
- * class of mistake as a plugin importing core.
+ * `crates/omni-gateway/src/console.rs` holds the original — the one reader the
+ * REST read and the stream source share, so both select and filter
+ * identically. This console cannot call Rust, and reaches the gateway over
+ * `/api/*` alone.
  *
  * So the level rule is restated, and the restatement is deliberately the
  * smaller half. The gateway already ran the *parsing* — a frame carries
  * `ConsoleLine` objects, not text — and it already ran the cap. What is left is
- * one comparison, and its ordering is imported from `@omni/ir` rather than
- * spelled out again, so the two copies cannot disagree about whether a warning
- * outranks an error. The branch that survives duplication is the awkward one
+ * one comparison, and its ordering is the console's `LEVELS`, which
+ * `test/api/rustMirrors.test.ts` holds to the gateway's order, so the two copies
+ * cannot disagree about whether a warning outranks an error. The branch that survives duplication is the awkward one
  * and is copied verbatim in spirit: **a line with no level is kept**. Journald
  * carries output the gateway never wrote, and an operator filtering to `error`
  * went looking for exactly those.
@@ -39,7 +37,7 @@ function isLevel(value: unknown): value is keyof typeof LEVELS {
 /**
  * Whether a pushed line survives the panel's level filter.
  *
- * Mirrors the level branch of `keep()` in `packages/control/src/console.ts`. An
+ * Mirrors the level filter in `crates/omni-gateway/src/console.rs`. An
  * unrecognised filter value keeps everything, which is the same direction the
  * gateway errs in: showing an operator a line they did not ask for is visible,
  * hiding one they did is not.

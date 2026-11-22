@@ -24,18 +24,15 @@ function scratch(): string {
   ]) {
     copyFileSync(join(import.meta.dir, "..", file), join(root, "scripts", file));
   }
-  mkdirSync(join(root, "packages/providers/src"), { recursive: true });
-  writeFileSync(
-    join(root, "packages/providers/src/descriptors.ts"),
-    "export const descriptors = {};\n",
-  );
+  mkdirSync(join(root, "crates/omni-control/data"), { recursive: true });
+  writeFileSync(join(root, "crates/omni-control/data/provider-catalog.json"), "{}\n");
   mkdirSync(join(root, "src"));
   writeFileSync(join(root, "src/value.ts"), "export function vanishedWidget() { return 1; }\n");
   writeFileSync(join(root, "src/consumer.ts"), "// `vanishedWidget` supplies the widget.\n");
   git(root, "init", "-q", "-b", "main");
   git(root, "config", "user.email", "hygiene@test.invalid");
   git(root, "config", "user.name", "Hygiene Test");
-  git(root, "add", "src", "packages");
+  git(root, "add", "src", "crates");
   git(root, "commit", "-qm", "base");
   git(root, "checkout", "-qb", "topic");
   git(root, "commit", "--allow-empty", "-qm", "topic");

@@ -56,8 +56,7 @@ const QuotaStack = styled.div`
  * When this credential's tightest window runs out, or null when nothing says
  * it will.
  *
- * "Tightest" is the router's sense of the word (`quotaHeadroom`,
- * `packages/router/src/quota.ts`): every reported window is a candidate, the
+ * "Tightest" is the router's sense of the word (`crates/omni-router/src/quota.rs`): every reported window is a candidate, the
  * ones nobody believes are dropped, and the worst of what is left decides. It
  * is not `quotaUsage`'s duration order — that is a reading order for the
  * meters, and a weekly window about to run dry outranks a five-hour one that

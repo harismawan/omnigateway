@@ -1,4 +1,3 @@
-import type { Cadence } from "@omnigateway/dashboard-sdk";
 import {
   type InfiniteData,
   queryOptions,
@@ -10,6 +9,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
+import type { Cadence } from "../session/live.tsx";
 import { del, get, patch, post, put, request, withQuery } from "./client.ts";
 import type {
   AccountQuota,
@@ -47,8 +47,6 @@ import type {
   MintedKey,
   ModelsResponse,
   NodesResponse,
-  PluginCatalogEntry,
-  PluginsResponse,
   ProviderId,
   QuotaHistoryQuery,
   QuotaHistoryResponse,
@@ -185,7 +183,6 @@ export const queryKeys = {
   database: ["database"] as const,
   snapshots: ["database", "snapshots"] as const,
   lifecycle: ["lifecycle"] as const,
-  plugins: ["plugins"] as const,
   catalog: ["catalog"] as const,
 };
 
@@ -198,8 +195,8 @@ export const queryKeys = {
  * read it back through `useProviderCatalog`. Written out twice, the unwrapping
  * of `{ providers }` and the sort would be two copies of one rule.
  *
- * Held for a long time for `usePlugins`' reason: the catalog is assembled at
- * boot from the provider registry plus public account snapshots. Credential
+ * Held for a long time: the catalog is assembled at boot from the provider
+ * registry plus public account snapshots, so it cannot move under an open tab. Credential
  * changes invalidate it too: connect, refresh and removal can change models.
  */
 export const catalogQuery = queryOptions({
@@ -245,8 +242,8 @@ export function findProvider(
  * socket exists — that is what lets `src/session/stream.tsx` fall back to
  * polling by re-rendering rather than by reaching into any of them.
  *
- * Defined beside the `cadence` that produces it, which is in the SDK now that a
- * plugin panel reads the same switch. Re-exported here because every hook below
+ * Defined beside the `cadence` that produces it, in `session/live.tsx`.
+ * Re-exported here because every hook below
  * takes one and this is where a reader of those signatures looks.
  */
 export type { Cadence };
@@ -1337,22 +1334,6 @@ export function useConnectFinish(): UseMutationResult<
   return useMutation({
     mutationFn: (input) => post<{ id: string }>("/api/connect/finish", input),
     onSuccess: () => client.invalidateQueries({ queryKey: queryKeys.credentials }),
-  });
-}
-
-/**
- * Which plugins this installation runs.
- *
- * Held for a long time on purpose: plugins are loaded at boot and installing one
- * reports that a restart is required, so the set cannot change under a console
- * that stays open. The rail reads this on every screen, and a refetch per
- * navigation would be a request whose answer is known not to have moved.
- */
-export function usePlugins(): UseQueryResult<PluginCatalogEntry[]> {
-  return useQuery({
-    queryKey: queryKeys.plugins,
-    queryFn: async ({ signal }) => (await get<PluginsResponse>("/api/plugins", signal)).plugins,
-    staleTime: 5 * 60_000,
   });
 }
 

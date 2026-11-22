@@ -1,8 +1,7 @@
 import { expect, test } from "bun:test";
-import * as sdk from "@omnigateway/dashboard-sdk";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { LiveProvider, useLive } from "../../src/session/live.tsx";
+import { type LiveConnection, LiveProvider, useLive } from "../../src/session/live.tsx";
 
 /**
  * The switch under test, rendered as text so the assertions read what an
@@ -58,8 +57,8 @@ test("pausing turns every cadence into false, which is what stops a query", asyn
 });
 
 test("with no provider above it, nothing polls", () => {
-  // The case a plugin panel hits in its own test harness, and the one a panel
-  // rendered outside the shell hits in production. It must be "off" rather than
+  // The case a board rendered outside the shell hits, in a test or in
+  // production. It must be "off" rather than
   // a thrown error: a component that cannot find the switch has no business
   // deciding the answer is "poll anyway", and a panel that threw here would
   // take the console's error boundary with it over a preference.
@@ -67,42 +66,6 @@ test("with no provider above it, nothing polls", () => {
 
   expect(screen.getByRole("button").textContent).toBe("PAUSED");
   expect(screen.getByTestId("cadence").textContent).toBe("false");
-});
-
-test("the console reaches the same context object a plugin would", async () => {
-  // The failure this exists for is silent and is not about behaviour: two
-  // copies of the module mean two `createContext` calls, and whoever reads the
-  // second finds no provider and pauses forever.
-  //
-  // The nesting is the whole test, and the first version of it had the nesting
-  // backwards — console provider outside, SDK provider inside, console hook at
-  // the bottom. The outer provider satisfied the console's hook whether or not
-  // the two spellings named one context, so re-declaring `createContext` in
-  // `session/live.tsx` left all 400 tests green. Providing through the SDK and
-  // reading through the console, with no console provider anywhere, is what
-  // makes the identity load-bearing.
-  const user = userEvent.setup();
-
-  render(
-    <sdk.LiveProvider>
-      <Readout />
-    </sdk.LiveProvider>,
-  );
-
-  // Live, not paused: the SDK's provider was found by the console's `useLive`.
-  // Two contexts would give the no-provider default and read "false" here.
-  expect(screen.getByTestId("cadence").textContent).toBe("10000");
-  await user.click(screen.getByRole("button"));
-  expect(screen.getByTestId("cadence").textContent).toBe("false");
-});
-
-test("the console's re-export is the SDK's own binding, not a copy of it", () => {
-  // The same property as the test above, asserted without a renderer — cheap
-  // enough to state directly, and it fails with a message that names the cause
-  // rather than a rendered string. Both are kept: this one localises the fault,
-  // and the render test proves the context actually flows.
-  expect(useLive).toBe(sdk.useLive);
-  expect(LiveProvider).toBe(sdk.LiveProvider);
 });
 
 /**
@@ -126,7 +89,7 @@ function TopicReadout({ topic = "res:usage" }: { topic?: string }) {
   );
 }
 
-const pushing = (...topics: string[]): sdk.LiveConnection => ({
+const pushing = (...topics: string[]): LiveConnection => ({
   status: "push",
   pushed: (topic) => topics.includes(topic),
 });
@@ -156,9 +119,8 @@ test("a pushed topic stops polling while an unpushed one keeps its interval", ()
 });
 
 test("cadence with no topic keeps its interval even while the socket is pushing", () => {
-  // The back-compat clause, and the reason this ships as a patch rather than a
-  // minor. A panel built against 0.1.1 calls `cadence(ms)` and behaves exactly
-  // as it did, instead of going dark until its author republishes.
+  // The back-compat clause: a caller that names no topic calls `cadence(ms)`
+  // and behaves exactly as it did before push existed.
   render(
     <LiveProvider connection={pushing("res:usage")}>
       <TopicReadout />
@@ -200,7 +162,7 @@ test("the LIVE switch outranks the transport", async () => {
   expect(screen.getByTestId("bare").textContent).toBe("false");
 });
 
-test("a provider with no connection reports polling, which is what a plugin panel sees", () => {
+test("a provider with no connection reports polling", () => {
   render(
     <LiveProvider>
       <TopicReadout />

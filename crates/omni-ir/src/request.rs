@@ -1,4 +1,4 @@
-//! The canonical request, mirroring `packages/ir/src/request.ts`.
+//! The canonical request, ported from `packages/ir/src/request.ts`.
 //!
 //! Each TS discriminated union is an internally tagged enum on the same
 //! discriminant (`type`, `kind` or `mode`) with the same spellings, so a

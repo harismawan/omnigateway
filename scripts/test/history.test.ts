@@ -5,8 +5,8 @@
  * worktree has a local `main` and a HEAD ahead of it, so it exercises exactly
  * the one arrangement that already worked — which is why both CI failures were
  * invisible from it and had to be found by reproducing the checkout shape
- * `actions/checkout` creates. That is the same lesson as
- * `packages/plugin-api/test/changed.test.ts`: an instrument that can only be
+ * `actions/checkout` creates. That is the same lesson as the 0.x publish-drift
+ * test (`changed.test.ts`, on `bun-checkpoint`): an instrument that can only be
  * observed through state it cannot control is observed only where it is right.
  */
 

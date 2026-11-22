@@ -20,15 +20,18 @@
  * remove, and what still talks about it as though it were there?** On the branch
  * it was written for it reports one line and no false positives.
  *
- * Three exclusions, each derived rather than listed:
+ * Four exclusions, three derived rather than listed:
  *
  * - `docs/` is skipped. Specs record past intent by design, and CLAUDE.md says
  *   to read them as history.
  * - A removed declaration whose name is a registered provider id is not a
  *   removed concept — `const kilo` moving does not stop `kilo` being a provider
- *   that comments may name. The ids come from `descriptors.ts`.
+ *   that comments may name. The ids are the top-level keys of
+ *   `crates/omni-control/data/provider-catalog.json`.
  * - A mention with a history marker near it ("was", "no longer", "replaced"…)
  *   is a deliberate record, which is the thing this repository asks for.
+ * - Declarations under the trees deleted with the TypeScript gateway
+ *   (`RETIRED`, the one listed exclusion; see its docblock).
  *
  * Run: `bun run check:claims`. Exits non-zero with the lines to fix.
  */
@@ -98,6 +101,19 @@ if (resolved.base === undefined) {
 const base = resolved.base;
 const changed = changedSources(ROOT, base);
 
+/**
+ * Trees deleted whole when the TypeScript gateway was retired for the Rust one.
+ *
+ * Their declarations are not removed *concepts*: the Rust crates carry the same
+ * rules under other names, and a comment naming the TS symbol records where a
+ * rule came from (the TS reference lives on the `bun-checkpoint` branch).
+ * Counting them made the check report the retirement itself — every console
+ * comment naming a server function — which is the noise this script exists
+ * not to produce. Once the retirement is on `main` these paths exist at no
+ * base, and the exclusion is inert.
+ */
+const RETIRED = ["apps/gateway/", "apps/cli/", "packages/"];
+
 // Declared at the base, gone in the working tree.
 //
 // **The working tree, not HEAD.** This read `${base}..HEAD` and `git show
@@ -108,6 +124,7 @@ const changed = changedSources(ROOT, base);
 // differently about the same repository for two commits.
 const removed = new Set<string>();
 for (const file of changed) {
+  if (RETIRED.some((root) => file.startsWith(root))) continue;
   let before = "";
   try {
     before = git("show", `${base}:${file}`);
@@ -135,9 +152,15 @@ for (const file of tracked) {
 
 // Raw, not `readable`: this is a fixed path the repository always has, so its
 // absence is a broken checkout rather than an ordinary working-tree state, and
-// swallowing that would make the provider-id skip list silently empty.
-const descriptors = readFileSync(join(ROOT, "packages/providers/src/descriptors.ts"), "utf8");
-const providerIds = new Set([...descriptors.matchAll(/^ {2}(\w+):\s/gm)].map(([, id]) => id ?? ""));
+// swallowing that would make the provider-id skip list silently empty. The
+// catalog's top-level keys are the provider ids.
+const catalog: unknown = JSON.parse(
+  readFileSync(join(ROOT, "crates/omni-control/data/provider-catalog.json"), "utf8"),
+);
+if (typeof catalog !== "object" || catalog === null || Array.isArray(catalog)) {
+  throw new Error("provider-catalog.json is not an object keyed by provider id");
+}
+const providerIds = new Set(Object.keys(catalog));
 
 const gone = [...removed].filter((name) => !alive.has(name) && !providerIds.has(name));
 

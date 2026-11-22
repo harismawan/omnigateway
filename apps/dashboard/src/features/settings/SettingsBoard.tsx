@@ -1,10 +1,3 @@
-import {
-  DEFAULT_SMART_ROUTER_POLICY,
-  GUARDRAIL_HISTORY_TURNS_MAX,
-  GUARDRAIL_TIMEOUT_MAX_MS,
-  SMART_ROUTER_POLICY_MAX_CHARS,
-  SMART_ROUTER_TIMEOUT_MAX_MS,
-} from "@omni/store/types";
 import { type ReactNode, useEffect, useId, useState } from "react";
 import styled from "styled-components";
 import {
@@ -16,6 +9,13 @@ import {
 } from "../../api/queries.ts";
 import type { PonytailMode, Settings, SmartRouterModelState } from "../../api/types.ts";
 import { PageHead } from "../../components/Rack.tsx";
+import {
+  DEFAULT_SMART_ROUTER_POLICY,
+  GUARDRAIL_HISTORY_TURNS_MAX,
+  GUARDRAIL_TIMEOUT_MAX_MS,
+  SMART_ROUTER_POLICY_MAX_CHARS,
+  SMART_ROUTER_TIMEOUT_MAX_MS,
+} from "../../lib/domain.ts";
 import { Button } from "../../ui/Button.tsx";
 import { Field, Input, Textarea } from "../../ui/Field.tsx";
 import { Meter } from "../../ui/Meter.tsx";
@@ -484,9 +484,8 @@ function parseDraft(
       // same answer the store gives a value it does not recognise.
       // `hasOwn`, not `in`: `in` walks the prototype chain, so "toString" would
       // pass the guard and then be cast to a mode nothing can render. The
-      // console cannot import `isPonytailMode` — rule 12 permits it
-      // `@omni/store/types` and not the catalog subpath — so this is the local
-      // answer, and the `Record` below is what keeps the option list honest.
+      // console has no `isPonytailMode` of its own to call, so this is the
+      // local answer, and the `Record` below is what keeps the option list honest.
       ponytailMode:
         draft.ponytailMode !== undefined && Object.hasOwn(PONYTAIL_LEVELS, draft.ponytailMode)
           ? (draft.ponytailMode as PonytailMode)

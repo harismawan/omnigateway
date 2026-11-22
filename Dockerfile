@@ -3,41 +3,19 @@ FROM --platform=$BUILDPLATFORM oven/bun:1.4.4-alpine AS base
 WORKDIR /app
 
 # Manifests first: this layer is cached until a dependency actually changes,
-# so editing source does not reinstall node_modules.
-#
-# Every workspace has to be here, dev dependencies included. A pruned checkout
-# must keep each workspace its survivors name, and bun checks that against
-# bun.lock before it looks at whether --production would have skipped the edge
-# -- so @omni/testkit needs a line even though nothing under src/ imports it.
-# Omitting one is not a slow image, it is `bun install` refusing to run at all.
+# so editing source does not reinstall node_modules. The console is the only
+# workspace, so its manifest is the only one `bun install` checks against
+# bun.lock.
 COPY package.json bun.lock ./
-COPY packages/control/package.json packages/control/
-COPY packages/coord/package.json packages/coord/
-COPY packages/dashboard-sdk/package.json packages/dashboard-sdk/
-COPY packages/ir/package.json packages/ir/
-COPY packages/plugin-api/package.json packages/plugin-api/
-COPY packages/ponytail/package.json packages/ponytail/
-COPY packages/providers/package.json packages/providers/
-COPY packages/ratelimit/package.json packages/ratelimit/
-COPY packages/router/package.json packages/router/
-COPY packages/rtk/package.json packages/rtk/
-COPY packages/store/package.json packages/store/
-COPY packages/testkit/package.json packages/testkit/
-COPY apps/gateway/package.json apps/gateway/
 COPY apps/dashboard/package.json apps/dashboard/
 
 # The console is built here, with dev dependencies, and only its output is
-# carried forward. One install rather than two: the dashboard's build reaches
-# the SDK and the store's types through the workspace, so a partial install
-# fails its typecheck with a module it cannot find.
+# carried forward.
 FROM base AS build
 RUN bun install --frozen-lockfile
 COPY tsconfig.base.json ./
-COPY packages packages
-COPY apps/gateway apps/gateway
 COPY apps/dashboard apps/dashboard
-# The regular build's `typecheck` step reaches the repository's `scripts/` for two
-# import-boundary tests, which do not ship; CI typechecks, the image compiles.
+# Production build only: `typecheck` runs in CI, the image compiles.
 RUN bun run --cwd apps/dashboard build:production
 
 # Native musl build on each buildx target (QEMU on single-architecture hosts).
@@ -47,9 +25,6 @@ WORKDIR /app
 RUN apk add --no-cache build-base perl linux-headers
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates crates
-# Rust embeds the same migration SQL as the frozen TS store.
-COPY packages/store/src/sqlite/migrations packages/store/src/sqlite/migrations
-COPY packages/store/src/postgres/migrations packages/store/src/postgres/migrations
 ARG OMNI_VERSION=0.0.0-dev
 ENV OMNI_CLI_VERSION=$OMNI_VERSION
 RUN cargo build --locked --release -p omni-gateway --bin omnigateway

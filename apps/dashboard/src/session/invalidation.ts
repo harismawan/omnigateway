@@ -39,10 +39,11 @@ export const TOPIC_QUERIES: Readonly<Record<string, InvalidateQueryFilters>> = {
    * the client surface's `["client", "usage", …]` alongside it.
    *
    * Both, because the topic describes the *resource* and both branches read it.
-   * A client session holds this topic (see `authorised` in the gateway's
-   * `stream.ts`), so an entry covering only the console's key would leave the
-   * client subscribed to a frame that does nothing — which is silence, and
-   * silence is indistinguishable from a quiet gateway.
+   * A client session holds this topic (see `authorised` in
+   * `crates/omni-gateway/src/stream.rs`), so an entry covering only the
+   * console's key would leave the client subscribed to a frame that does
+   * nothing — which is silence, and silence is indistinguishable from a quiet
+   * gateway.
    */
   "res:usage": {
     predicate: (query) =>
@@ -153,7 +154,7 @@ export function invalidateTopic(client: QueryClient, topic: string): void {
  * what it missed.
  *
  * Deliberately not `invalidateQueries()` with no argument: a reconnect says
- * nothing about a captured body or about which plugins are installed, and the
+ * nothing about a captured body or about what supervises the process, and the
  * `res:logs` predicate is the one place that distinction is written down.
  */
 export function invalidateEveryTopic(client: QueryClient): void {

@@ -1,9 +1,9 @@
-//! Core migrations, shared byte-for-byte with `packages/store/src/sqlite/db.ts`.
+//! Core SQLite migrations.
 //!
-//! The SQL is the TS files themselves (`include_str!`), split the way TS splits
-//! them, recorded in the same `migrations(id, applied_at)` ledger. A database
-//! is therefore at the same migration id whichever build last opened it, and
-//! either build continues from wherever the other stopped.
+//! The SQL lives in `crates/omni-store/migrations/sqlite/` (`include_str!`),
+//! byte-for-byte the files the TS store shipped, split the way it split them,
+//! recorded in the same `migrations(id, applied_at)` ledger. Installed databases
+//! record applied ids, so a shipped file is frozen: never edit one, add the next.
 
 use crate::error::StoreError;
 use crate::{js, rollup};
@@ -32,7 +32,7 @@ macro_rules! migration_sql {
     ($file:literal) => {
         include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../packages/store/src/sqlite/migrations/",
+            "/migrations/sqlite/",
             $file
         ))
     };
@@ -84,8 +84,10 @@ pub const LATEST_MIGRATION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].id;
 /// `statements` in `db.ts`: comment lines dropped, split on a semicolon that
 /// ends a line, each piece trimmed, empties dropped.
 ///
-/// A line-end split, not a SQL parser — the TS comment says why that is enough
-/// for every file in `migrations/`. The trims are JavaScript's, not Rust's.
+/// A line-end split, not a SQL parser. Enough for every file in
+/// `migrations/sqlite/` — none holds a `BEGIN … END` trigger body or a quoted
+/// semicolon — and a migration that needs either moves this to a real
+/// tokenizer. The trims are JavaScript's, not Rust's.
 pub fn statements(sql: &str) -> Vec<String> {
     let kept: Vec<&str> = sql
         .split('\n')

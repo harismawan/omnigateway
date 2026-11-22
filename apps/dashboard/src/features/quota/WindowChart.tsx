@@ -1,4 +1,3 @@
-import { durationFor, quotaVerdict } from "@omni/store/types";
 import type { ReactNode } from "react";
 import {
   CartesianGrid,
@@ -10,6 +9,7 @@ import {
   YAxis,
 } from "recharts";
 import styled from "styled-components";
+import { durationFor, quotaVerdict } from "../../lib/domain.ts";
 import { formatChartTime, formatDateTime, formatDuration, isDatedSpan } from "../../lib/format.ts";
 import {
   budgetPace,
@@ -135,8 +135,8 @@ function projectedText(resetsAt: number | null, projection: QuotaPace | null): s
 /**
  * How the exhaustion estimate reads, always phrased against the reset.
  *
- * The verdict comes from `@omni/store/types` rather than from `survives`
- * directly, and `omni quota` phrases from the same call. `survives` is true by
+ * The verdict comes from `quotaVerdict` in `lib/domain.ts` rather than from
+ * `survives` directly, and `omni quota` phrases from the same rule. `survives` is true by
  * construction whenever there is no `exhaustsAt` — which includes a window with
  * no ceiling and one with no inferable rate — so branching on it first prints
  * "lasts the window" beside a panel that is simultaneously reporting that

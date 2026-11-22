@@ -157,9 +157,9 @@ test("a gap frame refetches the whole window instead of stitching onto a hole", 
 });
 
 test("a transport status arm is ignored, not read as a hole", async () => {
-  // `open`, `refused` and `closed` were added to `TopicMessage` for plugin
-  // channels, which can be refused; they are delivered by topic, so this board
-  // sees them too. Its `gap` arm treats anything that is not a readable frame
+  // `open`, `refused` and `closed` exist on `TopicMessage` for held topics,
+  // which can be refused; they are delivered by topic, so this board sees them
+  // too. Its `gap` arm treats anything that is not a readable frame
   // as a hole and drops the accumulated tail — so without an explicit ignore,
   // an `ack` for `stream:console` would clear the terminal on every reconnect.
   //

@@ -12,7 +12,7 @@ Derive the `Secure` cookie policy from the configured public `OMNI_BASE_URL`, no
 request URL. TLS-terminating reverse proxies otherwise risk receiving privileged session cookies
 without `Secure`.
 
-Evidence: `apps/gateway/src/routes/http.ts`, `apps/gateway/src/routes/admin.ts`,
+Evidence: `crates/omni-gateway/src/api.rs` (`session_cookie`, `base_url_is_https`),
 `docs/deploying.md`.
 
 ### Causally ordered credential-health transitions
@@ -20,8 +20,8 @@ Evidence: `apps/gateway/src/routes/http.ts`, `apps/gateway/src/routes/admin.ts`,
 Prevent an older, slow success from clearing breaker or rate-limit protection established by a
 newer failure. Add an ordering token or transition revision across both store implementations.
 
-Evidence: `apps/gateway/src/dispatch/index.ts`, `packages/store/src/sqlite/credentials.ts`,
-`packages/store/src/postgres/credentials.ts`.
+Evidence: `crates/omni-gateway/src/dispatch.rs`, `crates/omni-gateway/src/overlay.rs`,
+`crates/omni-store/src/pg/health.rs`.
 
 ## Near-term features
 
@@ -34,8 +34,8 @@ last outcome in database status.
 **Value:** High  
 **Estimated scope:** 3–5 days
 
-Evidence: `README.md`, `apps/gateway/src/maintenance.ts`,
-`packages/control/src/database.ts`.
+Evidence: `README.md`, `crates/omni-gateway/src/maintenance.rs`,
+`crates/omni-control/src/database.rs`.
 
 ### 2. Store-aware readiness endpoint
 
@@ -46,7 +46,7 @@ credentials by default.
 **Value:** High for Kubernetes and clustered deployments  
 **Estimated scope:** 2–5 days
 
-Evidence: `apps/gateway/src/app.ts`, `k8s/deployment.yaml`, `docs/deploying.md`.
+Evidence: `crates/omni-gateway/src/server.rs`, `k8s/deployment.yaml`, `docs/deploying.md`.
 
 ### 3. Paginated request-log investigation and export
 
@@ -56,9 +56,8 @@ metadata-only JSONL/CSV export. Do not include captured request bodies in bulk e
 **Value:** High for incident investigation  
 **Estimated scope:** 5–8 days
 
-Evidence: `packages/control/src/usage.ts`, `packages/store/src/types.ts`,
-`packages/store/src/sqlite/usage.ts`, `packages/store/src/postgres/usage.ts`,
-`apps/dashboard/src/features/logs/LogsBoard.tsx`.
+Evidence: `crates/omni-control/src/logs.rs`, `crates/omni-store/src/logs.rs`,
+`crates/omni-store/src/pg/logs.rs`, `apps/dashboard/src/features/logs/LogsBoard.tsx`.
 
 ### 4. Gateway-key rotation
 
@@ -69,8 +68,8 @@ rotation scheduler.
 **Value:** High for routine and emergency secret rotation  
 **Estimated scope:** 4–7 days
 
-Evidence: `packages/control/src/keys.ts`, `apps/gateway/src/routes/admin.ts`,
-`apps/cli/src/registry.ts`.
+Evidence: `crates/omni-control/src/keys.rs`, `crates/omni-gateway/src/admin_routes.rs`,
+`crates/omni-cli/src/registry.rs`.
 
 ### 5. Manual quota refresh
 
@@ -81,8 +80,8 @@ probe failure never disables a credential.
 **Value:** Medium–high  
 **Estimated scope:** 2–4 days
 
-Evidence: `packages/control/src/quota/poll.ts`, `apps/gateway/src/quota/poller.ts`,
-`apps/cli/src/commands/quota.ts`.
+Evidence: `crates/omni-control/src/quota_runtime.rs`, `crates/omni-gateway/src/quota.rs`,
+`crates/omni-cli/src/quota_operations.rs`.
 
 ### 6. Bounded scheduled OAuth refresh
 
@@ -92,7 +91,7 @@ Retain per-credential coalescing and cluster coordination.
 **Value:** Medium–high for installations with several OAuth accounts  
 **Estimated scope:** 2–4 days
 
-Evidence: `apps/gateway/src/oauth/scheduler.ts`, `packages/control/src/quota/poll.ts`.
+Evidence: `crates/omni-gateway/src/refresh.rs`, `crates/omni-control/src/quota_runtime.rs`.
 
 ### 7. Plugin starter repository
 
@@ -103,8 +102,7 @@ until more than one external plugin needs it.
 **Value:** Medium; potentially high if the plugin ecosystem grows  
 **Estimated scope:** 3–6 days
 
-Evidence: `docs/writing-a-plugin.md`, `packages/plugin-api/package.json`,
-`packages/testkit/package.json`.
+Evidence: none in 1.x — plugins are not supported (0.x plugin API: `bun-checkpoint`).
 
 ## Plugin opportunities
 

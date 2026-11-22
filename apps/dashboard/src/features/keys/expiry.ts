@@ -3,8 +3,9 @@
 // free to drift from the one `/v1` enforces, and a key refused at `/v1` while
 // the console calls it active is the failure this whole feature would otherwise
 // ship.
-import { keyUsable } from "@omni/store/types";
+
 import type { ApiKeySummary } from "../../api/types.ts";
+import { keyUsable } from "../../lib/domain.ts";
 
 /**
  * The three states a key can be in, which is one more than the board used to

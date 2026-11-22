@@ -1,25 +1,13 @@
 # Architecture
 
-Rust quota runtime ownership, supported provider boundary and public APIs are
-documented in [Rust quota runtime](docs/rust-quota-runtime.md).
+How OmniGateway is put together, for contributors and design auditors. [How it is
+built](#how-it-is-built) has the crate map and layering rules; the rest of this document
+details what sits behind them. Conventions that govern changes — boundaries, testing, traps —
+are in [CLAUDE.md](CLAUDE.md). Approved designs live in `docs/superpowers/specs/`; they name the
+0.x TypeScript code as it was, which is on the `bun-checkpoint` branch.
 
-Rust CLI process supervision and metadata-only doctor diagnostics are described
-in [Rust CLI service boundary](docs/rust-cli-service.md); service launches use the
-canonical `omnigateway` executable, not the `omni` dispatch identity.
-
-Rust database replacement registers the gateway's persistent SQLite owners in
-`omni_store::lifecycle`: writer/checkpointer, routing refresher/miss resolver,
-auth/control and OAuth. The swap takes the transient-access barrier and owner
-locks, closes every old connection, runs the shared control restore/import
-protocol, then reopens owners before rebuilding routing and publishing `res:*`.
-Export pages and maintenance operations hold transient-access leases; export
-connections do not survive a page. `/v1/*` admission is response-owned and drains
-before replacement; `/health` does not need a database connection. A typed swap
-failure keeps client admission closed until a successful recovery restore.
-
-How OmniGateway put together, for contributors and design auditors. [How it is built](#how-it-is-built) below has package map and layering rules; rest of this doc detail behind them.
-
-Conventions governing changes — architectural boundaries, testing expectations, traps — see [CLAUDE.md](CLAUDE.md). Approved designs live in `docs/superpowers/specs/`.
+Narrower Rust references: [Rust quota runtime](docs/rust-quota-runtime.md), [Rust CLI service
+boundary](docs/rust-cli-service.md), [cluster cutover](docs/rust-cluster-cutover.md).
 
 ## Contents
 
@@ -31,6 +19,7 @@ Conventions governing changes — architectural boundaries, testing expectations
 - [Dispatch](#dispatch)
 - [Providers](#providers)
 - [Storage](#storage)
+  - [Body capture forensics](#body-capture-forensics)
   - [Replacing the database while it is open](#replacing-the-database-while-it-is-open)
 - [Background loops](#background-loops)
   - [Stopping and restarting](#stopping-and-restarting)
@@ -38,228 +27,240 @@ Conventions governing changes — architectural boundaries, testing expectations
 - [The console and the CLI](#the-console-and-the-cli)
 - [Plugins](#plugins)
 - [Clustering](#clustering)
+- [Account-derived provider catalogs](#account-derived-provider-catalogs)
 
 ## How it is built
 
-A Bun workspace monorepo. The layering is deliberate and enforced by what each
-package is allowed to import: a provider-neutral core at the bottom, provider
-knowledge in one place, pure routing above that, and every side effect pushed up
-into the gateway process.
+One Cargo workspace (`crates/`, 14 crates) building one binary, `omnigateway`, plus a React
+console built with Bun into `apps/dashboard/dist` and served by that binary. The binary is also
+the CLI: invoked as `omni` (a symlink in every release archive) or as `omnigateway omni …`,
+`crates/omni-gateway/src/main.rs` hands argv to `omni_cli::run` before any runtime starts.
 
-The repository pins Bun 1.4.4 across development, CI and release builds.
-[The built-ins audit](docs/bun-builtins-audit.md) records native API migrations
-and the wire/security contracts that prevent equivalent-looking substitutions.
+The layering is enforced by what each crate may depend on: a provider-neutral core at the
+bottom, provider knowledge in one crate, pure ranking and limit arithmetic above that, and every
+side effect pushed up into the gateway process.
 
 ```mermaid
 graph TD
   subgraph frontends[Front ends]
-    gateway["apps/gateway<br/><i>Elysia server, dispatch, loops</i>"]
-    cli["apps/cli<br/><i>the omni binary</i>"]
-    dashboard["apps/dashboard<br/><i>React console</i>"]
+    gateway["omni-gateway<br/><i>hyper server, dispatch, loops</i>"]
+    cli["omni-cli<br/><i>omni</i>"]
+    dashboard["apps/dashboard<br/><i>React console, /api/* only</i>"]
   end
 
-  control["@omni/control<br/><i>every operator action;<br/>no HTTP, argv or terminal</i>"]
-  router["@omni/router<br/><i>pure ranking;<br/>no I/O, no timers</i>"]
-  store["@omni/store<br/><i>SQLite + field encryption</i>"]
-  providers["@omni/providers<br/><i>adapters, wire codecs,<br/>catalog, HTTP client</i>"]
-  rtk["@omni/rtk<br/><i>tool-result filters</i>"]
-  ponytail["@omni/ponytail<br/><i>vendored coding ruleset</i>"]
-  ratelimit["@omni/ratelimit<br/><i>key limit arithmetic;<br/>no clock, no state</i>"]
-  ir["@omni/ir<br/><i>domain model — depends on nothing</i>"]
+  core["omni-gateway-core<br/><i>config, snapshot, single-node limiter</i>"]
+  control["omni-control<br/><i>operator operations;<br/>no HTTP, argv or terminal</i>"]
+  dialects["omni-dialects<br/><i>client ingress / egress</i>"]
+  cluster["omni-cluster-limit<br/><i>Redis limiter + load</i>"]
+  router["omni-router<br/><i>pure ranking</i>"]
+  store["omni-store<br/><i>SQLite + Postgres, writer</i>"]
+  providers["omni-providers<br/><i>codecs, SSE, HTTP client</i>"]
+  coord["omni-coord<br/><i>Memory + Redis coordinator</i>"]
+  ratelimit["omni-ratelimit<br/><i>pure limit arithmetic</i>"]
+  crypto["omni-crypto"]
+  ir["omni-ir<br/><i>domain model</i>"]
+  rtk["omni-rtk<br/><i>tool-result filters (unwired)</i>"]
 
+  gateway --> core
   gateway --> control
-  gateway --> rtk
-  gateway --> ponytail
-  gateway --> ratelimit
+  gateway --> dialects
+  gateway --> cluster
+  gateway --> cli
   cli --> control
-  dashboard -. "types only" .-> ir
-  dashboard -. "types only" .-> store
+  core --> control
+  core --> cluster
   control --> router
-  control --> ponytail
-  control --> ratelimit
-  router -. "types + 2 pure helpers,<br/>via /types subpath" .-> store
-  router --> providers
-  store --> rtk
-  store --> ponytail
+  control --> providers
+  control --> store
+  control --> coord
+  cluster --> coord
+  cluster --> ratelimit
+  coord --> ratelimit
+  router -. "types only" .-> store
+  router --> ir
   store --> ratelimit
+  store --> crypto
   providers --> ir
+  providers --> crypto
+  dialects --> ir
+  ratelimit --> ir
   rtk --> ir
-  ponytail --> ir
-  store --> ir
+  dashboard -. "HTTP" .-> gateway
 ```
 
-Arrows read *depends on*, and the direction never reverses. Two rules do most of
-the work: `@omni/ir` is side-effect free and imports nothing, and `@omni/router`
-is a pure function — no network, no database, no timers. Everything that has to
-touch the world is pushed up into the gateway process.
+Arrows read *depends on* (a simplification of the Cargo manifests; transitive edges omitted).
+`omni-ir` depends on no other crate in the workspace. `omni-router` and `omni-ratelimit` are
+pure functions — no I/O, no clock, `now` and the random draw are parameters — so a ranking or a
+limit decision is reproducible from its inputs. `omni-router` reads `omni-store` row types but
+never opens a connection.
 
-`@omni/ratelimit` is the same shape applied to key limits: it decides whether a
-request is over a ceiling, and it holds no clock and no counters — `now` is a
-parameter and the counts are handed to it, so it never learns whether a number
-came from memory or from SQLite. It imports nothing but its schema validator, not
-even `@omni/ir`. The rings and the in-flight gauge live in the gateway, because
-state is not the package's job, and that split is what lets sliding-window
-arithmetic be tested without a gateway, a store, or a clock.
+`omni-ratelimit` decides whether a request is over a ceiling and holds no counters; the rings,
+buckets and gauges live in `omni-gateway-core/src/ratelimit.rs` (one process) and
+`omni-cluster-limit` (a fleet). That split is what lets sliding-window arithmetic be tested
+without a gateway, a store, or a clock (`crates/omni-ratelimit/tests/`).
 
-The dashboard's edges are dotted because they are type-level only. It has no edge
-to `@omni/providers` at all: provider names, colours, order and model lists reach
-the console over `GET /api/catalog`, because a provider loaded from
-`<root>/plugins/` exists only at runtime and no build-time import could see one.
+`omni-control` is every operator action, shared by `/api/*` handlers and the CLI. The CLI does
+not call the running server: it opens the SQLite file itself, which is why it works with the
+gateway down. Postgres fleets are administered over HTTP.
 
-`@omni/providers/catalog` and `/descriptors` are still deliberately import-free,
-for a different reason than they used to be: the pure router imports
-`descriptors`, and the leaf property is what lets it.
+The console has no build-time edge to any crate. Provider names, colours, order and models reach
+it over `GET /api/catalog`, built from `crates/omni-control/data/provider-catalog.json` — the
+only source of the built-in catalog. Constants the console copies from Rust are held to their
+owners by `apps/dashboard/test/api/rustMirrors.test.ts`, which reads Rust source.
 
-The router's dotted edge into `@omni/store` is nearly the same story: its
-package-root imports are all `import type`. Two pure arithmetic helpers,
-`durationFor` and `cacheReadRate`, do run at runtime — imported through the
-`@omni/store/types` leaf subpath, so neither SQLite nor crypto enters the
-router's module graph and the no-I/O rule holds.
-
-The gateway and the CLI are two front ends over the same `@omni/control`
-functions. The CLI does not call the running server's API — it opens the same
-SQLite file directly, which is why it still works when the gateway is down.
-
-The rest of this document goes a level deeper: a request traced end to end, how
-routing ranks and excludes accounts, the commit point that decides whether
-failover is still possible, the provider adapter shape, the database schema and
-its encryption boundary, and the background loops.
+`omni-rtk` is built and tested but not called: dispatch sends the request as received (see
+[Dispatch](#dispatch)).
 
 ## What a request actually does
 
-`POST /v1/messages`, `POST /v1/chat/completions` and `POST /v1/responses` same handler; dialect
-is parameter.
+`POST /v1/messages`, `POST /v1/chat/completions` and `POST /v1/responses` go through one
+handler, `proxy` in `crates/omni-gateway/src/server.rs`; the dialect is a parameter.
 
 ```mermaid
 sequenceDiagram
   autonumber
   actor Client
-  participant Route as routes/proxy
-  participant In as ingress
-  participant RTK as @omni/rtk
-  participant Pony as @omni/ponytail
-  participant Router as @omni/router
-  participant Disp as dispatch
-  participant Cred as @omni/store
-  participant Prov as provider adapter
+  participant Route as server.rs proxy
+  participant Snap as gateway-core snapshot
+  participant In as omni-dialects ingress
+  participant Lim as limiter
+  participant Scr as screening.rs
+  participant Disp as dispatch.rs
+  participant Router as omni-router
+  participant Prov as omni-providers codec
   participant Out as egress
-  participant Log as request_logs
+  participant W as writer
 
   Client->>Route: POST /v1/messages
-  Route->>Route: Bearer or x-api-key<br/>(both = reject), hash lookup
-  Route->>Route: per-key rate limit
-  Route->>In: validate + translate
-  In-->>Route: ChatRequest (provider-neutral IR)
-  Route->>Route: model allowlist,<br/>after alias normalization
-  opt key flagged for smart routing, switch on
-    Route->>Disp: local classifier per uncached segment<br/>(local-only, one row per check)
-    Disp-->>Route: PUBLIC, CONFIDENTIAL → model := local,<br/>or the request is refused
+  Route->>Snap: Bearer or x-api-key (conflict = AUTH),<br/>hash lookup in memory
+  Route->>In: parse + validate
+  In-->>Route: ChatRequest (IR)
+  Route->>Route: model allowlist, after [1m] normalization
+  Route->>Lim: admit (claims before any await)
+  opt key flagged for smart routing / carries a usage policy
+    Route->>Scr: screen_first: classifier dispatches<br/>(own rows, request_transforms off)
   end
-  opt key carries a usage policy
-    Route->>Disp: classifier request (own id, own row,<br/>no RTK, no ponytail, no capture)
-    Disp-->>Route: ALLOW, or the request is refused
-  end
-  Route->>Disp: dispatch(request, signal)<br/>(local-only when routed local)
-  Disp->>RTK: filter tool results (off by default)
-  RTK-->>Disp: rewritten request + savings report
-  Disp->>Pony: append ponytail ruleset (off by default)
-  Pony-->>Disp: request with ruleset last in system
+  Route->>Disp: dispatch(request, deadline)
   Disp->>Router: rank(snapshot, load)
-  Router-->>Disp: ordered candidates + exclusion reasons
-  Disp->>Log: pending row
-  Disp->>Cred: openForInference()
-  Note over Cred: decrypted here, not before
-  Disp->>Prov: send(request, creds, http)
+  Router-->>Disp: ordered candidates + exclusions
+  Disp->>W: Begin (pending row)
+  Disp->>Prov: send(request, secrets from snapshot, http)
   Prov-->>Disp: StreamEvent stream
   Disp->>Out: events
-  Out-->>Client: SSE in the client's dialect<br/>+ : keepalive every 10s
-  Disp->>Log: close out — tokens, cost, status
+  Out-->>Client: SSE in the client's dialect<br/>+ : keepalive every 10s (4s Responses)
+  Disp->>W: Finish — tokens, cost, status (exactly once)
 ```
 
-Two details diagram flattens. Credentials decrypt at step 13, not sooner — ranking ten candidates costs zero decryptions. Log row opens before first attempt, closes exactly once — client hanging up mid-stream recorded as such, not success.
+The request path performs no store read. Keys, models, credentials (with secrets already
+decrypted), health, quota and settings are one `Arc<GatewaySnapshot>` behind an `ArcSwap`
+(`omni-gateway-core/src/snapshot.rs`); a request loads it once. A key not yet in the snapshot is
+looked up by one guarded store read (`miss.rs`: negative cache, read budget). This differs from
+0.x, which decrypted lazily per purpose.
 
-**Usage policies** (`apps/gateway/src/guardrail/`). A key carrying one has each inference request judged before the real dispatch, after admission — so the check runs inside the key's concurrency slot and a refused request still counts. Judging is the first step of the event sequence the surface encoder consumes (`screenFirst`), not a step before it: a streaming route sends its head at once and its keepalives cover the classifier, and a refusal arrives as an in-stream `error` like every other pre-commit failure; the non-streaming path drains the same sequence into a status. The parent row is still completed exactly once, carrying `guardrail:allowed|denied|unavailable|unconfigured`. The classifier itself is an ordinary `dispatch` with its own request id and `request_logs` row under the same key (`guardrail:classifier`), debited through `finishLog` like any request (its debit first calls `recordOverride`, so the classifier model's override is charged on every replica though no admission recorded it), with `requestTransforms: false` and the bare transport, so neither RTK, ponytail nor body capture touches it. It rides the parent's admission and claims no `1m` ring slot. Fails closed: only a bare `ALLOW` reply the model finished (`endTurn`/`stopSequence`) is an allow. What is judged is the system prompt plus the last `guardrailHistoryTurns` human-written messages (tool turns are not human messages and do not count toward it), oldest first, the newest as the request and the rest as context, under one shared human-text cap the newest spends first, plus the text of every tool result after the oldest of them in a `<tool_results>` section under its own 16,000-character cap (images, files, native parts and call arguments never sent; `guardrail/extract.ts`). Verdicts are cached per process (bounded LRU, one hour) keyed on key, policy, model and the truncated judged texts and tool results as structured arrays — so each new tool turn is a new classifier call; failures never are. Design: [per-key guardrails](docs/superpowers/specs/2026-10-18-key-guardrails-design.md).
+The log row opens on the first routed attempt (`LogEvent::Begin`) and closes exactly once: a
+`Finisher` (`finish.rs`) sends `Finish`, and if dropped unsent — the client hung up — sends the
+499 row instead. Persistence is the batched writer's (see [Storage](#storage)).
 
-**Confidential routing** (`apps/gateway/src/smartRouter/`). Pre-dispatch screening is two steps in one place: smart routing, then the guardrail. Both run as the first steps of the same event sequence (`screenFirst`, which generalised the guardrail's judge-first wrapper), after admission, so the same rules apply — streaming sends its head at once, a refusal is an in-stream `error`, the parent row completes exactly once. A key is screened only when its `smartRouting` flag and the global `smartRouterEnabled` are both on; otherwise the path is the one it always was. `smartRouter/extract.ts` pulls every text the request carries (system and mid-conversation system turns, user and assistant text, thinking, tool-call arguments, tool results, tool names, descriptions, input schemas, options and provider-tool wire, citations, the vendor bag, and every string field of native blocks and tool-result native parts bar signatures, encrypted content, ids and base64; never images or files) and splits it into segments of up to 8,000 characters, packed from the start so earlier segments stay stable as a conversation grows. `smartRouter/check.ts` classifies each uncached segment through an ordinary `dispatch` against `smartRouterClassifierModel` (at most four in flight, each under `smartRouterTimeoutMs`, `requestTransforms: false`, bare transport) and decides `external`, `local` or `refused`. One `request_logs` row per check, tagged `smart-router:classifier`, debited through `finishLog` like the guardrail's. Verdicts are cached per process for an hour per classifier, policy and segment; failures never are; more than 64 uncached segments routes local unjudged. A local decision re-dispatches the request with `model := smartRouterLocalModel`, and `smartRouter/relabel.ts` keeps the row on the client's model while the response names the local one. **Fails closed, never falls back external:** both models must be virtual models whose every target is the `custom` provider, and dispatch re-checks that at send time (`DispatchOptions.localOnly`) for the rerouted request, every classifier call, and a guardrail check on a locally routed request, so a model edited afterwards cannot start reaching an external provider. When the request goes local the guardrail judges with the smart-router classifier, never `guardrailModel`. The parent row carries `smart-router:public|local|already-local|unavailable|unconfigured` (and `oversize`); a non-streaming judged response carries `x-omni-route`. A reduction in leaks, not a security boundary.
+**Usage policies** (`screening.rs`). A key with a `guardrail_policy` has each inference request
+judged after admission, inside the event sequence the encoder consumes (`screen_first`): a
+streaming route sends its head at once, keepalives cover the classifier, a refusal is an
+in-stream error. The classifier is an ordinary dispatch with its own request id and row, with
+`request_transforms: false`. Only a bare `ALLOW` from a finished reply admits; deny, timeout,
+unreadable reply and unset `guardrailModel` all refuse. Verdicts are cached per process for an
+hour (`VERDICT_TTL_MS`).
 
-`GET /v1/models` answered from routing snapshot, no provider call. `POST /v1/messages/count_tokens` estimated locally — deliberately writes no usage row. It reads the routing snapshot too, and applies the ponytail injection by hand before estimating: it never dispatches, so a count that skipped it would under-report by the whole ruleset on every call while the real request paid for it. No degradation is recorded there, because there is no row to record it on.
+**Confidential routing** (same file). With the key's `smart_routing` flag and the global
+`smartRouterEnabled`, every text the request carries is segmented and classified against
+`smartRouterClassifierModel`; a confidential verdict re-dispatches to `smartRouterLocalModel`
+with `local_only`, which admits only virtual models whose every target is `custom`. Fails
+closed, never falls back external. Smart routing runs before the guardrail.
+
+`GET /v1/models` is answered from the snapshot, smallest target window per model.
+`POST /v1/messages/count_tokens` is a local estimate (`omni_ir::tokens`), charged to the
+`requests` dimension only, writing no usage row.
 
 ## Observability
 
-Observability lives in `apps/gateway/src/telemetry`, with a pure registry, renderer and span
-encoder separated from the OTLP queue and timer. Three constraints determine the shape:
+`crates/omni-gateway/src/telemetry.rs` (Prometheus registry and renderer) and `otlp.rs` (span
+encoder, bounded queue, exporter). Three constraints shape it:
 
-1. `/metrics` reads no store and calls no coordinator; every exported value is process-local.
-2. Trace context is inbound only. Provider headers remain ordered and unchanged, so no
-   `traceparent` is propagated upstream.
-3. Both surfaces are absent by default. Without an OTLP endpoint no span array is allocated, and
-   a bounded exporter drops rather than delaying or failing a request.
+1. `/metrics` reads no store and calls no coordinator; every exported value is process-local. It
+   exists only when `OMNI_METRICS_TOKEN` is set and requires exactly `Bearer <token>`.
+2. Trace context is inbound only. `TraceHttp` wraps the provider `HttpClient` to time requests and
+   adds no header, so no `traceparent` reaches a provider.
+3. Without `OMNI_OTLP_ENDPOINT` nothing is traced; the exporter drops rather than delaying or
+   failing a request.
 
-The full rationale and metric/span vocabulary are in
-[the observability design](docs/superpowers/specs/2026-09-04-observability-design.md).
+Vocabulary and rationale: [the observability design](docs/superpowers/specs/2026-09-04-observability-design.md).
 
 ## Rate limiting
 
-Step 3 is sparse matrix, not counter. Limit = `(dimension, window)` pair. Pairs that exist are ones that mean something:
+A limit is a `(dimension, window)` pair. The pairs that exist are the ones that mean something:
 
 | Dimension | 1m | 5h | 1w | Counted from |
 | --- | --- | --- | --- | --- |
-| `requests` | ✓ | ✓ | ✓ | in-memory ring at `1m`; rollup + delta above it |
-| `tokens` | ✓ | ✓ | ✓ | rollup + delta, debited on completion |
-| `spend` (USD) | — | ✓ | ✓ | rollup + delta, debited on completion |
-| `concurrency` | *no window — a gauge* | | | in-flight count in this process |
+| `requests` | ✓ | ✓ | ✓ | bounded history at `1m`; seeded buckets + debits above it |
+| `tokens` | ✓ | ✓ | ✓ | seeded buckets, debited on completion |
+| `spend` (USD) | — | ✓ | ✓ | seeded buckets, debited on completion |
+| `concurrency` | *no window — a gauge* | | | in-flight count |
 
-No `spend` at `1m` — per-minute dollar ceiling is rate limit in costume; `requests` and `tokens` already shape burst there. No `1d` either; `usage_daily` is reporting rollup, and every extra window is another counter to keep, another header to render.
-
-Every window **slides**. Fixed one resets on clock edge, letting key limited to sixty a minute send sixty at `T+59s`, sixty more at `T+61s` — twice ceiling, no rule broken, at every window size.
+No `spend` at `1m` — a per-minute dollar ceiling is a rate limit in costume. Every window
+**slides**: a fixed window lets a key limited to sixty a minute send sixty at `T+59s` and sixty
+more at `T+61s`.
 
 ```mermaid
 flowchart TD
-  req(["request"]) --> claim["<b>claim</b> — synchronous<br/><i>ring stamp + gauge, before any await</i>"]
-  claim --> counts["counters<br/>ring · usage_rollup + delta · gauge"]
-  counts --> ev{"@omni/ratelimit<br/><i>pure: no clock, no I/O</i>"}
-  ev -- over --> back["<b>roll back the claim</b>"] --> deny(["429<br/><i>Retry-After from the oldest row</i>"])
+  req(["request"]) --> claim["<b>claim</b> — before any await<br/><i>1m stamp + gauge, key-wide and model subject</i>"]
+  claim --> ev{"omni-ratelimit<br/><i>pure: no clock, no I/O</i>"}
+  ev -- over --> back["<b>roll back both claims</b>"] --> deny(["429<br/><i>Retry-After from the window clearing last</i>"])
   ev -- under --> ok(["admitted<br/><i>headers carry the window nearest exhaustion</i>"])
-  ok --> fin["release in finally<br/><i>streams release on drain, hang-up, or abort</i>"]
-  ok -.-> debit["on completion: debit<br/>tokens · cost · long-window requests"]
-  debit -.-> counts
+  ok --> fin["release on Admission drop<br/><i>streams release when the body ends or is dropped</i>"]
+  ok -.-> debit["after the row commits: debit<br/>tokens · cost · long-window requests"]
 ```
 
-Three things load-bearing there.
+**The claim is taken before any await** and given back on refusal; read-then-record would let a
+burst judge one pre-burst snapshot. Pins: `crates/omni-gateway-core/tests/ratelimit.rs`
+(`a_burst_against_a_1m_ceiling_admits_exactly_the_ceiling_*`).
 
-**Claim is synchronous.** Ring stamp and gauge taken before first `await`, given back if request refused. Read-first-record-after would let every concurrent request for a key judge same pre-burst snapshot — not narrow race, since `await` alone enough to yield and no I/O need be involved.
+**Counts may run high, never low.** Long windows are time buckets (`buckets.rs`) seeded from the
+store and debited by every completed request **after its row commits**: the writer delivers each
+batch's completions and runs seed reads on its own connection between batches, on one ordered
+channel (`ratelimit_seed.rs`), so a row is counted by the seed or by its debit, never both and
+never neither. Seeding does not block: an unseeded window admits against what can be checked
+(deliberate difference from 0.x, documented in `ratelimit.rs`). A refusal's exact reset is read
+from the row stamps the seed loaded, so no store read precedes a 429.
 
-**Arithmetic is pure package.** `@omni/ratelimit` holds no clock, no state; `now` is parameter, counters handed to it, so it never learns whether number came from memory or SQLite. Rings and gauge live in `apps/gateway` — that what makes arithmetic testable without gateway, store, or clock.
+**Concurrency release is structural.** The single-node gauge is freed when the `Admission` is
+dropped, so the leak 0.x healed with a TTL cannot happen; the cluster gauge does need TTL and
+renewal (see [Clustering](#clustering)).
 
-**Counts may run high, never low.** Long window = rollup read cached thirty seconds plus in-memory delta; requests aging out inside that window not subtracted — figure errs toward *refusing early*. Opposite error is limiter you walk through by timing cache refresh, which attacker finds and operator cannot.
+**Per-model overrides stack, judged in one admission.** `limits.models` gives one requested model
+(after `[1m]` normalization) its own matrix; `LimitConfig::model_override` is the only lookup.
+The override counts under its own subject (`omni-cluster-limit/src/subject.rs`), one admission
+claims both subjects, `combine`s the decisions, and rolls back both on refusal. Bounds
+(`MAX_MODEL_OVERRIDES`, `MAX_MODEL_NAME_LENGTH`) in `omni-ratelimit/src/limits.rs`. Design:
+[per-model limits](docs/superpowers/specs/2026-10-16-per-model-key-limits-design.md).
 
-`tokens` and `spend` debit on completion, because exact count exists only then: key at ceiling refused on *next* request. So does `requests` at `5h`/`1w`, different reason — those read committed rows, and admission held in delta but pruned before its row landed counted nowhere. Concurrent burst can therefore overshoot long request ceiling by number in flight — what `concurrency` gauge bounds.
+Limits are one JSON object on `api_keys.limits`; dimension and window names are a storage
+contract that fails **closed** — an unknown name is a parse failure, refused at authentication
+as `INTERNAL`, while the key list still returns the row so an operator can find it.
 
-That gauge's release is the most dangerous line here. Non-streaming frees it in request-scope `finally`; stream frees it from `sseResponse`'s run-once completion, because streaming handler returns as soon as head ready while request runs on. Decrement beside debit never runs for client that hung up; one in `finally` runs mid-stream. Either leaks slot, silently. What reclaims a leaked one is expiry: a slot **does** expire — `GAUGE_TTL_MS` 300s, enforced in memory as well as Redis — and that same expiry would drop a slot from a request still running. So a slot is **named** (a uuid the limiter owns, never `requestId`, because a named acquire is idempotent and two requests sharing one id would hold one slot between them) and **renewed** on a third-of-TTL timer, `unref`ed and cleared by the release. **Renewal is capped** at `MAX_RENEWED_MS` (a day): unbounded renewal would turn the leak above from a five-minute one into a permanent one, so past the cap the timer stops and the slot lapses exactly as it did before renewal existed. `PROBE_TTL_MS` is deliberately not renewed at all; see the breaker section for why.
-
-If store cannot answer, long windows stop enforcing and gateway logs it, while `1m` and `concurrency` go on exactly — justification for serving rather than refusing: limits that stop abuse fastest never touch database.
-
-**Per-model overrides stack, judged in one admission.** `limits.models` may give one requested model (after `[1m]` normalization, exact match) its own matrix in the same shape, never nested, never empty. Stricter wins: request for that model must pass both, so no override lifts key past own key-wide ceiling. `modelOverride` in `@omni/ratelimit/catalog` is only lookup (`Object.hasOwn`; bare index answers `constructor`). Override counts under its own **subject** — `` `${keyId}/m/${encodeURIComponent(model)}` `` — with own ring, named gauge slot, `lim:<subject>:<window>` buckets seeded from that model's `request_logs` rows, and own debits; model without override costs one `hasOwn`, nothing more. Admission therefore runs after body parse and allowlist, and **one** admission claims both subjects before judging either, `combine`s the two decisions (last-to-clear violation, nearer-exhaustion headroom per dimension), and on any refusal or failure gives back **both**: two admissions would leave request refused by model ceiling holding key-wide stamp and slot. On refusal every violated long window, in every subject, has its reset read from that subject's own rows **before** last-to-clear is chosen, and the refused dimension's header is the refusing entry itself — so a 429's headers and `Retry-After` name one instant. Admission holding two slots renews both, releases both.
-
-Two costs, both accepted. **A claim is provisional and visible**: key-wide claim of request its model ceiling will refuse counts against concurrent requests for another model until rolled back — over-counting, for one evaluation. **An override's long windows are linear in that model's traffic**: `usage_rollup` has no model column, so seed (on request path) and `readLimitUsage` (every key listing) read `request_logs` through `idx_request_logs_key_model_at`, bounded by model's own rows rather than key's. Probes, measurements and rejected alternatives: [per-model limits spec](docs/superpowers/specs/2026-10-16-per-model-key-limits-design.md#history).
-
-Limits live as one validated JSON object on `api_keys.limits`, so dimension and window names persisted in every row — storage contract like `RTK_FILTER_IDS` with opposite failure mode. Unknown RTK id dropped on read; unknown limit key is **parse failure**, because limit read as "no limit" fails open on ceiling operator set. That refusal lands at authentication rather than row parser, so `keys.list()` still returns unparseable key, marked — listing is how operator finds row to fix.
-
-Clients see each vendor's own dialect — `anthropic-ratelimit-*`, `x-ratelimit-*`, `Retry-After` on every 429 — so SDK backs off with code it already ships. `spend` and `concurrency` appear on neither: no vendor defines header for them.
+Clients see each vendor's own headers — `anthropic-ratelimit-*`, `x-ratelimit-*`, `Retry-After`
+on every 429 (`omni-dialects/src/egress/`). `spend` and `concurrency` appear on neither.
 
 ## Routing
 
-Router is pure function over immutable snapshot of credentials, health, quota, models, settings, plus live count of in-flight requests. Returns candidates in order to try, and every excluded account with its reason — exactly what `omni models dry-run` prints.
+`rank` (`crates/omni-router/src/rank.rs`) is a pure function over the routing snapshot plus live
+in-flight counts and recent latency. It returns candidates in order and every excluded account
+with its reason — what `omni models dry-run` prints.
 
 ```mermaid
 flowchart LR
   vm["virtual model<br/><b>fast</b>"] --> targets["targets<br/>credential × model"]
-
-  targets --> filter{eligible?}
-  filter -- no --> excl["<b>excluded</b>, with reason<br/>capability mismatch · disabled<br/>expired, no refresh token<br/>provider said 429 · breaker open<br/>probe held elsewhere · pin resolves to no account"]
+  targets --> filter{"eligible?<br/><i>filters.rs</i>"}
+  filter -- no --> excl["<b>excluded</b>, with reason<br/>provider:missing · capability · disabled<br/>expired, no refresh token · rate-limited<br/>breaker open · quota spent · pin:missing"]
   filter -- yes --> score
-
-  subgraph score["score — six normalized terms"]
+  subgraph score["score.rs — six normalized terms"]
     direction TB
     t["tier ×10"]
     h["health ×3"]
@@ -268,637 +269,405 @@ flowchart LR
     c["cost ×1"]
     lat["latency ×1"]
   end
-
-  score --> mult["× credential weight<br/>× target weight"]
+  score --> mult["× credential weight × target weight"]
   mult --> strat{strategy}
-  strat --> out["ordered candidates<br/><i>walked on failover</i>"]
-  strat -.- opts["priority · roundRobin<br/>weighted · score"]
+  strat --> out["ordered candidates"]
+  strat -.- opts["priority · roundRobin · weighted · score"]
 ```
 
-Exclusion reading *provider said 429* is `credential_health.rate_limited_until` — upstream account this gateway routing around, set from provider's own `Retry-After`. Not the key limit above, not the quota-probe cooldown either. Three unrelated things in this codebase called rate limit, sitting at three scopes — gateway key, provider credential, probe loop — and only first is policy an operator authors.
+Weights are settings defaults. A request carrying a provider-defined tool or `ProviderNative`
+history block is owned by that provider; other providers' targets are excluded at filter stage
+as `capability:providerNative` (`required_providers`), so it fails at routing with the
+requirement named rather than losing the tool. "Rate-limited" here is
+`credential_health.rate_limited_until`, set from the provider's own `Retry-After` — not a key limit.
 
-Weights shown are defaults, configurable. Request carrying Anthropic-defined tool excluded from every non-Anthropic target at filter stage — why it fails at routing with requirement named, rather than quietly losing tool. Breaker cooldown scales with consecutive failures.
+A target may name one account in `credential_id`; then only that account serves it. The pin is a
+hard filter: a disabled, breakered, rate-limited or spent account fails the request rather than
+spilling to a sibling. A pin resolving to no account is reported once per target as
+`pin:missing`. Whether an account serves a target — provider, custom endpoint, pin — is one
+question, `serves_target` in `filters.rs`, which `model_limits`, doctor and agent setup also ask.
+Nothing validates pin existence at write time; doctor reports dangling pins.
 
-Target may name one account in `credentialId`, and then only that account serve it. Pin is hard and lives at filter stage, not in ranking: account that is disabled, breakered, rate-limited or out of quota fail the request rather than spill to sibling. Operator pin for billing separation or per-account agreement, and silent spillover defeat both — so no strategy exist for it, because strategy decide order and pin decide membership.
-
-Whether an account can serve a target is one question — provider, custom endpoint, pin — answered in one place, `servesTarget` in `@omni/store/types`. Router, `putModel`, model-limit resolution, `omni doctor` and console's account picker all ask it there. They did not always, and three of them asked less than router did, so target pinned to another provider's account saved clean, failed every request, and read as healthy in `doctor`.
-
-Accounts pin exclude are skipped silently, same as accounts of wrong provider. Pin resolving to no account is reported once per target, as `pin:missing`, because otherwise request fail with nothing in exclusion list to explain it. Four ways a pin resolve to nothing — deleted, disabled, wrong provider, wrong custom endpoint — and all four read alike.
-
-Nothing validate the id at write time: removing account must not make unrelated edit of model that mention it unsavable, same rule `putModel` already follow for auth. `omni doctor` carry that weight instead and report every unresolvable pin. Both surfaces that delete an account name the models pinned to it first, because those targets stop serving rather than losing one of several.
-
-Nothing here thrown away: exclusion list with reasons is exactly what `omni models dry-run` prints.
+`resolve_model` (`resolve.rs`) resolves a configured virtual model first, then `provider/model`
+syntax, then a bare well-known model name by longest prefix from `Providers::builtin`
+(`providers.rs`, catalog rows from the JSON). `custom` never prefix-routes: a bare name cannot
+carry an endpoint id.
 
 ## Dispatch
 
-Dispatch is where side effects router refuses to have actually live: request deadline, retries, failover, token refresh, health writes, cost pricing, load accounting.
+`crates/omni-gateway/src/dispatch.rs` is where the side effects the router refuses live: deadline,
+retries, failover, token refresh, health writes, pricing (`price.rs`), load accounting (`load.rs`).
 
-**A success writes health only when it would change something routing decides on.** `successWouldChange` in `packages/router/src/breaker.ts` reads snapshot row before attempt — never inside `updateHealth`'s `apply`, which run inside transaction the check exist to skip — and answer true when any field `recordSuccess` reset (`SUCCESS_RESETS`: breaker state, failure count, `openedAt`, `rateLimitedUntil`) differ from blank. No row read as blank, so healthy account ordinarily has **no `credential_health` row at all**; rows come into being on failure. Failure count is in that set on purpose: leave it out and next success never reset it, breaker open on cumulative failures rather than consecutive. Every failure still write. Measurements — last use, time-to-first-token — are process-local in `loadRegistry` and reach ranking as `RankInput.recent`; console's "last used" come from `request_logs` via `usage.lastUsedByCredential`, one seek on `idx_request_logs_cred`. Postgres `config_version` trigger on this table is row-level and conditional on decision columns only (`002_health_measurements.sql`), strict subset of `SUCCESS_RESETS`: count change patch through `healthSaved`, never rebuild. Design: `docs/superpowers/specs/2026-09-07-credential-health-write-path-design.md`.
+**A success writes health only when it would change something routing decides on.**
+`success_would_change` (`omni-router/src/breaker.rs`) reads the snapshot row before the attempt
+and answers true when any field `record_success` resets differs from blank. No row reads as
+blank, so a healthy account ordinarily has no `credential_health` row. Every failure writes.
+Health is applied to the in-memory snapshot and written through the writer; `overlay.rs` keeps
+this process's writes visible until the store surely has them, so a rebuild cannot put an older
+row back. The Postgres `config_version` trigger (`migrations/postgres/002_health_measurements.sql`)
+fires on decision columns only. Design:
+`docs/superpowers/specs/2026-09-07-credential-health-write-path-design.md`.
 
-**An open breaker past its cooldown is probed by one request, not by everyone who ranks it.** Router mark such pair `probe` (`Pair.probe` in `packages/router/src/filters.ts`) and mark `halfOpen` row same way — router say *whether* a pair is probe territory, never *who* probes, because that is a claim and claims are I/O. Dispatch make it beside `releaseSlot`, inside the attempt's `try`: `coord.gauge.acquire("probe:<healthKey>", PROBE_TTL_MS)` — count before is zero, this request is the probe and write `breakerState: "halfOpen"` (decision field, so it write through and every replica rank the pair as `halfOpen` from then); above zero, candidate skipped as `breaker:probing` and **does not consume an attempt**. Every candidate skipped that way is `NO_CANDIDATES`, nothing failed. Slot released in the same `finally` as load slot, after stream drain, so failover carry it. `halfOpen` write skipped when row already read `closed` — `probe` decided at rank time, row is newer — and request run as ordinary. Probe success close breaker through `recordSuccess` **at commit point** (first `blockDelta`), not at `end`: closing at `end` kept sole-credential pair answering `NO_CANDIDATES` to everyone else for whole stream. Post-commit failure land on closed row as one counted failure, accepted. Probe failure before commit hit `recordFailure`'s `halfOpen` branch and re-open without burning the threshold. Abandoned probe — client hang-up before health heard back — leave `halfOpen`, and the `halfOpen` arm of the filter mean next request re-claim and probe again. `PROBE_TTL_MS` 180s: deliberately **not** renewed, unlike the concurrency and load slots — a request outliving it loses its claim and a second request may probe, which is bounded and costs one extra request against a credential that is recovering anyway; renewal would instead let one very long probe hold a recovering pair out of rotation for its whole life. It is also how long a coordinator fault between acquire and release strand the shared slot. Design: `docs/superpowers/specs/2026-09-07-breaker-half-open-probe-design.md`.
+**An open breaker past its cooldown is probed by one request.** The router marks such a pair (and
+a `halfOpen` row) `probe`; dispatch claims `probe:<healthKey>` through `Probes::claim` (local
+map, or the shared coordinator in a fleet, 180 s expiry, never renewed). Held elsewhere: the
+candidate is skipped as `breaker:probing` and consumes no attempt. The probe writes `halfOpen`,
+and a success closes the breaker **at the commit point**, not at the end of the stream.
 
-Important rule is **commit point**:
+**Commit point.** The first `BlockDelta` commits the attempt — or the pending buffer reaching
+`PENDING_MAX_EVENTS` / `PENDING_MAX_BYTES`, so a provider emitting many non-content events cannot
+hold the client indefinitely.
 
 ```mermaid
 flowchart TD
-  start([candidate 1]) --> att["attempt<br/><i>refresh token if inside lead window</i>"]
+  start([candidate 1]) --> att["attempt<br/><i>refresh first if inside REFRESH_LEAD_MS</i>"]
   att --> ev{first event?}
-
-  ev -- error --> retryable{retryable<br/>and attempts left?}
-  retryable -- yes --> next["next candidate<br/><i>breaker opens on the old one</i>"] --> att
+  ev -- error --> retryable{retryable and attempts left?}
+  retryable -- yes --> next["next candidate<br/><i>failure recorded on the old one</i>"] --> att
   retryable -- no --> fail(["error response<br/><i>client never saw a byte</i>"])
-
-  ev -- "first content delta" --> commit{{"COMMITTED<br/>record ttft"}}
+  ev -- "first content delta / pending cap" --> commit{{"COMMITTED<br/>record ttft"}}
   commit --> stream["stream to client"]
   stream --> late{error now?}
   late -- yes --> inband(["reported in-band<br/><i>no failover possible</i>"])
   late -- no --> done(["end · usage · cost"])
 ```
 
-Everything left of commit point invisible to client: rate-limited or broken account swapped for another, request simply succeeds. Everything right of it is not, and pretending otherwise would corrupt stream.
+An Anthropic 401 refreshes and retries once. Cancellation is structural: dropping the stream
+drops the upstream body (closing the socket), the load slot and any probe claim. Pins:
+`crates/omni-gateway/tests/dispatch.rs`.
 
-Circuit-breaker state and latency written back on every terminal outcome, so next request's ranking reflects this one.
+Only four providers dispatch in 1.x — `anthropic`, `openai`, `antigravity`, `custom`
+(`send_provider`). Others stay in the catalog and routing registry; a target naming one fails
+its attempt with `INTERNAL "no adapter for provider …"`.
+
+**RTK and ponytail are not applied.** The settings `rtkEnabled` and `ponytailMode` are stored and
+editable, and `request_logs` keeps its RTK columns, but dispatch and `count_tokens` send the
+request as received. `crates/omni-rtk` is the ported filter set, unwired.
 
 ## Providers
 
-Anthropic ingress splits thinking into portable IR and unparsed vendor extras. The
-encoder merges extras only into an emitted thinking object, with IR-derived
-members winning; the generic vendor merge cannot replace that object. Context-edit
-filtering reads the final merged body. `betweenTools` preserves signed progress
-replay but is conservatively off for `clear_thinking` edits (upstream support is
-unmeasured); non-Anthropic encoders degrade it to their existing off behavior.
+`crates/omni-providers`: one directory per provider codec — `anthropic/`, `openai/`,
+`antigravity/`, `custom/` — each roughly `codec.rs`, `wire.rs` (IR → body), `decode.rs`
+(stream → `StreamEvent`), `profile.rs` (client fingerprint: header order, casing, user agent),
+`oauth.rs`. Shared at the crate root: `codec.rs` (the contract), `adapter.rs` (its host),
+`http/` (client), `sse.rs`, `http_error.rs`, `response_format.rs`, `tool_result_files.rs`,
+`quota.rs` (usage probes).
 
-Anthropic auto-mode checks use opaque provider metadata rather than a gateway
-verdict schema. Ingress retains `safeguards` in the vendor bag and `anthropic-*`
-protocol headers in `providerHeaders.anthropic`; the codec still owns upstream
-authentication and adds the OAuth beta when needed. A non-empty safeguard list
-disables that codec's tool cloak, system prefix/rewrite, and attribution signing;
-ingress retains the raw client system representation for this path. Tool-use IDs
-are not rewritten. The wire encoder preserves opaque client system-block fields,
-but current IR text/cache placement and configured additions outrank that snapshot;
-Ponytail cannot be silently overwritten by the vendor merge. Other normalization
-and configured gateway transforms still
-apply, so this is not a general raw-proxy mode.
+A `ProviderCodec` describes one HTTP request and reads one stream back; nothing in it is async.
+`adapter::send` performs it — build, validate, send, classify a failed status, decode — once for
+every provider. `decode_state` is an associated type, so "host handed back the wrong state"
+cannot be written. A codec that throws before commit fails over; after commit its error is
+forwarded in-stream (`codec_failure` relabels an unclassified throw).
 
-The decoder preserves `message_delta.delta.safeguard_results` (or final-frame
-top-level results) in the terminal event's provider-keyed `vendor` bag.
-`collect()` retains it for buffered replies; Anthropic egress restores the field
-inside the final delta or on the buffered Messages object. Absence, null, and
-unsupported/unavailable statuses remain distinct. Other egress dialects ignore
-this metadata, and dispatch does not interpret it. The real-adapter regression
-suite is `apps/gateway/test/routes/autoModeSafeguards.test.ts`.
+Three wire dialects, not two: Anthropic- and OpenAI-shaped bodies, and Antigravity's Cloud Code
+Assist envelope (`v1internal:streamGenerateContent`, a Gemini request carrying the account's
+Cloud Code project id). The project id is minted during OAuth and lives on
+`credential.providerData`; the codec refuses a request that would send it blank. Inference uses
+`daily-cloudcode-pa.googleapis.com` — the plain host answers `429 RESOURCE_EXHAUSTED` for an
+account with quota left, which reads as an account problem rather than a URL one. The bootstrap
+shape follows the App 2.34 capture (`tests/fixtures/antigravity-2.34.0.json`).
 
-Eight providers, each a directory of roughly same files — `descriptor.ts`, `codec.ts`, `wire.ts`, `decode.ts`, `models.ts`, `profile.ts`, `index.ts` — plus whatever that provider alone needs: `anthropic` carries `tools.ts` for versioned tool types and `cloak.ts` for the OAuth tool rename, `kimi` and `grok` carry `device.ts` for device-code flows. `muse` carries `endpoint.ts`, the one host check its mint and its codec share — its device flow ends in a second call that buys the Model API key inference actually uses.
+The OpenAI OAuth leg is the Codex surface and wears Codex 0.170.0's captured fingerprint
+(`tests/fixtures/codex-0.170.0.json`, `openai_fingerprint_literals.rs`); it moves only with a new
+capture (`scripts/codex-capture/README.md`). `custom` is the operator-supplied OpenAI-compatible
+provider: the credential names the origin and protocol (chat or responses), which travels in
+decode state because the response cannot reveal it.
 
-Three wire dialects, not two. Five of the seven speak an Anthropic- or OpenAI-shaped body; `antigravity` speaks Google's Cloud Code Assist — `v1internal:streamGenerateContent`, which nests a Gemini request inside an envelope carrying the account's own Cloud Code project id. That id is minted during OAuth rather than at request time, because a codec cannot make a network call; it lives on `credential.providerData` and the codec refuses a request that would send it blank. The endpoint is the streaming one even for a non-streaming client, since plain `generateContent` answers 400 on several models.
-
-**Inference must use `daily-cloudcode-pa.googleapis.com`; the difference is entitlement rather than failover.** Measured against a live account with a byte-identical inference request: `daily-cloudcode-pa` answered 200, plain `cloudcode-pa` `429 RESOURCE_EXHAUSTED` — while that account's own quota RPC reported 0% of both windows used and its IDE was generating normally. Pointing inference at the wrong host fails every request and blames the account, because the upstream's chosen error names quota rather than the URL. The bootstrap (`loadCodeAssist`, `onboardUser`) and quota RPCs were verified live on `cloudcode-pa` at that time; they now follow the 2026-11-21 App 2.34 / CLI 1.5.13 capture onto `daily-cloudcode-pa` too, which is not yet measured live (see the provider design).
-
-`codec.ts` is the provider; `index.ts` is four lines joining it to its descriptor through `codecAdapter`. A `ProviderCodec` describes a request and reads a stream back, and the host performs it — one `http()` call, the status check, the deadline, the empty-body refusal — once for every provider rather than once per provider. That split exists because boundary rule 15 says a plugin never holds the `HttpClient`, and a provider whose whole job is talking upstream cannot be handed nothing; **all eight built-ins are on it**, so `codecAdapter` is the only implementation of `ProviderAdapter` this repository ships and a plugin-supplied provider takes exactly the shape a built-in does. `ProviderAdapter` survives as the injection point dispatch and its tests construct — a seam, not a second shape.
-
-**Authorization follows the same inversion, one layer over.** `PluginOAuthFlow` in `packages/providers/src/oauthFlow.ts` makes each step — `start`, `begin`, `exchange`, `refresh`, `usage` — an async generator that *yields* a described request and reads the response the host hands back, and `oauthAdapter` turns it into the `OAuthProvider` every consumer already takes. A generator rather than a build-and-parse pair because `kilo.exchange` genuinely needs two dependent requests: it polls for a token, then reads the account's organization id *with* that token. All six built-in flows run on it, which is what makes it a contract rather than a hopeful shape — and porting them is what found the two things it could not express: a per-request deadline (a usage probe wants 15s where a token call wants 30s, and one host constant would have quadrupled the shorter one silently) and a transport failure that has to be raised *into* the step, so a flow can tolerate a best-effort read that fails after the credential is already earned. The vendor data no longer sits in core at all: each built-in's flow is `packages/providers/src/<id>/oauth.ts`, `builtinOAuthFlows()` is the one list of them, and `seedBuiltinOAuth()` installs them into `OAUTH_PROVIDERS` — an empty registry until a host fills it — through `registerOAuthProvider`, the same door a plugin's flow comes through. The gateway seeds from `installPluginProviders`, the one boot function a test can reach; the CLI seeds in `run()`, because `omni connect` runs against an installation whose gateway is stopped. That is after `loadPlugins`, which is safe only because the loader registers no flow of its own. What control keeps is the mechanism: `oauthAdapter`, which performs the yielded requests, enforces the origin check and the yield cap, and stamps `gatewayAuthored` on a trusted flow's errors.
-
-`descriptor.ts` is what core reads. Adding a provider used to mean editing sixteen tables spread across `ir`, `router`, `store`, `control`, the gateway, the CLI and the console; eight were compiler-checked `Record<ProviderId, …>` and eight were hand-written arrays, zod enums and CSS blocks that went stale in silence — five of them independent copies of the same six names. One record per provider replaced them.
-
-The exhaustiveness did **not** survive, and saying it did would be the more comfortable of two claims rather than the true one. `ProviderId` is now a validated string — it has to be, because a provider loaded from `<root>/plugins/` has an id no compiled-in union could contain — so `PROVIDER_DESCRIPTORS` is `Readonly<Record<string, ProviderDescriptor>>`, and a `Record<string, …>` accepts any subset of keys. Five tables still list the eight built-ins by hand: the descriptor table, the adapter map, and the profile, body-order and catalog assemblies. Deleting a provider's line from any of them typechecks cleanly. Measured, all five.
-
-What catches it instead is `bun run lint`, because the provider's import goes unused, and `packages/providers/test/descriptor.test.ts`, which holds every one of those tables to a literal list of ids written out in the test itself. That is a real net — it fails loudly and names the table — but it is lint and tests, not the compiler, and a contributor who believes otherwise will trust a green `tsc` that is not checking what they think.
-
-What the type system *does* still enforce is the shape of one descriptor: every field on `ProviderDescriptor` is required, so a descriptor that exists but is incomplete does not compile. And `noUncheckedIndexedAccess` makes every lookup keyed on a *stored* id a compile error at the point of use, which is where the genuinely partial reads are. `docs/adding-a-provider.md` lists what none of this can find.
-
-Two subpaths, and the split is load-bearing. `@omni/providers/descriptors` is a **leaf** — capabilities, pricing fallbacks, catalog, model prefixes, presentation — which is how `packages/router` reads per-provider data while staying pure, and how the console reads labels and colours without an adapter reaching a browser bundle. `registry.ts` joins those to the adapter, the client profile and the body key order, for anything needing a provider whole. Dispatch itself reads `ADAPTERS`. Adapters import `BODY_ORDER` and profiles read `Bun.env`, so neither may sit upstream of the leaf. `packages/providers/test/leafSubpaths.test.ts` asserts it with **two instruments, because neither is sufficient alone**: it walks each entry point's import graph using `Bun.Transpiler.scanImports` — the same parser that builds the code, so dynamic `import()` and type-only imports are classified correctly — and it also builds the browser bundle and checks for `Bun.env`. The walk catches an adapter or profile import that no marker reveals, since adapters take `HttpClient` by injection. The bundle catches a global, which has no import edge for a walk to find. Two hand-written versions of this test, one of each kind, each missed exactly what the other now covers.
+Anthropic auto-mode safeguards are opaque metadata: ingress keeps `safeguards` in the vendor bag
+and `anthropic-*` headers; a non-empty list disables that codec's tool cloak and system rewrite;
+the decoder carries `safeguard_results` to the terminal event's vendor bag, which Anthropic
+egress restores. Pins: `crates/omni-providers/tests/anthropic_decode.rs`.
 
 ```mermaid
 flowchart LR
-  ir(["ChatRequest<br/>(IR)"]) --> wire["wire.ts<br/><i>IR → provider body</i>"]
-  wire --> http["http-client.ts<br/><b>node:http, not fetch</b><br/><i>autoSelectFamilyAttemptTimeout 3s</i>"]
-  http --> up[("Anthropic · OpenAI Responses<br/>Kimi · Kilo · xAI")]
-  up --> dec["decode.ts<br/><i>SSE → StreamEvent</i>"]
-  dec --> ev(["StreamEvent<br/>(IR)"])
-  cat["models.ts → catalog<br/><i>pricing + limits, defaults only</i>"] -.-> wire
-
-  custom["<b>custom</b><br/><i>own chat + responses codecs</i>"] -. "protocol chosen by the credential" .-> wire
-  custom -. "operator-supplied origin" .-> http
+  ir(["ChatRequest (IR)"]) --> wire["wire.rs<br/><i>IR → provider body</i>"]
+  wire --> http["http/<br/><b>header order and casing preserved</b><br/><i>CONNECT_ATTEMPT_TIMEOUT 3s</i>"]
+  http --> up[("Anthropic · OpenAI · Antigravity · custom")]
+  up --> dec["decode.rs<br/><i>SSE → StreamEvent</i>"]
+  dec --> ev(["StreamEvent (IR)"])
+  cat["provider-catalog.json<br/><i>pricing + limits, defaults only</i>"] -.-> wire
 ```
 
-`custom` is the operator-supplied one: a credential names the origin and the wire protocol, and the codec points its own encoders at it. Because the protocol is a property of the *credential* rather than of the provider, `decode` cannot infer it from the response — it travels in `decodeState`, the same field Anthropic's tool cloak uses, and those two are its only users. It shipped importing kimi's encoder and kilo's decoder and now forks both, which is what rule 2 asks of every provider — the fork is why it has the same file set as the other five rather than being the exception this paragraph once described.
+All outbound HTTP goes through one keep-alive HTTP/1.1 client (`http/`) that writes headers in
+the given order and casing — providers recognise first-party clients by them — and logs only
+host, path, status, duration. `CONNECT_ATTEMPT_TIMEOUT` is 3 s per address, above Linux's one
+second initial SYN retransmit: a shorter budget turns a dropped SYN on a lossy path into a
+connect failure that reads as a provider outage. Pin: `crates/omni-providers/tests/http_client.rs`.
 
-All outbound HTTP goes through one client, built on `node:http` rather than `fetch` for specific reason: Bun's `fetch` alphabetizes request headers, destroying header order and casing providers use to recognize first-party CLI. Client preserves both verbatim, logs only host, path, status, duration.
-
-One constant in that client worth naming, because failure it prevents reads as provider outage and is not one. Node's `autoSelectFamily` on by default, gives each address family fixed budget before moving to next — budget whose default is *below* Linux's one-second initial TCP retransmit timeout. So dropped SYN, routine on lossy path, abandoned at ~500 ms instead of recovering at ~1000 ms, and where other family cannot serve at all (AAAA record, no IPv6 route) both attempts spent and connect simply fails. `CONNECT_ATTEMPT_TIMEOUT_MS` raises it to 3 s, pinned by test asserting it stays above that RTO. Measured: 3 failures in 99 connects at default, 0 in 212 once raised, previously-failing connects completing at 1007–1061 ms.
-
-Catalog supplies defaults — pricing and context limits — at moment you create target. Router then prices from saved target, so editing catalog affects new targets only.
+The catalog supplies defaults — pricing and context limits — when a target is created. The
+router prices from the saved target, so editing the catalog affects new targets only. Catalog
+rows are pinned per provider by `crates/omni-router/tests/*_catalog.rs`.
 
 ## Storage
 
-One SQLite file, WAL mode, eleven migrations — plus, when body capture on, tree of encrypted artifacts beside it.
+Two backends behind one `Store` (`crates/omni-store/src/backend.rs`): SQLite (default; one file,
+WAL) and Postgres (`pg/`, cluster mode). Migrations are SQL files under
+`crates/omni-store/migrations/{sqlite,postgres}/`, included at compile time, recorded in a
+`migrations(id, applied_at)` ledger; a shipped file is frozen, because installed databases record
+its id. A database from a newer build keeps its unknown migrations. Behaviour proven on one
+backend is proven on the other in `crates/omni-store/tests/contract.rs`, which runs each case
+against SQLite then Postgres.
 
-**`synchronous = NORMAL`, set explicitly, and it is the single largest lever on request-path cost.** Default is FULL, which fsyncs WAL on every commit; a request commits three or four times — `usage.begin`, `usage.route` on failover, `usage.append` with its two rollups, `credentials.updateHealth`. `bun:sqlite` synchronous, so each fsync block whole event loop, not one request. Measured on xfs, 1,000 iterations after warmup: one health write 2,177 µs at FULL against 16.4 µs at NORMAL, and a request's whole store time 9,076 µs against 315 µs.
+**Nothing in the store runs on the request path.** The gateway serves from its snapshot (rebuilt
+when SQLite's `data_version` or Postgres's config version moves, polled every 500 ms) and hands
+every request-path write to **the writer** (`writer/`): a bounded channel the request path feeds
+with `try_send`, one task writing one transaction per batch (4096 events or 200 ms). A full
+channel drops and counts; on Postgres under pressure only optional `Begin`/`Route` events are
+shed, and every admitted request reserves capacity for its `Finish`. Completion is a claim
+(`state = 'pending'` → done), applied once per id, with `usage_daily` and `usage_rollup` folded in
+the same transaction with SQLite's own arithmetic (`writer/num.rs`). Breaker failures and
+transitions go through `HealthWriter`, a separate immediate path.
 
-**What NORMAL give up, stated exactly.** It does **not** survive an OS crash — SQLite say a WAL transaction at NORMAL "might roll back following a power loss or system crash", and a kernel panic is a system crash. Durability across *application* crash is kept at every setting including OFF, so it is not something NORMAL buy. Window is not milliseconds: at NORMAL the WAL sync at **checkpoint**, not at commit, so exposure is every transaction since last sync — bounded by autocheckpoint (1000 pages) or kernel writeback, tens of seconds in practice. What WAL still guarantee, and this pragma not take away, is that the file cannot be **corrupted**; that is what `OFF` would give up and why this is NORMAL.
-
-Most of what is exposed is replayable — request logs, usage counters, credential health, and `usage_rollup`, which commit inside `append`'s transaction so rows and counters roll back together and `omni doctor` gain no false positive. **One row is not**: `updateSecrets` store a rotated OAuth refresh token, provider has already rotated it, so a rollback there leave a dead credential needing browser re-auth rather than a statistic to recompute. Accepted, not overlooked. Also here: password and API-key hashes, `virtual_models`, `quota_windows`, plugin tables. Supersede the 2026-08-08 audit's "keep breaker openings and provider rate limits durable immediately", which allowed exactly this exception — "unless the product explicitly accepts a crash-loss window". It does now.
-
-One documented invariant bend and it is worth naming: long-window rate limits "may over-count and must never under-count", but a power loss roll back committed `request_logs` rows, so `sumSince` under-count afterwards. Narrow — power loss only, and the in-memory half reset on restart regardless.
-
-Pinned by `packages/store/test/pragmas.test.ts`, because a revert show up as nothing but a slow gateway.
+`PRAGMA synchronous = NORMAL` (`migrate.rs` `apply_pragmas`): it does not survive an OS crash —
+transactions since the last WAL sync may roll back — but the file cannot be corrupted. Most of
+what is exposed is replayable; a rotated OAuth refresh token is not, and that loss is accepted.
 
 ```mermaid
 flowchart TB
-  subgraph ledger[Schema ledgers]
-    mig["<b>migrations</b><br/>core's 001…011"]
-    pmig["<b>plugin_migrations</b><br/>one track per plugin,<br/><i>independent of core's numbering</i>"]
-  end
-
   subgraph accounts[Accounts]
-    cred["<b>credentials</b><br/>access_token 🔒 refresh_token 🔒<br/>api_key 🔒 id_token 🔒"]
-    health["<b>credential_health</b><br/>breaker · failures · rate limit<br/><i>written on failure or recovery only</i>"]
-    quota["<b>quota_windows</b><br/>provider observations,<br/>not gateway counts"]
-    samples["<b>quota_samples</b><br/>one row per changed reading<br/><i>pruned at logRetentionDays</i>"]
+    cred["<b>credentials</b><br/>access 🔒 refresh 🔒 api_key 🔒 id_token 🔒"]
+    health["<b>credential_health</b><br/><i>written on failure or recovery only</i>"]
+    quota["<b>quota_windows</b> · <b>quota_samples</b><br/>provider observations"]
   end
-
   subgraph config[Configuration]
-    vm["<b>virtual_models</b><br/>targets, pricing, weights"]
-    keys["<b>api_keys</b><br/>hash only, never the key<br/>limits: the (dimension, window) matrix"]
+    vm["<b>virtual_models</b>"]
+    keys["<b>api_keys</b><br/>hash only · limits"]
     settings["<b>settings</b>"]
   end
-
   subgraph history[History]
-    logs["<b>request_logs</b><br/>metadata + tokens, state pending→done<br/><i>pruned at logRetentionDays</i>"]
-    daily["<b>usage_daily</b><br/>rollup<br/><i>kept 400 days</i>"]
-    hourly["<b>usage_rollup</b><br/>per-key hourly counters, derived<br/><i>pruned with request_logs</i>"]
-    bodies["<b>request_bodies</b><br/>pointer + sha256, never a body<br/><i>pruned at min(bodyRetentionDays, logRetentionDays), capped at 100k rows</i>"]
-    artifact["<i>request_bodies/YYYY/MM/DD/&lt;id&gt;.json.enc</i> 🔒<br/>client pair + one pair per attempt"]
+    logs["<b>request_logs</b><br/>pending → done · node_id"]
+    daily["<b>usage_daily</b> (400 days)"]
+    hourly["<b>usage_rollup</b> (derived)"]
+    bodies["<b>request_bodies</b><br/>pointer + sha256"]
+    artifact["request_bodies/YYYY/MM/DD/&lt;id&gt; 🔒<br/><i>bytea column on Postgres</i>"]
   end
-
-  cred --- health
-  cred --- quota
-  quota == "same transaction" ==> samples
   logs == "same transaction" ==> daily
   logs == "same transaction" ==> hourly
-  logs -. "requestId" .- bodies
-  bodies -. "rel_path" .-> artifact
-  pmig -. "plugin_&lt;id&gt;_&lt;name&gt;" .-> ptab["<i>plugin tables</i><br/>named by the host"]
+  logs -. requestId .- bodies
+  bodies -. rel_path .-> artifact
 ```
 
-Admin sessions not on that diagram because not in database: they live in `Map` in gateway process — why restart signs everyone out, why restore must end them explicitly rather than by replacing table.
+Encryption is a boundary: the four 🔒 fields are AES-256-GCM under a key derived from
+`OMNI_ENCRYPTION_KEY` (`omni-crypto/src/field.rs`, `enc:v1:` format). The snapshot opens them once
+per `token_version`. Gateway API keys are stored as hashes only. OAuth expiry is a nullable JS
+number (`Option<f64>`) in SQLite; Postgres keeps BIGINT and refuses a non-finite value without
+touching the previous token version.
 
-Writing rollup in *same transaction* as log row is what lets year of usage history survive 30-day pruning of detailed logs.
-
-`quota_samples` written in same transaction as snapshot it describes, only when reading actually changed — idle account re-read every poll interval, moves nothing. `quota_windows` therefore answers "what is true now" and carries liveness in `observed_at`; `quota_samples` answers "how did it get here". Burn estimate needs only former, so works on install with no accumulated history.
-
-Encryption is boundary, not pass. Only four 🔒 fields sealed, AES-256-GCM under key derived from `OMNI_ENCRYPTION_KEY`, decryption lazy and purpose-scoped — credential opens *for inference*, *for refresh*, or *for usage*, so ranking ten candidates costs zero decryptions. Gateway API keys not stored at all, only hashes.
-
-OAuth expiry in the Rust store and routing snapshot is a nullable JS number (`Option<f64>`), not an integer timestamp. SQLite preserves fractional and infinite REALs and binds NaN as NULL. PostgreSQL keeps its BIGINT column: it rounds the bound double on write or rejects it when non-finite or out of range. The expiry and sealed tokens still rotate in one versioned write; a failed PostgreSQL conversion leaves the previous expiry and token version unchanged.
-
-**Reading `request_logs` back is one query, keyset-paged, and every consumer shares it.** `UsageRepo.page` in `@omni/store/types` takes one required `RequestLogQuery` object — one object rather than parameters because sqlite swap forwarder hand-writes arrow per method and lower-arity arrow silently drops argument, which is how scoped `recent` once returned every key's rows. Order always `(at DESC, id DESC)`; tie-break total, because two rows in same millisecond ordered only by id and ambiguous sort makes cursor ambiguous. Cursor exclusive, `since`/`until` inclusive. Predicate itself lives once, in `packages/store/src/logPage.ts`, parameterised only by placeholder syntax — two backends cannot disagree on boundary. Both repos map rows through `toLog` **before** cutting cursor, so it carries normalized numeric `at` rather than Postgres BIGINT string, which compares lexically on next read. Fetch is `limit + 1`, so full final page reports no cursor rather than handing caller cursor whose only page is empty.
-
-**Filters and scope apply before limit, never to page after it.** That is whole point: filtering fetched tail answers "among newest N rows", which reads identical to "in the log" and is not. `pageLogs` in `@omni/control` takes caller filters and verified `Scope` as *separate arguments* — filters can only narrow, scope comes from session, and scope's key is written after caller's `apiKeyId` so client sending one cannot widen. `readsNothing` checked **before** `scopeKey`, same trap as `recentLogs`: `scopeKey` collapses `all` and `none` to same `undefined`. Cursor parsed **before** that early return, so client's malformed cursor is `BAD_REQUEST` rather than empty page reading as end of its history. Wire cursor is versioned base64url JSON (`{"v":1,"at":…,"id":"…"}`); every decode failure is `BAD_REQUEST` and none falls back to newest page. Indexes carrying it: `(at, id)`, `(api_key_id, at, id)`, `(credential_id, at, id)` — migration 015 replaced shorter prefixes rather than adding beside them, so no redundant index costs write per row. Migration 016 added one per exact filter, then **017 retracted three of them**: filters a person types became case-insensitive substrings, and leading wildcard cannot seek B-tree, so `(resolved_model,…)`, `(requested_model,…)`, `(error_code,…)` bought nothing and still cost write per row. Those columns moved **into** keyset index — `(at DESC, id DESC, requested_model, resolved_model, error_code)` — because scan walk it for ordering anyway, so match test against index entries and only surviving page fetched: 1M rows matching nothing, 204ms to 78ms, error filter 160ms to 33ms, head read unchanged, index 44MB to 87MB. Second, separate covering index does **not** work — SQLite prefer narrower index supplying order, 198ms against 202ms — so columns must live in index scan already want. **Postgres diverge here, measured.** Its planner read leading-wildcard `ILIKE` as unindexable, so both misses plan as parallel seq scan plus sort and `idx_request_logs_at` never opened at all; widening it there cost 15MB to 58MB at 500k rows and bought 0.25ms of 86ms, so migration 006 drop the three and leave keyset index at 004's shape. Backends share **predicate**, not index shape. Scan also hurt less there — Postgres run it in another process across workers, where synchronous `bun:sqlite` scan *is* event loop. `resolved_provider` keep own index and its `=` on both (0.01ms against seq scan on Postgres); `state` never had one, `idx_request_logs_pending` cover selective half and `done` is every row. Miss is linear in retained rows, and time bound collapse it (300k rows: 22.5ms to 0.23ms over newest 1%), which is why export require both bounds; free-instead-of-linear need FTS5 trigram plus `pg_trgm` GIN, two mechanisms for one predicate, not taken. 016's `ANALYZE` trap died with plan that had it: leading wildcard leave one plan, so statistics have nothing to choose between, measured identical.
-
-Filters split by **where value came from**, not by column. Id, provider, state come from list gateway handed caller, so compared `=`; `apiKeyId` especially, because scope enforced by writing key into that query and substring there let key `mine` read `mine-2`. Four a person *types* — `model`, `requestedModel`, `resolvedModel`, `errorCode` — matched as case-insensitive substring, `contains()` in `logPage.ts`, because no column hold spelling operator have: alias `opus` only ever requested, `claude-opus-5` only ever resolved, and neither recalled in full. `model` ask both columns, `OR`ed with each other and `AND`ed with rest. Substring is what old browser box did too; difference is it filtered **fetched tail** and these run before page limit, so answer is "in log" not "among newest N rows". Two dialect differences passed in, both because default diverge: placeholder syntax, and `LIKE` (SQLite fold ASCII case) vs `ILIKE` (Postgres not). `_` and `%` escaped with explicit `ESCAPE '\\'` — every error code is `ALL_CANDIDATES_FAILED`, so unescaped filter matched `ALLXCANDIDATESXFAILED`; pinned in contract suite. `toQuery` copies filters one key at time, so key it forgets is filter wire accepts and nothing applies — `.strict()` cannot see it, parameter *is* known — pinned as whole set by `logPage.test.ts`.
-
-Export (`exportLogs`) reuses same `toQuery` and same scope gate, with own batch size: caller's page size describes screenful, not how walk is batched. Generator, so consumer that stops iterating stops paging — cancellation with no second mechanism. Both time bounds required, since it is one read here with no page size bounding it. No row cap and no in-band error row: both formats would parse one as data, and truncated CSV that looks complete is worse than refusal. Metadata only — it never touches `request_bodies`.
-
-Console keeps bounded `useLogs(limit)` for overview, chassis and client summary, and pages only on two investigation boards. `res:logs` invalidates paginated board **only while at its head**: invalidating infinite query refetches every page it loaded, so operator scrolled back ten pages would have all ten re-read each second to repaint rows nowhere near head. That pause is **stated and reversible**, because head that quietly stopped updating reads exactly like gateway serving nothing: board says so and offers "Back to live", which `useTrimToHead` implements by dropping every page but first — `isHeadPage` true again, so poll and push resume on own, and rows stay on screen until next poll replaces them. Trim **cancel query first**: in-flight `fetchNextPage` resolve against page list captured when it started, so it write every trimmed page back beside one it fetched and board sit paused with button already clicked.
-
-`request_bodies` is one table whose payload not in database on SQLite (files beside it); on Postgres the envelope bytes sit in its `bytes` bytea column. Bodies are largest thing this gateway could store — one conversation with pasted file dwarfs whole of `request_logs` — and inlining them would carry every prompt through same page cache, same WAL, same `VACUUM` as routing tables, one `sqlite3` invocation from plaintext. Row therefore holds pointer and `sha256` **over the stored envelope** (ciphertext plus any header), so on-disk truncation detectable by reader holding no key at all. That what lets reader answer `missing` or `corrupt` instead of raising: file tree and table not written transactionally together *will* drift, and expiry deletes file and row explicitly rather than by `ON DELETE CASCADE`, because silently disabled `foreign_keys` pragma would turn expiry of prompt corpus into indefinite retention of one.
-
-Capture needs two keys — `OMNI_BODY_LOGGING_ALLOWED` at boot, `settings.bodyLoggingEnabled` at runtime — and third can veto: API key carrying `body_logging_opt_out` never captured. Both checked in `apps/gateway/src/routes/proxy.ts` before any capture work begins. Reading back is `readRequestBody` in `@omni/control`, served by `GET /api/requests/:id/body` behind same admin session as every other `/api/*` route.
-
-One artifact holds client pair and every wire pair together, so failover incident reads as one ordered story. The two not same payload: RTK's `transformRequest` runs in dispatch before routing, so `client.request` is pre-filter conversation and every `attempts[].request` is post-filter one. `request_logs` already records which filters ran and how much they removed but not *what*; artifact is only place that can be read — why console labels each side rather than presenting them as interchangeable.
+**Reading `request_logs` back is one keyset-paged query** (`omni-store/src/logs.rs`,
+`pg/logs.rs`), ordered `(at DESC, id DESC)`, cursor exclusive (`omni-control/src/logs.rs`, base64url),
+fetch `limit + 1`. Filters and scope apply before the limit. Filters split by where the value came
+from: ids, provider, state — and the scoped `apiKeyId` above all — compare with `=`; the four a
+person types (`model`, `requestedModel`, `resolvedModel`, `errorCode`) are case-insensitive escaped
+substrings (`LIKE` on SQLite, `ILIKE` on Postgres, `ESCAPE '\'`). Migration 017 moved those columns
+into the keyset index so the scan tests index entries.
 
 ### Body capture forensics
 
-Headers never captured, at any layer — every provider authenticates through headers, so that is where tokens are. Guarantee structural, not policy: capture layer never handed a header list, so no provider, present or future, can opt its own in.
+Capture needs `OMNI_BODY_LOGGING_ALLOWED` at boot and `settings.bodyLoggingEnabled` at runtime, and
+a key with `body_logging_opt_out` is never captured (checked in `server.rs` before any capture work;
+`body_capture.rs`). Headers are never captured: the capture API is never handed a header list.
 
-Masking best-effort, applied before write. Bearer tokens, `sk-`/`ak-`/`pk-` prefixed keys, well-known vendor prefixes (`ghp_` and rest of GitHub's, `github_pat_`, `AIza`, `GOCSPX-`, `xai-`), any long opaque token → elided forms. Length rule has no idea what it looks at, so it also elides base64 image data, content hashes, minified source — deliberate: corpus leaking live credential is worse failure. And it does not catch everything: length rule tuned to base64url, so standard-base64 secret or AWS secret access key can slip through on `+` or `/`, credential shorter than forty-one characters or exactly forty (Azure OpenAI key) out of reach entirely. Prefix rules exist because length rule cannot be whole answer; between them reduction in exposure, not guarantee of none.
+Masking (`omni-store/src/bodies.rs`) is best-effort and applied before write: bearer tokens,
+prefixed keys, well-known vendor prefixes, long opaque tokens. It is deliberately not extensible
+by providers. Payloads are bounded structurally (string length, array tail, depth, key count) so
+an artifact stays valid JSON; an artifact still over 512 KB has its bodies replaced by a marker.
 
-Individual payloads bounded structurally rather than by byte offset — strings past 64 KB, arrays to last 24 items, nesting past 6 levels, objects to 80 keys — so stored artifact always valid JSON; byte-truncated JSON useless for exactly the forensics motivating capture. Artifact still over 512 KB after that has bodies replaced by marker recording why. 512 KB is plaintext budget; stored size is envelope size. Writers emit binary raw (`N + 38` bytes for N of JSON); legacy rows still in corpus hex-encode (`2N + 65`), so one reaches ~1 MB: with 100k-row cap, worst-case corpus ~100 GB of stored envelope bytes until legacy rows expire, ~50 GB after — logical bytes, not PostgreSQL table, TOAST or WAL size. Same cap applies per body held in memory while request in flight, one per side per attempt — ~512 KB × (attempts + 1) per captured request.
-
-Artifact has own envelope in `packages/store/src/bodies/artifact.ts`, not credential string, though same derived AES-256-GCM key (`encryption.ts` untouched). `sealArtifact` is the one writer both stores call: binary, codec raw. Gzip is read, not written — benchmark found its seal latency over budget on synthetic incompressible input at the 512 KB cap, though representative cap fixtures stayed within it ([results](docs/superpowers/plans/2026-10-10-body-artifact-storage-benchmark.md)); `sealArtifactWithGzip` keeps the measured policy for the benchmark alone. Reader picks format by exact prefix: `enc:v1:` legacy hex, or `OGBA` binary — magic, version, codec (`0` raw JSON, `1` gzip), uncompressed length, 12-byte IV, ciphertext + tag, `N + 38` bytes raw. First 10 header bytes are GCM additional data, so version, codec and claimed length are authenticated; only authenticated fields govern decompression, natively capped at plaintext budget and required to match claimed length. Anything else is `corrupt`, never retried as other format. `sha256` covers whole stored envelope: detects damage and swapped files without key. GCM is authentication boundary, so null digest still needs valid tag. Encoded size over `MAX_ENVELOPE_BYTES` (`2 * MAX_ARTIFACT_BYTES + 65`, any envelope) reads `corrupt` before whole-file or whole-`bytea` read (SQLite opens file and checks size on handle; Postgres `get` withholds `bytes` by `octet_length` in SQL). Binary has tighter `MAX_ARTIFACT_BYTES + 38` ceiling, checked in `parseBinary` once bytes are in memory but before digest or decrypt. No writer makes one: `put` refuses plaintext over budget and throws before writing byte or row, which `finishLog` reports as failed body write without failing request. `prepareArtifact`'s last fallback can still exceed budget, but only with thousands of attempts, which gateway (`maxAttempts` ≤ 10 plus refreshes) never captures. Bytes past a ceiling already stored stay, so `corrupt` recovers to `ready` if later reader accepts them.
-
-Rollout is staged because format is storage contract between versions. Release A (v0.13.5): every reader accepts both, writer still emits legacy. Release B: binary writes, deployed only after every reader of shared corpus — each gateway replica, CLI install, standbys, restore readers — runs v0.13.5 or later. Rollback only to v0.13.5 or later: older reader calls binary artifact `corrupt` and may record it; dual reader reading row again recovers it to `ready`. Corpus mixed until legacy rows expire under body retention; nothing rewrites them. Rehearsed on both backends in `packages/store/test/contract/bodies.test.ts`. Neither format changes snapshot rules: SQLite snapshot excludes body tree, `copyStore` carries no body rows, Postgres dump keeps bytes opaque.
-
-Reader answers absence rather than raising, three different answers for three different causes: `not captured` = capture not running; `captured, then lost` = retention or row cap went through; `captured, but unreadable` = file there but will not decrypt, usually changed `OMNI_ENCRYPTION_KEY`. No command deletes a captured body — retention, row cap, orphan sweep are gateway's; second path erasing forensic evidence on request loses incident record.
+The envelope is `OGBA`, version, codec, claimed length, then AES-256-GCM (`pg/bodies.rs` `seal`;
+SQLite writes the same bytes to a file, `bodies/sqlite.rs`). The row holds a `sha256` over the
+stored envelope, so truncation is detectable without the key. Writers emit raw; readers accept
+raw, gzip and legacy `enc:v1:` hex, bounded by `MAX_ENVELOPE_BYTES` before reading. Reading back
+is `omni-control/src/bodies.rs`, behind `GET /api/requests/:id/body` (admin only) and
+`omni bodies`. A missing, swept or undecryptable artifact is a state to report, not an error.
 
 ### Replacing the database while it is open
 
-Snapshot is `VACUUM INTO` a file in `snapshots/` beside database. That folds write-ahead log in by definition, so no `-wal` or `-shm` to handle on way out, and it reads through SQLite rather than copying file, so taking one against live gateway yields consistent database, not torn one. `request_bodies/` tree excluded by construction: including it would make every downloaded copy a prompt corpus and make snapshot size track prompt volume rather than database size. Restore therefore leaves the two sides out of step — state that already exists and is already handled: orphan sweep above collects files restored `bodies` table no longer references, and row whose file is gone reads back as *captured, then lost* rather than raising.
-Retention — `keepLatest` and `maxAgeDays`, both enforced, newest always kept — prunes when snapshot written *and* on hourly sweep. Both, because create path alone is not policy: install that stops taking snapshots never expires one, and lowering `keepLatest` does nothing until somebody happens to take another. Forced copy taken on way into restore skips prune during its own creation and stays exempt from every later one, because undo for an operation must not be deletable by policy that operation runs under — nor by ordinary housekeeping five manual snapshots later. Same sweep removes staging files no operation holds any more: upload a refused import wrote, and `${db}.incoming` a swap that failed after its rename left behind. Both database-sized, nothing else looks at that directory.
+SQLite only; Postgres refuses snapshot, vacuum, restore and the latch (`pg_dump` is the backup).
 
-Restoring one replaces file every repo reads from, inside process reading it. Three pieces make that survivable.
+A snapshot is `VACUUM INTO` a file in `snapshots/` beside the database (`omni-control/src/database.rs`):
+consistent against a live gateway, no `-wal`/`-shm`, and `request_bodies/` excluded so a download is
+never a prompt corpus. Retention — `keepLatest` and `maxAgeDays`, newest always kept — prunes on
+write and on the hourly sweep; the forced snapshot taken on the way into a restore is exempt.
 
-**Store is swappable.** `createStore` returns stable outer object whose repo methods forward, *per call*, to replaceable inner handle; `reopen()` closes inner handle and opens new one at same path, and `close()` is idempotent so restore can close, move file, reopen without separate primitive. Indirection not decoration. Store captured by value into five long-lived holders at boot — app, refresher, three loops — and two dozen modules typed against `Store`, so closing and re-opening connection underneath them would leave every one holding repos bound to dead `Database`. Reading handle per call is what makes swap invisible to them. Also means binding repo method to local defeats whole mechanism and strands that local on closed handle. Routing subscribers live on outer object for same reason: listener registered at boot must survive restore.
+Restoring replaces the file every owner reads, inside the process reading it.
 
-**Quiesce latch gates client traffic, and only client traffic.** `/v1/*` refused with 503 and `retry-after`, rendered by same encoders proxy uses so SDK gets error in dialect it already parses. `/api/*` and `/health` stay live for whole operation: console is how operator watches restore and how they hear it failed, so latch covering whole server would black out dashboard at exact moment it needed and take load balancer's health check with it.
+**Owners are registered.** Every persistent SQLite connection the gateway holds — writer and
+checkpointer, routing refresher and miss resolver, auth/control, OAuth — is registered in
+`omni_store::lifecycle`. A swap takes the transient-access write barrier and every owner's lock
+(`lifecycle::exclusive`), so no connection to the old file survives it. Export pages and
+maintenance hold transient-access leases.
 
-What latch waits for is requests being *answered*, not streams draining. Elysia's `onAfterResponse` fires when response handed back, which for SSE is long before body ends. So wait is bounded — ten seconds — and latch stays shut for whole swap rather than only until in-flight count hits zero, because stream admitted before close still reads through handle swap is about to replace.
-
-**Sequence ordered so neither of two things making it recoverable can be skipped:** nothing closed until candidate judged, nothing swapped until undo exists.
+**The quiesce latch gates `/v1/*` only** (`quiesce.rs`). Client requests are refused with 503 in
+their dialect; `/api/*` and `/health` stay live, because the console is how the operator watches
+the restore and the load balancer must keep its health check. Admission belongs to the response
+lifetime, streams included; the latch drains up to 10 s and stays shut for the swap.
 
 ```mermaid
 flowchart TD
-  req(["restore or import"]) --> latch["close latch<br/><i>/v1 refused · drain, bounded at 10s</i>"]
-  latch --> insp["inspect candidate<br/><b>read-only, separate handle</b><br/>quick_check + migration-001 tables"]
+  req(["restore or import"]) --> latch["close latch<br/><i>/v1 refused · drain ≤ 10s</i>"]
+  latch --> insp["inspect candidate<br/><b>read-only</b> · quick_check + migration-001 tables"]
   insp -- "corrupt, or not ours" --> abort(["BAD_REQUEST<br/><i>live database untouched</i><br/>latch reopens"])
   insp -- ok --> undo["pre-restore snapshot<br/><i>forced, exempt from retention</i>"]
-  undo --> stage["stage beside the live file<br/><i>nothing closed yet</i>"]
+  undo --> stage["stage beside the live file"]
   stage -- "no room" --> abort
-  stage --> swap["close handle · unlink stale -wal/-shm<br/>rename into place · reopen()"]
-  swap -- fails --> wedged(["<b>SwapFailedError</b><br/>best-effort reopen, then latch stays shut<br/><i>pre-restore id logged</i>"])
-  swap -- ok --> inval["invalidate the routing snapshot<br/>end admin sessions <i>iff</i> the password hash changed"]
-  inval --> roll["rebuild usage_rollup<br/><i>guarded; a failure is a doctor complaint</i>"]
-  roll --> open(["latch reopens"])
+  stage --> swap["close owners · unlink stale -wal/-shm<br/>rename into place · reopen"]
+  swap -- fails --> wedged(["<b>Swap error</b><br/>best-effort reopen; latch stays shut"])
+  swap -- ok --> cmp["compare password hashes<br/><i>end sessions iff changed</i>"]
+  cmp --> roll["rebuild usage_rollup<br/><i>guarded; failure is a doctor complaint</i>"]
+  roll --> open(["rebuild routing snapshot · reopen latch · invalidate all topics"])
 ```
 
-Error seam is distinction worth internalizing. Everything before swap — file failing `quick_check`, file that is database but not ours, no room on disk for undo, **no room for staging copy** — fails with live database untouched, latch reopens immediately. Staging copy in particular sits outside swap's `try`, because full disk is where it actually fails and it fails having moved nothing: classing that as failed swap would refuse `/v1` until operator restarted process, over database never opened.
+Everything before the swap fails with the live database untouched and the latch reopened. A
+failure during the swap leaves the latch shut: the file it would serve from is in an unknown state.
+The latch is reopened only by the call that shut it, and a successful restore — the documented way
+out of a failed one — reopens it unconditionally.
 
-Failure *during* swap raises `SwapFailedError`, and gateway deliberately leaves latch shut: file it would serve from is in unknown state, and refusing client traffic beats answering out of half-swapped database. Handle itself reopened on way out, best effort, and error carries whether that worked — because both halves of documented recovery run through it. `GET /api/database` reads PRAGMAs through that handle and second attempt takes its own undo snapshot through it, so swap that left database closed would leave panel blank and turn retry into different, unrecognised failure. `/api/*` still up — how operator reaches pre-restore snapshot named in log line.
+**Nothing sits between the swap and the password comparison**: by then the swap has succeeded, and
+a step that threw in front of the comparison would skip ending sessions while the restored password
+is live. The rollup rebuild therefore runs last and guarded. Pins: `database.rs` tests
+`swap_exact_sequence_keeps_forced_undo_without_retention`,
+`failures_preserve_frozen_half_swap_states_and_sequences`.
 
-Latch reopened only by call that shut it, and only on failure. Two mutating requests can overlap — double-clicked button, two tabs — and single-flight guard refusing second lives *inside* operation, which gateway reaches only after closing latch. Without that rule refused request reopens gate while first mid-swap — precisely the window latch exists to cover. Success reopens unconditionally, because restoring undo snapshot is documented way out of failed swap and it must end that outage rather than inherit it.
-
-Required-tables check is set migration 001 creates, not today's schema. `openDb` migrates snapshot forward on way in, so asserting current tables would reject exactly the old backup operator reaches for.
-
-Two smaller placements carry weight. Candidate copied to staging name *before* handle closes, so window with no database open is a rename, not a file copy. And uploaded database streamed to temp file beside live one rather than into `/tmp`, because swap renames that file into place and rename across filesystems fails. That upload bounded twice: by byte cap this gateway accepts at all, and by what disk can take with room left for undo snapshot import about to write — same precheck `createSnapshot` runs, on the one path accepting operator-supplied bytes. Stale
-`-wal` and `-shm` go while handle shut: they belong to file being replaced, and SQLite reopening new database beside another database's write-ahead log is how restore becomes corruption.
-
-Two pieces of derived state don't survive swap on own. Routing snapshot cache checks staleness with SQLite's `data_version`, which is connection-local — freshly opened handle over different file can report same number and serve stale snapshot — so invalidated explicitly. Admin sessions live in `Map` rather than database, but `setPassword` clears them, so restore writing different password hash is that same "log everyone out" event arriving by another door. Hashes compared across swap and only boolean leaves operation, so restoring this install's own snapshot leaves operator signed in.
-
-Restore ends by rebuilding `usage_rollup`, and *ordering* is the point. Nothing may sit between swap and password comparison: by then swap already succeeded, so step that throws in front of comparison skips session invalidation while restored password is live. Rebuild therefore runs last, guarded — stale rollup is `omni doctor` complaint, restore aborting after swap is outage. Recomputed rather than trusted because nothing in file an operator hands over says whether its counters agree with its rows. `bun:sqlite` is synchronous, so it blocks loop — and so `/api/*` and `/health` — for ≈0.4 s per 500k `request_logs` rows, ≈1.6 s at 2M, ≈6.5 s at 8M.
-
-CLI cannot do any of this, and refuses rather than trying: `omni db restore` stops if gateway running against that installation, no override. Second process can reopen own handle but cannot quiesce gateway's, and renaming file under live SQLite connection corrupts the database being rescued.
+`omni db restore` refuses while a gateway runs against the installation, no override: a second
+process cannot quiesce the gateway's owners.
 
 ## Background loops
 
-Three timers, plus queue drain stopped alongside them:
-
 ```mermaid
 flowchart LR
-  boot([boot]) --> sweep["sweep pending rows<br/><i>once</i>"]
-  boot --> oauth
-  boot --> quota
-  boot --> maint
-  boot --> bus
-
-  oauth["<b>OAuth refresh</b><br/>every 60s"] --> oauthJob["renew inside lead window<br/>disable if expired, no refresh token"]
-  quota["<b>Quota poller</b><br/>every quotaPollIntervalMs<br/><i>default 300s; 0 disables</i>"] --> quotaJob["ask providers what is left<br/><i>failed probe ⇒ unknown, never disabled</i>"]
-  maint["<b>Maintenance</b><br/>every 1h"] --> maintJob["prune request_logs and usage_rollup at retention<br/>prune quota_samples at retention<br/>prune usage_daily at 400d<br/>prune body rows at min(bodyRetentionDays, logRetentionDays), cap at 100k<br/>sweep artifact files with no row<br/>prune snapshots at retention<br/>sweep staging files older than 1h"]
-  bus["<b>Plugin event bus</b><br/><i>no interval — setTimeout(…, 0) drain</i>"] --> busJob["deliver to handlers off the request path<br/><i>bounded queue; drops rather than grows</i>"]
-
-  oauthJob -.-> oauth
-  quotaJob -.-> quota
-  maintJob -.-> maint
-  busJob -.-> bus
-
-  stop([SIGTERM / shutdown]) ==> oauth & quota & maint & bus
+  boot([boot]) --> sweep["recover pending rows<br/><i>own node, or a dead node's</i>"]
+  boot --> oauth["<b>OAuth refresh</b> every 60s<br/><i>refresh.rs</i>"]
+  boot --> quota["<b>Quota poller</b><br/>quotaPollIntervalMs (0 disables)<br/><i>quota.rs</i>"]
+  boot --> maint["<b>Maintenance</b><br/>heartbeat 10s · sweep 1h under lease<br/><i>maintenance.rs</i>"]
+  boot --> snap["<b>Snapshot refresher</b> 500ms<br/>+ limiter preseeder"]
+  boot --> writer["<b>Writer</b><br/>batches · checkpoints"]
+  maint --> mj["recover pending · prune request_logs, usage_rollup,<br/>quota_samples, usage_daily (400d), bodies (+100k cap)<br/>sweep artifact orphans · prune snapshots · sweep staging"]
 ```
 
-Event bus is fourth entry in same stopper list, and teardown treats it as loop like others even though it has no interval — it holds queued work, and work running after store closes reaches closed handle exactly the way late timer would. Socket registry is fifth, for a related but distinct reason covered under [stopping and restarting](#stopping-and-restarting): its heartbeat is a timer like the others, but closing the connections is what keep drain from taking the full deadline.
-
-Setting `quotaPollIntervalMs` to zero disables poller entirely; read once at boot — manual refresh still runs, because operator supplied trigger. `POST /api/credentials/quota/refresh` and `omni quota refresh` reach **same per-account attempt** scheduled pass uses, so eligibility, cooldown, OAuth refresh and persistence cannot diverge between them. One `QuotaOps` per process, shared by routes and poller: its in-flight map is what make refresh during a pass join that probe rather than start second. Across processes guarantee is weaker by design — per-account `coord.mutex` plus reread of `observedAt` suppress duplicate *successful* call; failed or empty one may repeat, and unreachable coordinator cost duplicate call, never the refresh. Manual pass take **no** `quota-poll` lease: interactive request must not become silent no-op because another node hold scheduler's. Retiring `pending` rows at startup is what stops crash from double-counting usage.
-
-Body rows expire on same sweep as request logs they belong to, rather than own schedule, so artifact can never outlive its log line. Row cap runs beside window because window bounds nothing: at sustained load, seven-day retention over full traffic is unbounded in practice. Orphan sweep exists because crash between file write and row write leaves file nothing will ever come back for.
+OAuth refresh renews inside its lead window and disables an expired credential with no refresh
+token (`expiredNoRefresh`). Refresh is coalesced locally and, in a fleet, under a shared lock with a
+re-read and a versioned CAS write (`updateSecrets` semantics), so a rotated token is never lost to a
+race. The quota poller and the operator's refresh (`POST /api/credentials/quota/refresh`,
+`omni quota refresh`) go through one `Quota` per process (`omni-control/src/quota_runtime.rs`); a
+failed probe keeps the old snapshot and never disables a credential; a 429 cools only probing.
+Details: [Rust quota runtime](docs/rust-quota-runtime.md).
 
 ### Stopping and restarting
 
-Signal and `POST /api/lifecycle/shutdown` reach same teardown. They used to be unable to: server, store, and three loop stoppers are locals of bootstrap, so handler defined anywhere else had nothing to stop. `createShutdown` closes over them once, and both callers get same shutdown — loops first, because timer firing while socket drains reaches store about to close, then server, then store, then exit. Second request while first draining escalates, on theory first one evidently stuck.
+`SIGTERM`/`SIGINT` and `POST /api/lifecycle/shutdown` reach the same teardown (`lib.rs`): stop
+accepting, stop the stream hub, stop the loops, let connections drain up to `STOP_DEADLINE` (5 s),
+cancel stragglers (their finishers file 499 rows), drain socket connections, join body workers,
+close health writer, drain quota and refresh, then close the writer, the cluster limiter and the
+coordinator, in that order. A second signal exits 1. A drain timeout exits **0**: a nonzero code
+would read to `Restart=on-failure` as a crash.
 
-Socket registry is fifth entry in that stopper list, and its position matter rather than being tidy.
-`app.stop()` called without `true`, so it drain rather than sever — and open WebSocket never end on
-its own, so one still connected hold teardown for whole five-second deadline every time. Registry
-therefore close every socket **before** server stop, with `1001` and a restart reason, which is what
-console's own reconnect path expect. 4401 would be wrong here: that one tell client to stop trying.
+Socket connections close with `1001` and a restart reason, which the console's reconnect path
+expects; `4401` would tell it to stop trying.
 
-Drain bounded at five seconds. Bun stops server by letting connections finish, and shutdown asked for over HTTP arrives on one of them, so request asking for shutdown is itself reason shutdown cannot complete — gateway answered `ok` then stayed alive until second signal escalated. Signal never hits this, because shell holds no socket. On timeout process exits **0**: nonzero code would read to `Restart=on-failure` as crash and resurrect gateway operator just asked to stop.
-
-Restart is not shutdown, and what it takes depends on what is watching. Capability detected rather than assumed:
+Restart is not shutdown, and what it takes depends on the supervisor (`lifecycle.rs` `describe`):
 
 ```mermaid
 flowchart TD
-  q(["describeLifecycle()<br/><i>pure: environment + one path probe</i>"]) --> j{JOURNAL_STREAM set?}
+  q(["describe()"]) --> j{JOURNAL_STREAM set?}
   j -- yes --> sd["<b>systemd</b><br/>canRestart · canShutdown"]
   j -- no --> d{"/.dockerenv exists?"}
   d -- yes --> ct["<b>container</b><br/>canRestart <i>(a hope, not a fact)</i>"]
-  d -- no --> nn["<b>none</b><br/>canRestart false, with the reason"]
-
+  d -- no --> nn["<b>none</b><br/>canRestart false"]
   sd --> scope{"MANAGERPID set?"}
-  scope -- yes --> user["systemctl <b>--user</b> --no-block restart"]
+  scope -- yes --> user["systemctl --user --no-block restart"]
   scope -- no --> sys["systemctl --no-block restart"]
-
-  ct --> exit["exit 0 — the policy decides,<br/>and cannot be read from in here"]
-  nn --> refuse["control disabled in the console;<br/><i>omni restart from a shell instead</i>"]
+  ct --> exit["exit 0 — the restart policy decides"]
 ```
 
-`JOURNAL_STREAM` is systemd's own statement it captures *this* process, which beats looking for installed unit file — that says unit exists, not that this process is one it started. `MANAGERPID` is separate question asked only once systemd established: picks user manager over system one, because uid wrong in both directions. Failing first, `/.dockerenv` means container. Failing both, nothing would respawn process and restart refused.
+Under systemd the gateway asks the manager rather than signalling itself: the installed unit
+sets `Restart=on-failure` and a handled `SIGTERM` exits 0, so a self-signalled gateway would stay
+stopped. `--no-block` is load-bearing: restarting the unit tears down its cgroup, including the
+`systemctl` client. A cluster replica refuses restart; roll the deployment instead.
 
-Under systemd gateway asks manager instead of signalling itself:
-
-```
-systemctl [--user] --no-block restart omnigateway.service
-```
-
-Unit the CLI installs sets `Restart=on-failure`, and handled `SIGTERM` exits zero, which systemd reads as success — self-signalling gateway would stop and stay stopped. `--no-block` load-bearing: restarting unit tears down its whole cgroup, containing `systemctl` client just spawned, so blocking call killed mid-wait while queued job survives. Asking also fails better. Refused `systemctl` is ordinary error response from gateway still running and still serving, rather than process that killed itself and hoped.
-
-Container's restart policy is one capability here that is hope rather than fact — not readable from inside container — so restart is exit code 0 and console reports uncertainty instead of promising. With no supervisor at all `canRestart` is false, because `omni start` without unit is detached spawn with pidfile and nothing watching it. Shutdown stays available in every shape; stopping is the point of it.
-
-`describeLifecycle` is pure function of environment and one path probe — what lets console disable control and print reason rather than letting operator press it and find out.
-
-Console renders both controls at foot of its sidebar rather than on one screen. Stopping gateway is not database operation; filed next to snapshots because that page had room, and cost was that reaching it meant navigating to unrelated screen first. Rail is 168px wide, so supervisor sentence above becomes section's `title` and confirm dialog repeats whichever half of it decides what click does — disabled-control *reason* stays inline, because that one explains why button in front of you will not work.
-
-Restart is watched rather than timed. Console polls `/health` — its one documented exception to reading `/api/*` only, for reason given under [the console and the CLI](#the-console-and-the-cli) — until gateway stops answering, then until it answers again, and only then reloads. Page reloading on fixed delay would land either before process went or while still starting, and operator reads both as failed restart. Shutdown has no second half to watch, so rail says so and stops.
+The console watches a restart by polling `/health` until the gateway stops answering, then until
+it answers again — its one exception to `/api/*` only.
 
 ## Push transport
 
-One multiplexed socket, `/api/stream`, admin-gated at upgrade. Polling stay beside it permanently,
-not as migration aid: proxy that eat `Upgrade` is ordinary deployment, and console behind one must
-keep working rather than degrade to nothing.
-
-Two topic classes, and class **is** delivery contract rather than hint about one:
+One multiplexed WebSocket, `/api/stream` (`stream_transport.rs` over the bounded RFC 6455 codec
+in `stream_codec.rs`; pure contracts in `stream.rs`). Polling stays beside it permanently: a proxy
+that eats `Upgrade` is an ordinary deployment.
 
 | Class | Carries | Guarantee |
 | --- | --- | --- |
-| `res:<name>` | at most `{ keys }` | none. Dropped frame self-heal — next change re-invalidate, and reconnecting client invalidate everything before resubscribing |
-| `stream:<name>` | payload | monotonic `seq` over bounded ring; past ring server answer `gap` |
+| `res:<name>` | at most `{ keys }` | none. A dropped frame self-heals at the next change; a reconnecting client invalidates everything |
+| `stream:<name>` | payload | monotonic `seq` over a bounded ring; past the ring the server answers `gap` |
 
-`res:*` exist so push and poll cannot disagree. Both path end in same REST fetch through same
-serializer, so no second rendering of any resource exist and no bug where socket show one number and
-reload show another. Client map topic to query key by **prefix**, because `["logs", limit]` and
-`["usage", …6]` are parameterised — enumerated table go stale silently, which is the failure mode
-this whole design keep avoiding. One exception is real: `res:logs` must exclude
-`["logs","body",…]`, a prefix collision on immutable data.
+`res:*` exists so push and poll cannot disagree: both end in the same REST fetch. The console maps
+a topic to query keys by **prefix** (`apps/dashboard/src/session/invalidation.ts`). A topic names a
+resource and covers every branch reading it — `res:usage` and `res:logs` cover the console's
+`["usage",…]` and the client's `["client","usage",…]`. A client principal may hold only those two
+(`stream.rs` `authorised`); `plugin:*` topics are always refused.
 
-A topic name a resource, and every branch reading that resource must be in its entry. Console and
-client surface hold different query keys for the same rows — `["usage",…]` and
-`["client","usage",…]` — so `res:usage` and `res:logs` cover both. An entry covering one branch
-leave the other subscribed to a frame that do nothing, and the symptom is silence, which look
-exactly like a quiet gateway. Client's key summary ride `res:usage`, not `res:keys`: its
-`limitUsage` is computed from usage rows, and a client cannot hold `res:keys` anyway. A panel whose
-topic its principal cannot hold must poll with **no** topic — naming one switch polling off in
-favour of a push that never arrive.
+Emitters must cover **every** change to what a topic names, because push replaces polling. The
+writer's `LogObserver::committed` emits one `res:logs` per row event and, per finish, `res:usage`
+too; admin mutations emit their resource (`admin_routes.rs`); the quota poller emits on pass
+completion; a database swap invalidates everything, on success only.
 
-`stream:*` **never claim gapless**. Bounded ring plus explicit `gap` is entire contract; silent skip
-is the failure the class exist to prevent. Subscribe to `stream:*` topic no source declared answer
-`error`, one generic rule covering console whose capture is `none` and every plugin stream whose
-source failed to start — neither may look like topic merely quiet.
+Coalescing is mandatory, leading **and** trailing: floor 1 s for `res:usage`/`res:logs`, 5 s for
+`res:quota`/`res:credentials`. Backpressure is real: per-connection queues are bounded and drop the
+oldest frame, counted. Pin: `slow_queue_drops_oldest_counts_and_resumes_without_close`.
 
-Coalescing mandatory, not optimisation. At 100 requests per second, per-request `res:usage` frame is
-100 client refetch per second against surface polling at 60s today: uncoalesced push strictly worse
-than polling it replace. Leading **and** trailing — leading alone lose last change of burst, which
-is the one operator watch for; trailing alone put floor of latency on idle gateway's first event,
-the case socket was added for. Floor 1s for `res:usage` and `res:logs`, 5s for `res:quota` and
-`res:credentials`, all in one place so they readable against each other.
+The socket must not outlive its session: the heartbeat re-verifies every 20 s and closes **4401**,
+which alone means "authenticate again, do not reconnect". A verification that *errors* closes
+nothing. Pin: `expired_session_upgrade_and_next_shared_heartbeat`.
 
-Emitters sit where state change, and must cover **every** change to what a topic name, because push
-replace polling rather than supplement it: `cadence(ms, topic)` return `false` once the socket
-declare that topic pushed, so panel refetch a pushed topic on nothing else, and a
-transition emitting nothing is one nobody see. When adding a topic, enumerate the writes to the
-resource and check each one emits — the count of emitters should match the count of writers.
-Request log change three times — `beginLog` when row
-appear, `routeLog` when failover rewrite its target, `finishLog` when it complete — and all three
-emit `res:logs`. Only `finishLog` also emit `res:usage`, because only there has anything been
-counted. Shipping with the completion emitter alone made in-flight request invisible until it was no
-longer in flight.
-
-Other emitters, each already at-most-once: admin mutation handlers,
-quota poller at pass completion, OAuth sweep when it touched a row, database swap for global
-invalidate. Swap emit only on success — telling every console to refetch against store that did not
-come back is worse than telling it nothing.
-
-Socket must not outlive its session. Admin TTL is 12h, so connection authenticated once at upgrade
-would otherwise survive expiry indefinitely — privilege bug, not inconvenience. Heartbeat
-re-verify every 20s and close **4401**. That code load-bearing on client: 4401 alone mean
-"authenticate again, do not reconnect", any other code drop client into ordinary backoff loop
-against gateway that refuse it every time. Revalidation that *throw* close nothing, because verify
-that threw is not verify that failed.
-
-Registry hold `revalidate` thunk rather than token or `Request`, so it never learn what cookie is.
-Same seam let machine-token arm land later without registry growing second shape.
-
-Backpressure real rather than notional. Bun's `send` report status instead of blocking, so slow
-consumer is socket returning non-positive status; drain stop at first such frame rather than sending
-ones behind it, because on `stream:*` sequence is the contract. Past queue capacity oldest frame go
-— on transport whose point is currency, newest is one worth keeping — counted, and reported once per
-tick rather than once per drop.
-
-Third class `plugin:<id>:<name>` sit in neither of the two, owned by plugin through `channels`
-capability. It carry no `seq`, so it can never `gap`: `channels.send` emit `{type,topic,payload}`
-and nothing more — no ring behind it, nothing to fall off the back of — so console `hold`
-resubscribe **without** `sinceSeq` and SDK `ChannelMessage` carry no `gap` arm. Adding one would
-be a case every panel author write and none reach. What panel do get is `open`/`refused`/`closed`,
-because plugin topic is the one class a principal can be refused: `authorised` give it to admin
-alone, so viewer's panel must be able to say so. Console `hold` is refcounted and unsubscribe on
-last release — that frame is what fire plugin's `onClose`, so panel unmounting with tab still open
-is a session plugin may drop. Plugin receive `open(name)` and nothing more — no socket, no upgrade request, no header,
-no `Principal` — and `<id>` come from manifest host validated against directory name, so plugin
-supply tail of topic and never head. Split load-bearing: channel registry answer what **exist**,
-`authorised` decide who may hold it, so opening channel never widen plugin's own reach. Admin
-principal may hold any opened plugin topic, because console render plugin panel; machine arm reach
-its own plugin's prefix alone. Topic nothing opened refused exactly like `stream:*` topic nothing
-declared. Outbound frame go through same per-connection queue as everything else, so bound and drop
-behaviour below is the only one that exist. Client must subscribe before it send: plugin's only way
-to answer publish on that topic, so frame from unsubscribed connection is question whose answer have
-nowhere to land. Handler that throw caught, counted per plugin, reported one batched line — same
-shape plugin event bus use, same reason.
-
-Latch not gate `/api/stream`, same rule keeping `/api/*` and `/health` live through restore. Socket
-stay open across database swap: repo methods forward per call, so no connection hold handle a swap
-invalidate, and global invalidate emit after `reopen()`.
-
-`/health` watcher deliberately **not** on socket. One check proving gateway came back must not
-depend on subsystem being restarted.
+The latch does not gate `/api/stream`; sockets stay open across a swap.
 
 ## The console and the CLI
 
-Two front ends, one set of operations, two very different paths to it:
-
 ```mermaid
 flowchart LR
-  browser(["browser"]) -- "/api/* + session cookie" --> admin["routes/admin<br/><i>requireAdmin, then exactly<br/>one control call</i>"]
-  admin --> control["@omni/control"]
-  term(["terminal"]) --> omni["omni<br/><i>no HTTP at all</i>"]
+  browser(["browser"]) -- "/api/* + session cookie" --> api["api.rs · admin_routes.rs<br/><i>guard, then one omni-control call</i>"]
+  api --> control["omni-control"]
+  term(["terminal"]) --> omni["omni<br/><i>no HTTP for local SQLite</i>"]
   omni --> control
-  control --> db[("SQLite")]
-
-  spa["dashboard SPA<br/><i>static files, same origin</i>"] -.- browser
-  gw["apps/gateway serves both"] -.- spa
-  gw -.- admin
-
+  control --> db[("SQLite / Postgres")]
+  gw["omnigateway serves dist/"] -.- browser
   browser -- "/health only, during a restart" --> gw
 ```
 
-Console is React SPA gateway serves as static files from own origin; may import types and model catalog, never provider adapter or HTTP client. Its one documented exception to "`/api/*` only" is that `/health` edge: restart is exactly window in which no authenticated surface exists to ask, so liveness is one question `/api/*` cannot answer. CLI skips server completely and opens database itself — same operations, no running gateway required.
+The console is a React SPA served as static files from the gateway's own origin
+(`static_files.rs`: `OMNI_STATIC_DIR`, else `public/` beside the executable, else the checkout's
+`apps/dashboard/dist`; paths normalised and `canonicalize`-contained). It may import nothing from
+the gateway: types are mirrored in `src/api/types.ts`, single-copy helpers in `src/lib/domain.ts`.
+Three principals share one cookie — `admin`, `viewer` (read-only, optional password) and `client`
+(one API key's own surface at `/client`). `apps/dashboard/tooling/build.ts` bundles React normally;
+there is no import map and no shared runtime.
 
-Reading captured body is one of those operations, not route's own logic: `readRequestBody` decides swept or undecryptable artifact is state to report rather than error to raise, and handler adds no error mapping that could quote path or stack back. Carries no CLI command yet — only asymmetry between the two front ends. `GET /api/settings` additionally reports `bodyLoggingAllowed` beside settings, because runtime toggle meaningless without boot-time key and console knowing only setting would render switch that silently does nothing.
+`omni` resolves an installation root (`--root` > `OMNI_ROOT` > cwd > `~/.config/omnigateway`),
+merges that root's `.env` explicitly — the gateway itself reads no `.env` — and runs
+`omni-control` operations against the SQLite file. Process supervision (`omni start`, `service`)
+and doctor are described in [Rust CLI service boundary](docs/rust-cli-service.md).
 
 ## Plugins
 
-Plugin adds routes, storage and console UI to one installation without being part of this repository. Loaded from `<root>/plugins/` at boot, in lexicographic id order so two installs with same plugins behave same way. `docs/writing-a-plugin.md` is procedure; this section is why shape is what it is.
-
-```mermaid
-flowchart LR
-  disk[("&lt;root&gt;/plugins/&lt;id&gt;/<br/><i>lexicographic id order</i>")] --> load["loader<br/><i>manifest · API major · import · setup · migrations</i>"]
-  load -- "any failure" --> skip["skip one plugin<br/>report to stdout + omni doctor"]
-  load -- ok --> ctx["PluginContext<br/><i>capability-scoped</i>"]
-
-  ctx --> routes["routes under /api/plugins/&lt;id&gt;/*"]
-  ctx --> store["storage → plugin_&lt;id&gt;_&lt;name&gt;"]
-  ctx --> files["files → &lt;root&gt;/plugins/&lt;id&gt;/data/"]
-  ctx --> net["net:outbound → declared origins only"]
-  ctx --> events["events:request · events:limit"]
-  ctx --> channels["channels → plugin:&lt;id&gt;:&lt;name&gt; topics on /api/stream"]
-  ctx --> ui["UI bundle at /plugin-assets/&lt;id&gt;/…"]
-
-  skip -.-> serving(["gateway serves either way<br/><i>the proxy path depends on no plugin</i>"])
-  ctx -.-> serving
-```
-
-### The trust boundary, which is not one
-
-Plugin is `import`ed into gateway process, and that process holds encryption key, decrypted provider credentials, admin session state and API-key hashes. Bun offers no in-process sandbox. Capability context is therefore **guardrail rather than sandbox**: makes accidental overreach impossible and plugin's intent auditable from its manifest, and does not stop hostile code, which reaches past it by importing store directly.
-
-```mermaid
-flowchart TB
-  subgraph proc["one Bun process — one memory space"]
-    gw["gateway"]
-    key["OMNI_ENCRYPTION_KEY<br/>decrypted credentials<br/>admin sessions · key hashes"]
-    plug["plugin code"]
-  end
-
-  plug -- "what the manifest declares" --> ctx["PluginContext<br/><i>storage · files · net · events</i>"]
-  ctx --> gw
-  plug -. "<b>what nothing prevents</b><br/>import @omni/store directly" .-> key
-
-  classDef bad stroke-dasharray: 5 5
-  class plug,key bad
-```
-
-Dashed edge is whole point of section. Not a gap to be closed by better context object; it is what "same process" means. Say it plainly wherever it comes up — reader believing context is sandbox makes worse installation decisions than one who knows it is not.
-
-Supervised subprocess with IPC protocol would be real boundary. Considered and deferred on cost — process supervision, protocol versioning, restart semantics — and decision recorded rather than assumed. If this project ever accepts plugins it does not control, that is point to revisit, before rather than after.
-
-### Every failure is survivable
-
-```mermaid
-flowchart LR
-  s([boot]) --> m{manifest parses?}
-  m -- no --> x
-  m -- yes --> v{API major<br/>compatible?}
-  v -- no --> x
-  v -- yes --> i{entry imports?}
-  i -- no --> x
-  i -- yes --> u{"setup() returns?"}
-  u -- throws --> x
-  u -- yes --> g{migrations apply?<br/><i>one transaction each</i>}
-  g -- no --> x
-  g -- yes --> ok(["loaded"])
-
-  x(["skipped, with the reason<br/><i>stdout + omni doctor + a disabled nav entry</i>"]) --> serve
-  ok --> serve([" gateway serves "])
-```
-
-Malformed manifest, incompatible API major, entry that will not import, setup that throws, migration that fails: each skips one plugin, reported to stdout and `omni doctor`, leaves gateway serving. Asymmetry deliberate. Proxy path depends on no plugin and must not become able to, and gateway refusing to start because optional cosmetic feature has syntax error has converted nuisance into outage — while also removing console operator would use to find out which plugin to remove.
-
-### Storage rides the database, on its own track
-
-```mermaid
-flowchart TB
-  subgraph one["one omnigateway.db"]
-    core["core tables<br/><i>migrations: 001…011</i>"]
-    p1["plugin_pokemon_*<br/><i>plugin_migrations: pokemon 1…n</i>"]
-    p2["plugin_other_*<br/><i>plugin_migrations: other 1…m</i>"]
-  end
-
-  one --> snap["snapshot<br/><i>VACUUM INTO — takes plugin data with it</i>"]
-  snap --> rest{"restore onto an install<br/>without that plugin?"}
-  rest -- yes --> orph["tables stay as orphans<br/><i>omni doctor reports; nothing auto-drops</i>"]
-  rest -- no --> fine(["plugin resumes on its own track"])
-
-  rm["omni plugin remove"] -.-> keep["directory goes, tables stay"]
-  rmp["omni plugin remove --purge"] -.-> drop["tables dropped, after confirming"]
-```
-
-Plugin tables live in gateway's own SQLite file, so plugin data moves with snapshot and restore like everything else. Named `plugin_<id>_<name>` by host from `{{name}}` placeholder plugin writes, tracked in `plugin_migrations` on a track independent of core's `001..` — core's next migration number unaffected by anything plugin does.
-
-Plugin migrations apply one transaction each rather than one for batch. Single transaction reads tidier and is wrong: plugin failing on migration 5 would silently revert 1 through 4 on every subsequent boot, turning one bad migration into repeated data loss.
-
-Restoring onto install lacking a plugin leaves orphan `plugin_*` tables. They stay, `omni doctor` reports them, nothing drops them automatically — restore is precisely when plugin may not be installed yet, and drop is irreversible. `omni plugin remove` keeps the tables too; only `--purge` drops them, and it confirms first.
-
-### Events are at-most-once, and say so
-
-```mermaid
-flowchart LR
-  fin["finishLog()<br/><i>already at-most-once per request id</i>"] --> emit["emit RequestCompleted"]
-  emit --> q{"bounded queue"}
-  q -- full --> drop(["<b>dropped</b>, never grown"])
-  q -- room --> drain["drain off the request path<br/><i>setTimeout(…, 0)</i>"]
-  drain --> h1["handler A"]
-  drain --> h2["handler B — throws"]
-  h2 --> lost(["that plugin loses that event<br/><i>and nothing else does</i>"])
-  kill(["process dies with work queued"]) -.-> gone(["<b>gone</b> — delivery is not durable"])
-```
-
-`RequestCompleted` emitted from `finishLog`, already the one site running at most once per request id — same guarantee, same reason, that put rate-limiter's token debit there. Handlers run off request path through bounded queue: nothing runs on caller's stack, throwing handler costs that plugin its event and nothing else, and full queue drops rather than grows, because unbounded queue behind slow handler is memory leak appearing only under load.
-
-Delivery explicitly **not durable**. Event queued when process dies is gone, so anything needing exact accounting reconciles from its own storage instead. Fine for counter, wrong for ledger, and distinction documented rather than left for someone to assume wrong half.
-
-Plugin channels carry the same promise and one more: a client must **subscribe before it sends**, because the plugin's only way to answer is `send(connectionId, …)` on that topic, so a frame from an unsubscribed connection is refused rather than handed over. A plugin topic nothing opened is refused like a `stream:*` topic nothing `declareStream`d — a topic with no owner must not read as a topic that is merely quiet. Two orderings are load-bearing and both fail silently when reversed. The channel registry is built **before** `loadPlugins` in `apps/gateway/src/index.ts`, because a plugin opens its channel inside `setup`; one built after leaves every plugin holding a live-looking handle onto nothing. And the route's `close` reads `registry.topics(id)` **before** `registry.remove(id)` — reverse it and every `onClose` handler goes unfired. A throwing handler is caught, counted per plugin, reported as one batched line per plugin, never one per failure and never with the error body: `LogFields` is a closed allowlist and that code was authored outside this repository.
-
-### The console shares one React
-
-```mermaid
-flowchart TB
-  man["apps/dashboard/shared/manifest.ts<br/><b>one list, three consumers</b>"]
-  man --> ext["build externals<br/><i>console does not bundle them</i>"]
-  man --> imap["import map in index.html"]
-  man --> shared["shared runtime build"]
-
-  imap --> rt[("react · react-dom<br/>styled-components<br/>@tanstack/react-query<br/>@omnigateway/dashboard-sdk")]
-  ext -.-> rt
-  shared -.-> rt
-  console["console bundle"] --> rt
-  plugbundle["plugin UI bundle<br/><i>/plugin-assets/&lt;id&gt;/…</i>"] --> rt
-
-  rt --> okk(["one instance — hooks work"])
-  two(["two copies"]) -.-> err(["<b>invalid hook call</b>"])
-  twosdk(["two SDK copies"]) -.-> quiet(["<b>panel pauses, silently</b>"])
-```
-
-Plugins render inline in console, so both halves must hold same React instance — two copies make every plugin hook throw. So console externalises `react`, `react-dom`, `styled-components`, `@tanstack/react-query` and `@omnigateway/dashboard-sdk` rather than bundling them, and import map in `index.html` resolves those bare specifiers to shared runtime built beside it. Specifier list, import map and shared build's entry points are one object in `apps/dashboard/shared/manifest.ts`, because those three drifting apart fails in three different and equally unhelpful ways.
-
-`apps/dashboard/tooling/build.ts` uses Bun for production HTML and one multi-entry shared-runtime
-graph. Application assets and self-hosted fonts are content-hashed; shared entry URLs stay stable.
-The thin transform adapter retains TanStack's public route generator/splitter and Babel's
-styled-components names. `tooling/serve.ts` uses Bun for development proxying/static
-preview. Development rebuilds the production graph into temporary snapshots and
-reloads the page after success (component state resets; no React Fast Refresh).
-Failed edits retain the last good snapshot; serialized rebuilds coalesce rapid edits.
-Preview serves existing `dist` on 4173 without watching; dev defaults to 5173.
-
-`@omnigateway/dashboard-sdk` is on that list too, and it is worth separating from the other four rather than reading as one more of them. Those are shared for instance identity, and every breach announces itself — a thrown hook error, a component drawing from the wrong stylesheet. The SDK is shared for **context identity**: it holds the chassis LIVE switch, so a second copy is a second `createContext` result, and a panel reading it finds no provider above it, takes the "polling is off" default, and never polls again. Nothing throws and nothing is logged; the only symptom is a panel that stopped updating, which is indistinguishable from the pause working. A plugin bundle must mark the SDK external exactly as it marks React.
-
-Two build facts hide inside that list. `export * from "react"` does not work and does not warn — React is CommonJS, so the re-export compiles to a module exporting only `default`; the shims destructure the default instead. The SDK is ESM, so `export *` is correct for it. And plugin UI assets are served at `/plugin-assets/<id>/…`, not `/plugins/<id>/…`, which would collide with the console's own client-side routes; bundles are unauthenticated like the console's own JavaScript, and the catalog at `/api/plugins` is admin-gated, because what is gated is data.
-
-`sdk` range shipped console does not satisfy disables only UI, and nav entry renders disabled carrying reason. Plugin collecting data should not go dark because console's React moved, and operator should get sentence rather than blank page.
+Not supported in 1.x. `<root>/plugins/` entries are warned about once at boot and never loaded;
+`/api/plugins*` answers 501, `/plugin-assets/<id>/*` 404; `omni plugin *` exits 1; doctor reports
+plugin directories without running them. Plugin tables in a restored 0.x database are left in
+place. The 0.x plugin host and its design are on `bun-checkpoint`.
 
 ## Clustering
 
-One process was the premise everywhere: rate-limit rings, the concurrency gauge, admin sessions,
-the refresh-coalescing map, the boot-time sweep of pending rows, the socket registry — each a
-module-scope `Map`, each correct because nothing else held one. Cluster mode keeps that code and
-moves the maps behind one interface.
+`OMNI_CLUSTER_MODE=true` runs replicas over one Postgres primary (`OMNI_DATABASE_URL`) and one
+Redis/Valkey (`OMNI_REDIS_URL`). There is no SQLite shadow. Every replica must use the same fixed
+`OMNI_DAY_OFFSET_MINUTES` so one instant has one `usage_daily.day`.
 
 ```mermaid
 flowchart LR
   subgraph replicaA["replica A"]
-    limA[limiter] --> coordA[Coord]
-    loadA[load registry] --> coordA
-    refA[refresher] --> coordA
-    authA[admin auth] --> coordA
-    bcA[broadcaster] --> coordA
+    limA[cluster limiter] --> coordA[RedisCoord]
+    loadA[load publisher] --> coordA
+    authA[sessions] --> coordA
+    hubA[stream hub] --> coordA
     loopsA[loops] -->|lease| coordA
   end
   subgraph replicaB["replica B"]
-    coordB[Coord]
+    coordB[RedisCoord]
   end
   coordA --> redis[(Redis)]
   coordB --> redis
@@ -906,135 +675,55 @@ flowchart LR
   replicaB --> pg
 ```
 
-**`@omni/coord`** is the interface (`packages/coord`): `window` (the `1m` ring), `gauge`
-(concurrency and routing load), `buckets` (the `5h`/`1w` counters), `mutex`, `lease`, `kv`,
-`pubsub`, `incr`. Pure like `@omni/ratelimit` — no clock, `now` a parameter — with one in-memory
-implementation that is the maps the gateway held before. The Redis implementation lives in
-`apps/gateway/src/coord/redis.ts`, each primitive one Lua script. The property every
-implementation must hold: a claim is visible to every concurrent claimant **at call time**,
-before the promise settles. In memory that is "mutate, then `Promise.resolve`"; in Redis it is the
-script. Two consumers depend on it in a way that is easy to break: the limiter raises its claim
-before its first yield, and the load registry keeps a synchronous local map and only *samples* the
-shared gauge before ranking — an `await` between `counts()` and `acquire()`, even on a resolved
-promise, let nine simultaneous dispatches rank on one snapshot. Concretely: `rateLimit.ts`
-raises `deciding` and claims before its first yield, and `loadRegistry.ts` reads the shared gauge
-only through `refresh()` before it ranks; the burst test in `dispatch.test.ts` catches the
-`await` version. `coord` is threaded through **all** of a call graph or none —
-`apps/gateway/test/cluster/sharedCoord.test.ts` stands up two route trees over one memory coord
-and fails on any site still reading a module-scope map.
+**`omni-coord`** is the interface: windows, gauges, buckets, mutex, lease, kv, pubsub, incr.
+`MemoryCoord` is the single-process implementation; `RedisCoord` runs each primitive as one Lua
+script (`redis/scripts.rs`, digests pinned by `scripts_are_byte_stable`), loaded once and called by
+`EVALSHA` over one ordered submission queue (`redis/link.rs`), so a release cannot be overtaken by
+the next acquire. Every implementation holds one property: a claim is visible to every concurrent
+claimant **when issued** — memory futures complete on their first poll
+(`every_memory_call_completes_on_its_first_poll`).
 
-**Invariants the table below relies on.** Refresh serialisation is three layers — the local
-`inFlight` map, `coord.mutex`, and a **re-read** behind the lock — and the re-read is the dedup:
-a view whose `expiresAt` sits behind the row's is answered from the store, never the provider.
-The long windows (`5h`, `1w`) are `coord.buckets`, seeded from `usage.sumBuckets` under a lock,
-and **`add` on an unseeded key is a no-op**, because the row is already in the store the seed
-will read; the two tests named "before the seed" pin both directions. Background loops run under
-`coord.lease` via `underLease`, and the heartbeat is every process's own — it is what keeps its
-pending rows out of another's `sweepPending`. `complete()` in both usage repositories is a
-**claim** — `ON CONFLICT DO UPDATE … WHERE state = 'pending'`, rollup only when a row changed —
-so a row swept as dead and then completed by its owner is billed once. A remote routing change
-arrives as the `RoutingChange` itself over the `routing` topic and goes through
-`snapshots.applyRemote`, so a foreign health write patches rather than rebuilds. On Postgres
-`config_version` move only when a decision column of `credential_health` change, so a bare
-failure-count increment is patched there too — and a dropped publish leave that count stale on
-one replica until something else invalidates, which **lengthen** a backoff and nothing more: the
-replica holding the lower count judge its own successes silent, so it never reset the row, and
-the count only climb until a replica with the true count succeed through it.
+**Failure.** Redis unreachable: each primitive falls back to an embedded `MemoryCoord`, so limits
+degrade to per-replica and no request is refused over it; a lease that cannot be confirmed is not
+held; `kv` refuses (`OVERLOADED`), because a session verified against a fallback map is one a
+password change elsewhere cannot end. Logged at a bounded rate. Postgres unreachable: the request
+fails. Pins: `crates/omni-coord/tests/faults.rs`, `crates/omni-cluster-limit/tests/faults.rs`.
 
-**What moved where.**
-
-| Was | Now | Exact across replicas? |
+| Concern | Cluster mechanism | Exact across replicas? |
 | --- | --- | --- |
-| `1m` ring, concurrency gauge | `coord.window`, `coord.gauge` | yes |
-| `5h`/`1w` store cache + debit delta | `coord.buckets`, seeded from `usage.sumBuckets` under a lock | yes, sliding at the grain (minute, hour) |
-| routing load counts | local map + `coord.gauge` sample per rank | one round trip stale |
-| refresh coalescing | local map + `coord.mutex` + re-read + `updateSecrets` CAS | yes — three layers, each covering the last's hole |
-| admin sessions, pending OAuth flows, probe cooldowns | `coord.kv` with TTL | yes |
-| background loops | each tick under `coord.lease` | one holder at a time |
-| boot-time `sweepPending` | own node's rows, or a node whose heartbeat lapsed | yes — `request_logs.node_id`, `nodes` heartbeat |
-| socket registry, ring, coalescer | per replica; every frame goes out through `coord.pubsub` and back in | one delivery path |
+| `1m` window, concurrency | one `ADMIT` script per limited request (`omni-cluster-limit`) | yes |
+| `5h`/`1w` | Redis bucket hashes, seeded in the background under `omni:lock:seed:<bucket>`; debits batched with the row's commit id so a seeded row is never counted twice | yes, at the grain |
+| routing load | local registry + fleet picture published/read every 100 ms (`load.rs`) | ~one interval stale |
+| OAuth refresh | local coalescing + shared lock + re-read + versioned CAS | yes |
+| sessions, pending OAuth, probe claims | `kv` / gauges with TTL | yes |
+| maintenance sweep | under `lease("maintenance")` | one holder |
+| pending-row recovery | own node's rows, or a node whose heartbeat lapsed | yes |
+| push | every frame published and re-delivered, own included; `seq` from `incr` | one path |
 
-**Push.** Every emitter's frame is published and re-delivered through the subscription — the
-emitting replica's own included — so a single process and a fleet run one path. Two coalescers
-in series, emit side and deliver side, bound what a replica publishes and what a client receives;
-they add no delay. `stream()` takes its sequence numbers from `coord.incr`, so a client reconnecting to
-another replica carries a number every replica recognises; each ring holds only what it saw, and
-answers `gap` for the rest, which the client already treats as "refetch"; the ring's `push`
-accepts that seq and drops a frame behind its head. Plugin channels are
-pod-local by construction: every connection id a plugin ever sees is one whose socket is on the
-replica running that plugin instance.
+Cluster gauge slots **expire while their holder is live**, so a long request names its slot (a
+random uuid per admission, never `requestId` — a named acquire is idempotent) and renews it on a
+timer, capped at `MAX_RENEWED_MS` (a day) so a leaked slot still lapses. Probe slots are not
+renewed. Unseeded long windows admit while the seed lands (the one deliberate difference from 0.x).
 
-**Console.** One stdout per process. Each publishes its lines on the shared `stream:console` —
-which through the fan-out is every replica's lines merged — and on its own
-`stream:console:<nodeId>`. The REST backlog of another replica is an ask over `pubsub` answered
-on a topic minted per ask; `GET /api/nodes` lists who is alive.
+Committed key, credential, quota and health changes publish row identities on the `routing`
+topic (`routing.rs`); the receiver reads current primary state and patches its snapshot, and a
+500 ms version poll repairs missed publications. PG inference reserves bounded writer capacity
+before admission (4 s deadline, which also revalidates the key and screening settings against the
+primary); a full queue returns the surface's overload response without dispatch. Under pressure
+only optional `Begin`/`Route` events are shed — unlike 0.x, which awaited them, so an overloaded
+replica's console may miss a pending row. Shutdown drains writer, commit consumer, limiter, then
+coordinator. A lineage change needs the [offline bucket sweep](docs/rust-cluster-cutover.md)
+(`omnigateway cluster-cutover-sweep`).
 
-**Failure.** Redis unreachable: `attempt()` decides fail-open per table. The proxy-path
-primitives fall through to an embedded in-memory
-coordinator, so limits degrade to per-replica and no request is refused over it; a lease that
-cannot be confirmed is not held (`lease` false); a lock that cannot be taken throws (`mutex`);
-`kv` refuses with `OVERLOADED`, because a
-session verified against a fallback map is one a password change elsewhere cannot end. Logged
-once per thirty seconds under two closed `LogFields` keys, `coord` and `coordFallback`.
-Postgres unreachable is the same as SQLite locked: the request fails. The Redis client's own
-quirks — `connect()` never rejects with `autoReconnect` on, `onclose` never fires on a killed
-connection, scripts are `SCRIPT LOAD`ed at connect and called by `EVALSHA` so a release cannot
-be overtaken by the next acquire — are documented in `apps/gateway/src/coord/redis.ts` and in the
-design spec's History section.
-
-**Tests.** The contract suite runs against real Redis when `OMNI_TEST_REDIS_URL` is set (CI sets
-it, through a `valkey` service), and `test/cluster/sharedCoord.test.ts` runs the two-replica suite
-over two **separate** Redis coordinators — which is what two pods actually hold.
-
-**Rust gateway.** `crates/omni-gateway` selects one bounded Postgres primary pool
-per replica in cluster mode; there is no SQLite shadow. A warm request uses its
-in-memory routing snapshot. Committed key, credential, quota, and health changes
-publish row identities (never keys or secrets) on `routing`; the receiving
-worker reads current primary state and patches its snapshot. A 500 ms version
-poll repairs missed publications. Health mutations serialize against the stored
-row, while fleet load is published and read in the background every 100 ms.
-PG inference reserves bounded terminal queue capacity before admission. The waiter cap
-is one per default-sized batch of queue credits (32 by default), and its 4 s
-deadline also covers revalidation of the key and screening settings against
-the primary. The same settings determine reservation size and screening;
-the warm path still reads only the replica snapshot. A full wait queue,
-deadline, or closed writer returns the surface's overload response without
-dispatch or a completion row. Hyper need not notice a disconnect before
-reading the body, so the deadline bounds retention in that case. At half or
-less free queue credit, Rust sheds only optional `Begin`/`Route` events,
-counting them separately in `/metrics`. This intentionally differs from the
-TypeScript gateway, which awaits those writes; an overloaded Rust replica's
-console may miss a pending row or failover update. Every admitted request can
-enqueue its reserved `Finish` without waiting, including on cancellation.
-The writer commits completed logs and usage rollups
-atomically before handing off a debit with that transaction's top-level xid8.
-A failed write still hands off a debit, without an xid. PG retains a batch when
-the commit consumer is full; shutdown drains writer, consumer, limiter, then
-coordinator, in that order. See the
-[offline bucket sweep](docs/rust-cluster-cutover.md) for a lineage change.
-
-Console reads address a process in both Rust modes. `node=all` merges the
-store's live nodes (only the local node in SQLite), tags lines, and shares one
-deadline across remote publication and replies, including queued fanout.
-
-**The store.** `OMNI_CLUSTER_MODE=true` selects `packages/store/src/postgres/` at
-`OMNI_DATABASE_URL`, a second implementation of the same `Store` interface over `Bun.SQL`.
-Every replica must use the same fixed `OMNI_DAY_OFFSET_MINUTES` so one instant has one
-`usage_daily.day`; set it explicitly in a fleet rather than inheriting each host's current offset.
-Migrations are its own numbered list under an advisory lock. Request bodies are `bytea` rows rather
-than files. `vacuum`,
-`snapshotTo`, `inspect`, restore and the quiesce latch are SQLite's and are refused; plugin
-storage is Postgres, and its SQL is the plugin's to write for it — which is why `ctx.storage`
-became asynchronous at plugin-api generation 3.
+Console reads address a process: `stream:console` merges every replica's lines,
+`stream:console:<nodeId>` is one; `GET /api/nodes` lists the live ones; `node=all` shares one
+deadline across remote replies (`console.rs`).
 
 Design: `docs/superpowers/specs/2026-09-02-horizontal-scaling-design.md`.
+
 ## Account-derived provider catalogs
 
-OAuth flows may store a normalized, public `providerData.modelCatalog` snapshot.
-`packages/providers/src/accountCatalog.ts` projects bounded model metadata only;
-control merges snapshots into `/api/catalog` without mutating static descriptors,
-decrypting secrets or performing upstream requests. Account changes invalidate
-the dashboard catalog. Unknown pricing is null; absent limits remain unknown.
-Qoder uses a versioned encrypted access-token bundle as the authoritative inference
-origin/auth/model input, so an immediately refreshed attempt never uses stale public
-metadata. See [Qoder](docs/qoder.md) for protocol and live-verification limits.
+OAuth flows may store a normalized, public `providerData.modelCatalog` snapshot. `omni-control`
+(`api.rs`, `public_rows`) merges those rows into `/api/catalog` without mutating the static
+catalog, decrypting secrets or calling upstream. Unknown pricing is null; absent limits stay
+unknown. Qoder, which used this most, is not served in 1.x ([Qoder](docs/qoder.md) describes 0.x).

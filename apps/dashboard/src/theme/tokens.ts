@@ -1,4 +1,4 @@
-import type { ProviderId } from "@omni/ir";
+import type { ProviderId } from "../api/types.ts";
 
 /**
  * The gateway's own provider id, not a second spelling of it.
@@ -7,7 +7,7 @@ import type { ProviderId } from "@omni/ir";
  * the console held two `ProviderId` types that were structurally identical
  * until the day they were not. Re-exported rather than redeclared so that
  * everything importing it from here keeps working while there stays exactly one
- * definition, in `@omni/ir`.
+ * definition, in `api/types.ts`.
  */
 export type { ProviderId };
 
@@ -78,13 +78,13 @@ export type AppTheme = typeof theme;
  *
  * A name, not a value: `ProviderPalette` in `GlobalStyle.ts` writes what is
  * behind it, from the catalog the shell gate has already loaded. Takes a bare
- * string rather than a `ProviderId` because a provider supplied by a plugin is
- * not in that union and is coloured the same way as any other.
+ * string rather than a `ProviderId` because it is called with stored ids,
+ * which a catalog change can leave naming no listed provider.
  *
  * Which display name and which order go with that id are catalog questions now,
  * and answered through `useProviderCatalog()`. This file no longer holds a
  * provider list of its own — there was one, derived from a build-time registry,
- * and it could not have seen a plugin's provider at all.
+ * and it could not have seen a provider added after the build.
  */
 export const SAFE_PROVIDER_ID = /^[a-z][a-z0-9-]{0,31}$/;
 
@@ -94,7 +94,7 @@ export function providerColor(provider: string): string {
   // styled-components does not escape an interpolation, so this function is a
   // direct path from a stored value into the stylesheet. Its call sites hand it
   // `credential.provider`, `target.provider` and `log.resolvedProvider`, none of
-  // which pass through `/api/catalog` — `packages/control` withholds a provider
+  // which pass through `/api/catalog` — the gateway withholds a provider
   // whose id is not a usable custom-property name, and these never meet that
   // check. The count used to be written here and was wrong by the time anyone
   // read it; `providerColorOnly.test.ts` counts instead, by refusing any other
@@ -104,17 +104,17 @@ export function providerColor(provider: string): string {
   // An id closing the declaration and opening its own would put
   // attacker-authored rules in the console's stylesheet.
   //
-  // The pattern is restated rather than imported: boundary rule 12 forbids the
-  // console importing `@omni/providers` at all, so this is the same move
-  // `heldAuths` makes for the null-prototype rule. `PROVIDER_ID_PATTERN` stays
-  // the source of truth and `apps/gateway/test/routes/providerIdMirror.test.ts`
-  // pins this copy to it, the one place that may import both.
+  // The pattern is restated rather than imported: the gateway is Rust, and its
+  // provider-id check (`parse_create` in `crates/omni-control/src/credentials.rs`)
+  // stays the source of truth. `test/api/rustMirrors.test.ts` pins this copy to
+  // it by reading that source.
   if (!SAFE_PROVIDER_ID.test(provider)) return "var(--ink-faint)";
   // The fallback is not decoration either. `var(--p-x)` with no second argument
   // is invalid at computed-value time, so the property inherits — and for
   // `color` and `border-left-color` that means the provider bar becomes the
   // colour of the text beside it, which is the one element whose whole job is
-  // carrying identity by hue. Reachable without any hostile input: uninstall a
-  // plugin and its accounts and log rows outlive its palette entry.
+  // carrying identity by hue. Reachable without any hostile input: a provider
+  // dropped from the catalog leaves accounts and log rows that outlive its
+  // palette entry.
   return `var(--p-${provider}, var(--ink-faint))`;
 }

@@ -202,8 +202,8 @@ export function draftToLimits(draft: LimitDraft): DraftResult {
 /**
  * The schema's own bounds on overrides, mirrored so a field is named first.
  *
- * Copies, because the console may not import `@omni/ratelimit`; pinned to the
- * originals by `apps/gateway/test/routes/modelOverrideBoundsMirror.test.ts`.
+ * Copies of `crates/omni-ratelimit/src/limits.rs`; pinned to the originals by
+ * `test/api/rustMirrors.test.ts`.
  */
 export const MAX_MODEL_OVERRIDES = 64;
 export const MAX_MODEL_NAME_LENGTH = 256;

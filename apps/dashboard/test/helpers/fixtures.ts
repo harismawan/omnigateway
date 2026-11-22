@@ -1,4 +1,3 @@
-import { DEFAULT_SMART_ROUTER_POLICY } from "@omni/store/types";
 import type {
   AccountQuota,
   AccountQuotaSample,
@@ -24,6 +23,7 @@ import type {
   UsageBucket,
   VirtualModel,
 } from "../../src/api/types.ts";
+import { DEFAULT_SMART_ROUTER_POLICY } from "../../src/lib/domain.ts";
 
 /** A fixed clock, so relative timestamps in assertions never drift. */
 export const NOW = 1_800_000_000_000;
@@ -264,8 +264,8 @@ export function log(patch: Partial<RequestLog> = {}): RequestLog {
  * so TypeScript would say nothing — and that is the shape `toClientLog`'s own
  * docblock rejects for the same reason.
  *
- * The projection this mirrors is pinned by
- * `apps/gateway/test/routes/clientLogShape.test.ts`. Handing a client test the
+ * The projection this mirrors is `client_projection` in
+ * `crates/omni-control/src/logs.rs`, pinned by `test/api/rustMirrors.test.ts`. Handing a client test the
  * operator's full row is what let a shared component read `rtkFilters` off a
  * payload that has never carried it, while every test stayed green and the
  * modal threw in a browser.
@@ -459,9 +459,9 @@ export function lifecycle(patch: Partial<LifecycleCapability> = {}): LifecycleCa
 /**
  * The provider catalog as `/api/catalog` sends it: **not** in display order.
  *
- * Hand-written rather than imported from `@omni/providers`. The console reads
- * this over `/api/catalog` now, and a fixture is what keeps a price edit in
- * `kilo/models.ts` from failing a test about draft state — the assertions state
+ * Hand-written rather than read from the gateway's catalog. The console reads
+ * this over `/api/catalog`, and a fixture is what keeps a catalog price edit
+ * from failing a test about draft state — the assertions state
  * their own numbers and this states the numbers they assert.
  *
  * Small on purpose: two or three models per provider, chosen for the shapes the

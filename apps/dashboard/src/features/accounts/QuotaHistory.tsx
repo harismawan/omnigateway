@@ -1,6 +1,6 @@
-import { quotaRolledOver } from "@omni/store/types";
 import { useQuotaHistory } from "../../api/queries.ts";
 import type { BurnEstimate, GatewayRate, QuotaWindow } from "../../api/types.ts";
+import { quotaRolledOver } from "../../lib/domain.ts";
 import { formatCount } from "../../lib/format.ts";
 import { burnOf, isQuotaStale, rateRatioOf, readingOf } from "../../lib/vitals.ts";
 import { Stack } from "../../ui/primitives.ts";

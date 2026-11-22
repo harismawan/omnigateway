@@ -1,67 +1,348 @@
-import type { ErrorCode, ProviderId } from "@omni/ir";
-import type {
-  ApiKey,
-  AuthType,
-  BodyArtifact,
-  BodyAttempt,
-  BodyDetailState,
-  BodyPair,
-  Credential,
-  CredentialHealth,
-  DatabaseStats,
-  Dimension,
-  DisabledReason,
-  LimitConfig,
-  LimitConfigBase,
-  PonytailMode,
-  QuotaSample,
-  QuotaWindow,
-  RequestLog,
-  Settings,
-  Strategy,
-  Target,
-  UsageBucket,
-  UsageDimension,
-  UsageGrain,
-  VirtualModel,
-  Window,
-  // The `/types` subpath is provider-neutral domain types only; the package
-  // root would drag SQLite and encryption into the browser build graph.
-} from "@omni/store/types";
+/**
+ * Wire shapes for `/api/*`.
+ *
+ * Everything in this file is written out by hand. The gateway that serves these
+ * shapes is the Rust one in `crates/`, which a browser bundle cannot import, so
+ * the console keeps its own copy of every row it renders and submits. Where a
+ * copy carries a value a mismatch would break silently — a bound, a pattern, a
+ * key list — `test/api/rustMirrors.test.ts` reads the Rust source and holds the
+ * two equal.
+ */
 
 /**
- * Wire shapes for `/api/*`. They are expressed in terms of the gateway's own
- * domain types wherever the route returns one unchanged, so a change on the
- * server side surfaces here as a type error rather than as a silent mismatch.
+ * A provider's id. A validated string rather than a closed union: the provider
+ * set comes from `GET /api/catalog`, never from a build-time list.
  */
-export type {
-  ApiKey,
-  AuthType,
-  BodyArtifact,
-  BodyAttempt,
-  BodyDetailState,
-  BodyPair,
-  Credential,
-  CredentialHealth,
-  DatabaseStats,
-  Dimension,
-  DisabledReason,
-  ErrorCode,
-  LimitConfig,
-  LimitConfigBase,
-  PonytailMode,
-  ProviderId,
-  QuotaSample,
-  QuotaWindow,
-  RequestLog,
-  Settings,
-  Strategy,
-  Target,
-  UsageBucket,
-  UsageDimension,
-  UsageGrain,
-  VirtualModel,
-  Window,
+export type ProviderId = string;
+
+/** Every way a request can fail, named once. The gateway's set is closed. */
+export type ErrorCode =
+  | "AUTH"
+  | "RATE_LIMIT"
+  | "QUOTA_EXHAUSTED"
+  | "OVERLOADED"
+  | "BAD_REQUEST"
+  | "CONFLICT"
+  | "CONTENT_FILTER"
+  | "CAPABILITY_MISMATCH"
+  | "MODEL_UNAVAILABLE"
+  | "FINGERPRINT_REFUSED"
+  | "UPSTREAM"
+  | "TIMEOUT"
+  | "NETWORK"
+  | "NO_CANDIDATES"
+  | "ALL_CANDIDATES_FAILED"
+  | "INTERNAL";
+
+export type BreakerState = "closed" | "open" | "halfOpen";
+export type AuthType = "oauth" | "apiKey";
+export type WindowType = "fiveHour" | "daily" | "weekly";
+
+/** The ponytail ruleset an operator picks between; `off` injects nothing. */
+export type PonytailMode = "off" | "lite" | "full" | "ultra";
+
+/** The RTK filter ids `request_logs.rtk_filters` stores. */
+export type RtkFilterId =
+  | "git-diff"
+  | "git-status"
+  | "git-log"
+  | "grep"
+  | "path-list"
+  | "numbered-read"
+  | "build-output"
+  | "test-output"
+  | "deduplicate-log"
+  | "smart-truncate"
+  | "lint-output"
+  | "package-output"
+  | "tree-output"
+  | "git-operation"
+  | "docker-build";
+
+/** The limit dimensions; JSON keys of `api_keys.limits`. */
+export type Dimension = "requests" | "tokens" | "spend" | "concurrency";
+/** The sliding windows a limit is counted over. */
+export type Window = "1m" | "5h" | "1w";
+
+type CountWindows = {
+  "1m"?: number | null | undefined;
+  "5h"?: number | null | undefined;
+  "1w"?: number | null | undefined;
+};
+type SpendWindows = { "5h"?: number | null | undefined; "1w"?: number | null | undefined };
+
+/** One limit scope: key-wide, or one per-model override. `null` at a pair is unlimited. */
+export type LimitConfigBase = {
+  requests?: CountWindows | undefined;
+  tokens?: CountWindows | undefined;
+  spend?: SpendWindows | undefined;
+  /** In-flight requests right now; not a window. */
+  concurrency?: number | null | undefined;
+};
+
+/** `api_keys.limits`: key-wide limits plus per-model overrides stacked on top. */
+export type LimitConfig = LimitConfigBase & {
+  models?: Record<string, LimitConfigBase> | undefined;
+};
+
+/**
+ * Why a credential is not routing. `manual` is the operator's own switch, and
+ * the only one undone with a toggle.
+ */
+export type DisabledReason = "tokenRejected" | "expiredNoRefresh" | "manual";
+
+export type Credential = {
+  id: string;
+  provider: ProviderId;
+  label: string;
+  authType: AuthType;
+  enabled: boolean;
+  tier: number;
+  weight: number;
+  /** Milliseconds since epoch, or null when the token does not expire. */
+  expiresAt: number | null;
+  accountEmail: string | null;
+  /** Provider-specific durable state, e.g. a custom account's `endpointId`. */
+  providerData: Record<string, unknown>;
+  /** Why `enabled` is false. Null whenever the credential is enabled. */
+  disabledReason: DisabledReason | null;
+  disabledAt: number | null;
+  hasRefreshToken: boolean;
+  tokenVersion: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+/** What routing decides on for one (credential, model). A missing row is healthy. */
+export type CredentialHealth = {
+  credentialId: string;
+  model: string;
+  breakerState: BreakerState;
+  consecutiveFailures: number;
+  openedAt: number | null;
+  rateLimitedUntil: number | null;
+};
+
+/**
+ * One provider-reported usage window for one credential. A provider that only
+ * gives a percentage is stored as `used: 87, limit: 100`.
+ */
+export type QuotaWindow = {
+  credentialId: string;
+  windowType: WindowType;
+  startsAt: number;
+  used: number;
+  /** Null means the provider reported usage without a ceiling. */
+  limit: number | null;
+  /** When the provider says the window rolls over, or null when it did not say. */
+  resetsAt: number | null;
+  /** When this reading was taken. Zero means never observed. */
+  observedAt: number;
+  /** How long the provider said this window runs for, or null. */
+  windowMs: number | null;
+};
+
+/** One retained reading of one window. */
+export type QuotaSample = {
+  credentialId: string;
+  windowType: WindowType;
+  observedAt: number;
+  used: number;
+  limit: number | null;
+  resetsAt: number | null;
+  windowMs: number | null;
+};
+
+/** Dollars per million tokens, by token class. */
+export type TargetPricing = {
+  input: number;
+  output: number;
+  cacheRead?: number | undefined;
+  cacheWrite5m?: number | undefined;
+  cacheWrite1h?: number | undefined;
+};
+
+export type Target = {
+  provider: ProviderId;
+  /** Required for custom targets; absent on built-in targets. */
+  endpointId?: string | undefined;
+  model: string;
+  tier: number;
+  weight: number;
+  costPerMTok: TargetPricing;
+  /** Advertised on `GET /v1/models`, never enforced. */
+  contextWindow?: number | undefined;
+  maxOutputTokens?: number | undefined;
+  capabilities: { tools: boolean; images: boolean; reasoning: boolean };
+  /** Serve this target from one named account only — a hard filter. */
+  credentialId?: string | undefined;
+};
+
+export type Strategy = "score" | "priority" | "roundRobin" | "weighted";
+
+export type VirtualModel = {
+  id: string;
+  targets: Target[];
+  strategy: Strategy;
+  /** True when this row was generated from an alias for a concrete model name. */
+  isAlias: boolean;
+};
+
+export type ApiKey = {
+  id: string;
+  label: string;
+  /** First 12 chars of the key, for display. Never the full key. */
+  prefix: string;
+  hash: string;
+  /** `null` is unrestricted; `[]` denies every model. */
+  modelAllowlist: string[] | null;
+  /**
+   * `{}` is unlimited; `null` means the stored column could not be parsed —
+   * a different fact that must never collapse into `{}`.
+   */
+  limits: LimitConfig | null;
+  bodyLoggingOptOut: boolean;
+  createdAt: number;
+  revokedAt: number | null;
+  /** When this key stops being accepted, or `null` when it never does. */
+  expiresAt: number | null;
+  /** `null` is the only spelling of "no guardrail". */
+  guardrailPolicy: string | null;
+  smartRouting: boolean;
+};
+
+/** `pending` rows hold placeholder metrics: read `state`, never `status`. */
+export type RequestState = "pending" | "done";
+
+export type RequestLog = {
+  id: string;
+  state: RequestState;
+  at: number;
+  apiKeyId: string | null;
+  requestedModel: string;
+  resolvedProvider: ProviderId | null;
+  resolvedModel: string | null;
+  credentialId: string | null;
+  attempts: number;
+  status: number;
+  errorCode: string | null;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  ttftMs: number | null;
+  durationMs: number;
+  costUsd: number;
+  degradations: string[];
+  rtkApplied: boolean;
+  rtkFilterHits: number;
+  rtkOriginalCodeUnits: number;
+  rtkCompressedCodeUnits: number;
+  rtkEstimatedTokensSaved: number;
+  rtkFilters: RtkFilterId[];
+};
+
+export type ScoringWeights = {
+  tier: number;
+  health: number;
+  quota: number;
+  cost: number;
+  latency: number;
+  load: number;
+};
+
+export type Settings = {
+  weights: ScoringWeights;
+  maxAttempts: number;
+  requestDeadlineMs: number;
+  breakerThreshold: number;
+  breakerCooldownMs: number;
+  logRetentionDays: number;
+  bodyRetentionDays: number;
+  /** Zero disables polling entirely. */
+  quotaPollIntervalMs: number;
+  rtkEnabled: boolean;
+  autoCacheEnabled: boolean;
+  ponytailMode: PonytailMode;
+  bodyLoggingEnabled: boolean;
+  bodyLoggingCaptureStreamChunks: boolean;
+  snapshotKeepLatest: number;
+  snapshotMaxAgeDays: number;
+  guardrailModel: string | null;
+  guardrailTimeoutMs: number;
+  guardrailHistoryTurns: number;
+  smartRouterEnabled: boolean;
+  smartRouterClassifierModel: string | null;
+  smartRouterLocalModel: string | null;
+  smartRouterPolicy: string;
+  smartRouterTimeoutMs: number;
+};
+
+export type BodyDetailState = "none" | "ready" | "missing" | "corrupt";
+
+/** One request/response pair as it crossed a boundary. */
+export type BodyPair = {
+  request: unknown;
+  response: unknown;
+  /** True when structural bounding altered either half. */
+  truncated: boolean;
+};
+
+/** One provider attempt's wire pair, in dispatch order. */
+export type BodyAttempt = BodyPair & {
+  /** 1-based, matching how `request_logs.attempts` counts. */
+  attempt: number;
+  provider: ProviderId;
+  /** Raw SSE frames when stream-chunk capture is on, else null. */
+  streamChunks: string[] | null;
+};
+
+/**
+ * One request's whole story. `client.request` is the pre-RTK conversation and
+ * every `attempts[].request` the post-filter one; never present them as
+ * interchangeable.
+ */
+export type BodyArtifact = {
+  schemaVersion: number;
+  requestId: string;
+  at: number;
+  client: BodyPair;
+  attempts: BodyAttempt[];
+  error: unknown;
+};
+
+export type UsageDimension =
+  | "credential"
+  | "model"
+  | "requestedModel"
+  | "apiKey"
+  | "provider"
+  | "hour"
+  | "day";
+
+export type UsageGrain = "raw" | "daily";
+
+export type UsageBucket = {
+  key: string;
+  /** Present only when the query set `splitBy`. */
+  split?: string;
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  rtkSavedTokens: number;
+  rtkAppliedRequests: number;
+  costUsd: number;
+  errors: number;
+  durationMsSum: number;
+};
+
+export type DatabaseStats = {
+  pageSize: number;
+  pageCount: number;
+  freelistCount: number;
+  schemaVersion: number;
 };
 
 export type ApiErrorBody = { error: { code: ErrorCode | string; message: string } };
@@ -69,8 +350,8 @@ export type ApiErrorBody = { error: { code: ErrorCode | string; message: string 
 /**
  * A request row as `/api/client/logs` returns it.
  *
- * Hand-mirrored from `ClientRequestLog` in `@omni/control`, which the console
- * may not import. It is an enumerated projection there rather than `RequestLog`
+ * Hand-mirrored from `client_projection` in `crates/omni-control/src/logs.rs`
+ * (pinned by `test/api/rustMirrors.test.ts`). It is an enumerated projection there rather than `RequestLog`
  * minus three keys, so it is enumerated here too: typing this as the store's own
  * row is what let a component read `rtkFilters` off a payload that has never
  * carried it, and TypeScript agreed because the fetch is an unchecked cast.
@@ -123,9 +404,8 @@ export type RequestRow = ClientRequestLog &
 /**
  * Which surface a session belongs to.
  *
- * Mirrored rather than imported: `Principal` is declared in `@omni/control`,
- * which the console may not reach into. The `machine` arm is deliberately absent
- * — it belongs to a plugin token and never opens a browser session, so a console
+ * Mirrored by hand from the gateway's session principal. The `machine` arm is
+ * deliberately absent — it never opens a browser session, so a console
  * that could represent one would invite a branch nothing can reach.
  */
 export type SessionPrincipal =
@@ -149,8 +429,9 @@ export type StatusResponse = {
  * a provider's accounts could not say which one was filling up. The figures are
  * fractions because that is what the bars and the chart render, **not** because
  * the ceiling behind them is withheld: exact ratios and `exhaustsAt` both give
- * it back, and `AccountQuota` in `@omni/control` records why that was accepted
- * rather than rounded away.
+ * it back, which was accepted rather than rounded away. Built by
+ * `crates/omni-control/src/client_quota.rs`; key set pinned by
+ * `test/api/rustMirrors.test.ts`.
  */
 export type AccountQuota = {
   /** Stable per account, and what a chart joins its retained readings on. */
@@ -177,7 +458,7 @@ export type AccountQuota = {
   /** Whether the window outlives its own reset. Null when the estimate is suppressed. */
   survives: boolean | null;
   /**
-   * True when the reading is too old to believe. Decided in `@omni/control`,
+   * True when the reading is too old to believe. Decided by the gateway,
    * because the test needs `quotaPollIntervalMs` and that setting lives on a
    * route no client may read.
    */
@@ -198,7 +479,7 @@ export type ClientQuotaResponse = { accounts: AccountQuota[] };
  * One retained reading of one account's window, as the client surface charts it.
  *
  * `usedRatio` is never null: a reading against an unstated ceiling is not a
- * percentage of anything and is dropped in `@omni/control`, the same rule
+ * percentage of anything and is dropped by the gateway, the same rule
  * `quotaSegments` applies to the operator's readings.
  */
 export type AccountQuotaSample = {
@@ -231,9 +512,8 @@ export type CredentialsResponse = { credentials: Credential[] };
 /**
  * How fast one quota window is being spent, and whether it lasts.
  *
- * Mirrored rather than imported: the estimate is derived in `@omni/control`,
- * which the console may not reach into, so this is a hand-kept copy of
- * `BurnEstimate` that the route returns unchanged.
+ * A hand-kept copy of the burn estimate the gateway derives and the route
+ * returns unchanged.
  *
  * Every estimate is null when `stale` is true — a reading nobody believes must
  * not be dressed up as a number, so surfaces guard on the flag rather than on
@@ -299,8 +579,7 @@ export type QuotaHistoryResponse = {
 /**
  * Which accounts a manual quota refresh is for.
  *
- * Mirrored from `@omni/control` rather than imported, like every other wire
- * type here. Discriminated on purpose: a caller that drops a field must fail
+ * Mirrored by hand, like every other wire type here. Discriminated on purpose: a caller that drops a field must fail
  * closed rather than ask every connected provider.
  */
 export type QuotaRefreshRequest = { kind: "one"; credentialId: string } | { kind: "all" };
@@ -379,8 +658,7 @@ export type ApiKeySummary = Omit<ApiKey, "hash"> & {
 /**
  * One ceiling and what has gone against it.
  *
- * Mirrored rather than imported: the shape is assembled in `@omni/control`,
- * which the console may not reach into. `used` counts completed requests still
+ * Mirrored by hand from the shape the gateway assembles. `used` counts completed requests still
  * inside the window, so it is a floor on what the limiter sees rather than the
  * limiter's own number — the gateway adds an in-memory delta this route cannot.
  */
@@ -489,7 +767,7 @@ export type SettingsResponse = {
   /**
    * Each configured smart-router model's state, judged by the gateway against
    * its live routing snapshot whatever the switch says. Mirrors
-   * `SmartRouterModelStatus` in `@omni/control`. Optional because an older
+   * the gateway's smart-router model status. Optional because an older
    * gateway does not send it; absent means "not known", never "ok".
    */
   smartRouterModels?: SmartRouterModelStatus;
@@ -506,9 +784,8 @@ export type SmartRouterModelStatus = {
 /**
  * One request's captured bodies.
  *
- * Mirrored rather than imported: the shape is assembled in `@omni/control`,
- * which the console may not reach into, so this is a hand-kept copy of
- * `RequestBodyRead` that the route returns unchanged. It deliberately carries no
+ * A hand-kept copy of the shape the gateway assembles and the route returns
+ * unchanged. It deliberately carries no
  * artifact path and no digest — where the gateway keeps a file is not the
  * console's business.
  */
@@ -696,11 +973,8 @@ export type ConnectPollResult = ConnectPending | ConnectComplete;
 /**
  * The database panel's wire shapes.
  *
- * Mirrored by hand rather than imported, for the reason `BurnEstimate` above
- * gives: these are `@omni/control`'s types, and the console may not reach into
- * that package. `DatabaseStats` is the exception — it is a store type, which the
- * `/types` subpath already publishes, so it is imported and stays honest by
- * itself.
+ * Mirrored by hand, like every wire type here; `DatabaseStats` is declared
+ * at the top of this file with the other store rows.
  */
 export type RetentionPolicy = {
   /** How many snapshots survive regardless of age. Never zero. */
@@ -777,52 +1051,6 @@ export type LifecycleCapability = {
   version: string;
 };
 
-/** What a plugin asks for in the rail. Absent when the plugin adds no screen. */
-export type PluginNav = {
-  label: string;
-  /** A name from the plugin's manifest. The console picks its own glyph. */
-};
-
-export type PluginUiInfo = {
-  /**
-   * The URL the console imports, under `/plugin-assets/<id>/`.
-   *
-   * Carries the plugin's version as `?v=`, and it must be imported whole. The
-   * query is what makes a reinstalled bundle a URL the browser has not already
-   * resolved — the module map is keyed by URL for the lifetime of a document,
-   * so a stripped one would leave a console tab on the previous build while
-   * reporting the new version beside it.
-   *
-   * `null` whenever the bundle is incompatible: the gateway withholds the URL
-   * on purpose, so a console that ignored `compatible` would still have nothing
-   * to import and could not turn a version mismatch into a render crash.
-   */
-  entry: string | null;
-  compatible: boolean;
-  /** Why it is incompatible. Shown on the disabled rail entry, verbatim. */
-  reason?: string | undefined;
-};
-
-/**
- * One installed plugin, as `/api/plugins` reports it.
- *
- * Mirrored rather than imported: the shape is assembled in
- * `apps/gateway/src/plugins/ui.ts`, and per boundary 12 the console may not
- * reach into the gateway for a type. The three states this file has to keep
- * distinguishable are `ui === null` (backend-only, no screen at all),
- * `ui.compatible === false` (a screen that will not load, named with a reason),
- * and a live UI.
- */
-export type PluginCatalogEntry = {
-  id: string;
-  name: string;
-  version: string;
-  nav: PluginNav | null;
-  ui: PluginUiInfo | null;
-};
-
-export type PluginsResponse = { plugins: PluginCatalogEntry[] };
-
 /** List price in US dollars per million tokens, as the catalog publishes it. */
 export type CatalogPricing = {
   input: number;
@@ -863,12 +1091,9 @@ export type CatalogModel = {
 /**
  * One provider the gateway can serve, as `/api/catalog` reports it.
  *
- * Mirrored rather than imported: the shape is assembled by `providerCatalog()`
- * in `packages/control`, and per boundary 12 the console may not reach into the
- * gateway or control for a type — nor, since this endpoint exists, into the
- * provider package for the data itself. A provider that loads from a plugin at
- * boot has no build-time module to import, which is the whole reason the
- * console reads this over the wire.
+ * Mirrored by hand from the shape `crates/omni-control/src/api.rs`
+ * assembles. The console reads the provider set over the wire rather than
+ * from any build-time list, so it shows whatever the running gateway serves.
  *
  * `order` is the rank the console draws providers in; the wire order is not a
  * contract, so `useProviderCatalog` sorts by it on the way in.

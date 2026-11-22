@@ -9,10 +9,7 @@ const START: f64 = 1_792_140_063_816.0;
 const META: &str = "internal_chat_message_metadata_passthrough";
 
 fn fixture() -> Value {
-    serde_json::from_str(include_str!(
-        "../../../packages/providers/test/fixtures/codex-0.170.0.json"
-    ))
-    .unwrap()
+    serde_json::from_str(include_str!("fixtures/codex-0.170.0.json")).unwrap()
 }
 fn request() -> Value {
     serde_json::from_str(r#"{"model":"pool","system":[{"type":"text","text":"be brief"}],"tools":[{"kind":"portable","name":"wait","description":"Waits.","inputSchema":{"type":"object","properties":{"cell_id":{"type":"string"}},"required":["cell_id"],"additionalProperties":false}}],"messages":[{"role":"user","content":[{"type":"text","text":"wait a moment then say hi"}]},{"role":"assistant","content":[{"type":"providerNative","provider":"openai","blockType":"reasoning","data":{"id":"rs_1","summary":[],"encrypted_content":"opaque"}},{"type":"text","text":"Waiting briefly."},{"type":"toolUse","id":"call_1","name":"sleep","input":{"duration_ms":1}}]},{"role":"user","content":[{"type":"toolResult","toolUseId":"call_1","content":"Sleep completed."}]}],"stream":true,"vendor":{"openai":{"prompt_cache_key":"0199a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b"}}}"#).unwrap()

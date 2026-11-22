@@ -8,11 +8,11 @@
  * implementation that keeps the CLI and wire contracts — which is the point: it
  * is the baseline a rewrite is judged against.
  *
- *   bun scripts/build-binary.ts /tmp/bench/omnigateway
+ *   cargo build --release -p omni-gateway --bin omnigateway
  *   bun scripts/bench-gateway.ts \
- *     --gateway /tmp/bench/omnigateway \
- *     --cli "bun apps/cli/src/index.ts" \
- *     --out docs/benchmarks/2026-11-07-ts-baseline.json
+ *     --gateway target/release/omnigateway \
+ *     --cli "target/release/omnigateway omni" \
+ *     --out /tmp/bench/rust.json
  *
  * `--gateway` may be relative (`target/release/omnigateway`): its program
  * path is resolved against the repo root, not the bench root it runs in.

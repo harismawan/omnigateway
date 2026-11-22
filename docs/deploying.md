@@ -216,7 +216,7 @@ v0.10.3**, whose migration drops columns every older image writes on the success
 deploy scale to one replica first (the rolling update's surviving replica is the one that breaks),
 and take a snapshot before it: rolling `newTag` back does not roll the schema back, and the old
 image fails every successful request against it. Details in the README's "Upgrading" note and the
-header of `packages/store/src/postgres/migrations/002_health_measurements.sql`. Once the release
+header of `crates/omni-store/migrations/postgres/002_health_measurements.sql`. Once the release
 that writes binary body artifacts is deployed, never set `newTag` below v0.13.5, and never skip
 v0.13.5 on the way up: an older replica beside a new one calls every new body unreadable
 (see [Recording bodies](operations.md#recording-bodies)).

@@ -2,7 +2,7 @@
 // them. `sameWindow` is imported rather than reimplemented because the store
 // dedups on it, and a chart that disagreed with storage about what a window is
 // would be a worse bug than either being wrong alone.
-import { durationFor, quotaRolledOver, sameWindow } from "@omni/store/types";
+
 import type {
   BurnEstimate,
   CredentialHealth,
@@ -10,6 +10,7 @@ import type {
   QuotaWindow,
   RequestRow,
 } from "../api/types.ts";
+import { durationFor, quotaRolledOver, sameWindow } from "./domain.ts";
 import { formatDuration } from "./format.ts";
 
 /**
@@ -418,7 +419,7 @@ export type QuotaReading = {
  *
  * A ceiling of zero is unknown rather than a division, and overshoot clamps to
  * fully spent — spend is debited after a request served, so `used > limit` is
- * reachable and "150% used" is not a reading. `@omni/control` applies the same
+ * reachable and "150% used" is not a reading. The gateway applies the same
  * rule to the figures it sends a client, and the two must agree or one chart
  * would disagree with the other about the same account.
  */

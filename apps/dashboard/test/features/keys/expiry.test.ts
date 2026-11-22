@@ -1,6 +1,6 @@
 import { afterAll, expect, test } from "bun:test";
-import { keyUsable } from "@omni/store/types";
 import { fromLocalInput, keyState, toLocalInput } from "../../../src/features/keys/expiry.ts";
+import { keyUsable } from "../../../src/lib/domain.ts";
 import { apiKey } from "../../helpers/fixtures.ts";
 
 /**
@@ -77,11 +77,11 @@ test("something that is not a date is reported rather than sent as NaN", () => {
 /**
  * A stored instant outside `Date`'s ±8.64e15 range.
  *
- * `keyExpirySchema` refuses it, so it can only arrive from a restored or
- * hand-edited row — the same way `sqlite/config.ts` reads targets back
- * unvalidated. Blank rather than a throw, because this runs in a `useState`
- * initialiser and a `RangeError` there takes the whole dialog into the route's
- * error boundary.
+ * `key_expiry` in `crates/omni-control/src/body_schema.rs` refuses it, so it
+ * can only arrive from a restored or hand-edited row — the same way
+ * `crates/omni-store/src/models.rs` reads targets back unvalidated. Blank
+ * rather than a throw, because this runs in a `useState` initialiser and a
+ * `RangeError` there takes the whole dialog into the route's error boundary.
  */
 test("an out-of-range instant blanks the field instead of throwing", () => {
   expect(() => toLocalInput(9e15)).not.toThrow();

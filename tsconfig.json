@@ -4,13 +4,5 @@
     "noEmit": true,
     "allowImportingTsExtensions": true
   },
-  "include": [
-    "packages/*/src/**/*",
-    "packages/*/test/**/*",
-    "apps/gateway/src/**/*",
-    "apps/gateway/test/**/*",
-    "apps/cli/src/**/*",
-    "apps/cli/test/**/*",
-    "scripts/**/*"
-  ]
+  "include": ["scripts/**/*"]
 }

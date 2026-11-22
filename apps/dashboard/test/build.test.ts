@@ -8,12 +8,17 @@
  * threw on load and showed an empty page.
  *
  * What happened: `use-sync-external-store` ships CommonJS and calls
- * `require("react")`. The console externalises React so it and every plugin
- * share one instance through the import map — and an external has no module for
- * a `require` to resolve to, so rolldown emitted a stub that throws
+ * `require("react")`. The console then externalised React so plugins could
+ * share one instance through an import map — and an external has no module for
+ * a `require` to resolve to, so the bundler emitted a stub that throws
  * "Calling `require` for react in an environment that doesn't expose the
  * `require` function". Nothing in the source said anything was wrong. The stack
  * named a hashed chunk and no file in this repository.
+ *
+ * Plugins and the import map are gone, React is bundled, and with it the ESM
+ * shims that aliased `use-sync-external-store` away: a bundled React gives the
+ * package's `require` a module to resolve to. The guards below are what keep
+ * that true if anything is ever externalised again.
  *
  * Slow, because it runs a real build. That is the point: a faster test would
  * have to assert against a description of the output rather than the output, and
@@ -24,14 +29,11 @@ import { beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseSync } from "@babel/core";
-import * as sdk from "@omnigateway/dashboard-sdk";
-import { SHARED_IMPORTS, sharedEntryName } from "../shared/manifest.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const dist = join(root, "dist");
 
-/** Every emitted `.js`, console chunks and shared runtime alike. */
+/** Every emitted `.js`. */
 function bundles(dir: string): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -78,118 +80,57 @@ describe("the built console", () => {
     expect(offenders.map((f) => f.slice(dist.length + 1))).toEqual([]);
   });
 
-  test("imports nothing bare that the import map cannot resolve", () => {
-    // The general invariant behind that regression, and the one worth keeping:
-    // anything externalised has to be in the map, or the browser is handed a
-    // bare specifier it has no way to resolve. Deriving the expected set from
-    // the map rather than listing it means a new external is caught by this test
-    // instead of by a blank page.
+  test("imports nothing bare, because there is no import map to resolve it", () => {
+    // The general invariant behind that regression. With nothing externalised,
+    // any bare specifier left in a chunk is one the browser has no way to
+    // resolve — a blank page rather than a degraded one.
     const html = readFileSync(join(dist, "index.html"), "utf8");
-    const found = /type="importmap">({.*?})<\/script>/s.exec(html);
-    expect(found).not.toBeNull();
-    const mapped = new Set(
-      Object.keys((JSON.parse(found?.[1] ?? "{}") as { imports: Record<string, string> }).imports),
-    );
+    expect(html).not.toContain("importmap");
 
     const bare = new Set<string>();
-    for (const file of bundles(join(dist, "assets"))) {
+    let relative = 0;
+    for (const file of bundles(dist)) {
       const code = readFileSync(file, "utf8");
       for (const imported of new Bun.Transpiler({ loader: "js" }).scanImports(code)) {
         const specifier = imported.path;
         // Scan actual syntax: strings that look like imports are not imports.
-        if (!specifier.startsWith(".") && !specifier.startsWith("/")) bare.add(specifier);
+        if (specifier.startsWith(".") || specifier.startsWith("/")) relative += 1;
+        else bare.add(specifier);
       }
     }
 
-    expect([...bare].filter((s) => !mapped.has(s)).sort()).toEqual([]);
-    // And the map is not vacuously satisfied by a build that imported nothing.
-    expect(bare.size).toBeGreaterThan(0);
+    expect([...bare].sort()).toEqual([]);
+    // And the check is not vacuously satisfied by a build that imported nothing.
+    expect(relative).toBeGreaterThan(0);
   });
 
-  test("keeps React out of its own chunks, so there is exactly one copy", () => {
-    // The reason any of this externalising exists. Two React instances make
-    // every plugin hook throw "invalid hook call", with nothing pointing here.
-    const inlined = bundles(join(dist, "assets")).filter((file) =>
-      /__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE|react\.transitional\.element/.test(
+  test("bundles exactly one React", () => {
+    // Two React instances make every hook throw "invalid hook call", with
+    // nothing pointing here. Bundled as ESM, React's module namespace is the
+    // one place that exports its internals by name — a getter in the export
+    // map — so exactly one such getter means exactly one React. (The assignment
+    // form this used to match only exists in React's CommonJS build, and a
+    // guard matching nothing passes against every bundle while proving nothing:
+    // the first version of it did exactly that after React 19's renames.)
+    const getters = bundles(dist).flatMap((file) => [
+      ...readFileSync(file, "utf8").matchAll(
+        /__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE:\(\)=>/g,
+      ),
+    ]);
+    expect(getters).toHaveLength(1);
+    // And no CommonJS copy beside it, which would initialise its own.
+    const commonjs = bundles(dist).filter((file) =>
+      /\.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE\s*=/.test(
         readFileSync(file, "utf8"),
       ),
     );
-    expect(inlined.map((f) => f.slice(dist.length + 1))).toEqual([]);
-
-    // Present in the shared runtime, which is where it belongs — so the check
-    // above is discriminating rather than matching a fingerprint nothing has.
-    // That guard earned itself immediately: the first version of this test used
-    // `__SECRET_INTERNALS` and `ReactCurrentDispatcher`, both of which React 19
-    // renamed, so the absence check passed against every bundle in the tree
-    // while proving nothing at all.
-    const shared = bundles(join(dist, "shared")).some((file) =>
-      /__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE|react\.transitional\.element/.test(
-        readFileSync(file, "utf8"),
-      ),
-    );
-    expect(shared).toBe(true);
+    expect(commonjs.map((f) => f.slice(dist.length + 1))).toEqual([]);
   });
 
-  test("provides every binding the console imports from a shared entry", () => {
-    // `imports nothing bare that the import map cannot resolve` above checks
-    // that each bare specifier is *mapped*. It never asks whether the module at
-    // the other end actually provides the names being imported, and the gap
-    // between those two is a console that does not boot: an ES import of a
-    // binding a module does not export is a load-time SyntaxError, not an
-    // `undefined`.
-    //
-    // Parse both artifact boundaries: source re-exports alone do not prove the
-    // bundler preserved them for consumers outside its graph.
-    const parser = new Bun.Transpiler({ loader: "js" });
-    const chunks = bundles(join(dist, "assets")).map((file) => {
-      const ast = parseSync(readFileSync(file, "utf8"), { configFile: false, babelrc: false });
-      if (!ast) throw new Error(`Could not parse ${file}`);
-      return ast.program.body;
-    });
-    let checked = 0;
-
-    for (const [specifier, url] of Object.entries(SHARED_IMPORTS)) {
-      const entry = join(dist, "shared", `${sharedEntryName(url)}.js`);
-      const provided = new Set(parser.scan(readFileSync(entry, "utf8")).exports);
-      expect(provided.size).toBeGreaterThan(0);
-      const expected = parser.scan(
-        readFileSync(join(root, "shared", `${sharedEntryName(url)}.ts`), "utf8"),
-      ).exports;
-      for (const name of expected) expect(provided).toContain(name);
-      if (specifier === "@omnigateway/dashboard-sdk") {
-        for (const name of Object.keys(sdk)) expect(provided).toContain(name);
-      }
-      const wanted = new Set<string>();
-      for (const body of chunks) {
-        for (const node of body) {
-          if (node.type !== "ImportDeclaration" || node.source.value !== specifier) continue;
-          for (const binding of node.specifiers) {
-            if (binding.type === "ImportDefaultSpecifier") wanted.add("default");
-            if (binding.type === "ImportSpecifier") {
-              wanted.add(
-                binding.imported.type === "Identifier"
-                  ? binding.imported.name
-                  : binding.imported.value,
-              );
-            }
-          }
-        }
-      }
-
-      checked += wanted.size;
-      expect([...wanted].filter((name) => !provided.has(name)).sort()).toEqual([]);
-    }
-
-    // Positive control: parser or import shape changes must not make this vacuous.
-    expect(checked).toBeGreaterThan(0);
-  });
-
-  test("keeps stable public URLs, ordered theme/import map, hashed external fonts and clean output", () => {
+  test("keeps stable public URLs, ordered theme bootstrap, hashed external fonts and clean output", () => {
     const html = readFileSync(join(dist, "index.html"), "utf8");
-    expect(html).toContain('type="importmap"');
     expect(html).toContain('type="module"');
     expect(html).toContain('localStorage.getItem("omni-theme")');
-    expect(html.indexOf('type="importmap"')).toBeLessThan(html.indexOf('type="module"'));
     expect(html.indexOf('localStorage.getItem("omni-theme")')).toBeLessThan(
       html.indexOf('type="module"'),
     );
@@ -200,7 +141,7 @@ describe("the built console", () => {
     expect(readFileSync(join(dist, "favicon.svg"))).toEqual(
       readFileSync(join(root, "public/favicon.svg")),
     );
-    expect(existsSync(join(dist, "shared/favicon.svg"))).toBe(false);
+    expect(existsSync(join(dist, "shared"))).toBe(false);
     expect(existsSync(join(dist, "stale-build.txt"))).toBe(false);
     const css = readdirSync(join(dist, "assets"))
       .filter((name) => name.endsWith(".css"))
@@ -228,26 +169,5 @@ describe("the built console", () => {
     const code = files.map((file) => readFileSync(file, "utf8")).join("\n");
     expect(code).toContain("Panel__");
     expect(code).toContain("login__");
-    // Consumers may reference React internals, but the implementation is shared.
-    const react = bundles(join(dist, "shared")).filter((file) =>
-      readFileSync(file, "utf8").includes(
-        "__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE",
-      ),
-    );
-    // React, JSX runtime and the renderer all recognize the element symbol.
-    // Only the React implementation initializes the shared dispatcher object.
-    expect(react.length).toBeGreaterThan(0);
-    expect(
-      bundles(join(dist, "shared")).filter((file) =>
-        /\.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE\s*=/.test(
-          readFileSync(file, "utf8"),
-        ),
-      ),
-    ).toHaveLength(1);
-    for (const file of bundles(join(dist, "shared"))) {
-      for (const imported of parser.scanImports(readFileSync(file, "utf8"))) {
-        expect(imported.path.startsWith(".")).toBe(true);
-      }
-    }
   });
 });

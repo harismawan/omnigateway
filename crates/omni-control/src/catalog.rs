@@ -1,6 +1,6 @@
-//! Built-in provider descriptors, the same data as the TS registry's
-//! `PROVIDER_DESCRIPTORS`. Edit both together; `scripts/test/
-//! providerCatalogData.test.ts` fails when the data file drifts from it.
+//! Built-in provider descriptors. `data/provider-catalog.json` is the only
+//! source of the built-in catalog: edit the data file directly;
+//! `crates/omni-router/tests/*_catalog.rs` pin rows.
 //!
 //! Operator metadata only: registry order, catalog rows, pricing, limits,
 //! model auth, capabilities and presentation. Gateway routing keeps its own
