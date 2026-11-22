@@ -1746,14 +1746,6 @@ fn logs(f: &Fixture) -> Vec<Vec<String>> {
     )
 }
 
-/// Confirmed `bun test` shell output RTK compresses (the `omni-rtk` suite's).
-fn bun_output() -> String {
-    let mut lines = vec!["bun test v1.4.0".to_owned()];
-    lines.extend(vec!["case passed".to_owned(); 300]);
-    lines.extend(["300 pass", "0 fail", "Ran 300 tests across 10 files"].map(str::to_owned));
-    lines.join("\n")
-}
-
 async fn rtk_gw(rtk: bool, env: &[(&str, &str)]) -> Gw {
     let f = fixture(&["c0"]);
     set_setting(&f.path, "rtkEnabled", if rtk { "true" } else { "false" });
@@ -1813,8 +1805,33 @@ async fn rtk_compresses_the_wire_body_while_the_client_body_stays_as_sent() {
         bun_output()
     );
     let wire = tool(&artifact["attempts"][0]["request"]["messages"]);
-    assert!(wire.len() < bun_output().len(), "{wire}");
-    assert!(wire.contains("lines omitted"), "{wire}");
+    // The crate's own output for the same body: a wrong-but-shorter
+    // compression fails here.
+    let mut mint = omni_dialects::ingress::random_tool_use_id;
+    let ingested = omni_dialects::ingress::ingest(
+        omni_dialects::ingress::Surface::OpenAi,
+        &body,
+        &omni_dialects::ingress::Headers::new(),
+        &mut omni_dialects::ingress::IngressOptions {
+            new_tool_use_id: &mut mint,
+        },
+    )
+    .expect("ingest");
+    let out =
+        omni_rtk::transform_request(&ingested.request, &omni_rtk::RtkConfig { enabled: true });
+    assert!(out.report.applied);
+    let expected = out
+        .request
+        .messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .find_map(|b| match b {
+            omni_ir::request::ContentBlock::ToolResult(r) => Some(r.content.clone()),
+            _ => None,
+        })
+        .expect("tool result");
+    assert_ne!(expected, bun_output());
+    assert_eq!(wire, expected);
 }
 
 #[tokio::test(flavor = "multi_thread")]

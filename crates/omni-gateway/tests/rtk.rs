@@ -15,15 +15,6 @@ use omni_ir::request::{ChatRequest, ContentBlock};
 use omni_ir::stream::StreamEvent;
 use omni_rtk::{RtkConfig, transform_request};
 
-/// The `omni-rtk` suite's confirmed shell output: `bun test` with 300
-/// passing cases, then a final user turn so the result is historical.
-fn bun_output() -> String {
-    let mut lines = vec!["bun test v1.4.0".to_owned()];
-    lines.extend(vec!["case passed".to_owned(); 300]);
-    lines.extend(["300 pass", "0 fail", "Ran 300 tests across 10 files"].map(str::to_owned));
-    lines.join("\n")
-}
-
 fn tool_chat(stream: bool) -> ChatRequest {
     serde_json::from_value(serde_json::json!({
         "model": "m1",
@@ -237,7 +228,7 @@ async fn request_transforms_off_leaves_the_request_untouched_with_rtk_on() {
 #[tokio::test]
 async fn a_guardrail_classifier_sees_the_original_tool_result_with_rtk_on() {
     omni_gateway::clock::init_request_ids().expect("RNG");
-    let (text, _) = expected();
+    let (text, report) = expected();
     let f = fixture(&["c0"]);
     set_setting(&f.path, "rtkEnabled", "true");
     set_setting(&f.path, "guardrailModel", "\"m1\"");
@@ -261,6 +252,7 @@ async fn a_guardrail_classifier_sees_the_original_tool_result_with_rtk_on() {
         [None, None],
         None,
     );
+    let mut fin = finisher(&h, &d);
     let events: Vec<StreamEvent> = d
         .events
         .by_ref()
@@ -283,5 +275,67 @@ async fn a_guardrail_classifier_sees_the_original_tool_result_with_rtk_on() {
         );
     }
     assert_eq!(sent_tool_result(&h, 1), text);
+    // The screened parent's row carries the parent dispatch's report; the
+    // classifier files its own row, judged as received.
+    fin.complete(false, None);
+    drop(d);
     h.writer.close().await.expect("close");
+    let cols = "status, rtk_applied, rtk_filter_hits, rtk_original_code_units, \
+         rtk_compressed_code_units, rtk_estimated_tokens_saved, rtk_filters";
+    let parent = rows(
+        &f.path,
+        &format!("SELECT {cols} FROM request_logs WHERE id = 'req_rtk'"),
+    );
+    let mut want = vec!["200".to_owned()];
+    want.extend(report);
+    assert_eq!(parent, vec![want]);
+    let classifier = rows(
+        &f.path,
+        &format!("SELECT {cols} FROM request_logs WHERE id <> 'req_rtk'"),
+    );
+    let mut zero = vec!["200".to_owned()];
+    zero.extend(zero_report());
+    assert_eq!(classifier, vec![zero]);
+}
+
+/// The deadline's completion path: a hanging upstream past
+/// `requestDeadlineMs` is the gateway's timeout (504), not a client cancel
+/// (499), and its row carries the report.
+#[tokio::test]
+async fn a_deadline_timeout_still_carries_the_report() {
+    let (_, report) = expected();
+    let f = fixture(&["c0"]);
+    set_setting(&f.path, "rtkEnabled", "true");
+    set_setting(&f.path, "requestDeadlineMs", "150");
+    let h = harness(&f, vec![Reply::Hang]);
+    let mut d = dispatch(h.deps.clone(), req(true));
+    let mut fin = finisher(&h, &d);
+    let events: Vec<StreamEvent> = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        d.events.by_ref().map(|e| e.expect("no throw")).collect(),
+    )
+    .await
+    .expect("the deadline ends the stream");
+    match events.as_slice() {
+        [StreamEvent::Error { code, message, .. }] => {
+            assert_eq!(*code, omni_ir::error::ErrorCode::Timeout);
+            assert_eq!(message, "request deadline exceeded");
+        }
+        other => panic!("{other:?}"),
+    }
+    fin.complete(false, None);
+    drop(d);
+    let (status, row) = the_row(h, &f).await;
+    assert_eq!((status.as_str(), &row), ("504", &report));
+    let code = rows(&f.path, "SELECT error_code FROM request_logs");
+    assert_eq!(code, vec![vec!["TIMEOUT".to_owned()]]);
+    assert!(
+        row_num(&row, 1) >= 1 && row_num(&row, 3) < row_num(&row, 2),
+        "{row:?}"
+    );
+    assert_ne!(row[5], "[]");
+}
+
+fn row_num(row: &[String], i: usize) -> i64 {
+    row[i].parse().expect("number")
 }

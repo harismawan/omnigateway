@@ -287,5 +287,19 @@ mod tests {
             .expect("written");
         assert!(!raw.contains("ponytailMode"), "{raw}");
         assert_eq!(sv::get(&get(&store).expect("read"), "ponytailMode"), None);
+        // Shapes the retired field never accepted are ignored too, never
+        // refused.
+        for shape in [serde_json::json!(7), serde_json::json!({})] {
+            let mut input = get(&store).expect("read");
+            sv::set(&mut input, "ponytailMode", JsValue::from(&shape));
+            sv::set(&mut input, "maxAttempts", JsValue::Number(4.0));
+            let saved = put(&store, &input).expect("an invalid ponytailMode is ignored");
+            assert_eq!(sv::get(&saved, "maxAttempts"), Some(&JsValue::Number(4.0)));
+            assert_eq!(sv::get(&saved, "ponytailMode"), None, "{shape}");
+            let raw = omni_store::settings::operator_raw(store.connection())
+                .expect("row")
+                .expect("written");
+            assert!(!raw.contains("ponytailMode"), "{raw}");
+        }
     }
 }

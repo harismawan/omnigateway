@@ -172,11 +172,8 @@ mod tests {
     fn a_stored_ponytail_mode_is_stripped_while_other_unknown_keys_are_echoed() {
         let out = decode(Some(r#"{"ponytailMode":"full","extra":7,"maxAttempts":5}"#));
         assert_eq!(get(&out, "ponytailMode"), None);
-        assert!(matches!(get(&out, "extra"), Some(JsValue::Number(7.0))));
-        assert!(matches!(
-            get(&out, "maxAttempts"),
-            Some(JsValue::Number(5.0))
-        ));
+        assert_eq!(get(&out, "extra"), Some(&JsValue::Number(7.0)));
+        assert_eq!(get(&out, "maxAttempts"), Some(&JsValue::Number(5.0)));
         assert_eq!(get(&decode(None), "ponytailMode"), None);
     }
     #[test]
