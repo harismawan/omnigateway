@@ -42,7 +42,7 @@ pub fn report(store: &omni_store::SqliteStore) -> Result<Value, String> {
     // doctor must diagnose what this binary can actually serve.
     let catalog = omni_router::Providers::builtin();
     let mut providers = omni_router::Providers::default();
-    for id in ["openai", "anthropic", "antigravity", "custom"] {
+    for id in ["openai", "anthropic", "antigravity", "kimi", "custom"] {
         if let Some(descriptor) = catalog.get(id) {
             providers.register(id, descriptor.clone());
         }

@@ -76,6 +76,12 @@ fn send_provider<'a>(
             request,
             http,
         )),
+        "kimi" => Box::pin(send(
+            &omni_providers::kimi::codec::KimiCodec,
+            "kimi",
+            request,
+            http,
+        )),
         _ => Box::pin(send(
             &omni_providers::custom::CustomCodec,
             omni_providers::custom::ID,
@@ -806,7 +812,7 @@ fn run(mut s: RunState) -> EventsStream {
             let preemptive_refresh_required = c.credential.auth_type == AuthType::OAuth
                 && c.credential.expires_at.is_some_and(|at| at - REFRESH_LEAD_MS as f64 <= attempt_now);
 
-            if c.target.provider != omni_providers::custom::ID && c.target.provider != "anthropic" && c.target.provider != "openai" && c.target.provider != "antigravity" {
+            if c.target.provider != omni_providers::custom::ID && c.target.provider != "anthropic" && c.target.provider != "openai" && c.target.provider != "antigravity" && c.target.provider != "kimi" {
                 let ttft = lock(&log).ttft_ms;
                 slot.release(ttft);
                 yield Err(GatewayError::new(

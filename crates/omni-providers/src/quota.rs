@@ -27,6 +27,15 @@ pub fn request(
             ),
         });
     }
+    if (provider, operation) == ("kimi", "usage") {
+        // The probe carries the credential's device identity; kimi answers a
+        // probe from an unknown device differently.
+        let device = crate::kimi::device::from_data(data.as_object());
+        return Some(QuotaRequest {
+            timeout: std::time::Duration::from_secs(15),
+            http: crate::kimi::oauth::usage_request(token, &device),
+        });
+    }
     let url = match (provider, operation) {
         ("openai", "usage") => "https://chatgpt.com/backend-api/wham/usage".into(),
         ("openai", "list") => {
@@ -190,6 +199,18 @@ fn window(v: &Value, kind: &str, now: f64) -> Option<Value> {
     )
 }
 pub fn usage(provider: &str, v: &Value, now: f64) -> Vec<Value> {
+    if provider == "kimi" {
+        // One plan window under `usage`, counters as strings. The sibling
+        // `limits` array is per-minute burst ceilings, not the plan window:
+        // mixing them in would park an account for a minute of throttling.
+        return v
+            .get("usage")
+            .filter(|v| !v.is_null())
+            .or_else(|| v.get("Usage").filter(|v| !v.is_null()))
+            .and_then(|root| window(root, "weekly", now))
+            .into_iter()
+            .collect();
+    }
     if provider == "antigravity" {
         let groups = v["groups"]
             .as_array()

@@ -114,10 +114,9 @@ impl Providers {
         let mut openai = descriptor(all, &["gpt-", "o1", "o3", "o4"]);
         openai.catalog = catalog("openai");
         p.register("openai", openai);
-        p.register(
-            "kimi",
-            descriptor(caps(true, false, false), &["kimi-", "moonshot"]),
-        );
+        let mut kimi = descriptor(caps(true, false, false), &["kimi-", "moonshot"]);
+        kimi.catalog = catalog("kimi");
+        p.register("kimi", kimi);
         p.register("kilo", descriptor(all, &[]));
         p.register("grok", descriptor(all, &["grok-"]));
         let mut antigravity = descriptor(all, &["gemini-"]);

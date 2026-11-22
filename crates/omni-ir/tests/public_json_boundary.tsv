@@ -296,3 +296,20 @@ omni-ir/src/text.rs :: fn to_utf16(&self) -> Vec<u16>	scalar text only
 omni-ir/src/text.rs :: fn to_utf8_lossy(&self) -> std::borrow::Cow<'_, str>	explicit UTF-8-only diagnostic and hashing boundary
 omni-ir/src/text.rs :: fn with_json_source<R>(&self, f: impl FnOnce(&str) -> R) -> R	borrows UTF-8 JSON source or escapes lone units only in JSON string positions
 omni-providers/src/antigravity/codec.rs :: fn build_canonical( &self, request: &CanonicalRequest, model: &str, access_token: &str, project: &Text, request_id: Option<&Text>, ) -> Result<CodecRequest<DecodeState>, BuildError>	borrows canonical request and uses JsValue iteration and stack-growing serialization
+omni-providers/src/kimi/decode.rs :: fn new() -> Self	constructor creates empty decoder; queued StreamEvent owns iterative Drop
+omni-providers/src/kimi/device.rs :: fn from_data(source: Option<&Map<String, Value>>) -> KimiDevice	borrows provider data; reads scalar string fields into owned strings
+omni-providers/src/kimi/device.rs :: fn headers(&self) -> Vec<(String, String)>	string pairs only
+omni-providers/src/kimi/device.rs :: fn headers(provider_data: &Map<String, Value>) -> Vec<(String, String)>	borrows provider data; reads scalar string fields into string pairs
+omni-providers/src/kimi/device.rs :: fn map(&self) -> Map<String, Value>	scalar string values via deep::insert; no nested JSON ownership
+omni-providers/src/kimi/device.rs :: fn mint() -> KimiDevice	owned strings only
+omni-providers/src/kimi/oauth.rs :: fn begin_request(device_id: &str) -> Result<AuthRequest, GatewayError>	request contains only strings and header pairs
+omni-providers/src/kimi/oauth.rs :: fn begin_result( status: u16, text: &str, device_id: &str, ) -> Result<AuthorizeStart, GatewayError>	iteratively dropped JsValue parse; pending extras hold scalar strings only
+omni-providers/src/kimi/oauth.rs :: fn exchange_request(pending: &PendingFlow) -> Result<(AuthRequest, KimiDevice), GatewayError>	request contains only strings and header pairs; device is owned strings
+omni-providers/src/kimi/oauth.rs :: fn minted_device_id(start: &AuthorizeStart) -> Result<String, GatewayError>	borrows pending extras; reads one scalar string into an owned string
+omni-providers/src/kimi/oauth.rs :: fn poll_result( status: u16, text: &str, device: &KimiDevice, now: f64, ) -> Result<FlowResult, DeviceError>	borrow-only JSON field extraction; FlowResult owns deep-safe Clone/Drop
+omni-providers/src/kimi/oauth.rs :: fn refresh_request(token: &str, device: &KimiDevice) -> AuthRequest	request contains only strings and header pairs
+omni-providers/src/kimi/oauth.rs :: fn start() -> AuthorizeStart	owned strings only
+omni-providers/src/kimi/oauth.rs :: fn token_result( status: u16, text: &str, fallback: Option<&str>, now: f64, device: &KimiDevice, ) -> Result<FlowResult, GatewayError>	borrow-only JSON field extraction; device identity cloned as scalar strings; FlowResult owns deep-safe Clone/Drop
+omni-providers/src/kimi/oauth.rs :: fn usage_request(access: &str, device: &KimiDevice) -> AuthRequest	request contains only strings and header pairs
+omni-providers/src/kimi/profile.rs :: fn initialize()	scalar/string API; no arbitrary JSON ownership
+omni-providers/src/kimi/wire.rs :: fn to_chat_wire(req: &ChatRequest, model: &str) -> Encoded	internal: caller must be inside a deep scope; production entry points are the codec and ingest

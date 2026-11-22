@@ -235,7 +235,10 @@ impl Quota {
             return json!({"kind":"disabled","credentialId":id});
         }
         if c.auth_type != AuthType::OAuth
-            || !matches!(c.provider.as_str(), "openai" | "anthropic" | "antigravity")
+            || !matches!(
+                c.provider.as_str(),
+                "openai" | "anthropic" | "antigravity" | "kimi"
+            )
         {
             return json!({"kind":"unsupported","credentialId":id});
         }

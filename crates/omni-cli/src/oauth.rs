@@ -66,7 +66,10 @@ pub fn connect(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
         .first()
         .filter(|s| !s.is_empty())
         .ok_or((2, "provider is required".into()))?;
-    if !matches!(provider.as_str(), "openai" | "anthropic" | "antigravity") {
+    if !matches!(
+        provider.as_str(),
+        "openai" | "anthropic" | "antigravity" | "kimi"
+    ) {
         return Err((
             2,
             "provider must be one of anthropic, openai, kimi, kilo, grok, antigravity, muse, qoder"
@@ -87,94 +90,104 @@ pub fn connect(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
             return Err((1, "BAD_REQUEST: invalid credential for reconnect".into()));
         }
     }
-    let (verifier, challenge) = omni_providers::oauth::pkce();
-    let state = omni_providers::oauth::random_state();
-    let start = match provider.as_str() {
-        "openai" => omni_providers::openai::oauth::start(
-            "http://localhost:1455/auth/callback",
-            &verifier,
-            &challenge,
-            &state,
-        ),
-        "antigravity" => omni_providers::antigravity::oauth::start(&verifier, &challenge, &state),
-        _ => omni_providers::anthropic::oauth::start(&verifier, &challenge, &state),
-    };
-    eprintln!(
-        "\nOpen this URL to authorize {provider}:\n  {}\n",
-        start.authorize_url
-    );
-    let code = if std::io::stdin().is_terminal() {
-        String::from_utf16_lossy(
-            &crate::password::secret("Paste the code or callback URL: ").map_err(error)?,
-        )
+    let result = if provider == "kimi" {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(error)?;
+        rt.block_on(device_connect(provider, flags.contains_key("json")))?
     } else {
-        let mut bytes = Vec::new();
-        std::io::stdin().read_to_end(&mut bytes).map_err(error)?;
-        String::from_utf8_lossy(&bytes).into_owned()
-    };
-    let code = normalize(provider, &start.pending, omni_ir::js::trim(&code))?;
-    let prior = reconnect
-        .map(|id| {
-            row(&s, id).map_err(|e| {
-                if e.1 == "BAD_REQUEST: no such credential" {
-                    (1, "BAD_REQUEST: credential not found".into())
-                } else {
-                    e
-                }
-            })
-        })
-        .transpose()?;
-    let request = match provider.as_str() {
-        "openai" => omni_providers::openai::oauth::exchange_request(&code, &start.pending),
-        "antigravity" => {
-            omni_providers::antigravity::oauth::exchange_request(&code, &start.pending)
-        }
-        _ => omni_providers::anthropic::oauth::exchange_request(&code, &start.pending),
-    }
-    .map_err(gateway)?;
-    let data = prior
-        .as_ref()
-        .filter(|c| text(field(c, "provider")) == *provider)
-        .and_then(|c| jsjson::stringify(field(c, "providerData")))
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or(serde_json::Value::Null);
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(error)?;
-    let result = rt.block_on(async {
-        let client = Client::new();
-        let response = send(&client, provider, request, "exchange").await?;
-        let mut result = token_result(provider, &response, None, &data)?;
-        if provider == "antigravity" {
-            use omni_providers::antigravity::oauth as ag;
-            let access = String::from_utf16_lossy(&result.access_token);
-            let email = tokio::time::timeout(
-                std::time::Duration::from_secs(15),
-                send(&client, provider, ag::email_request(&access), "exchange"),
-            )
-            .await
-            .map_err(|_| (1, "UPSTREAM: antigravity oauth exchange threw".into()))??;
-            result.account_email = ag::email_result(email.0, &email.1);
-            let loaded = send(&client, provider, ag::load_request(&access), "exchange").await?;
-            let (mut project, tier) = ag::project_result(loaded.0, &loaded.1);
-            if project.is_empty() {
-                let r = send(
-                    &client,
-                    provider,
-                    ag::onboard_request(&access, &tier),
-                    "exchange",
-                )
-                .await?;
-                project = ag::onboard_result(r.0, &r.1);
+        let (verifier, challenge) = omni_providers::oauth::pkce();
+        let state = omni_providers::oauth::random_state();
+        let start = match provider.as_str() {
+            "openai" => omni_providers::openai::oauth::start(
+                "http://localhost:1455/auth/callback",
+                &verifier,
+                &challenge,
+                &state,
+            ),
+            "antigravity" => {
+                omni_providers::antigravity::oauth::start(&verifier, &challenge, &state)
             }
-            result.provider_data = serde_json::json!({"projectId":project,"tier":tier})
-                .as_object()
-                .cloned()
-                .unwrap_or_default();
+            _ => omni_providers::anthropic::oauth::start(&verifier, &challenge, &state),
+        };
+        eprintln!(
+            "\nOpen this URL to authorize {provider}:\n  {}\n",
+            start.authorize_url
+        );
+        let code = if std::io::stdin().is_terminal() {
+            String::from_utf16_lossy(
+                &crate::password::secret("Paste the code or callback URL: ").map_err(error)?,
+            )
+        } else {
+            let mut bytes = Vec::new();
+            std::io::stdin().read_to_end(&mut bytes).map_err(error)?;
+            String::from_utf8_lossy(&bytes).into_owned()
+        };
+        let code = normalize(provider, &start.pending, omni_ir::js::trim(&code))?;
+        let prior = reconnect
+            .map(|id| {
+                row(&s, id).map_err(|e| {
+                    if e.1 == "BAD_REQUEST: no such credential" {
+                        (1, "BAD_REQUEST: credential not found".into())
+                    } else {
+                        e
+                    }
+                })
+            })
+            .transpose()?;
+        let request = match provider.as_str() {
+            "openai" => omni_providers::openai::oauth::exchange_request(&code, &start.pending),
+            "antigravity" => {
+                omni_providers::antigravity::oauth::exchange_request(&code, &start.pending)
+            }
+            _ => omni_providers::anthropic::oauth::exchange_request(&code, &start.pending),
         }
-        Ok::<_, (u8, String)>(result)
-    })?;
+        .map_err(gateway)?;
+        let data = prior
+            .as_ref()
+            .filter(|c| text(field(c, "provider")) == *provider)
+            .and_then(|c| jsjson::stringify(field(c, "providerData")))
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or(serde_json::Value::Null);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(error)?;
+        rt.block_on(async {
+            let client = Client::new();
+            let response = send(&client, provider, request, "exchange").await?;
+            let mut result = token_result(provider, &response, None, &data)?;
+            if provider == "antigravity" {
+                use omni_providers::antigravity::oauth as ag;
+                let access = String::from_utf16_lossy(&result.access_token);
+                let email = tokio::time::timeout(
+                    std::time::Duration::from_secs(15),
+                    send(&client, provider, ag::email_request(&access), "exchange"),
+                )
+                .await
+                .map_err(|_| (1, "UPSTREAM: antigravity oauth exchange threw".into()))??;
+                result.account_email = ag::email_result(email.0, &email.1);
+                let loaded = send(&client, provider, ag::load_request(&access), "exchange").await?;
+                let (mut project, tier) = ag::project_result(loaded.0, &loaded.1);
+                if project.is_empty() {
+                    let r = send(
+                        &client,
+                        provider,
+                        ag::onboard_request(&access, &tier),
+                        "exchange",
+                    )
+                    .await?;
+                    project = ag::onboard_result(r.0, &r.1);
+                }
+                result.provider_data = serde_json::json!({"projectId":project,"tier":tier})
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default();
+            }
+            Ok::<_, (u8, String)>(result)
+        })?
+    };
     if result
         .refresh_token
         .as_ref()
@@ -223,6 +236,55 @@ pub fn connect(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
     } else {
         format!("connected {provider} as {id}")
     })
+}
+/// The device-code connect: begin, show the operator the URL and code, then
+/// poll at the provider's own interval until approval or the 600s deadline.
+/// The URL block goes straight to stderr even under `--json`: it is the
+/// instruction the operator must act on, not progress chatter.
+async fn device_connect(provider: &str, json: bool) -> Result<FlowResult> {
+    use omni_providers::kimi::oauth as kimi;
+    let client = Client::new();
+    let initial = kimi::start();
+    let device_id = kimi::minted_device_id(&initial).map_err(gateway)?;
+    let request = kimi::begin_request(&device_id).map_err(gateway)?;
+    let response = send(&client, provider, request, "begin").await?;
+    let start = kimi::begin_result(response.0, &response.1, &device_id).map_err(gateway)?;
+    eprintln!(
+        "\nOpen this URL to authorize {provider}:\n  {}",
+        start.authorize_url
+    );
+    if let Some(code) = &start.user_code {
+        eprintln!("\nThen enter the code: {code}");
+    }
+    eprintln!();
+    let interval_ms = start.pending.interval.unwrap_or(5.0) * 1000.0;
+    let deadline = now() + 600_000;
+    let mut announced = false;
+    loop {
+        let (request, device) = kimi::exchange_request(&start.pending).map_err(gateway)?;
+        let response = send(&client, provider, request, "exchange").await?;
+        #[allow(clippy::cast_precision_loss)]
+        let at = now() as f64;
+        match kimi::poll_result(response.0, &response.1, &device, at) {
+            Ok(result) => return Ok(result),
+            Err(omni_providers::oauth::DeviceError::Gateway(e)) => return Err(gateway(e)),
+            Err(omni_providers::oauth::DeviceError::Pending) => {
+                if !announced {
+                    if !json {
+                        eprintln!("waiting for approval…");
+                    }
+                    announced = true;
+                }
+                if now() >= deadline {
+                    return Err((1, "authorization timed out".into()));
+                }
+                // The interval is the provider's own: polling faster is what
+                // makes a provider start answering `slow_down`.
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                tokio::time::sleep(std::time::Duration::from_millis(interval_ms as u64)).await;
+            }
+        }
+    }
 }
 fn row(s: &omni_store::SqliteStore, id: &str) -> Result<J> {
     cli_rows_for(s, Some(id))
@@ -457,10 +519,23 @@ pub fn refresh(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
     let provider = text(field(&c, "provider"));
     let token = secret(&s, &key, id)?
         .ok_or_else(|| (1, format!("AUTH: credential {id} has no refresh token")))?;
+    let prior =
+        serde_json::from_str(&jsjson::stringify(field(&c, "providerData")).unwrap_or_default())
+            .unwrap_or(serde_json::Value::Null);
+    // One identity per refresh: the request and the stored result must carry
+    // the same device id even when providerData has none yet.
+    let kimi_device =
+        (provider == "kimi").then(|| omni_providers::kimi::device::from_data(prior.as_object()));
     let request = match provider.as_str() {
         "openai" => omni_providers::openai::oauth::refresh_request(&token),
         "anthropic" => omni_providers::anthropic::oauth::refresh_request(&token),
         "antigravity" => omni_providers::antigravity::oauth::refresh_request(&token),
+        "kimi" => omni_providers::kimi::oauth::refresh_request(
+            &token,
+            kimi_device
+                .as_ref()
+                .ok_or((1, "INTERNAL: internal error".to_string()))?,
+        ),
         _ => {
             return Err((
                 1,
@@ -468,16 +543,28 @@ pub fn refresh(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
             ));
         }
     };
-    let prior =
-        serde_json::from_str(&jsjson::stringify(field(&c, "providerData")).unwrap_or_default())
-            .unwrap_or(serde_json::Value::Null);
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(error)?;
     let result = rt.block_on(async {
         let response = send(&Client::new(), &provider, request, "refresh").await?;
-        let result = token_result(&provider, &response, Some(&token), &prior)?;
+        let result = if provider == "kimi" {
+            #[allow(clippy::cast_precision_loss)]
+            let at = now() as f64;
+            omni_providers::kimi::oauth::token_result(
+                response.0,
+                &response.1,
+                Some(&token),
+                at,
+                kimi_device
+                    .as_ref()
+                    .ok_or((1, "INTERNAL: internal error".to_string()))?,
+            )
+            .map_err(gateway)?
+        } else {
+            token_result(&provider, &response, Some(&token), &prior)?
+        };
         // Builtin step results still pass through the host's shape guard.
         if provider == "openai" && matches!(field(&c, "providerData"), J::Null) {
             return Err((1, "UPSTREAM: openai oauth refresh threw".into()));

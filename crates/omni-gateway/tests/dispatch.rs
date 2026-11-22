@@ -930,3 +930,123 @@ async fn one_non_delta_event_over_the_byte_cap_commits_at_once() {
     assert!(matches!(events.last(), Some(StreamEvent::Error { .. })));
     flush(h).await;
 }
+
+#[tokio::test]
+async fn kimi_registered_codec_dispatches_the_coding_stream() {
+    let f = fixture(&["c0"]);
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute(
+        "UPDATE credentials SET provider='kimi',auth_type='oauth',access_token=api_key,provider_data='{\"deviceId\":\"dev-1\"}'",
+        [],
+    )
+    .expect("provider");
+    let h = harness(&f, vec![sse_ok(2)]);
+    let mut d = dispatch(h.deps.clone(), req("kimi-for-coding"));
+    let events = drain(&mut d).await;
+    assert!(matches!(events.first(), Some(StreamEvent::Start { .. })));
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    let log = d.log.lock().expect("log").clone();
+    assert_eq!(
+        (
+            log.status,
+            log.attempts,
+            log.input_tokens,
+            log.output_tokens
+        ),
+        (200, 1, 10, 4)
+    );
+    {
+        let calls = h.script.seen.lock().expect("seen");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].provider, "kimi");
+        assert_eq!(
+            calls[0].url,
+            "https://api.kimi.com/coding/v1/chat/completions"
+        );
+        assert!(
+            calls[0]
+                .headers
+                .contains(&("Authorization".into(), "Bearer sk-up".into()))
+        );
+        assert!(
+            calls[0]
+                .headers
+                .contains(&("X-Msh-Device-Id".into(), "dev-1".into()))
+        );
+        let sent: serde_json::Value = serde_json::from_str(&calls[0].body).expect("body");
+        assert_eq!(sent["model"], "kimi-for-coding");
+        assert_eq!(sent["stream"], true);
+        assert_eq!(
+            sent["stream_options"],
+            serde_json::json!({"include_usage": true})
+        );
+    }
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn kimi_non_streaming_client_is_served_by_collecting_the_stream() {
+    let f = fixture(&["c0"]);
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute(
+        "UPDATE credentials SET provider='kimi',auth_type='oauth',access_token=api_key,provider_data='{\"deviceId\":\"dev-1\"}'",
+        [],
+    )
+    .expect("provider");
+    let h = harness(&f, vec![sse_ok(1)]);
+    let request = Request {
+        request: chat("kimi-for-coding", false),
+        request_id: "req_t".into(),
+        api_key_id: Some("k1".into()),
+        route_started_at: 1_000,
+    };
+    let mut d = dispatch(h.deps.clone(), request);
+    let events = drain(&mut d).await;
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    {
+        let calls = h.script.seen.lock().expect("seen");
+        assert_eq!(calls.len(), 1);
+        let sent: serde_json::Value = serde_json::from_str(&calls[0].body).expect("body");
+        // The request going out streams either way; a non-streaming upstream
+        // would return JSON the SSE parser yields nothing from.
+        assert_eq!(sent["stream"], true);
+    }
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn kimi_retryable_failure_before_commit_fails_over() {
+    let f = fixture(&["c0", "c1"]);
+    set_setting(&f.path, "routingStrategy", "\"priority\"");
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute(
+        "UPDATE credentials SET provider='kimi',auth_type='oauth',access_token=api_key,provider_data='{\"deviceId\":\"dev-1\"}',tier=CASE id WHEN 'c0' THEN 1 ELSE 2 END",
+        [],
+    )
+    .expect("provider");
+    let h = harness(
+        &f,
+        vec![status(500, "{\"error\":{\"message\":\"boom\"}}"), sse_ok(1)],
+    );
+    let mut d = dispatch(h.deps.clone(), req("kimi-for-coding"));
+    let events = drain(&mut d).await;
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    let log = d.log.lock().expect("log").clone();
+    assert_eq!((log.status, log.attempts), (200, 2));
+    assert_eq!(log.credential_id.as_deref(), Some("c1"));
+    {
+        let calls = h.script.seen.lock().expect("seen");
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|c| c.provider == "kimi"));
+    }
+    flush(h).await;
+}

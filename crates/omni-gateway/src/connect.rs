@@ -18,6 +18,7 @@ const PROVIDERS: &[(&str, &str)] = &[
     ("anthropic", ""),
     ("openai", "http://localhost:1455/auth/callback"),
     ("antigravity", "https://antigravity.google/oauth-callback"),
+    ("kimi", ""),
 ];
 fn bad(s: &str) -> GatewayError {
     GatewayError::new(ErrorCode::BadRequest, s)
@@ -192,6 +193,30 @@ impl ConnectFlows {
             }
             _ => string(provider),
         };
+        if *provider == "kimi" {
+            // Device begin: mint the identity locally, then ask upstream for a
+            // device code before the operator is shown anything.
+            let initial = omni_providers::kimi::oauth::start();
+            let device_id = omni_providers::kimi::oauth::minted_device_id(&initial)?;
+            let request = omni_providers::kimi::oauth::begin_request(&device_id)?;
+            let mut runner = crate::oauth_runner::ExchangeRunner::new(
+                app.deps.refresher.http.as_ref(),
+                crate::oauth_runner::ExchangeConfig {
+                    provider: "kimi",
+                    step: "begin",
+                    max_requests: 1,
+                    origins: crate::oauth_runner::Origins::Allowlist(
+                        omni_providers::kimi::oauth::AUTH_ORIGINS,
+                    ),
+                },
+            );
+            let response = runner.send(request, 30).await?;
+            let start =
+                omni_providers::kimi::oauth::begin_result(response.0, &response.1, &device_id)?;
+            return self
+                .store_flow(provider, label, credential, &start, "device", false)
+                .await;
+        }
         let (verifier, challenge) = omni_providers::oauth::pkce();
         let state = omni_providers::oauth::random_state();
         let start = if *provider == "openai" {
@@ -371,7 +396,6 @@ fn poll_reply(result: Result<String>) -> Result<String> {
 /// Device exchange dispatch: exactly one provider poll per call; the caller
 /// owns the loop and deadline. Each device provider commit adds an arm here
 /// driving its oauth.rs builders through `crate::oauth_runner::ExchangeRunner`.
-#[allow(clippy::match_single_binding)] // provider arms land in later commits
 async fn device_exchange(
     provider: &str,
     host: &crate::refresh::Refresher,
@@ -379,6 +403,24 @@ async fn device_exchange(
     prior: &serde_json::Value,
 ) -> std::result::Result<FlowResult, DeviceError> {
     match provider {
+        "kimi" => {
+            let (request, device) = omni_providers::kimi::oauth::exchange_request(pending)?;
+            let mut runner = crate::oauth_runner::ExchangeRunner::new(
+                host.http.as_ref(),
+                crate::oauth_runner::ExchangeConfig {
+                    provider: "kimi",
+                    step: "exchange",
+                    max_requests: 1,
+                    origins: crate::oauth_runner::Origins::Allowlist(
+                        omni_providers::kimi::oauth::AUTH_ORIGINS,
+                    ),
+                },
+            );
+            let response = runner.send(request, 30).await?;
+            #[allow(clippy::cast_precision_loss)]
+            let now = (host.now)() as f64;
+            omni_providers::kimi::oauth::poll_result(response.0, &response.1, &device, now)
+        }
         #[cfg(test)]
         "device-fixture" => tests::device_fixture(host, pending, prior).await,
         _ => {
@@ -1558,5 +1600,487 @@ mod tests {
             stringify(get(&flow, "pending").expect("pending")).expect("json"),
             r#"{"verifier":"v","challenge":"c","state":"s","redirectUri":"r"}"#
         );
+    }
+
+    // --- kimi device flow ----------------------------------------------------
+    // Mirrors control/test/oauth/kimi.test.ts against the real host wiring:
+    // the pure builders' bytes, the store/poll/persist machinery, and the
+    // refresher's token classification.
+
+    const KIMI_DEVICE_DATA: &str = r#"{"deviceId":"11111111-2222-3333-4444-555555555555","deviceName":"MacBook-Pro","deviceModel":"MacBookPro18,3","osVersion":"15.3.1"}"#;
+    const KIMI_FLOW: &str = r#"{"provider":"kimi","label":"kimi","pending":{"verifier":"","challenge":"","state":"","redirectUri":"","deviceCode":"dc-1","interval":5,"extra":{"deviceId":"11111111-2222-3333-4444-555555555555","deviceName":"MacBook-Pro","deviceModel":"MacBookPro18,3","osVersion":"15.3.1"}}}"#;
+    const KIMI_CLIENT_ID: &str = "17e5f671-d194-4dfb-9706-5516cb48c098";
+    const KIMI_TOKEN_URL: &str = "https://auth.kimi.com/api/oauth/token";
+    const KIMI_EXCHANGE_BODY: &str = "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code&device_code=dc-1&device_id=11111111-2222-3333-4444-555555555555&client_id=17e5f671-d194-4dfb-9706-5516cb48c098";
+    const KIMI_AUTH_HEADERS: [(&str, &str); 9] = [
+        ("Content-Type", "application/x-www-form-urlencoded"),
+        ("X-Msh-Platform", "kimi_code_cli"),
+        ("X-Msh-Version", "0.26.0"),
+        ("X-Msh-Device-Id", "11111111-2222-3333-4444-555555555555"),
+        ("X-Msh-Device-Name", "MacBook-Pro"),
+        ("X-Msh-Device-Model", "MacBookPro18,3"),
+        ("X-Msh-Os-Version", "15.3.1"),
+        ("User-Agent", "kimi-code-cli/0.26.0"),
+        ("Accept", "application/json"),
+    ];
+
+    fn kimi_headers() -> Vec<(String, String)> {
+        KIMI_AUTH_HEADERS
+            .iter()
+            .map(|(n, v)| ((*n).to_owned(), (*v).to_owned()))
+            .collect()
+    }
+
+    /// Like `Scripted`, but keeps every request so tests can assert on the
+    /// identity headers and form bytes that reached the transport.
+    struct Captured {
+        status: u16,
+        body: &'static str,
+        seen: std::sync::Mutex<Vec<omni_providers::http::HttpRequest>>,
+    }
+    impl Captured {
+        fn new(status: u16, body: &'static str) -> Arc<Self> {
+            Arc::new(Self {
+                status,
+                body,
+                seen: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+        fn last(&self) -> omni_providers::http::HttpRequest {
+            self.seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .last()
+                .cloned()
+                .expect("captured request")
+        }
+    }
+    impl omni_providers::http::HttpClient for Captured {
+        fn send(
+            &self,
+            req: omni_providers::http::HttpRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = std::result::Result<
+                            omni_providers::http::HttpResponse,
+                            omni_providers::http::HttpError,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            self.seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(req);
+            Box::pin(async {
+                Ok(omni_providers::http::HttpResponse {
+                    status: self.status,
+                    headers: omni_providers::http::Headers::new(),
+                    body: omni_providers::http::ResponseBody::from_bytes(self.body),
+                })
+            })
+        }
+    }
+
+    /// A kimi device flow at `oauth:pending:dev` with a frozen identity and a
+    /// fixed clock, so expiry arithmetic is pinnable.
+    async fn kimi_harness(
+        http: Arc<dyn omni_providers::http::HttpClient>,
+    ) -> (
+        tempfile::TempDir,
+        Arc<crate::refresh::Refresher>,
+        Arc<omni_gateway_core::snapshot::SnapshotHolder>,
+        Arc<ConnectFlows>,
+    ) {
+        let dir = tempfile::tempdir().expect("dir");
+        let store = Arc::new(
+            omni_store::Store::open(
+                omni_store::StoreConfig::Sqlite {
+                    path: dir.path().join("db"),
+                },
+                0,
+            )
+            .await
+            .expect("store"),
+        );
+        let key = omni_crypto::field::derive_key("test-key");
+        let holder = Arc::new(
+            omni_gateway_core::snapshot::SnapshotHolder::build(
+                &omni_store::SqliteStore::open(dir.path().join("db"), 0).expect("sqlite"),
+                key.clone(),
+                0.0,
+            )
+            .expect("snapshot"),
+        );
+        let host = Arc::new(crate::refresh::Refresher::new(store, key, http, || {
+            1_000_000
+        }));
+        let flows = Arc::new(ConnectFlows::default());
+        flows
+            .coord
+            .kv_set("oauth:pending:dev", KIMI_FLOW, 600_000)
+            .await
+            .expect("put");
+        (dir, host, holder, flows)
+    }
+
+    /// A stored kimi credential plus a refresher answering `status`/`body`.
+    async fn kimi_refresh_harness(
+        status: u16,
+        body: &'static str,
+    ) -> (
+        tempfile::TempDir,
+        Arc<omni_store::Store>,
+        omni_crypto::field::FieldKey,
+        Arc<crate::refresh::Refresher>,
+        Arc<Captured>,
+        omni_store::credentials::Credential,
+    ) {
+        let dir = tempfile::tempdir().expect("dir");
+        let store = Arc::new(
+            omni_store::Store::open(
+                omni_store::StoreConfig::Sqlite {
+                    path: dir.path().join("db"),
+                },
+                0,
+            )
+            .await
+            .expect("store"),
+        );
+        let key = omni_crypto::field::derive_key("test-key");
+        let http = Captured::new(status, body);
+        let host = Arc::new(crate::refresh::Refresher::new(
+            store.clone(),
+            key.clone(),
+            http.clone(),
+            || 1_000_000,
+        ));
+        let tokens = omni_store::credentials::TokenUpdate {
+            access_token: Some("test-token-1".into()),
+            refresh_token: Some("test-token-2".into()),
+            api_key: None,
+            id_token: None,
+            expires_at: Some(2_000_000.0),
+            updated_at: 0,
+        };
+        store
+            .save_oauth(
+                &key,
+                &omni_store::credentials::OAuthCredential {
+                    id: "k1",
+                    provider: "kimi",
+                    label: "kimi",
+                    provider_data: KIMI_DEVICE_DATA,
+                    account_email: None,
+                    tokens: &tokens,
+                    reconnect: false,
+                },
+            )
+            .await
+            .expect("save");
+        let credential = store
+            .credential(&key, "k1")
+            .await
+            .expect("read")
+            .expect("present");
+        (dir, store, key, host, http, credential)
+    }
+
+    #[tokio::test]
+    async fn kimi_begin_request_bytes_and_reply_shape() {
+        let device_id = "11111111-2222-3333-4444-555555555555";
+        let request = omni_providers::kimi::oauth::begin_request(device_id).expect("begin");
+        assert_eq!(
+            request.url,
+            "https://auth.kimi.com/api/oauth/device_authorization"
+        );
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.headers, kimi_headers());
+        assert_eq!(request.body, format!("client_id={KIMI_CLIENT_ID}"));
+
+        let start = omni_providers::kimi::oauth::begin_result(
+            200,
+            r#"{"device_code":"dc-1","user_code":"WDJB-MJHT","verification_uri":"https://kimi.example/device","verification_uri_complete":"https://kimi.example/device?user_code=WDJB-MJHT","interval":5}"#,
+            device_id,
+        )
+        .expect("begin result");
+        assert_eq!(start.user_code.as_deref(), Some("WDJB-MJHT"));
+        assert_eq!(
+            start.authorize_url,
+            "https://kimi.example/device?user_code=WDJB-MJHT"
+        );
+        assert_eq!(start.pending.device_code.as_deref(), Some("dc-1"));
+        assert_eq!(start.pending.interval, Some(5.0));
+
+        let flows = ConnectFlows::default();
+        let reply = flows
+            .store_flow("kimi", string("kimi"), None, &start, "device", false)
+            .await
+            .expect("reply");
+        let value: serde_json::Value = serde_json::from_str(&reply).expect("json");
+        assert_eq!(value["kind"], "device");
+        assert_eq!(value["userCode"], "WDJB-MJHT");
+        assert_eq!(value["supportsManualPaste"], false);
+        assert_eq!(value["pollIntervalMs"], 5000);
+        assert_eq!(
+            value["authorizeUrl"],
+            "https://kimi.example/device?user_code=WDJB-MJHT"
+        );
+        let flow = flows
+            .pending(value["flowId"].as_str().expect("id"), false)
+            .await
+            .expect("stored");
+        assert!(device_flow(&flow));
+        let pending = pending_value(&flow).expect("pending");
+        assert_eq!(
+            pending
+                .extra
+                .get("deviceId")
+                .and_then(serde_json::Value::as_str),
+            Some(device_id)
+        );
+    }
+
+    #[test]
+    fn kimi_begin_rejects_a_blank_device_id_before_any_request() {
+        // INTERNAL, not a bare failure: a flow that needs an identity and did
+        // not mint one is a gateway bug, not something the operator did.
+        let error = omni_providers::kimi::oauth::begin_request("  ").expect_err("blank");
+        assert_eq!(error.code, ErrorCode::Internal);
+        assert_eq!(error.message, "kimi begin requires a non-blank deviceId");
+    }
+
+    #[test]
+    fn kimi_begin_rejects_a_blank_required_field() {
+        let error = match omni_providers::kimi::oauth::begin_result(
+            200,
+            r#"{"device_code":"","user_code":"WDJB-MJHT"}"#,
+            "11111111-2222-3333-4444-555555555555",
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("expected an unusable response"),
+        };
+        assert_eq!(error.code, ErrorCode::Auth);
+        assert_eq!(
+            error.message,
+            "device code endpoint returned an unusable response"
+        );
+    }
+
+    #[tokio::test]
+    async fn kimi_poll_pending_keeps_flow_and_sends_the_device_identity() {
+        let http = Captured::new(400, r#"{"error":"authorization_pending"}"#);
+        let (_dir, host, holder, flows) = kimi_harness(http.clone()).await;
+        let error = flows
+            .poll(host.clone(), holder.clone(), "dev".into())
+            .await
+            .expect_err("pending");
+        assert_eq!(error.message, PENDING_MARKER);
+        assert_eq!(
+            poll_reply(Err(error)).expect("reply"),
+            r#"{"status":"pending"}"#
+        );
+        let sent = http.last();
+        assert_eq!(sent.url, KIMI_TOKEN_URL);
+        assert_eq!(sent.headers, kimi_headers());
+        assert_eq!(sent.body, KIMI_EXCHANGE_BODY);
+        let stored = flows.pending("dev", false).await.expect("kept");
+        let pending = pending_value(&stored).expect("pending");
+        assert_eq!(pending.device_code.as_deref(), Some("dc-1"));
+        assert_eq!(pending.interval, Some(5.0));
+        assert_eq!(
+            pending
+                .extra
+                .get("deviceId")
+                .and_then(serde_json::Value::as_str),
+            Some("11111111-2222-3333-4444-555555555555")
+        );
+        // A second poll runs a fresh exchange against the kept flow.
+        let again = flows
+            .poll(host, holder, "dev".into())
+            .await
+            .expect_err("pending");
+        assert_eq!(again.message, PENDING_MARKER);
+        assert!(flows.pending("dev", false).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn kimi_poll_slow_down_is_also_pending() {
+        let http = Captured::new(400, r#"{"error":"slow_down"}"#);
+        let (_dir, host, holder, flows) = kimi_harness(http).await;
+        let error = flows
+            .poll(host, holder, "dev".into())
+            .await
+            .expect_err("pending");
+        assert_eq!(error.message, PENDING_MARKER);
+        assert!(flows.pending("dev", false).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn kimi_poll_denied_is_a_terminal_auth_error() {
+        let http = Captured::new(400, r#"{"error":"access_denied"}"#);
+        let (_dir, host, holder, flows) = kimi_harness(http).await;
+        let error = flows
+            .poll(host, holder, "dev".into())
+            .await
+            .expect_err("denied");
+        assert_eq!(error.code, ErrorCode::Auth);
+        assert_eq!(
+            error.message,
+            "token endpoint rejected the request: access_denied"
+        );
+        assert!(poll_reply(Err(error)).is_err());
+        assert!(flows.pending("dev", false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn kimi_poll_approval_persists_the_device_identity() {
+        let http = Captured::new(
+            200,
+            r#"{"access_token":"test-token-1","refresh_token":"test-token-2","expires_in":3600}"#,
+        );
+        let (_dir, host, holder, flows) = kimi_harness(http.clone()).await;
+        let id = flows
+            .poll(host.clone(), holder.clone(), "dev".into())
+            .await
+            .expect("approved");
+        assert_eq!(
+            poll_reply(Ok(id.clone())).expect("reply"),
+            serde_json::json!({"status":"complete","id":id}).to_string()
+        );
+        assert_eq!(http.last().body, KIMI_EXCHANGE_BODY);
+        let rows = host.store.list_credentials(&host.key).await.expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].provider, "kimi");
+        assert_eq!(
+            rows[0].secrets.access_token.as_deref(),
+            Some("test-token-1")
+        );
+        assert_eq!(
+            rows[0].secrets.refresh_token.as_deref(),
+            Some("test-token-2")
+        );
+        // The identity sent upstream is the one frozen onto the credential.
+        assert_eq!(
+            rows[0].provider_data,
+            serde_json::from_str::<serde_json::Value>(KIMI_DEVICE_DATA).expect("data")
+        );
+        let connected = &holder.load().routing.credentials[0];
+        assert_eq!(connected.id, id);
+        assert_eq!(connected.expires_at, Some(1_000_000.0 + 3_600_000.0));
+        assert!(flows.pending("dev", false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn kimi_poll_rejects_a_blank_access_token() {
+        let http = Captured::new(200, r#"{"access_token":""}"#);
+        let (_dir, host, holder, flows) = kimi_harness(http).await;
+        let error = flows
+            .poll(host, holder, "dev".into())
+            .await
+            .expect_err("blank token");
+        assert_eq!(error.code, ErrorCode::Auth);
+        assert_eq!(error.message, "token endpoint returned no access_token");
+        assert!(flows.pending("dev", false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn kimi_exchange_without_a_device_code_is_a_programming_error() {
+        let http = Captured::new(200, "{}");
+        let (_dir, host, _holder, _flows) = kimi_harness(http.clone()).await;
+        let pending = PendingFlow {
+            verifier: String::new(),
+            challenge: String::new(),
+            state: String::new(),
+            redirect_uri: String::new(),
+            device_code: None,
+            interval: None,
+            extra: serde_json::Map::new(),
+        };
+        match device_exchange("kimi", &host, &pending, &serde_json::Value::Null).await {
+            Err(DeviceError::Gateway(error)) => {
+                assert_eq!(error.code, ErrorCode::Internal);
+                assert_eq!(
+                    error.message,
+                    "kimi exchange requires a pending flow produced by begin()"
+                );
+            }
+            Err(DeviceError::Pending) => panic!("expected internal error, got pending"),
+            Ok(_) => panic!("expected internal error, got a completed flow"),
+        }
+        assert!(
+            http.seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "nothing may reach transport without a device code"
+        );
+    }
+
+    #[tokio::test]
+    async fn kimi_refresh_returns_a_new_access_token_and_reuses_the_stored_device() {
+        let (_dir, store, key, host, http, credential) =
+            kimi_refresh_harness(200, r#"{"access_token":"test-token-3","expires_in":60}"#).await;
+        let secrets = host.refresh(&credential).await.expect("refresh");
+        assert_eq!(secrets.access_token.as_deref(), Some("test-token-3"));
+        assert_eq!(secrets.refresh_token.as_deref(), Some("test-token-2"));
+        let sent = http.last();
+        assert_eq!(sent.url, KIMI_TOKEN_URL);
+        assert_eq!(sent.headers, kimi_headers());
+        assert_eq!(
+            sent.body,
+            format!(
+                "grant_type=refresh_token&refresh_token=test-token-2&device_id=11111111-2222-3333-4444-555555555555&client_id={KIMI_CLIENT_ID}"
+            )
+        );
+        let stored = store
+            .credential(&key, "k1")
+            .await
+            .expect("read")
+            .expect("present");
+        assert_eq!(stored.expires_at, Some(1_000_000.0 + 60_000.0));
+        assert_eq!(
+            stored.provider_data,
+            serde_json::from_str::<serde_json::Value>(KIMI_DEVICE_DATA).expect("data")
+        );
+        assert_eq!(
+            stored.secrets.refresh_token.as_deref(),
+            Some("test-token-2")
+        );
+    }
+
+    #[tokio::test]
+    async fn kimi_refresh_preserves_the_stored_token_when_the_new_one_is_blank() {
+        let (_dir, _store, _key, host, _http, credential) =
+            kimi_refresh_harness(200, r#"{"access_token":"test-token-3","refresh_token":""}"#)
+                .await;
+        let secrets = host.refresh(&credential).await.expect("refresh");
+        assert_eq!(secrets.access_token.as_deref(), Some("test-token-3"));
+        assert_eq!(secrets.refresh_token.as_deref(), Some("test-token-2"));
+    }
+
+    #[tokio::test]
+    async fn kimi_refresh_classifies_token_endpoint_failures() {
+        // A provider having a bad minute must not disable a healthy
+        // credential: the refresher disables only on AUTH.
+        for (status, body, code) in [
+            (500, r#"{"error":"internal_error"}"#, ErrorCode::Upstream),
+            (503, "{}", ErrorCode::Upstream),
+            (400, r#"{"error":"invalid_grant"}"#, ErrorCode::Auth),
+            (429, r#"{"error":"rate_limited"}"#, ErrorCode::RateLimit),
+        ] {
+            let (_dir, store, key, host, _http, credential) =
+                kimi_refresh_harness(status, body).await;
+            let error = host.refresh(&credential).await.expect_err("classified");
+            assert_eq!(error.code, code, "{status} {body}");
+            let stored = store
+                .credential(&key, "k1")
+                .await
+                .expect("read")
+                .expect("present");
+            assert_eq!(stored.enabled, code != ErrorCode::Auth, "{status} {body}");
+        }
     }
 }

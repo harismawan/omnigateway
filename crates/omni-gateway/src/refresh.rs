@@ -280,10 +280,20 @@ impl Refresher {
                 format!("credential {} has no refresh token", c.id),
             )
         })?;
+        // One identity per refresh: minting separately for the request and the
+        // result would send one device id upstream and store another.
+        let kimi_device = (c.provider == "kimi")
+            .then(|| omni_providers::kimi::device::from_data(c.provider_data.as_object()));
         let request = match c.provider.as_str() {
             "anthropic" => omni_providers::anthropic::oauth::refresh_request(token),
             "openai" => omni_providers::openai::oauth::refresh_request(token),
             "antigravity" => omni_providers::antigravity::oauth::refresh_request(token),
+            "kimi" => omni_providers::kimi::oauth::refresh_request(
+                token,
+                kimi_device
+                    .as_ref()
+                    .ok_or_else(|| GatewayError::new(ErrorCode::Internal, "internal error"))?,
+            ),
             _ => {
                 return Err(GatewayError::new(
                     ErrorCode::BadRequest,
@@ -327,6 +337,16 @@ impl Refresher {
                 Some(token),
                 (self.now)() as f64,
                 &c.provider_data,
+            )
+        } else if c.provider == "kimi" {
+            omni_providers::kimi::oauth::token_result(
+                response.0,
+                &response.1,
+                Some(token),
+                (self.now)() as f64,
+                kimi_device
+                    .as_ref()
+                    .ok_or_else(|| GatewayError::new(ErrorCode::Internal, "internal error"))?,
             )
         } else {
             omni_providers::anthropic::oauth::token_result(

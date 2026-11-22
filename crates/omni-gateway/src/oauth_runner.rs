@@ -3,9 +3,6 @@
 //! them under host-owned limits: a request cap, an origin check and a
 //! per-request deadline. Modeled on `connect::AntigravityExchange`, whose
 //! pinned single-provider path stays as it is.
-// The provider arms that drive this runner land in later commits; until then
-// only the plumbing tests construct it.
-#![allow(dead_code)]
 use omni_ir::error::{ErrorCode, GatewayError};
 use omni_providers::{
     http::{HttpClient, HttpRequest},
@@ -16,6 +13,8 @@ use omni_providers::{
 /// providers; a validator covers hosts published through discovery (grok).
 pub(crate) enum Origins<'a> {
     Allowlist(&'a [&'a str]),
+    // Grok's discovery-published hosts land in a later commit.
+    #[allow(dead_code)]
     Validator(&'a (dyn Fn(&url::Url) -> bool + Sync)),
 }
 
