@@ -1,8 +1,16 @@
 //! `packages/rtk/src/filters/git.ts`: the Git anchor grammar shared by the
 //! unknown-origin detector and the line retainer, and the operation filter.
 //!
-//! The fragments are the TS strings verbatim; see the TS file for why each is
-//! as wide as it is (combined-diff columns are unbounded on purpose).
+//! The fragments are the TS strings verbatim. Combined-diff content columns
+//! are unbounded on purpose (`[ +-]*[-+]`): a combined diff for N parents
+//! prints N prefix columns per content row (and N+1 `@` on the hunk header),
+//! and git imposes no parent limit, so every finite bound has a merge whose
+//! marker rows it drops while the hunk headers and omission counts survive.
+//! Measured on real octopus merges (`git commit-tree -p …`, `git diff -c
+//! HEAD^!`): a four-column bound lost 35 of 40 rows at 6 parents, a sixteen-
+//! column one lost rows at 17. The width never decides whether a document is
+//! a Git diff (detection reads only the header and pair rows), so widening it
+//! cannot pull a new document into this family.
 
 use super::shared::{BoundedText, capped, plain_edges, render_selection};
 use crate::jsre::{JsRegex, compile, js_regex};

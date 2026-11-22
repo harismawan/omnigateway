@@ -43,7 +43,7 @@ pub fn resolve(flags: &HashMap<String, String>) -> Result<Context, String> {
         "flag"
     } else if env.get("OMNI_ROOT").is_some_and(|s| !s.is_empty()) {
         "env"
-    } else if [".env", "omnigateway.db", "apps/gateway/src/index.ts"]
+    } else if [".env", "omnigateway.db"]
         .iter()
         .any(|p| cwd.join(p).exists())
     {
@@ -54,7 +54,7 @@ pub fn resolve(flags: &HashMap<String, String>) -> Result<Context, String> {
     let root = if let Some(r) = flag_root.or_else(|| env.get("OMNI_ROOT").filter(|s| !s.is_empty()))
     {
         absolute(&cwd, r)
-    } else if [".env", "omnigateway.db", "apps/gateway/src/index.ts"]
+    } else if [".env", "omnigateway.db"]
         .iter()
         .any(|p| cwd.join(p).exists())
     {

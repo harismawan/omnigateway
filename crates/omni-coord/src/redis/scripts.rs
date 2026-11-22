@@ -1,7 +1,7 @@
-//! The Lua scripts, byte-for-byte the text of the frozen TS
-//! `apps/gateway/src/coord/redis.ts`, so both runtimes load the same digests
-//! and a TS→Rust cutover runs the same server-side logic. A unit test re-reads
-//! the TS file and fails on any drift.
+//! The Lua scripts. Their text is byte-for-byte what the TS gateway loaded, so
+//! a fleet mid-cutover ran the same server-side logic, and every node of one
+//! fleet must load the same digests. `scripts_are_byte_stable` pins the digest
+//! of each: changing a script is deliberate and updates its digest with it.
 //!
 //! Each script is the atomic half of one primitive: what the in-memory
 //! implementation does between one call and the next return, done server-side
@@ -144,7 +144,7 @@ pub(crate) const LEASE_ACQUIRE_SRC: &str = r#"
   return 0
 "#;
 
-/// `LEASE_RELEASE` is `MUTEX_RELEASE` in TS: release only what this holder took.
+/// `LEASE_RELEASE` is `MUTEX_RELEASE`: release only what this holder took.
 pub(crate) const LEASE_RELEASE_SRC: &str = MUTEX_RELEASE_SRC;
 pub static WINDOW_CLAIM: LazyLock<CoordScript> =
     LazyLock::new(|| CoordScript::new("WINDOW_CLAIM", WINDOW_CLAIM_SRC));
@@ -198,29 +198,44 @@ pub(crate) fn builtin() -> [&'static CoordScript; 13] {
 mod tests {
     use super::*;
 
-    /// The frozen TS source, read at test time: a drift in either file fails.
+    /// The `EVALSHA` digest (SHA-1 of the text) of every built-in script, as
+    /// it was when the scripts were last proven equal to the TS gateway's.
+    /// Every process in a fleet loads these digests, so a script that changes
+    /// by one byte is a different script: a node on the old text and a node
+    /// on the new one run different server-side logic against the same keys.
+    /// Change a script only on purpose, and update its digest here with it.
+    const DIGESTS: [(&str, &str); 13] = [
+        ("WINDOW_CLAIM", "b688e999514b45766a7405e01ecf1ec9db34f406"),
+        (
+            "WINDOW_ROLLBACK",
+            "9eb4084c9f65a3f4c5ad98cb87e60570c45a4317",
+        ),
+        ("GAUGE_ACQUIRE", "65ba4085d572c588766be1e43618fb4c642ee473"),
+        ("GAUGE_RENEW", "f9d7537e43058399e1d4a6955c1dc66e9a55aa8b"),
+        ("GAUGE_READ", "e7150687b8795f326d313045a18079121847964d"),
+        ("GAUGE_RELEASE", "0608aa38aeb6e01088872768916b24a25b33bb1b"),
+        ("GAUGE_SNAPSHOT", "66ec7f6c77e3c822761a51a4cafd43d394910ce1"),
+        ("BUCKETS_ADD", "cb58b80c2f160efcbf9e789f6367c8a4d805c7b0"),
+        ("BUCKETS_SUM", "58fca06c1a6565d024a28f7023b18d78cb91bab2"),
+        ("BUCKETS_SEED", "c08ab8b91b81ad23a8ec285633e7c8d3621291f0"),
+        ("MUTEX_RELEASE", "e810903f64fc9d5a53508485e066cc60b5b2a370"),
+        ("LEASE_ACQUIRE", "fb02741994f17fedcfa2d4a3891beaa948399274"),
+        (
+            "PUBLISH_SEQUENCED",
+            "b9cab81eee64f591234849533b329327365b07e7",
+        ),
+    ];
+
     #[test]
-    fn scripts_are_the_frozen_ts_text() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../apps/gateway/src/coord/redis.ts"
-        );
-        let ts = std::fs::read_to_string(path).expect("frozen TS redis coord");
-        for script in builtin() {
-            let start = format!("const {} = `", script.name);
-            let at = ts
-                .find(&start)
-                .unwrap_or_else(|| panic!("{} missing in TS", script.name))
-                + start.len();
-            let len = ts[at..].find('`').expect("closing backtick");
-            assert_eq!(
-                &ts[at..at + len],
-                script.source,
-                "{} drifted from TS",
-                script.name
-            );
+    fn scripts_are_byte_stable() {
+        let scripts = builtin();
+        assert_eq!(scripts.len(), DIGESTS.len());
+        for (script, (name, sha)) in scripts.iter().zip(DIGESTS) {
+            assert_eq!(script.name, name);
+            assert_eq!(script.sha, sha, "{name} changed");
         }
-        assert!(ts.contains("const LEASE_RELEASE = MUTEX_RELEASE;"));
+        // Lease release is mutex release: release only what this holder took.
+        assert_eq!(LEASE_RELEASE.source, MUTEX_RELEASE.source);
         assert_eq!(LEASE_RELEASE.sha, MUTEX_RELEASE.sha);
     }
 }

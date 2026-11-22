@@ -1,4 +1,4 @@
-//! Canonical stream events and `collect()`, mirroring `packages/ir/src/stream.ts`.
+//! Canonical stream events and `collect()`, ported from `packages/ir/src/stream.ts`.
 //!
 //! [`StreamEvent::to_json`] renders the TS object shape with `JSON.stringify`
 //! rules, which is what the conformance vectors record and what tests compare.

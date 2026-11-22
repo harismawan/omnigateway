@@ -38,12 +38,11 @@
 //! - Cancelling an awaited Redis call after its first poll does not
 //!   withdraw the command; it may still execute.
 //!
-//! **Wire compatibility.** The Redis implementation uses the TS key schema,
-//! value formats and Lua scripts byte-for-byte (see [`redis::scripts`]), so a
-//! TS process and a Rust process against the same server share windows,
-//! gauges, buckets, leases, locks, sessions, OAuth pending state and the
-//! `omni:pubsub` channel. `tests/compat.rs` runs the frozen TS `redisCoord`
-//! beside this one to prove it.
+//! **Wire compatibility.** The Redis implementation keeps the key schema,
+//! value formats and Lua scripts the TS gateway used, byte-for-byte (see
+//! [`redis::scripts`], whose digests are pinned), so every process of one
+//! installation against the same server shares windows, gauges, buckets,
+//! leases, locks, sessions, OAuth pending state and the `omni:pubsub` channel.
 //!
 //! **Times** are milliseconds as `f64`, as in `omni-ratelimit` and TS, where
 //! they reach Lua arithmetic. TTLs are `u64`: every one reaches a `PX` or
@@ -131,8 +130,8 @@ impl LockToken {
 /// it must not block; it may subscribe or unsubscribe.
 pub type Handler = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
-/// The coordinator. Mirrors TS `Coord` method for method; the comments there
-/// are the contract, summarised here.
+/// The coordinator, method for method the TS `Coord` it was ported from. The
+/// comments below are the contract.
 #[async_trait]
 pub trait Coord: Send + Sync {
     // --- window -------------------------------------------------------------

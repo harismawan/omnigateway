@@ -1,4 +1,4 @@
-//! Rate-limit arithmetic, mirroring `packages/ratelimit`.
+//! Rate-limit arithmetic, ported from `packages/ratelimit`.
 //!
 //! Pure: no clock, no I/O, `now` a parameter wherever time matters. The
 //! caller observes the counters (a ring for `1m`, buckets for the long
