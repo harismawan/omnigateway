@@ -31,7 +31,6 @@ omni start
 - [docs/operations.md](docs/operations.md) — key limits, logs, recording bodies, snapshots and restore
 - [docs/rust-quota-runtime.md](docs/rust-quota-runtime.md) — Rust single-node quota support and limits
 - [docs/deploying.md](docs/deploying.md) — systemd, reverse proxies, cluster mode, Docker and Kubernetes
-- [docs/plugins.md](docs/plugins.md) — installing, verifying and removing plugins
 - [ARCHITECTURE.md](ARCHITECTURE.md) — how it is built
 
 ## What it does
@@ -198,8 +197,7 @@ omni models put fast --from-catalog anthropic:claude-sonnet-5
 ```
 
 Two providers price in ways a flat per-target rate cannot express — xAI above
-200K context and Kilo's `kilo-auto/*` routers; the caveats are in
-[docs/adding-a-provider.md](docs/adding-a-provider.md).
+200K context and Kilo's `kilo-auto/*` routers.
 
 Mint a key for your client. **It is printed once and stored only as a hash:**
 
@@ -417,7 +415,7 @@ Use `--db <path>` to point one command somewhere else.
 | `omni credentials …` | list, show, enable, disable, `set`, `rm`, refresh, `add-key`, health |
 | `omni models …` | list, show, put, `rm`, `dry-run`, `catalog` |
 | `omni keys …` | list, create, `limits`, revoke |
-| `omni plugin …` | list, verify, install, update, remove; see [Plugins](#plugins) |
+| `omni plugin …` | not supported in 1.x; see [Plugins](#plugins) |
 | `omni service install` / `uninstall` | write or remove a systemd unit for this installation |
 | `omni setup claude` / `opencode` | point a client's config at this gateway |
 | `omni settings get` / `set` | routing weights, retention, deadlines, and the runtime switches |
@@ -649,67 +647,17 @@ built: [docs/roadmap.md](docs/roadmap.md).
 
 ## Plugins
 
-**Not supported by the Rust gateway (1.x).** Installed plugins are listed by
-`omni doctor` and their data stays in the database, but nothing loads them and
-the `omni plugin` commands refuse. What follows describes the 0.x TypeScript
-gateway (`omnigateway@0.15.5`).
-
-A plugin adds routes, storage, a provider, and a screen in the console to one
-installation,
-without being part of OmniGateway. Most installations run none.
-
-```bash
-omni plugin install ./some-plugin     # a directory, or a .tgz
-omni plugin install https://…/x.tgz   # a tarball over https, never http
-omni plugin install some-plugin@1.2.3 # a package name, through the npm registry
-omni plugin verify some-plugin        # every check the next boot will run
-omni plugin list                      # what is installed, and whether it would load
-omni plugin update some-plugin        # reinstall from whatever it was installed from
-omni restart                          # plugins load at boot, so this is required
-```
-
-**Nothing in the package is executed by any of these.** There is no dependency
-resolution, no `node_modules`, and no lifecycle script — the installer fetches,
-checks, and unpacks, and the plugin's own code is first imported at the next boot.
-How a spec is resolved, what installing by name refuses, what `list` and
-`verify` report, and what `remove` keeps are in
-[docs/plugins.md](docs/plugins.md).
-
-There is no curated directory to browse. None ship in this repository; one is
-published:
-
-| Plugin | What it does |
-| --- | --- |
-| [`@omnigateway/pokemon`](https://github.com/harismawan/omnigateway-plugin-pokemon) | A Pokémon companion. Each gateway key raises one that hatches, evolves, and graduates into a Pokédex on the tokens that key spends, with a shop that spends a wallet of those same tokens. |
-
-```bash
-omni plugin install @omnigateway/pokemon
-omni plugin verify pokemon
-omni restart
-```
-
-It needs outbound access to `pokeapi.co` and `raw.githubusercontent.com` for
-species data and sprites, which its manifest declares and `omni plugin verify
-pokemon` prints back. Those assets are Nintendo and Game Freak intellectual
-property, fetched at runtime and never vendored — into that repository, this one,
-or anything either publishes.
-
-Read the [security note](#security) on what a plugin can reach before installing
-one you did not write. To write one, see
-[docs/writing-a-plugin.md](docs/writing-a-plugin.md).
+Not supported in 1.x; the 0.x plugin guide is on the `bun-checkpoint` branch.
 
 ## Development
 
 Contributing, or running from a checkout? See
 [ARCHITECTURE.md](ARCHITECTURE.md) for how the system fits together,
 [CLAUDE.md](CLAUDE.md) for the repository map, architectural boundaries, and
-conventions, [docs/adding-a-provider.md](docs/adding-a-provider.md) for the
-provider checklist, and `docs/superpowers/specs/` for the design documents
+conventions, and `docs/superpowers/specs/` for the design documents
 behind each feature.
 
-The checkout pins Bun 1.4.4 for local builds, CI, and releases. See the
-[Bun built-ins audit](docs/bun-builtins-audit.md) for native-tool migrations and
-compatibility boundaries.
+The checkout pins Bun 1.4.4 for local builds, CI, and releases.
 
 ```bash
 git clone https://github.com/harismawan/omnigateway.git
