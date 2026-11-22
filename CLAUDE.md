@@ -55,6 +55,7 @@ cargo build --workspace
 cargo test --locked --workspace
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
+RUSTDOCFLAGS=-Dwarnings cargo doc --locked --workspace --no-deps
 cargo run -p omni-gateway --bin omnigateway          # gateway; config from process env only
 cargo run -p omni-gateway --bin omnigateway -- omni --help   # the CLI through the gateway binary
 ```

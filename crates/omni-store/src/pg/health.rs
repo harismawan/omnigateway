@@ -13,10 +13,10 @@
 //! back. Those are ordinary (retryable where transient) errors.
 //!
 //! At COMMIT, only an answer that *positively establishes* non-commit is
-//! treated as such ([`commit_rejection`]): an `ErrorResponse` of severity
+//! treated as such (`commit_rejection`): an `ErrorResponse` of severity
 //! ERROR (not FATAL or PANIC, which end the session) whose SQLSTATE is on
 //! an explicit allowlist:
-//! - [`COMMIT_RETRYABLE`], `40001` (serialization failure) and `40P01`
+//! - `COMMIT_RETRYABLE`, `40001` (serialization failure) and `40P01`
 //!   (deadlock detected): the two codes PostgreSQL's "Serialization
 //!   Failure Handling" (PostgreSQL 17 docs, §13.5) names for retrying the
 //!   whole transaction (40001 always, 40P01 "advisable"); both abort and

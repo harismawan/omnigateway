@@ -2,10 +2,11 @@
 //! terminal error path.
 //!
 //! A [`Finisher`] is created when the request arrives and sends exactly one
-//! [`LogEvent::Finish`]. If it is dropped without having sent one — the client
-//! hung up and the response future or body was dropped — it sends the 499
-//! row itself. That is the structural cancellation the spec asks for: no task
-//! is left behind to notice the disconnect.
+//! [`LogEvent::Finish`](omni_store::writer::LogEvent::Finish). If it is
+//! dropped without having sent one — the client hung up and the response
+//! future or body was dropped — it sends the 499 row itself. That is the
+//! structural cancellation the spec asks for: no task is left behind to
+//! notice the disconnect.
 
 use std::sync::{Arc, Mutex, PoisonError};
 

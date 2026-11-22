@@ -7,7 +7,7 @@
 //! duplicate keys and nesting depth survive validation, storage and the
 //! response exactly as `JSON.parse` → zod → `JSON.stringify` treats them.
 //! Validation is oracle-tested in [`crate::body_schema`],
-//! [`crate::model_schema`] and [`crate::settings`]; storage goes through the
+//! `model_schema` and [`crate::settings`]; storage goes through the
 //! same `omni_store` primitives the CLI uses.
 //!
 //! Errors are `(code, message)`: `code` is a `GatewayError` code

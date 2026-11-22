@@ -1,5 +1,5 @@
 //! The single-process implementation — the maps one gateway holds
-//! in memory behind [`Coord`](crate::Coord).
+//! in memory behind [`Coord`].
 //!
 //! Every method mutates synchronously and its future completes on the first
 //! poll, which is what makes the visibility property hold without a lock
