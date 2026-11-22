@@ -525,6 +525,27 @@ Note also that `fetchAvailableModels` answers on `daily-cloudcode-pa` and its
 `models` field is an **object keyed by id**, not an array — reading it as an
 array silently yields an empty comparison that looks like agreement.
 
+### Gemini 4 rows are from the public docs, not a probe
+
+Added 2026-11-22 at the operator's request, before 1.0.0, with no Antigravity
+account available to probe: `gemini-4-carbon`, `-argon`, `-neon` and
+`-hydrogen`, read from `ai.google.dev/gemini-api/docs/models` and `/pricing`.
+This is the source the catalog note says not to reason from, and it is used
+knowingly: the public API names one id per model with thinking as a request
+parameter, while `v1internal` has so far spelled every row its own way (tier
+suffixes, `gemini-pro-agent`). The rows therefore carry no tier suffix, the
+encoder sends no budget for them, and **whether `v1internal` serves these ids is
+unverified**. A 400 under one of them is an id to correct after a
+`fetchAvailableModels` probe, not an encoder bug. The default stays
+`gemini-3.8-flash-high`, the probed row.
+
+Limits are the public ones: 1,048,576 context, 65,536 synchronous output (the
+1M long-decode ceiling is a separate API feature). Carbon and Argon carry the
+standard $4/$20 (cache $0.20), not the introductory $2/$10 that ends
+2026-11-30, by the same rule as the 3.8/3.7/3.6 Flash rows; Neon ($3/$15/$0.15)
+and Hydrogen ($1.50/$7.50/$0.075) have one rate. These models cache implicitly
+only, so there is no storage price to omit.
+
 ### Images are accepted on their bytes, not their declared type
 
 Probed 2026-09-05 across mime types and payload shapes: `image/bmp`,

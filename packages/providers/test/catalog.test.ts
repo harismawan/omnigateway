@@ -120,6 +120,10 @@ const EXPECTED = {
   antigravity: {
     defaultModel: "gemini-3.8-flash-high",
     ids: [
+      "gemini-4-carbon",
+      "gemini-4-argon",
+      "gemini-4-neon",
+      "gemini-4-hydrogen",
       "gemini-3.8-flash-high",
       "gemini-3.8-flash-medium",
       "gemini-3.8-flash-low",

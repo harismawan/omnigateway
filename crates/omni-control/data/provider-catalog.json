@@ -806,6 +806,54 @@
       "authTypes": ["oauth"],
       "models": [
         {
+          "id": "gemini-4-carbon",
+          "label": "Gemini 4 Carbon",
+          "pricing": {
+            "input": 4,
+            "output": 20,
+            "cacheRead": 0.2,
+            "cacheWrite5m": 0,
+            "cacheWrite1h": 0
+          },
+          "limits": { "contextWindow": 1048576, "maxOutputTokens": 65536 }
+        },
+        {
+          "id": "gemini-4-argon",
+          "label": "Gemini 4 Argon",
+          "pricing": {
+            "input": 4,
+            "output": 20,
+            "cacheRead": 0.2,
+            "cacheWrite5m": 0,
+            "cacheWrite1h": 0
+          },
+          "limits": { "contextWindow": 1048576, "maxOutputTokens": 65536 }
+        },
+        {
+          "id": "gemini-4-neon",
+          "label": "Gemini 4 Neon",
+          "pricing": {
+            "input": 3,
+            "output": 15,
+            "cacheRead": 0.15,
+            "cacheWrite5m": 0,
+            "cacheWrite1h": 0
+          },
+          "limits": { "contextWindow": 1048576, "maxOutputTokens": 65536 }
+        },
+        {
+          "id": "gemini-4-hydrogen",
+          "label": "Gemini 4 Hydrogen",
+          "pricing": {
+            "input": 1.5,
+            "output": 7.5,
+            "cacheRead": 0.075,
+            "cacheWrite5m": 0,
+            "cacheWrite1h": 0
+          },
+          "limits": { "contextWindow": 1048576, "maxOutputTokens": 65536 }
+        },
+        {
           "id": "gemini-3.8-flash-high",
           "label": "Gemini 3.8 Flash (High)",
           "pricing": {

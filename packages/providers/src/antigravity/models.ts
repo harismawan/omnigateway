@@ -111,6 +111,45 @@ export const ANTIGRAVITY_MODELS: ProviderModelCatalogEntry = {
   // the IDE's, and it authenticates with a Google account.
   authTypes: ["oauth"],
   models: [
+    // **The four Gemini 4 rows are read from Google's public docs, not from a
+    // probe** — the one source the note above warns against, carried at the
+    // operator's request until a `fetchAvailableModels` probe confirms them.
+    // Ids, limits and rates read 2026-11-22 from `ai.google.dev/gemini-api/
+    // docs/models` and `/pricing`. The public API names one id per model with
+    // its thinking level as a request parameter, so these rows carry no tier
+    // suffix and `wire.ts` sends no budget for them; if `v1internal` spells
+    // them differently (as it does `gemini-pro-agent`), a request answers 400
+    // and the row is an id to correct, not a bug in the encoder.
+    //
+    // Carbon and Argon carry their **standard** rate ($4/$20), not the
+    // introductory $2/$10 that ends 2026-11-30, for the reason the 3.8 Flash
+    // rows below do. Neon and Hydrogen have one rate. The public API caches
+    // these implicitly only, so `cacheRead` is the cached-input rate and there
+    // is no storage price to leave out.
+    {
+      id: "gemini-4-carbon",
+      label: "Gemini 4 Carbon",
+      pricing: { input: 4, output: 20, cacheRead: 0.2, ...NO_CACHE_WRITE },
+      limits: FLASH_LIMITS,
+    },
+    {
+      id: "gemini-4-argon",
+      label: "Gemini 4 Argon",
+      pricing: { input: 4, output: 20, cacheRead: 0.2, ...NO_CACHE_WRITE },
+      limits: FLASH_LIMITS,
+    },
+    {
+      id: "gemini-4-neon",
+      label: "Gemini 4 Neon",
+      pricing: { input: 3, output: 15, cacheRead: 0.15, ...NO_CACHE_WRITE },
+      limits: FLASH_LIMITS,
+    },
+    {
+      id: "gemini-4-hydrogen",
+      label: "Gemini 4 Hydrogen",
+      pricing: { input: 1.5, output: 7.5, cacheRead: 0.075, ...NO_CACHE_WRITE },
+      limits: FLASH_LIMITS,
+    },
     {
       id: "gemini-3.8-flash-high",
       label: "Gemini 3.8 Flash (High)",

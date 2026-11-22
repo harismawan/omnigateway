@@ -123,6 +123,6 @@ mod tests {
         assert_eq!(super::model_auths("kilo", "unlisted"), ["oauth", "apiKey"]);
         assert!(super::rows(Some("")).is_empty());
         assert!(super::rows(Some("qoder")).is_empty());
-        assert_eq!(super::rows(None).len(), 78);
+        assert_eq!(super::rows(None).len(), 82);
     }
 }
