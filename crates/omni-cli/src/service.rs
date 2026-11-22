@@ -88,9 +88,13 @@ fn action(flags: &Flags, verb: &str) -> Result<(), String> {
     }
     Ok(())
 }
+/// The systemd unit `omni service install` writes. `MIMALLOC_PURGE_DELAY=1` is
+/// the allocator launch policy (`docs/rust-packaging.md`); it must be in the
+/// environment before the process starts, and systemd lets `EnvironmentFile=`
+/// override `Environment=`, so a value in `.env` still wins.
 pub(crate) fn render_unit(root: &Path, executable: &Path) -> String {
     format!(
-        "[Unit]\nDescription=OmniGateway\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nWorkingDirectory={}\nEnvironmentFile={}/.env\nExecStart={}\nRestart=on-failure\nRestartSec=2\n\n[Install]\nWantedBy=default.target\n",
+        "[Unit]\nDescription=OmniGateway\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nWorkingDirectory={}\nEnvironment=MIMALLOC_PURGE_DELAY=1\nEnvironmentFile={}/.env\nExecStart={}\nRestart=on-failure\nRestartSec=2\n\n[Install]\nWantedBy=default.target\n",
         root.display(),
         root.display(),
         executable.display()
@@ -441,6 +445,10 @@ mod tests {
     fn required_environment_file_and_canonical_exec() {
         let unit = render_unit(Path::new("/install"), Path::new("/release/omnigateway"));
         assert!(unit.contains("EnvironmentFile=/install/.env\nExecStart=/release/omnigateway\n"));
+        // The allocator launch policy (docs/rust-packaging.md).
+        assert!(
+            unit.contains("Environment=MIMALLOC_PURGE_DELAY=1\nEnvironmentFile=/install/.env\n")
+        );
         assert!(unit.contains("Restart=on-failure\nRestartSec=2"));
         assert!(unit.ends_with("WantedBy=default.target\n"));
     }

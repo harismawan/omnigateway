@@ -20,10 +20,11 @@ Environment=MIMALLOC_PURGE_DELAY=1
 ExecStart=/usr/local/bin/omnigateway
 ```
 
-`omni service install` generates the unit. When installing or updating a unit
-manually, run `systemctl daemon-reload` before restarting. Preserve the
-existing environment/root settings and carry the same allocator default into
-the unit.
+`omni service install` generates this unit, `Environment=` line included; a
+`MIMALLOC_PURGE_DELAY` in the root's `.env` overrides it. When installing or
+updating a unit manually, run `systemctl daemon-reload` before restarting.
+Preserve the existing environment/root settings and carry the same allocator
+default into the unit.
 
 For a shell launch of a release archive, use
 `MIMALLOC_PURGE_DELAY=${MIMALLOC_PURGE_DELAY:-1} ./omnigateway`.
