@@ -31,7 +31,7 @@
 //! |---|---|---|
 //! | window | `omni:w:<name>` | ZSET, member `<stamp>-<uuid>`, score stamp |
 //! | gauge | `omni:g:<name>` + index `omni:gidx:<prefix-to-first-colon>` | ZSET by expiry + SET |
-//! | buckets | `omni:b:<name>` | HASH `seeded`, `<start>:r|t|c` |
+//! | buckets | `omni:b:<name>` | HASH `seeded`, `<start>:r\|t\|c` |
 //! | lease | `omni:lease:<name>` | STRING holder id, `PX` |
 //! | mutex | `omni:lock:<name>` | STRING random token, `PX`, `NX` |
 //! | incr / sequence | `omni:seq:<name>` | STRING counter |

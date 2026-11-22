@@ -29,7 +29,7 @@ const RED_ZONE: usize = 256 * 1024;
 /// The size of each fresh segment.
 const SEGMENT: usize = 4 * 1024 * 1024;
 
-/// Runs `f` with at least [`RED_ZONE`] bytes of stack, moving to a new
+/// Runs `f` with at least `RED_ZONE` bytes of stack, moving to a new
 /// segment first when the current one is nearly used. Wrap each level of a
 /// recursion over client data in this.
 pub fn grow<R>(f: impl FnOnce() -> R) -> R {

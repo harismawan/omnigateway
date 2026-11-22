@@ -7,7 +7,7 @@
 //!
 //! All sizes, limits and the acceptance guard are in UTF-16 code units
 //! (`string.length` semantics). Patterns are JS `RegExp` sources, matched
-//! with JS semantics by [`jsre`]; the three lookaheads are written out by
+//! with JS semantics by `jsre`; the three lookaheads are written out by
 //! hand.
 
 pub mod catalog;

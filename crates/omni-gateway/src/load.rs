@@ -3,7 +3,7 @@
 //! `rank` reads: counts for the load term and round-robin, the last release
 //! and an EWMA of time-to-first-token for latency.
 //!
-//! Bounded: a pair's history is forgotten [`HISTORY_TTL`] after its last
+//! Bounded: a pair's history is forgotten [`HISTORY_TTL_MS`] after its last
 //! release (past an hour the router's
 //! idle/latency terms for a pair nobody uses are moot), and at most
 //! [`HISTORY_CAP`] pairs are kept, oldest release first out.

@@ -6,9 +6,9 @@
 //! HTTP/1 encoder writes the `Host` it derives (or the one in the map) where the
 //! `HeaderMap` puts it, and its map groups a name's values together, so the
 //! trailing order and node's last-casing-wins collapse are not expressible. The
-//! spec pre-approves this fallback: a small request writer ([`wire`]) over a
+//! spec pre-approves this fallback: a small request writer (`wire`) over a
 //! pooled `TcpStream` / `tokio-rustls` stream, with `httparse` reading the
-//! response head ([`body`]).
+//! response head (`body`).
 //!
 //! **Cancellation is structural.** A connection is owned by exactly one
 //! in-flight future or [`ResponseBody`] at a time. Dropping either drops the
