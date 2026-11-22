@@ -337,12 +337,11 @@ Translation invariants:
   where the prefix grew ≥1024 tokens since the last marker; mutates wire, never IR. Unpinned in
   Rust. Design:
   [auto-cache](docs/superpowers/specs/2026-08-23-anthropic-auto-cache-full-prefix-design.md).
-- **RTK runs once per dispatch**, in `dispatch_with_options` before model resolution, when
-  `rtkEnabled` and `DispatchOptions::request_transforms`; router and every attempt see the one
-  transformed request; the report rides on the shared `RequestLog`, so every completion path
-  carries it. Client body capture is pre-RTK, wire bodies post-RTK. Classifiers
-  (`request_transforms: false`) and `count_tokens` see the request as received. Pins:
-  `crates/omni-gateway/tests/rtk.rs`, `server.rs` `rtk_compresses_the_wire_body_*`,
+- **RTK runs once per dispatch**: `dispatch_with_options`, before model resolution, gated by
+  `rtkEnabled` ∧ `DispatchOptions::request_transforms`; router and every attempt get the one
+  transformed request; report set on `RequestLog` before it is shared. Pins:
+  `crates/omni-gateway/tests/rtk.rs` (`a_deadline_timeout_still_carries_the_report`,
+  `a_guardrail_classifier_sees_the_original_*`), `server.rs` `rtk_compresses_the_wire_body_*`,
   `count_tokens_estimates_the_request_as_received_*`. `request_logs.rtk_filters` stays a storage
   contract (`RTK_FILTER_IDS`, `omni-rtk/src/catalog.rs`; read-side allowlist in
   `omni-store/src/maintenance.rs` `rtk_filters`): add ids freely, rename only with a migration.
