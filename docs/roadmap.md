@@ -13,7 +13,7 @@ This file is a backlog, not a promise. An item earns a
 
 `README.md` says snapshots are manual and local: *"Nothing takes one on a schedule."*
 
-The maintenance loop in `apps/gateway/src/maintenance.ts` already runs on an
+The maintenance loop in `crates/omni-gateway/src/maintenance.rs` already runs on an
 interval and already *prunes* snapshots against `keepLatest` — it has simply never
 taken one. The change is an interval plus a `createSnapshot` call inside machinery
 that exists, with retention already written.
@@ -24,7 +24,7 @@ somewhere is a job for the host, not the gateway.
 ### Gateway key expiry
 
 Gateway keys carry `limits` and `modelAllowlist` and nothing that ends them. The
-`expiresAt` field in `packages/store/src/types.ts` is a *credential's* OAuth token
+`expiresAt` field on stored credentials (`crates/omni-store/src/credentials.rs`) is a *credential's* OAuth token
 expiry — an API key handed to a contractor is good forever.
 
 Needs a column on `api_keys`, a check in `authenticateApiKey`, and a third
@@ -41,8 +41,8 @@ Designed:
 [2026-09-04-observability-design.md](superpowers/specs/2026-09-04-observability-design.md).
 
 Nothing exposes a scrape endpoint, and the `k8s/` kustomize base ships without one.
-`apps/gateway/src/stream/registry.ts` already computes `{connections, dropped,
-queued}` that no route reads.
+The 0.x socket registry (`bun-checkpoint`) already computed `{connections, dropped,
+queued}` that no route read.
 
 ### Searching captured bodies
 
@@ -59,10 +59,10 @@ to storage.
 **Spend and quota alerting** — a webhook when a key crosses a budget, or when an
 account's quota pace says it will not survive the window.
 
-The plugin host, the event bus, `RequestCompleted`, and the broadcast channel with
-its burst cap all exist for exactly this. Putting a notifier in the core buys a
+The 0.x plugin host, event bus, `RequestCompleted` and broadcast channel existed for
+exactly this; 1.x has none of them, so this waits on plugin support returning. Putting a notifier in the core buys a
 configuration surface, a retry policy and an outbound origin that nobody asked the
-gateway for. See [writing-a-plugin.md](writing-a-plugin.md).
+gateway for. The 0.x plugin guide is on `bun-checkpoint`.
 
 ## Deliberately not planned
 
@@ -74,9 +74,9 @@ gateway for. See [writing-a-plugin.md](writing-a-plugin.md).
   own product, not a feature.
 - **Multi-tenancy.** The gateway has one operator with two narrower views; every
   provider account is the operator's, whoever is looking. Tenancy would touch every
-  scope decision in `packages/control`.
+  scope decision in `crates/omni-control`.
 - **More built-in providers.** The `custom` provider already serves any
   OpenAI-compatible endpoint, and
-  [adding-a-provider.md](adding-a-provider.md) exists so a new one can ship as a
-  plugin without core changing. A vendor earns a built-in by needing wire behaviour
+  a new provider is one codec directory in `crates/omni-providers` plus catalog rows
+  (see CLAUDE.md, "Adding a provider"). A vendor earns a built-in by needing wire behaviour
   `custom` cannot express, not by being popular.

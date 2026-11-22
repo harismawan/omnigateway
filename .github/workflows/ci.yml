@@ -116,10 +116,10 @@ jobs:
 
       # Only on failure, and it is the one thing the job log does not give you.
       # A full run prints thousands of assertion lines, so the handful of
-      # `(fail)` lines are somewhere in the middle of a page nobody scrolls. This pulls them
-      # and the lines above each one — which is where the diff and the stack
-      # are — into the run summary, so a flake is named the first time it fires
-      # rather than the second time somebody goes looking for it.
+      # `(fail)` lines are somewhere in the middle of a page nobody scrolls.
+      # This pulls them and the lines above each one — which is where the diff
+      # and the stack are — into the run summary, so a flake is named the first
+      # time it fires rather than the second time somebody goes looking for it.
       - name: Name the failures
         if: failure()
         shell: bash

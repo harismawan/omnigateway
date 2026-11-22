@@ -73,16 +73,15 @@ omni start
 
 ## How it is built
 
-A Bun workspace monorepo: a provider-neutral core at the bottom, provider
-knowledge in one place, pure routing above that, and every side effect pushed up
-into the gateway process. The gateway and the CLI are two front ends over the
-same `@omni/control` functions — the CLI opens the SQLite file directly, so it
+One Rust binary over a provider-neutral core, with provider knowledge in one crate, pure
+routing above that, and every side effect in the gateway process. The gateway and the CLI are
+two front ends over the same operator functions — the CLI opens the SQLite file directly, so it
 works when the gateway is down.
 
-**[ARCHITECTURE.md](ARCHITECTURE.md)** has the package map and layering rules,
+**[ARCHITECTURE.md](ARCHITECTURE.md)** has the crate map and layering rules,
 then goes a level deeper: a request traced end to end, how routing ranks and
 excludes accounts, the commit point that decides whether failover is still
-possible, the provider adapter shape, the database schema and its encryption
+possible, the provider codec shape, the database schema and its encryption
 boundary, and the background loops.
 
 ## Requirements
@@ -487,7 +486,6 @@ Configuration is environment variables, read from the installation's `.env`:
 | `OMNI_OTLP_HEADERS` | No | unset | Comma-separated `k=v` headers sent to the collector |
 | `OMNI_TRACE_SAMPLE` | No | `1.0` | Head sampling ratio from `0` to `1`; inbound sampled trace context is honoured |
 | `OMNI_ROOT` | No | the installation in the current directory, else `~/.config/omnigateway` | Which installation the CLI acts on, when `--root` is not passed |
-| `OMNI_PLUGIN_REGISTRY` | No | the public npm registry | Registry `omni plugin install <name>` resolves through; must be `https://` |
 | `OMNI_CLUSTER_MODE` | No | unset | `true` selects [cluster mode](docs/deploying.md#running-more-than-one-gateway) and requires the two URLs below; unset is one process on SQLite, and then the URLs must be unset too |
 | `OMNI_DATABASE_URL` | In cluster mode | — | The shared Postgres store |
 | `OMNI_REDIS_URL` | In cluster mode | — | The coordinator every process of a cluster shares: rate-limit counters, sessions, leases, push fan-out |
@@ -544,7 +542,7 @@ docker run --rm \
 ```
 
 The container listens on `0.0.0.0:9000`, serves the console, and keeps its
-database and plugins under `/data`. Fleets, the Kubernetes base under `k8s/`,
+database under `/data`. Fleets, the Kubernetes base under `k8s/`,
 GitOps releases and restart policy are in
 [docs/deploying.md](docs/deploying.md#docker).
 
@@ -638,12 +636,8 @@ built: [docs/roadmap.md](docs/roadmap.md).
 - Behind a reverse proxy, set `OMNI_BASE_URL` to the public HTTPS origin so
   OAuth callbacks match what the providers have registered.
 - The gateway talks to your providers and to nobody else — except your collector, if you name
-  one with `OMNI_OTLP_ENDPOINT`. No CDN fonts or undeclared third-party origins. A plugin may
-  declare outbound origins of its own, and `omni plugin verify <id>` shows exactly which ones it
-  asked for — as does its manifest, which is a plain file you can read before installing.
-- **Plugins run inside the gateway process, with its privileges** — the
-  capability context is a guardrail, not a sandbox. Read the
-  [security note](#plugins) before installing one you did not write.
+  one with `OMNI_OTLP_ENDPOINT`. No CDN fonts or undeclared third-party origins.
+- No plugins are loaded in 1.x: a `plugins/` directory is reported and never run.
 
 ## Plugins
 
@@ -655,17 +649,19 @@ Contributing, or running from a checkout? See
 [ARCHITECTURE.md](ARCHITECTURE.md) for how the system fits together,
 [CLAUDE.md](CLAUDE.md) for the repository map, architectural boundaries, and
 conventions, and `docs/superpowers/specs/` for the design documents
-behind each feature.
+behind each feature. The 0.x TypeScript gateway is on the `bun-checkpoint` branch.
 
-The checkout pins Bun 1.4.4 for local builds, CI, and releases.
+The gateway is Rust (toolchain pinned in `rust-toolchain.toml`); the console is
+built with Bun 1.4.4.
 
 ```bash
 git clone https://github.com/harismawan/omnigateway.git
 cd omnigateway
 bun install
-cp .env.example .env          # then set OMNI_ENCRYPTION_KEY
 bun run build:dashboard       # the gateway serves this build
-bun run dev                   # gateway on 9000, with file watching
+export OMNI_ENCRYPTION_KEY="$(openssl rand -base64 32)"
+cargo run -p omni-gateway --bin omnigateway   # gateway on 9000; reads no .env
+cargo test --workspace
 ```
 
 For dashboard development, run `bun run dev:dashboard` in another terminal
@@ -676,6 +672,7 @@ Both commands accept `--host`, `--port` and `--upstream` options.
 
 Releases are published to npm from a `v*` tag, with provenance attesting which
 commit produced them.
+
 # Qoder provider
 
 Not served by the Rust gateway (1.x); this describes `omnigateway@0.15.5`.

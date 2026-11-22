@@ -40,9 +40,10 @@ export const TOPIC_QUERIES: Readonly<Record<string, InvalidateQueryFilters>> = {
    *
    * Both, because the topic describes the *resource* and both branches read it.
    * A client session holds this topic (see `authorised` in
-   * `crates/omni-gateway/src/stream.rs`), so an entry covering only the console's key would leave the
-   * client subscribed to a frame that does nothing — which is silence, and
-   * silence is indistinguishable from a quiet gateway.
+   * `crates/omni-gateway/src/stream.rs`), so an entry covering only the
+   * console's key would leave the client subscribed to a frame that does
+   * nothing — which is silence, and silence is indistinguishable from a quiet
+   * gateway.
    */
   "res:usage": {
     predicate: (query) =>
