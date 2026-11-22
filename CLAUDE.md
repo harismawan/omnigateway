@@ -7,240 +7,187 @@ contributors. Update all that change touch.
 **This file is loaded every session; keep it lean.** Add here only an invariant a contributor
 break by not knowing it, in the fewest lines that name the file, symbol and test that pin it. Anything
 else go where its subject already live: how a subsystem work → `ARCHITECTURE.md`; operator-facing
-behaviour → `README.md` / `docs/*.md`; procedure → `docs/adding-a-provider.md`,
-`docs/writing-a-plugin.md`; design rationale → `docs/superpowers/specs/`; forensic history behind
-rule — how found, what measured, earlier wrong drafts — under `## History` in matching spec. One
-line here with a pointer beat a paragraph. Never restate what a test already pin, and never
-narrate a fix: state the rule that survive it.
+behaviour → `README.md` / `docs/*.md`; design rationale → `docs/superpowers/specs/`; forensic
+history behind rule — how found, what measured, earlier wrong drafts — under `## History` in
+matching spec. One line here with a pointer beat a paragraph. Never restate what a test already
+pin, and never narrate a fix: state the rule that survive it. A rule marked **unpinned** has no
+test holding it: a change there is the moment to add one.
 
 ## Scope
 
-OmniGateway = Bun/TypeScript monorepo for self-hosted AI gateway:
+OmniGateway = self-hosted AI gateway: a Rust Cargo workspace (`crates/`, one binary) plus the
+React/Bun console it serves.
 
-- `apps/gateway`: Elysia gateway + long-lived process loops
-- `apps/dashboard`: admin console served by gateway
-- `apps/cli`: local `omni` CLI
-- `packages/control`: admin ops shared by gateway routes + CLI
-- `packages/dashboard-sdk`: what plugin UI bundle build against
-- `packages/ir`: provider-neutral domain model
-- `packages/plugin-api`: pure plugin manifest schema, context + event types
-- `packages/providers`: provider adapters + catalog
-- `packages/router`: pure routing
-- `packages/ratelimit`: pure API-key limit eval + sliding-window counting
-- `packages/coord`: pure coordination interface (window, gauge, mutex) + in-memory impl; every
-  counter fleet must share live behind it
-- `packages/rtk`: tool-result filters, applied in dispatch before routing
-- `packages/ponytail`: vendored lazy-senior-dev ruleset, appended to system prompt in dispatch
-- `packages/store`: persistence + encryption; two `Store` impls, `sqlite/` (default) and
-  `postgres/` (cluster), one contract suite in `test/contract/` run against both
-- `packages/testkit`: shared test fixtures
+- `crates/omni-gateway`: the `omnigateway` binary — hyper server, auth, dispatch, streaming egress,
+  `/api/*` routes, push socket, loops, shutdown. `main.rs` dispatches to the CLI when invoked as
+  `omni` or `omnigateway omni …`
+- `crates/omni-gateway-core`: boot config, in-memory routing snapshot + refresher, single-node limiter
+- `crates/omni-cli`: `omni` — local install administration (also its own `omni` bin)
+- `crates/omni-control`: operator operations shared by `/api/*` and CLI; owns
+  `data/provider-catalog.json`, the **only** built-in catalog source
+- `crates/omni-dialects`: client dialects — Anthropic Messages, OpenAI Chat, Responses ingress/egress
+- `crates/omni-providers`: provider codecs (`anthropic/`, `openai/`, `antigravity/`, `custom/`),
+  SSE parser, order-preserving outbound HTTP client, quota probes
+- `crates/omni-router`: pure ranking — filters, score, breaker, quota, model resolution
+- `crates/omni-ratelimit`: pure limit arithmetic — windows, buckets, evaluate, combine
+- `crates/omni-cluster-limit`: Redis/Valkey cluster limiter, batched debits, seeding, load publish
+- `crates/omni-coord`: coordination trait + `MemoryCoord` + `RedisCoord` (Lua scripts)
+- `crates/omni-ir`: provider-neutral model + JS-compatible JSON writer
+- `crates/omni-store`: SQLite (default) + Postgres (cluster) stores, migrations, batched writer
+- `crates/omni-crypto`: byte-exact field encryption, key hashing, Codex/Qoder id derivations
+- `crates/omni-rtk`: pure tool-result filters — **built and tested, not wired into dispatch** (see
+  `dispatch.rs` "RTK and ponytail")
+- `apps/dashboard`: admin console (React, styled-components, Bun build), served from `dist/`
+- `scripts/`: npm packaging (`build-npm.ts`), bench harness, hygiene checks, capture tools
+- `packaging/npm`: npm launcher + platform package templates
+
+The TS/Bun 0.x tree is on `bun-checkpoint`; a TS path in a crate comment (`packages/…`,
+`apps/gateway/…`, "frozen TS") refers to it. That branch is a record, not an authority: Rust tests
+pin behaviour now.
 
 Approved designs in `docs/superpowers/specs/`; matching plans in `docs/superpowers/plans/`. Read
-spec before change, but verify current code — plans record past intent.
+spec before change, but verify current code — specs and plans name the code as it was.
 
 ## Commands
 
-Use Bun from repo root:
+Rust, from repo root (toolchain pinned in `rust-toolchain.toml`):
 
 ```bash
-bun install
-bun run dev              # gateway with file watching
-bun run start
-bun test                 # excludes dashboard tests
-bun run test:all         # both suites; what CI runs
-bun run typecheck        # core and dashboard
-bun run lint
+cargo build --workspace
+cargo test --locked --workspace
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
+cargo run -p omni-gateway --bin omnigateway          # gateway; config from process env only
+cargo run -p omni-gateway --bin omnigateway -- omni --help   # the CLI through the gateway binary
+```
+
+PG/Redis suites skip unless pointed at servers; CI's `rust` job sets `OMNI_TEST_DATABASE_URL`,
+`OMNI_TEST_PG_URL` (Postgres 17), `OMNI_TEST_REDIS_URL` (Valkey 8), `OMNI_TEST_REQUIRE_PG=1`,
+`OMNI_TEST_REQUIRE_REDIS=1` (skip becomes failure), and `OMNI_TEST_REDIS_DOCKER`/`_URL` naming a
+**disposable** Valkey container the fault tests stop and pause. Copy that block from `ci.yml`.
+
+Console and scripts, with Bun 1.4.4:
+
+```bash
+bun install --frozen-lockfile
+bun run test               # scripts/ suite, then console suite (happy-dom)
+bun run typecheck          # scripts + console
+bun run lint               # biome
 bun run fmt
+bun run check:claims       # stale-claims; reads git history
+bun run check:dead         # dead exports
+bun run build:dashboard            # typecheck + production build into apps/dashboard/dist
+bun run dev:dashboard              # 5173; rebuild + full reload; proxies /api, /health to 9000
+bun run --cwd apps/dashboard test  # console suite alone
 ```
 
-Dashboard:
+`apps/dashboard/tooling/transforms.ts` adapts pinned public TanStack hooks plus Babel
+styled-components (no Vite runtime). `tooling/serve.ts` owns dev/preview; dev rebuilds the
+production graph then reloads, resetting state rather than Fast Refresh.
 
-```bash
-bun run dev:dashboard              # Bun on 5173; rebuild/full reload; proxies /api and /health to 9000
-bun run build:dashboard            # typecheck + Bun production/shared build into apps/dashboard/dist
-bun run --cwd apps/dashboard test  # happy-dom suite excluded from root tests
-```
-
-Dashboard production transforms: `apps/dashboard/tooling/transforms.ts` adapts pinned public
-TanStack hooks plus Babel styled-components (the /vite export is a public hook facade,
-not a Vite runtime dependency). `tooling/serve.ts` owns native dev/preview; dev rebuilds
-the production graph then reloads the page, resetting state rather than Fast Refresh.
-
-CLI + release:
-
-```bash
-bun apps/cli/src/index.ts --help
-cd apps/cli && bun link
-omni doctor --root <install>
-bun run build:npm v1.2.3
-```
-
-Push `v*` tag run `.github/workflows/release.yml`; tag = sole version source. Before claim done, run
-focused changed-behavior tests and every check in `.github/workflows/ci.yml`.
+Release: `bun run build:npm v1.2.3 <assets-dir>` builds four platform packages + `omnigateway` from
+release archives. Push `v*` tag run `.github/workflows/release.yml`; tag = sole version source
+(`OMNI_CLI_VERSION` at build). Before claim done, run focused changed-behaviour tests and every check
+in `.github/workflows/ci.yml` (`rust` and `verify` jobs).
 
 ## Architectural boundaries
 
-**Single-copy rules.** Never re-derive these helpers locally:
-- `keyUsable`: revoked or expired keys are unusable; `expiresAt === now` is expired.
-- `credentialExpired` / `credentialPastExpiry`: only OAuth expiry prevents routing; refreshability
-  stays caller phrasing.
-- `servesTarget` / `resolvePin`: provider, endpoint, and pin are one question;
-  `ServingCredential.providerData` carries endpoint data. `servesTarget` names no provider.
-- `scopeOf`: principal to read filter.
-- `quotaRolledOver`: whether a quota window ended.
+**Single-copy rules.** Never re-derive these locally. Console copies live in
+`apps/dashboard/src/lib/domain.ts`, each naming its Rust twin, pinned by
+`apps/dashboard/test/lib/domain.test.ts` on the Rust test's cases:
+- `ApiKey::usable` (`crates/omni-store/src/keys.rs`): revoked or expired unusable; `expires_at == now`
+  is expired. Pin: `crates/omni-store/tests/key_mutations.rs`. `client_key_usable` in
+  `omni-control/src/admin_password.rs` restates it for the raw-row path — keep the two together.
+- `credential_expired` (`omni-router/src/filters.rs`): only an OAuth token past expiry **with no
+  refresh token** excludes at routing. Pin: `filters.rs` test
+  `expiry_excludes_only_an_unrefreshable_oauth_credential`.
+- `serves_target` (`omni-router/src/filters.rs`): provider, custom endpoint and pin are one question;
+  router, `model_limits`, `omni-control` `diagnostics.rs` (doctor pins) and `setup.rs` ask it there.
+  Pins: `crates/omni-router/tests/filters.rs` (`a_pin_*`, `pairs_custom_targets_*`).
+- `rolled_over` (`omni-router/src/quota.rs`): null `resets_at` is not rolled over. Pin:
+  `crates/omni-router/tests/quota_breaker_resolve.rs`. Not single-copy in Rust: `omni-control`
+  `client_quota.rs`, `credentials.rs` and `omni-cli` `quota.rs`/`status.rs` inline the same test.
+- Read scope has no shared `Scope` type: client routes pass the session's `api_key_id` explicitly
+  (`client_query` in `omni-control/src/logs.rs` writes it **after** forwarding the caller's filters).
 
-1. `packages/ir` stay provider-independent + side-effect-free. Inject clocks + logger sinks; never
-   import `process`, `console`, or transport.
-2. Provider wire formats, headers, signing, stream decoding, model catalogs stay in
-   `packages/providers`. Inside, adapter never import from other provider's directory —
-   shared helpers at package root (`http.ts`, `sse.ts`, `types.ts`); codecs provider
-   need forked into own directory even when near-identical, so each provider can become
-   standalone plugin later; `custom/` is worked example.
-3. `packages/router` stay pure: no network, database, token refresh, timers.
-4. Dispatch own side effects, retries, refresh, deadlines, failover, stream commit semantics.
-5. Gateway routes authenticate, parse, apply key policy, call dispatch or `@omni/control`, render
-   compatible responses, record metadata. Admin rules belong in `packages/control`, not handlers.
-6. `packages/control` know nothing about caller type: no Elysia, cookies, argv, terminal, timers.
-   Long-lived schedulers stay in `apps/gateway`.
-7. Store rows + secrets stay behind `@omni/store`; never expose encrypted or raw provider secrets.
-   Repo method added to `types.ts` added to **both** `sqlite/` and `postgres/` and to
-   sqlite forwarder, plus test in `test/contract/` — only place behaviour proven on one
-   backend proven on other. Plugin SQL passthrough dialect-specific by design. Postgres
-   `routing.version()` read-behind (interface sync, read async), so cross-process routing writes
-   reach replica through `routing` pubsub topic wired in `app.ts`, filtered to other nodes so
-   own writes still patch, not rebuild.
-8. All outbound provider HTTP use `HttpClient`; no direct production `fetch`.
-9. `@omni/providers/catalog` and `/descriptors` must stay leaves: pure `packages/router` import
-   `descriptors`; leaf property is what allow it. `packages/providers/test/leafSubpaths.test.ts`
-    pin both.
-    Anthropic safeguard replies carry opaque terminal `vendor` metadata through
-    `collect()`; never fabricate verdicts or rewrite reviewed tool identities.
-    Pin: `apps/gateway/test/routes/autoModeSafeguards.test.ts`.
-10. Catalog pricing give defaults. Router price from saved targets; catalog edits hit new targets
-    only.
-11. CLI administer local installs through `@omni/control`, never `/api/*`. Inject every side effect
-    so tests never start processes or write outside temp dirs.
-12. Dashboard call `/api/*` only, including `/api/stream`; `/health` alone stays plain polling.
-    It may import `@omni/store/types`, `@omni/ir`, `@omnigateway/dashboard-sdk`, never
-    `@omni/providers` — no subpath or leaf, including type-only imports (plugins exist only at
-    runtime). Pin: `apps/dashboard/test/imports.test.ts`. Mirror wire shapes in `api/types.ts`; never
-    import them back. `ProviderId` comes from `@omni/ir`; provider list/order/label/colour/models
-    come from `GET /api/catalog`, never `theme/tokens.ts`. In `routes/_app.tsx`, resolve catalog in
-    `beforeLoad` after session check and before mount; `errorComponent` must show error + retry and
-    preserve expired-session `redirect`. Pin: `apps/dashboard/test/routes/appGate.test.tsx`.
-    `/client` is `_app`'s **sibling**, so nothing resolves the catalog for it: a component shared
-    with a console board must not call `useProviderCatalog` above its `operator` gate, and its test
-    must pass `makeQueryClient({catalog: false})` — the harness seed otherwise hides the 401.
-    Pin: `apps/dashboard/test/features/client.test.tsx`.
-    Keep SDK in `SHARED_IMPORTS` so plugins share `LiveContext`; SDK owns the plugin API-prefix
-    rule, LIVE switch, and `usePluginChannel`. See
-    `docs/writing-a-plugin.md#how-the-sdk-is-wired-for-anyone-changing-it`.
-13. `packages/rtk` stay pure like `ir` and `router`: no I/O, clocks, randomness. Rewrite tool-result
-    content only, preserve errors + non-tool-result blocks. `@omni/rtk/catalog` leaf holding
-    filter-id union; `@omni/store` import that subpath alone. `packages/ponytail` sit beside it
-    under same rule — other pure dispatch-time request transform — and **return new
-    request**, not edit one handed. `@omni/ponytail/catalog` leaf holding mode
-    union; `@omni/store` import it alone, re-export `PonytailMode` from `@omni/store/types`.
-    Ruleset text **vendored and pinned**, never fetched: prompt that change under installation
-    = one no operator can reproduce bill from.
-14. `packages/coord` stay pure same way: interface + memory impl, `now` parameter, one timer
-    it own is mutex wait. Invariant every impl must hold: claim visible to every concurrent
-    claimant **at call time, before promise settle** — memory impl mutate then return
-    `Promise.resolve`. Consumers rely on it: `rateLimit.ts` claim before first yield;
-    `loadRegistry.ts` keep synchronous local map, read shared gauge only through `refresh()`
-    before rank. Thread `coord` through **all** of call graph;
-    `apps/gateway/test/cluster/sharedCoord.test.ts` fail on any site still reading module-scope
-    map. **`add` on unseeded bucket is no-op** (row already in store the seed read). **Gauge slot
-    expire while holder live, memory impl included** — caller whose work outlast `ttlMs` must pass
-    `holder` and `renew`; named acquire idempotent, so name must be unique per *admission* and
-    never a caller-supplied id. Redis impl
-    in `apps/gateway/src/coord/redis.ts` fail-open per table via `attempt()`, logged through
-    closed `LogFields` keys `coord`/`coordFallback`. Layers, seeding, lease, pubsub, claim
-    semantics: `ARCHITECTURE.md#clustering`. Design:
-    `docs/superpowers/specs/2026-09-02-horizontal-scaling-design.md`.
-15. `packages/ratelimit` stay pure same way; `now` always parameter, counters supplied by caller.
-    `@omni/ratelimit/catalog` leaf holding dimension + window unions, `LimitConfig`, its zod
-    schema; `@omni/store` import that subpath alone, re-export `LimitConfig`. Limiter state —
-    rings + gauges — live in `apps/gateway`. `@omnigateway/plugin-api/events` **mirrors** unions
-    and `WINDOW_MS`, not import (published vs not); mirror pinned by
-    `apps/gateway/test/plugins/limitVocabulary.test.ts`, only place that may import both.
-16. Plugins load from `<root>/plugins/` at boot with capability-scoped `PluginContext`, never
-    `Store`, `HttpClient`, `AdminAuth`, or `process.env`. This is a guardrail, not a sandbox; say so.
-    Provider plugins alone receive their own decrypted credential: `codec.buildRequest` gets
-    `{accessToken, apiKey, providerData}` via `credential.openForInference()`; OAuth `refresh` gets
-    the refresh token and `usage` gets the access token via `UsageSecrets`. Router/refresher enforce
-    matching provider, codec/flow hold neither client nor store, and URLs must match manifest
-    `origins`. OAuth `requests.ts` holds pure builders replacing `postJson`/`getJson`; nothing may
-    bypass the adapter. `packages/plugin-api` stays pure; loader/context/event bus/channel registry live in
-    `apps/gateway`. Load failures are reported and skipped, never fatal.
-    `channels.open(name)` exposes no socket, upgrade request, header, or `Principal`. `send` is local;
-    optional `broadcast` uses `coord.pubsub`, is never coalesced, and is capped per channel by
-    `BROADCAST_BURST`; count/report over-budget and unencodable payloads separately. Encode the
-    plugin-authored `unknown` envelope inside `try` at `broadcaster.channel`; call optional member
-    with `?.` though host always supplies it. Topic/table names use validated manifest id/name.
-    Registry reports existence; `routes/stream.ts` `authorised` decides access. Reuse the socket
-    registry's bounded per-connection queue.
-17. **No provider-specific code in core module** — aim, not achieved state, measured per package.
-    `ratelimit`, `rtk`, `ponytail` clean. `ir`: only `LogFields.surface` (`"anthropic" | "openai"`),
-    permitted vocabulary. `store`: `bodies/mask.ts` hold `xaiKey` rule and vendor key prefixes
-    on purpose (redaction paragraph below). `router`: `resolve.ts` exclude `custom` from prefix
-    routing, because bare model name cannot carry endpoint id. `control`: `schemas.ts` name
-    `custom` in one rule surviving its target union (custom target carry `endpointId`,
-    nothing else may); `credentials.ts` plus `models.ts` ask `=== "custom"` about endpoint
-    metadata. That is all.
-    **OAuth out of core.** `OAUTH_PROVIDERS` is an empty null-prototype registry populated by
-    provider modules through `registerOAuthProvider`; never restore a core provider literal.
-    `seedBuiltinOAuth()` runs unconditionally through `installPluginProviders` at gateway boot and
-    from `apps/cli/src/run.ts`. Thread the registry through the whole call graph; tests reading it
-    seed first. Idempotence tracks provider membership per registry with `WeakMap`; repair missing
-    membership. Seed order is operator-facing: anthropic, openai, kimi, kilo, grok, antigravity,
-    muse; pin this literal, never `builtinOAuthFlows()`. Seeding after plugin loading is safe only
-    while the loader registers no flow; if it does, move seeding first. `@omni/providers` imports
-    `@omni/store/types` type-only. OAuth flow steps are capped async generators; optional
-    `AuthRequest.timeoutMs` is clamped to host ceilings (30s token, 15s usage). Host owns transport,
-    origin checks, return validation, PKCE, polling, randomness, and `gatewayAuthored`. Contract:
-    `providers/src/oauthFlow.ts`; design: decoupling
-    spec; pins: `oauthSeed.test.ts`, `connect.test.ts`, `install.test.ts`, `oauthStoreEdge.test.ts`.
-    New provider knowledge in core go through three outcomes, in order: **descriptor data**; **make
-    value carry own provenance** so branch delete; **named extension point** from
-    closed set. `providerNative` is worked example: tagging block with producing
-    provider deleted `needsAnthropicNative`, `ANTHROPIC_NATIVE_TOOLS`, table in router.
-    Hook set **closed**. `LogFields` never extensible. Core cannot scan providers
-    (`packages/providers` import `@omni/ir`; reverse is cycle) — injection only direction.
-    **Redaction never becomes extensible**: `MASK_RULES` in `packages/store/src/bodies/mask.ts` keep
-    vendor rules in core; descriptor-supplied regex = provider deciding how much of own
-    secret survive. `PREFIXED_KEY` and `OPAQUE` already catch ordinary key shapes.
-    Core keep provider-shaped **vocabulary**, not logic: `ErrorCode`, `LogFields`, `StopReason`,
-    `CacheControl.ttl`, `AuthType`, `WindowType`, `surface`, `AnthropicToolFamily`. Provider
-    needing new member edit core, by design.
-    Trap: `autoCache` is **one boolean across six core files** — `providers/types.ts`,
-    `store/types.ts`, `control/schemas.ts`, `dispatch/index.ts`, `dispatch/attempt.ts`,
-    `SettingsBoard.tsx`. Design:
-    [core/provider decoupling](docs/superpowers/specs/2026-08-27-core-provider-decoupling-design.md),
-    [descriptor registry](docs/superpowers/specs/2026-08-26-provider-descriptor-registry-design.md).
-18. `Principal` and `Scope` in `@omni/control` are the only copies of caller identity/read scope.
-    `admin`, `viewer`, `client`, and `machine` share one cookie; `AdminAuth.verify` returns principal,
-    never boolean; `stream/registry.ts` re-exports the union. Guards are per-route, never grouped:
-    `requireAdmin`, `requireReader` (admin|viewer), `requireClient`; mutations, snapshot download,
-    `/api/connect/*`, and `/api/plugins` stay admin-only. `Scope.none` must pass `readsNothing` before
-    `scopeKey` in every scoped reader (`recentLogs`, `usageDaily`, `pageLogs`, `exportLogs`) because
-    `scopeKey` maps both `all` and `none` to `undefined` and `usage_daily.api_key_id` defaults to `''`.
-    Client body route is absent, not refusing. Design:
-    [client dashboard surface](docs/superpowers/specs/2026-08-27-client-dashboard-surface-design.md).
+1. `omni-ir`, `omni-router`, `omni-ratelimit`, `omni-rtk` stay pure: no I/O, no clock (`now` and
+   `rand` are parameters), no `tracing`, no `std::env`. `omni-router` may depend on `omni-store`
+   for types only (see its `Cargo.toml`). Unpinned beyond the dependency lists.
+2. Provider wire formats, headers, signing, stream decoding stay in `crates/omni-providers`. A
+   provider directory does not reach into another; shared helpers at crate root (`http/`, `sse.rs`,
+   `codec.rs`, `response_format.rs`, `tool_result_files.rs`). **Divergence:**
+   `anthropic/codec.rs` calls `custom::codec::needs_scope`, `antigravity/wire.rs` reads
+   `anthropic::body::AGENT_PREAMBLE`.
+3. Dispatch (`omni-gateway/src/dispatch.rs`) owns side effects, retries, refresh, deadlines,
+   failover, commit point (first `BlockDelta`, or the pending cap `PENDING_MAX_EVENTS`/`_BYTES`).
+   Pins: `crates/omni-gateway/tests/dispatch.rs`.
+4. Routes (`server.rs` inference, `api.rs`/`admin_routes.rs`/`client_routes.rs`/`database_routes.rs`)
+   authenticate, parse, apply key policy, call dispatch or `omni-control`, render. Admin rules belong
+   in `omni-control`, not handlers.
+5. `omni-control` knows nothing about caller type: no hyper, cookies, argv, terminal. Long-lived
+   timers stay in `omni-gateway` (`maintenance.rs`, `refresh.rs`, `quota.rs`). Unpinned.
+6. Store rows + secrets stay behind `omni-store`. A read/write added for one backend is added for
+   **both** SQLite and `pg/`, plus a case in `crates/omni-store/tests/contract.rs` (`each` runs SQLite
+   then Postgres). Postgres routing changes reach other replicas as row identities on the `routing`
+   topic (`omni-gateway/src/routing.rs`); a 500 ms version poll repairs misses.
+7. All outbound provider HTTP goes through `omni_providers::http::HttpClient`; OTLP export too. The
+   client writes headers in the given order and casing. Pin: `crates/omni-providers/tests/http_client.rs`.
+8. Catalog pricing gives defaults. Router prices from saved targets; catalog edits hit new targets
+   only. Catalog JSON pinned by `crates/omni-router/tests/*_catalog.rs`.
+9. CLI administers local SQLite installs through `omni-control`, never `/api/*`. Postgres fleets are
+   administered over HTTP. Unpinned.
+10. Console calls `/api/*` only, including `/api/stream`; `/health` alone stays plain polling. It
+    imports nothing from `crates/`, `@omni/*` or `@omnigateway/*`, type-only included, and nothing
+    from `scripts/`. Pin: `apps/dashboard/test/imports.test.ts`. Wire shapes mirrored in
+    `src/api/types.ts`; constants copied from Rust held by `test/api/rustMirrors.test.ts` (reads Rust
+    source; never the reverse). Provider list/order/label/colour/models come from `GET /api/catalog`,
+    never `theme/tokens.ts`. In `routes/_app.tsx`, resolve catalog in `beforeLoad` after session check,
+    before mount; `errorComponent` shows error + retry and preserves expired-session `redirect`. Pin:
+    `test/routes/appGate.test.tsx`. `/client` is `_app`'s **sibling**, so nothing resolves the catalog
+    for it: a component shared with a console board must not call `useProviderCatalog` above its
+    `operator` gate, and its test passes `makeQueryClient({catalog: false})`. Pin:
+    `test/features/client.test.tsx`.
+11. `omni-coord`: one trait, `MemoryCoord` + `RedisCoord`. Every impl: a claim visible to every
+    concurrent claimant **when issued** — memory futures complete on first poll. Pins:
+    `crates/omni-coord/tests/{contract,memory}.rs` (`every_memory_call_completes_on_its_first_poll`).
+    Redis scripts are byte-stable across a fleet: `scripts_are_byte_stable` in
+    `omni-coord/src/redis/scripts.rs` pins each digest. Redis failure falls back per primitive to an
+    embedded `MemoryCoord`; `kv` refuses instead. Pin: `crates/omni-coord/tests/faults.rs`.
+    `ARCHITECTURE.md#clustering`.
+12. `omni-ratelimit/src/limits.rs` owns the limit JSON schema; `Dimension`/`Window` in `lib.rs`.
+    Limiter state lives in `omni-gateway-core/src/ratelimit.rs` (single) and `omni-cluster-limit`
+    (fleet).
+13. **No provider logic in core crates** — aim, not achieved. Known provider literals outside
+    `omni-providers`: `omni-router/src/providers.rs` (`Providers::builtin` registry, nine ids),
+    `resolve.rs` (`custom` excluded from prefix routing); `omni-control` `model_schema.rs`/`models.rs`
+    (`custom` ⇔ `endpointId`), `diagnostics.rs` (served set), `quota_runtime.rs`/`api.rs` (quota
+    providers); `omni-gateway` `dispatch.rs` (`send_provider` + served-set guard), `price.rs`
+    (Anthropic cache-write multipliers), `connect.rs`/`refresh.rs` (OAuth providers);
+    `omni-store/src/bodies.rs` (vendor key prefixes in masking — on purpose, never extensible).
+    Core keeps provider-shaped **vocabulary**: `ErrorCode`, `StopReason`, log fields, `AuthType`,
+    `WindowType`.
+14. Plugins are not supported in 1.x. `<root>/plugins/` entries are warned once and never run;
+    `/api/plugins*` answers 501, `/plugin-assets/<id>/*` 404; `omni plugin *` exits 1. Pins:
+    `crates/omni-gateway/tests/drop_warnings.rs`, `server.rs` test `plugin_routes_are_unsupported`.
+15. `Principal` (`omni-gateway/src/admin_auth.rs`): `Admin`, `Viewer`, `Client{api_key_id}` share one
+    cookie; a stored `machine` session reads as none. Guards per route, never grouped:
+    `require_admin`, `require_reader`, `require_client` (`api.rs`). Mutations, snapshot download,
+    `/api/connect/*`, request bodies stay admin-only. Pins: `api.rs` test
+    `guards_admit_exactly_their_principals`, `admin_routes.rs` `routes_match_elysia_s_table`.
 
 ## Adding a provider
 
-Nine-step procedure in [docs/adding-a-provider.md](docs/adding-a-provider.md). Read before adding
-one — several steps exist because skipping made bugs that read as something else.
-
-## Writing a plugin
-
-Procedure in [docs/writing-a-plugin.md](docs/writing-a-plugin.md): manifest, capability context,
-storage placeholder, event guarantees, how UI bundle share console's React. Open with what plugin
-can reach, which decide whether rest good idea.
+Codec in `crates/omni-providers/src/<id>/` (`codec.rs`, `wire.rs`, `decode.rs`, `profile.rs`,
+`oauth.rs` as needed) on the `codec.rs` contract; register it in `omni-gateway/src/dispatch.rs`
+`send_provider` **and** the served-set guard beside `"no adapter for provider"`; catalog rows in
+`crates/omni-control/data/provider-catalog.json` plus `Providers::builtin` in
+`omni-router/src/providers.rs`; served set in `omni-control/src/diagnostics.rs`; OAuth in
+`omni-gateway/src/connect.rs`/`refresh.rs`; a `crates/omni-router/tests/<id>_catalog.rs`. Mirror the
+id rule: `rustMirrors.test.ts` checks every catalog key.
 
 ## TypeScript and dashboard style
 
+- Rust: workspace lints forbid `unsafe`, deny `unwrap_used` outside tests; clippy `-D warnings`.
 - Strict TypeScript; `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes` stay enabled.
 - Never commit `any`, tests included. Use `unknown` plus narrowing or named types.
 - ESM imports with explicit `.ts` extensions. Match nearby naming + comment density.
@@ -252,57 +199,47 @@ can reach, which decide whether rest good idea.
 
 ## Testing
 
-- Prefer behavior tests at narrowest stable boundary.
-- In-memory stores, synthetic credentials, stub `HttpClient`; never call live providers.
-- Dispatch or adapter changes cover streaming + non-streaming paths.
-- Preserve pre-commit failover vs post-commit stream behavior.
-- Shared proxy changes test Anthropic + OpenAI error surfaces.
-- Auth changes cover Bearer and `x-api-key`, malformed/conflicting input, revoked keys, allowlists,
-  relevant rate limits.
-- Deadline tests distinguish gateway timeout from client cancellation, leave no timers/listeners.
-- Dashboard tests run under happy-dom. Use `test/helpers/fetchStub.ts`, `renderWithProviders`,
+- Prefer behaviour tests at narrowest stable boundary. Synthetic credentials, local fake upstreams;
+  never call live providers.
+- Dispatch or codec changes cover streaming + non-streaming paths; preserve pre-commit failover vs
+  post-commit in-stream errors (`crates/omni-gateway/tests/dispatch.rs`).
+- Shared proxy changes test Anthropic + OpenAI + Responses error surfaces
+  (`server.rs` `auth_failures_answer_in_the_dialect_and_file_a_row`).
+- Auth changes cover Bearer and `x-api-key`, conflicting input, revoked keys, allowlists, limits.
+- Deadline tests distinguish gateway timeout from client cancellation.
+- Store behaviour on both backends goes in `crates/omni-store/tests/contract.rs`; PG/Redis tests must
+  fail, not skip, under `OMNI_TEST_REQUIRE_*`.
+- Console tests run under happy-dom. Use `test/helpers/fetchStub.ts`, `renderWithProviders`,
   `renderWithRouter`; assert visible text, roles, accessible names. Re-query after async loads.
-- **Do not add one test per call site of threaded registry** — stale day new site
-  appear. Inject sentinel registry holding one synthetic provider, none of six; assert
-  real request end to end; any consumer reading module-global fail loudly.
-  `apps/gateway/test/dispatch/dispatch.test.ts` hold it, kill all four threading mutants alone.
-  Need two dispatches: **configured** model short-circuit `resolveModel` before any registry
-  read; **inferred** target priced from `PROVIDER_MODEL_CATALOG`. Same instrument as
-  `providerTables.test.ts`, which discover leaking tables, not list them.
-- **Drift check reading repaired history cannot fail.** `publishable.test.ts` ask git what moved
-  since last tag; query in `packages/plugin-api/test/helpers/changed.ts`; `changed.test.ts`
-  ask it of scratch repositories, no-edit case first. Watched set include `package.json`; diff take
-  **one ref**, never `${ref}..HEAD` — two-dot compare commit to commit, miss working tree.
 - **Check gated on `merge-base(main, HEAD)` fail on `pull_request`, vacuous on `push`.**
-  `actions/checkout` never create `refs/heads/main`; on `push` to main `merge-base` is HEAD.
-  Base resolve through `main` or `origin/main`, fall back to **first parent** when HEAD is
-  base. One copy in `scripts/lib/history.ts`, tested in `scripts/test/history.test.ts`.
+  `actions/checkout` never create `refs/heads/main`; base resolve through `main` or `origin/main`,
+  fall back to **first parent** when HEAD is base. One copy in `scripts/lib/history.ts`, tested in
+  `scripts/test/history.test.ts`.
 
 ## Security and privacy
 
 - Never log prompt/response bodies, OAuth tokens, API keys, passwords, encryption keys, or arbitrary
   headers/metadata.
-- `LogFields` is a closed allowlist/redaction boundary: new free-text fields are security changes;
-  never add an index signature. Logger methods use `<T extends LogFields>(..., fields?:
-  OnlyLogFields<T>)`; pin: `packages/ir/test/logFields.test.ts` with `@ts-expect-error`.
-- `GatewayError.gatewayAuthored` is opt-in and defaults false. `reasonField` withholds a message
-  only when the error names a provider, unless debug is on or this flag is true. Set it only for repository-authored messages
-  containing no upstream/external text; `rebound` does not set it, `codecFailure` does. Preserve it
-  through `classify` and dispatch `rewrap`.
-- Return raw gateway API keys once; store only hashes.
-- Encrypt provider credentials with required `OMNI_ENCRYPTION_KEY`; never add default secrets or
-  commit `.env` files/databases.
+- Log fields are a closed allowlist: `FIELD_ORDER` in `omni-gateway/src/logging.rs`; any other field
+  never reaches the line. New free-text fields are security changes. Pin: `logging.rs` test
+  `fields_outside_the_allowlist_never_reach_the_line`.
+- `GatewayError::gateway_authored` (`omni-ir/src/error.rs`) defaults false. `reason_shown` in
+  `dispatch.rs` withholds a message only when the error names a provider, unless debug is on or the
+  flag is set. Set it only for repository-authored text. Unpinned at `reason_shown`.
+- Return raw gateway API keys once; store only hashes (`omni-crypto/src/apikey.rs`).
+- Encrypt provider credentials with required `OMNI_ENCRYPTION_KEY` (`omni-crypto/src/field.rs`);
+  never add default secrets or commit `.env` files/databases.
 - Client errors omit provider tokens, credential IDs, internal stacks.
-- Preserve admin sessions on every `/api/*` route except documented setup/status/login flows and
-  two password routes, which end sessions **by design**.
-- Two passwords, neither default. Admin: set at `/api/setup`; `PUT /api/settings/password` requires
-  current password, answers wrong current exactly like failed login, clears all sessions including
-  caller, then console redirects to `/login?reason=password-changed`. Viewer password is optional:
-  no row means `passwordMatches(null, …)` rejects and `viewerConfigured` is false.
-  `PUT /api/settings/viewer-password` sets/replaces; `{"password": null}` deletes it; absent field is
-  `BAD_REQUEST`; either change clears viewer sessions only. `MIN_PASSWORD_LENGTH` is 12 in
-  `@omni/control`, mirrored in plain `features/settings/policy.ts`; pin:
-  `apps/gateway/test/routes/passwordPolicyMirror.test.ts`.
+- Preserve admin sessions on every `/api/*` route except setup/status/login flows and the two
+  password routes, which end sessions **by design**.
+- Two passwords, neither default. `PUT /api/settings/password` requires current password; wrong
+  current is `AUTH "current password is incorrect"` — same code and status as a failed login,
+  different message (`invalid password`), so it says nothing a stolen cookie can use. Success
+  clears every session including caller's; console redirects to `/login?reason=password-changed`.
+  `PUT /api/settings/viewer-password`: string sets, `null` deletes, absent `BAD_REQUEST`; clears viewer
+  sessions only. Pins: `admin_auth.rs` tests `changing_the_admin_password_ends_every_session`,
+  `viewer_password_*`. `MIN_PASSWORD_LENGTH` = 12 in `omni-control/src/admin_password.rs`, mirrored in
+  `features/settings/policy.ts`, held by `rustMirrors.test.ts`.
 
 ## Client contracts
 
@@ -310,376 +247,225 @@ Client surface:
 
 - `POST /v1/messages`: Anthropic-compatible request, response, SSE, errors
 - `POST /v1/chat/completions`: OpenAI-compatible request, response, SSE, errors
-- `POST /v1/responses`: OpenAI Responses-compatible. **Stateless**: `previous_response_id`,
-  `item_reference`, explicit `store: true` refused, not normalized away; `background: true`
-  dropped. Keepalive under five seconds — Codex's HTTP client abandon connection silent for
-  about that long.
-- `GET /v1/models`: authenticated, filtered by key model allowlist
-- `POST /v1/messages/count_tokens`: authenticated local estimate; no dispatch or usage row
-- `GET /health`: unauthenticated liveness
+- `POST /v1/responses`: Responses-compatible. **Stateless**: `previous_response_id`,
+  `item_reference`, explicit `store: true` refused (`omni-dialects/src/ingress/responses.rs`);
+  `background` accepted and ignored. Keepalive ≤4 s (`RESPONSES_KEEPALIVE` in `server.rs`).
+- `GET /v1/models`: authenticated, filtered by key allowlist, smallest target window per model
+  (`resolve_model_limits`, `omni-router/src/model_limits.rs`)
+- `POST /v1/messages/count_tokens`: authenticated local estimate, charged to `requests` only, no
+  dispatch or usage row. Pin: `crates/omni-gateway-core/tests/ratelimit.rs`
+  `count_tokens_consumes_requests_and_never_tokens_spend_or_a_slot`
+- `GET /health`: unauthenticated liveness; `GET /metrics` only with `OMNI_METRICS_TOKEN`
 
-`/api/client/*` is key holder's own read surface: `login`, `logout`, `summary`, `usage`, `logs`,
-`quota`, `quota/history`. Scope come from verified session, never query parameter — two
-arrive as separate arguments because separate provenance. Client session re-read key
-row on **every** verify, refuse revoked one.
+`/api/client/*` (`client_routes.rs`) is key holder's own read surface: `login`, `logout`, `summary`,
+`usage`, `logs`, `quota`, `quota/history`. Scope comes from the verified session, never a query
+parameter (`apiKeyId=ignored` in the pin). Client session re-reads the key on **every** verify
+(`AdminAuth::verify`). Pins: `admin_auth.rs` test `client_sessions_end_when_the_key_stops_being_usable`;
+`server.rs` test `cluster_listener_uses_postgres_without_opening_a_sqlite_shadow` (no `credentialId`
+on client logs).
 
-`summary` carries `dayOffsetMinutes` as an additive top-level field, not inside shared
-`ApiKeySummary` and not wrapped. Absent differs from zero (UTC). It is the only install-level fact;
-justify any additional one independently. Pin: `clientSurface.test.ts` uses nonzero 420.
+`summary` carries `dayOffsetMinutes` as an additive top-level field. Absent differs from zero (UTC).
+Only install-level fact; justify any other. Pin asserts `0` only — a nonzero pin is missing.
 
-Client provider quota exposes named accounts: `accountQuota` returns credential+window rows with
-operator label; `usedRatio`/`ratePerHourRatio` are `0..1`, with derivable ceilings accepted.
-Keep `stale` and `rolledOver` separate. `/api/client/quota/history` exposes no aggregate gateway
-rate. Both history reads cap at `MAX_SAMPLES` (50_000) in `quota/history.ts`, query `cap + 1`, and
-report `truncated`; a single-series surface narrows before applying the all-account cap.
-`clientSurface.test.ts` pins no credential identity on `logs`/`usage`/`summary`; quota may name
-accounts but omits `used`/`limit`/`ratePerHour`.
+Client quota (`omni-control/src/client_quota.rs`) names accounts; `usedRatio`/`ratePerHourRatio` are
+`0..1`; `stale` and `rolledOver` kept separate; no aggregate gateway rate on history. History caps at
+`MAX_SAMPLES` (50_000), queries `cap + 1`, reports `truncated`; operator history
+(`quota_ops.rs`) narrows to one account before the cap. Key sets held by `rustMirrors.test.ts`.
 
-Every `/v1/*` request accept Bearer or `x-api-key`; reject conflicts. `null` model allowlist mean
-unrestricted; empty array deny all models.
+Every `/v1/*` request accepts Bearer or `x-api-key`; two that disagree are `AUTH "conflicting API
+key headers"`, two that agree pass (`api_key_header`, `omni-gateway-core/src/snapshot.rs`). `null`
+allowlist unrestricted; empty array denies all.
 
 Translation invariants:
 
 - Keep mid-conversation system messages in place; never fold into request-level `system`.
 - Forward `thinking` forms exactly. Never derive budgets from effort. Drop unsigned thinking before
-  Anthropic replay; preserve + accumulate Anthropic signatures.
-- Outbound: OpenAI surface render canonical thinking as `reasoning_content` (stream deltas and
-  non-streaming field); Anthropic surface keep dialect, unsigned blocks suppressed.
-- Carry `anthropic-beta` as both header and body passthrough. Never synthesize missing beta.
-- **A structured-output request arrives in three spellings and leaves in four, and the wrong one
-  fails the request.** Each ingress writes the bag named after its own *surface* —
-  `/v1/chat/completions` → `vendor.openai.response_format`, `/v1/responses` →
-  `vendor.openai.text.format`, `/v1/messages` → `vendor.anthropic.output_config.format` — so a
-  request kept its schema only when ingress and target happened to share a dialect.
-  `packages/providers/src/responseFormat.ts` is the only reader, and `readResponseFormatResult`
-  is its **one** parse: "asked and we refused" and "never asked" are different facts, and a second
-  walk beside it drifts and cannot tell a too-deep schema from a misspelled one. Outbound:
-  `text.format` (via shared `moveToResponsesText`), `output_config.format`,
-  `generationConfig.responseSchema`, `response_format`. **The vendor merge is bag-shaped, not
-  endpoint-shaped**: every encoder whose bag can carry a foreign spelling must delete it. A client's
-  own native spelling outranks the translation only when this gateway can **send** it — structurally
-  readable (`readableFormat`) *and* within the depth cap; Anthropic's bag is merged whole, so the
-  encoder's own members (translation, and the reasoning path's `effort`) are carried into the
-  replacement without outranking the client's, and with nothing to rescue it passes through
-  untouched. **Anthropic's schema is closed whichever route it took** — that backend refuses an
-  object node not explicitly `additionalProperties: false` at every depth, so `closeObjects` runs
-  after the merge; tool `input_schema` is never closed, and tuple `items` / `patternProperties` are
-  rejected outright whoever wrote them. The depth cap binds **reader and walker in the same unit**,
-  counting schema levels through the same position tables — a multiplier fits only positions
-  crossing a container first (`properties`), so an `items` chain read at twice the closing depth
-  went out half-closed. Both walks also remember visited nodes, and the walker's memo is keyed on
-  **depth as well as identity**: one object at several positions is otherwise expanded per path
-  (exponential), and a depth-blind memo reuses a shallow result where less budget remains. A refusal
-  is never silent: every encoder reports `<provider>:response-schema-too-deep`, including targets
-  whose bag never carried the spelling. Pins: `packages/providers/test/responseFormat.test.ts`,
-  `apps/gateway/test/ingress/responseFormatRouting.test.ts` (3x9 matrix). Measured backend
-  behaviour: [structured output](docs/superpowers/specs/2026-09-21-response-format-cross-provider-design.md).
-- `ToolDef` discriminant is `kind`: `"portable"` or `"provider"` plus real `ProviderId`.
-  `ProviderToolDef` is provider arm; `AnthropicToolDef` is **narrowing** requiring `family`.
-  `AnthropicToolDef` carry exact versioned `type`, never normalized or upgraded; versions in
-  `packages/providers/src/anthropic/tools.ts`; unknown dated types rejected, not prefix-matched.
-- Provider-native content blocks use `providerNative` IR variant, keep payload verbatim, stay out
-  of tool-id correlation, orphan removal, cross-provider translation, RTK. Block carry `provider` —
-  who produced it — routing read that field.
-- Provider-defined tool or `providerNative` history block admit **only** that provider's targets at
-  routing. OpenAI hosted tools (`tool_search`, `web_search`, `local_shell`) pin from turn 1; OpenAI
-  reasoning items come back from upstream and replayed, so Codex conversation pin from
-  turn 2. Degradation spelled `excluded:capability:providerNative`; old rows carry
-  `excluded:capability:anthropicTools`, stay readable — degradations forensic text never
-  parsed. Redaction of `credentialId` there read `Excluded.kind`, never string.
-- **Breakpoint on request's final mid-conversation system turn must leave that turn.**
-  `systemCacheControl` + `toWire` retarget it to
-  `lastCacheableHistoryBlock(body.messages.slice(0, -1))`; strip the mixed turn's copy, skip when
-  the target already has the client's marker, and record
-  `anthropic:system-turn-cache-control-retargeted`. History: auto-cache spec.
-- `pauseTurn` own stop reason; never fold into `endTurn` or `toolUse`.
-- Tool-result images ride `ToolResultBlock.images`, never serialised into `content` text (base64
-  billed as prose broke 1M windows). Every ingress reads them; each encoder sends them in place,
-  notes `<provider>:tool-result-images-moved` when it moves them to a later message, or
-  `<provider>:images-dropped`. A Responses `input_file`, and an Anthropic `document` that is a plain
-  base64 PDF or text, ride `ToolResultBlock.files` / the result text, portable to every provider.
-  `toolResultFiles.ts` is the one rule: text files are decoded into the output on every wire
-  (`tool-result-files-inlined`; models read file-part text unreliably), a binary goes only through
-  the wire's own carrier (`tool-result-files-moved`), else `files-dropped`. A Responses backend
-  refuses the **whole request** for an unlisted type, so its carrier is a measured allowlist.
-  Anthropic `search_result` and a `document` with citations/context/cache marker/url/file id ride
-  `ToolResultBlock.native` and pin routing like a top-level `providerNative` block. Pin:
-  `packages/providers/test/toolResultImages.test.ts`.
-- Client tool names renamed to PascalCase on Anthropic **OAuth** leg only, restored in
-  `anthropic/decode.ts` — never at egress. Anthropic fingerprint some name sets, refuse them
-  through billing placeholder; `FINGERPRINT_REFUSED` name that. Restore site load-bearing: RTK
-  normalize by case and separator alone, so egress-side restore silently degrade every shell
-  classification. Cloak live in `buildRequest` frame, never on `dispatchRequest` — shared across
-  attempts. Exempt names (already PascalCase, or `mcp__*`) reach wire unrenamed and **claim their
-  spelling**.
-- Unknown Anthropic block types + SSE events fail visibly, not skipped.
-- Preserve cache-control block, TTL, and order; record unsupported-feature degradations. Only two
-  exceptions:
-  - `autoCacheEnabled` defaults on and adds markers only when both
-    `estimateCachedInputTokens === 0` and the vendor bag has no `cache_control`. Walk last tool,
-    last system block, then last eligible wire-history block; place at most three markers where
-    prefix growth from the **last placed** marker is ≥1024, starting at 0. Walk `body.messages`
-    backwards, never `req.messages`; eligible blocks are text/image/tool_use/tool_result/document.
-    Mutate wire only, never shared IR. Record `anthropic:cache-breakpoint-added` and
-    `anthropic:history-cache-breakpoint-added`. Pin: deep-frozen
-    `packages/providers/test/anthropic.test.ts`; design: [auto-cache](docs/superpowers/specs/2026-08-23-anthropic-auto-cache-full-prefix-design.md).
-  - `ponytailMode` defaults off. Injection returns a new request, dedupes on `PONYTAIL_MARKER`, and
-    moves only the client's final-system marker onto the appended ruleset, preserving count/TTL and
-    never enabling auto-cache. `count_tokens` applies the same function. Degradation constants:
-    `ponytail:<level>`, `ponytail:already-present`, `ponytail:cache-marker-moved`,
-    `ponytail:cache-marker-not-last`. Vendor text stays pinned to v4.9.0 blob `a3e4d94b…`. Pin:
-    deep-frozen `packages/ponytail/test/inject.test.ts`; design: [ponytail](docs/superpowers/specs/2026-08-29-ponytail-prompt-injection-design.md).
-- `Usage.inputTokens` is uncached input. Cache reads and 5m/1h writes disjoint classes priced
-  once. Use `promptTokens()` when client surface need total prompt tokens.
-- Adapters stream upstream. OpenAI chat usage need `stream_options.include_usage`; Responses API
-  report usage on `response.completed`.
-- `/v1/models` report smallest target window in pool. Limits advertised, not enforced.
-- Normalize `[1m]` before key allowlist checks. `claude/` **not** reserved, not rewritten.
-- Gateway not validate request-shape support per model; unsupported combos surface as upstream
-  errors.
-- `ChatRequest.conversationId` is the client's opaque, conversation-scoped name; Anthropic
-  `metadata.user_id` supplies it without parsing. Never use OpenAI `user`. `readConversationHeader`
-  in `ingress/schemas.ts` checks after the body field, case-insensitively:
-  `x-session-id`, `x-session-affinity`, `x-deepseek-harness-session-id`, `session-id`. Fallback hashes
-  instructions + opening item, not tool list/first message; gateway-generated ids use the fallback.
-  In `openai/wire.ts`, resolve client `prompt_cache_key` → client `session_id` → hashed
-  `conversationId` → fallback before the vendor merge (`Object.assign` on the API-key leg,
-  `mergeCodexVendor` on OAuth). `openai/codec.ts` sends the same value
-  as `session-id`, `thread-id`, `x-client-request-id` headers on both legs; keep those names in
-  `openaiProfile.order`. Only `session-id` routes the Codex cache (measured); never drop it. Keep `store: false` for Codex. Inspect client key sets, not one member.
-  History: responses-ingress spec. The key is a UUIDv7 thread id (a supplied UUID passes through).
-  The OAuth leg wears Codex 0.170.0's TUI fingerprint, which moves only with a capture
-  (`scripts/codex-capture/README.md`); `nativeReasoning` reads the **client's** `include`, never
-  the body's, which always carries Codex's. Every id it derives is keyed with the credential's
-  `providerData.idSalt`, minted and backfilled by `openai/oauth.ts` alone; the unkeyed derivation
-  is only the fallback for a credential not yet refreshed. Pin: `openaiCodexFingerprint.test.ts`; design:
-  [Codex 0.163 fingerprint](docs/superpowers/specs/2026-10-16-codex-0163-fingerprint-design.md).
-- OpenAI surface read images from `messages[].images` (bare base64) and from `attachments` /
-  `experimental_attachments` as well as `content`. Payload's own container header beat any
-  declared type; remote URL never fetched. `images` is Ollama's images-only field, so
-  non-image there is `BAD_REQUEST`; `attachments` is SDK's general envelope, so PDF or hosted
-  URL dropped, never refused. Same reasoning as `looseCacheControl`.
+  Anthropic replay; preserve + accumulate signatures (`collect` pin: `crates/omni-ir/tests/stream_collect.rs`).
+- OpenAI chat egress renders canonical thinking as `reasoning_content`
+  (`omni-dialects/src/egress/openai.rs`).
+- Carry `anthropic-beta` as header and body passthrough, deduplicated; never synthesize a missing one
+  (`anthropic/codec.rs`). Unpinned.
+- **Structured output arrives in three spellings, leaves in four.** Ingress writes the bag of its own
+  surface (`vendor.openai.response_format`, `vendor.openai.text.format`,
+  `vendor.anthropic.output_config.format`). `read_response_format` in
+  `omni-providers/src/response_format.rs` is the **one** parse; "refused" (`TooDeep`) and "never
+  asked" are distinct. Outbound: `text.format` (`move_to_responses_text`), `output_config.format`,
+  `generationConfig.responseSchema`, `response_format`. Every encoder deletes foreign spellings from
+  its bag. Anthropic's schema is closed (`additionalProperties: false`) at every depth after the merge
+  (`anthropic/vendor.rs`); tool `input_schema` never closed. Depth cap 64 subschema levels. A refusal
+  is noted `<provider>:response-schema-too-deep`. Pins: `response_format.rs` tests
+  (`the_depth_cap_sits_at_sixty_four_subschema_levels`), `crates/omni-providers/tests/outbound_depth.rs`.
+  The 3×9 ingress×target matrix was TS-only: unpinned in Rust. Design:
+  [structured output](docs/superpowers/specs/2026-09-21-response-format-cross-provider-design.md).
+- Anthropic versioned tool `type` carried exactly; known versions listed in
+  `omni-dialects/src/ingress/anthropic_tools.rs`; unknown dated types rejected.
+- Provider-native blocks (`ProviderNative` in `omni-ir/src/request.rs`) carry payload verbatim and
+  their producing `provider`; routing admits only that provider's targets, excluded as
+  `capability:providerNative`. Pins: `crates/omni-router/tests/filters.rs` (`required_providers_*`,
+  `a_request_naming_anthropic_*`).
+- A cache breakpoint on the final mid-conversation system turn is retargeted to the last cacheable
+  history block or dropped (`anthropic:system-turn-cache-control-retargeted` / `-dropped`,
+  `anthropic/wire.rs`). Unpinned.
+- `pause_turn` own stop reason; never fold into end-turn or tool-use (`omni-ir/src/stream.rs`).
+- Tool-result images/files: `ToolResultBlock.images` / `.files`, never serialised into text. Text
+  files decoded inline (`tool-result-files-inlined`), binaries only through the wire's own carrier
+  (`tool-result-files-moved`), else `files-dropped`; Responses carrier is a measured allowlist
+  (`omni-providers/src/tool_result_files.rs`). Pins: that file's tests; encoder notes unpinned.
+- Client tool names renamed on the Anthropic **OAuth** leg only (`anthropic/cloak.rs`), restored in
+  `anthropic/decode.rs` via `uncloak` — never at egress. Exempt names (already PascalCase, `mcp__*`)
+  claim their spelling. Fingerprint refusals map to `FINGERPRINT_REFUSED`. Pin:
+  `crates/omni-providers/tests/anthropic_codec.rs`.
+- Unknown Anthropic SSE events fail visibly (`unrecognized Anthropic stream event`,
+  `anthropic/decode.rs`). Unpinned.
+- Preserve cache-control block, TTL, order. One exception: `autoCacheEnabled` (default on) adds
+  breakpoints in `anthropic/wire.rs` when the request carries none (`anthropic:cache-breakpoint-added`,
+  `anthropic:history-cache-breakpoint-added`). Unpinned in Rust. Design:
+  [auto-cache](docs/superpowers/specs/2026-08-23-anthropic-auto-cache-full-prefix-design.md).
+- **RTK and ponytail do not run.** `rtkEnabled` and `ponytailMode` are stored and editable but
+  dispatch and `count_tokens` send the request as received (`dispatch.rs`, `server.rs` comments).
+  `request_logs.rtk_filters` stays a storage contract (`RTK_FILTER_IDS`, `omni-rtk/src/catalog.rs`;
+  read-side allowlist in `omni-store/src/maintenance.rs` `rtk_filters`): add ids freely, rename only
+  with a migration.
+- `Usage.input_tokens` is uncached input; cache reads and 5m/1h writes priced once (`price.rs`).
+  `prompt_tokens()` (`omni-ir/src/stream.rs`) when a surface needs total prompt tokens.
+- OpenAI-chat upstreams need `stream_options.include_usage` (`custom/wire.rs`).
+- Normalize `[1m]` before key allowlist checks (`omni-dialects/src/ingress/mod.rs`). Pin:
+  `crates/omni-gateway/tests/key_identity.rs`.
+- Gateway does not validate request-shape support per model; unsupported combos are upstream errors.
+- `ChatRequest.conversation_id`: Anthropic `metadata.user_id`, else `read_conversation_header`
+  (`omni-dialects/src/ingress/mod.rs`): `x-session-id`, `x-session-affinity`,
+  `x-deepseek-harness-session-id`, `session-id`, case-insensitively. Never OpenAI `user`. The OpenAI
+  OAuth leg wears Codex 0.170.0's fingerprint (`openai/profile.rs`, `wire.rs`, `identity.rs`), moved
+  only with a capture (`scripts/codex-capture/README.md`); sends one id as `session-id`, `thread-id`,
+  `x-client-request-id`; ids keyed by the credential's `providerData.idSalt` (`openai/oauth.rs`).
+  Pin: `crates/omni-providers/tests/openai_fingerprint_literals.rs`. Design:
+  [Codex fingerprint](docs/superpowers/specs/2026-10-16-codex-0163-fingerprint-design.md).
+- OpenAI chat ingress reads images from `messages[].images` (Ollama; non-image there refused) and
+  `attachments`/`experimental_attachments` (non-image dropped); remote URLs never fetched
+  (`omni-dialects/src/ingress/openai.rs`).
 
-Detailed compatibility rules + measured client behavior belong in `docs/superpowers/specs/`.
+Detailed compatibility rules + measured client behaviour belong in `docs/superpowers/specs/`.
 
 ## Runtime and data traps
 
-- `OMNI_BASE_URL` must be public reverse-proxy origin. Changing `OMNI_ENCRYPTION_KEY` invalidate
-  stored credentials.
-- CLI root resolution: `--root` > `OMNI_ROOT` > install in cwd > `~/.config/omnigateway`. Root
-  `.env` intentionally override ambient environment.
-- CLI database path: `--db` > that root's own `.env` > ambient `OMNI_DB_PATH` > `omnigateway.db` in
-  root. `--root` flag suppress ambient `OMNI_DB_PATH` entirely (Bun preload cwd's `.env`);
-  suppression warned on stderr, reported by `doctor`, removed from env spawned gateway inherit.
-  `OMNI_ROOT` not suppress it: both ambient.
-- Quota cooldowns, `1m` and `concurrency` process-local, reset on restart; `5h` and `1w` come
-  from database, survive one.
-- A success writes `credential_health` only when pre-attempt snapshot
-  `successWouldChange`; never decide inside `updateHealth.apply`. `SUCCESS_RESETS` in
-  `router/src/breaker.ts` is the single reset set and includes `consecutiveFailures`; Postgres
-  trigger `WHEN` is a strict subset. Missing health row means blank/healthy. Recent ranking uses
-  `loadRegistry`'s `lastUsedAt`/`ewmaTtftMs`; display uses `usage.lastUsedByCredential`. Pins:
-  `apps/gateway/test/dispatch/dispatch.test.ts`, `packages/router/test/breaker.test.ts`.
-- `usage.append` must run at most once per request ID; duplicate completion double-count
-  `usage_daily` and `usage_rollup`. Pending rows hold placeholder metrics; inspect `state`, not
-  `status`.
-- `startOfDay` in `packages/store/src/sqlite/rollup.ts` takes the configured fixed offset; thread it
-  through both store factories, pinned by `packages/store/test/contract/usage.test.ts`.
-- `usage_rollup` is derived from authoritative `request_logs`; `rebuildRollup` reproduces every
-  bucket. Write it in `append`'s transaction, prune with source rows, rebuild after restore, compare
-  in `omni doctor`. Never restore unbounded synchronous `SELECT SUM`; a timeout around a
-  synchronous `bun:sqlite` read cannot fire.
-- `quota_windows` store provider observations, not gateway counts. Missing data mean unknown, not
-  unlimited. Probe failure must never disable credential.
-- `quotaRolledOver`: null `resetsAt` is not rolled over; stale rollover data may persist up to
-  `quotaPollIntervalMs` (default 300_000). Rollover suppresses inference only:
-  `burnFor` drops `ratePerHour`, `exhaustsAt`, `survives` but keeps measured `windowStartsAt`.
-  Surfaces phrase staleness before rollover.
-- Projection truncates at the ceiling: `projectedPace` ends when it reaches 100%, the same instant
-  as `exhaustsAt`; cap `usedPercent` at 100.
-- RTK filter ids persisted in `request_logs.rtk_filters`, so `RTK_FILTER_IDS` is storage contract.
-  `isRtkFilterId` drop unknown ids on read. Add ids freely; rename or remove only with migration.
-- `DIMENSIONS` and `WINDOWS` in `@omni/ratelimit/catalog` are JSON keys of `api_keys.limits` —
-  storage contract failing **closed**: unknown name is parse failure. Rename or remove only with
-  migration; update mirror in `@omnigateway/plugin-api/events` in same change.
-- Rate limiting explained in `ARCHITECTURE.md#rate-limiting`; invariants below each already broken
-  once.
-- Nothing plugin imports may reach unpublished `@omni/*`; published `plugin-api` and
-  `dashboard-sdk` must remain independently installable. `bundleWeight.test.ts` builds every entry
-  and requires zod only in the root entry, including a positive root assertion.
-- Published-package dependency ranges and versions move together. `publishable.test.ts` watches
-  pair `package.json` files beside `src`; a range-only repair is not releasable.
-- `SAFE_PROVIDER_ID` in dashboard `theme/tokens.ts` mirrors `PROVIDER_ID_PATTERN`.
-  `providerColor` validates every stored provider before CSS interpolation and returns
-  `var(--p-<id>, var(--ink-faint))`; do not move guards to call sites. `sqlite/config.ts` reads
-  `virtual_models.targets` with bare `JSON.parse`, so restored data bypasses write schemas. Pin:
-  `apps/gateway/test/routes/providerIdMirror.test.ts`.
-- `admit`/`consume` claim ring stamp and gauge **synchronously**, before any `await`, roll back
-  on refusal — ceiling of 3 once admitted 10 parallel requests.
-- Per-model overrides (`limits.models`): `modelOverride` in `@omni/ratelimit/catalog` is the
-  only lookup; one admission claims key-wide **and** model subject (`modelSubjectId`), rolls back
-  both. Pins: `apps/gateway/test/auth/rateLimit.test.ts`, `packages/ratelimit/test/catalog.test.ts`.
-- Refuse at auth, degrade at list. Unparseable `limits` read back as `null`, distinct from `{}`;
-  `authenticateApiKey` turn it into `INTERNAL` — not `AUTH`. `keys.list()` must never throw over
-  such row. Nothing may collapse that `null` into `{}`.
-- Five fields editable after minting: `limits` (`setKeyLimits`, `PUT /api/keys/:id/limits`),
-  `modelAllowlist` (`setKeyModels`, `PUT /api/keys/:id/models`), `expiresAt`
-  (`setKeyExpiry`, `PUT /api/keys/:id/expiry`), `guardrailPolicy` (`setKeyGuardrail`,
-  `PUT /api/keys/:id/guardrail`) and `smartRouting` (`setKeySmartRouting`,
-  `PUT /api/keys/:id/smart-routing`). All written whole, never patched —
-  `{}` is how last limit go away; allowlist `null` and `[]` opposite facts, and expiry `null`
-  ("never") and absent field likewise, so both schemas refuse default. Expiry take **past
-  instant** — "expire it now", reversible where `revoke` not; never add `> now` guard.
-  `bodyLoggingOptOut` deliberately not editable — promise to whoever hold key. Policy `null` is
-  only "no guardrail"; empty after trim refused, never coerced.
-  `smartRouting` take `{enabled}`; absent refused.
-- **Usage-policy guardrail fails closed**: only a bare `ALLOW` from the classifier admits; deny,
-  timeout, error, unreadable reply, unset `guardrailModel` all refuse, fixed gateway-authored
-  messages, classifier text never reaches client or stdout. Judged inside the event sequence
-  (`screenFirst`), after admission; classifier dispatched with `requestTransforms: false`, bare
-  transport. Pin: `apps/gateway/test/guardrail/proxy.test.ts`; parser:
-  `apps/gateway/test/guardrail/classifier.test.ts`.
-- Smart routing never falls back external; fails closed. Pin:
-  `apps/gateway/test/smartRouter/proxy.test.ts`; parser:
-  `apps/gateway/test/smartRouter/classifier.test.ts`.
-- Windows *slide*. `1m` exact ring in `apps/gateway`; longer windows are `usage.sumSince` —
-  which must filter `state = 'done'` — plus in-memory delta, cached 30s. Composition may over-count,
-  must **never** under-count, so delta keep everything at or after read instant. Failed
-  `sumSince` serve request, log through existing `LogFields` keys, degrading long windows
-  only.
-- Token and spend debit live in `finishLog` beside `usage.append`, never inside `@omni/store`: that
-  site already run at most once per request id.
-- Concurrency gauge released at request scope, nowhere else. Streaming handler return while
-  request still run, so `finally` around handler body fire at head-send; streams free it from
-  `sseResponse`'s run-once completion. No window expire gauge — leak lock key out until
-  restart.
-- `ApiKeySummary.limitUsage` count committed rows only: floor on what limiter see.
-  `concurrency.used` is `null`, not `0`.
-- `Target.credentialId` is a hard filter, never a routing strategy: no `"pinned"` strategy and no
-  spill from disabled, breakered, rate-limited, or quota-spent account. `pin:missing` emits once per
-  target only when no account resolves; declare `pinSeen` inside each target loop and set it before
-  drops. Nothing validates pin existence at write time—account removal must not make unrelated edits
-  unsavable; `omni doctor` uses `resolvePin`. Schema on both
-  target arms rejects empty and limits `[A-Za-z0-9_-]` to 64 chars; dashboard omits an empty pin.
-  Console draft clears pin on provider/endpoint change, not model change; API/CLI preserve it.
-  Pinned model limits use its account auth; unresolved pin falls back to provider-wide narrowing,
-  never catalog figures. `putModel.unreachable` checks pinned auth without grandfathering; `pairOf`
-  stays keyed on provider+model so clearing a dangling pin is never refused. `modelLimits` uses
-  enabled credentials while `models.ts` uses existence. Account-removal surfaces
-  name pinned models before confirmation; unanswered/empty console data means unknown.
-- Breaker probe is one dispatch claim per `(credential, model)`, gated in router. `filters.ts` marks
-  both open-past-cooldown and `halfOpen` as `Pair.probe`. Acquire `coord.gauge` inside attempt `try`
-  beside `releaseSlot`; release after drain in the same `finally`. Lost claim
-  (`breaker:probing`) consumes no attempt; all skipped means `NO_CANDIDATES`. `DispatchDeps.coord`
-  is required; router must not import `@omni/coord`. Pins:
-  `apps/gateway/test/dispatch/dispatch.test.ts`, `packages/router/test/imports.test.ts`; design:
-  `docs/superpowers/specs/2026-09-07-breaker-half-open-probe-design.md`.
-- `provider:missing` follow pin rule exactly: **once per target**, `kind: "target"`,
-  `credentialId: ""`, **first** guard in target loop. Dispatch's `INTERNAL "no adapter for
-  provider …"` stay throw: reaching it mean router admitted what it should have excluded;
-  `deps.adapters` separate injection point from descriptors.
-- **Format and existence two questions.** `providerIdSchema` check format alone, gate
-  **credentials**: `createApiKeyCredential` parse it, then ask `isProviderId`. `catalogModelAuths`
-  answer "every way in" for unknown provider. **Target naming any well-formed provider id
-  save** — `targetSchema` take `providerIdSchema`, existence checked nowhere on that path, same
-  exemption dangling pin have; `provider:missing` and `omni doctor` carry weight. One rule
-  survive old enum: **`custom` target require `endpointId`, nothing else may carry
-  one**.
-- `ProviderModelChoice.auth` enforced at write time in `putModel`, never at routing. Catalog export
-  fact (`catalogModelAuths`), control own rule. Provider with no credential unknown,
-  unlisted model unknown, disabled credentials count, stored target under that id exempt.
-- `ProviderId` is a validated string, not a built-in union. Provider-keyed lookups are partial;
-  keep `noUncheckedIndexedAccess` checks and never cast them away. `PROVIDER_ID_PATTERN` in providers
-  is source; control reads it. Plugin-id grammar mirrors in manifest/routes/control/store and is
-  pinned by `pluginIdGrammar.test.ts`. Built-in table completeness is pinned by lint plus
-  `descriptor.test.ts`, not typecheck.
-- Every provider-keyed table is null-prototype; use `Object.assign(Object.create(null), …)`, never
-  spread. Use `Object.hasOwn` (not method `.hasOwnProperty()`) only for injected tables, never instead
-  of null prototypes. `providerTables.test.ts` discovers tables rather than enumerating them. Guard
-  injected adapters at `dispatch/index.ts`, not `app.ts`; `DispatchDeps`/`ProxyDeps` are public.
-  Dashboard `heldAuths`
-  separately uses a null-prototype table.
-- Thread registries through the entire call graph; the sentinel-registry test is the guard.
-  Module-scope `Object.keys/entries(PROVIDER_DESCRIPTORS)` is a pre-plugin snapshot: grep for the
-  pattern whenever changing registries. `PROVIDER_IDS` may serve CLI text/tests, never gates.
-- `AggregateError` may have no message: use `describeError`; `classify` recurses into `errors` so
-  multi-address transport failures remain retryable.
-- Keep `CONNECT_ATTEMPT_TIMEOUT_MS` above one Linux TCP retransmit (>1s); do not use Node's shorter
-  Happy Eyeballs default.
-- Streaming responses need downstream `: keepalive` comments because provider heartbeats decoded
-  away; cadence is 10s, or 4s on `responses` (Codex drop a connection silent ~5s).
-  `requestDeadlineMs` default **0** = unlimited. The three **inference** routes alone clear Bun's
-  per-request ceiling with `server.timeout(request, 0)` — `/v1/models` and
-  `/v1/messages/count_tokens` do not, so server `idleTimeout: 255` still bound them.
-  Non-streaming request get no heartbeat, so unlimited one is bound
-  by the intermediary's read timeout, not by us. Positive deadline is **not** bounded by 255 — the
-  setting is consumed only by inference dispatch, whose routes cleared their ceiling.
-- **A gauge slot expires while its holder is live, in every impl** (`liveSlots` filters on expiry),
-  so work that can outlast a TTL must name its slot and `renew` it. `GAUGE_TTL_MS` (concurrency
-  ceiling) and `SLOT_TTL_MS` (load) do, on a third-of-TTL timer that is `unref`ed and cleared by the
-  release, and **capped at `MAX_RENEWED_MS`** — expiry is what reclaims a slot whose release never
-  ran, so renewing forever turn a five-minute leak permanent. `PROBE_TTL_MS` deliberately does
-  **not** renew — a bounded double-probe beat one long probe holding a recovering pair out of
-  rotation. **The slot name is the limiter's own uuid, never `requestId`**: a named acquire is
-  idempotent, so a caller-supplied id shared by two requests makes one slot and the ceiling admits
-  past itself. `""` is refused as a holder in both impls (Redis spend it as its unnamed sentinel).
-  Pins: `packages/coord/test/{memory,contract}.test.ts`,
-  `apps/gateway/test/routes/rateLimit.test.ts`, `apps/gateway/test/auth/rateLimit.test.ts`.
-- Socket registry close every connection **before** `app.stop()`; its `stopLoops` position is
-  what make that true. `stop()` called without `true`, so it drain. Close with `1001`; `4401` mean
-  "do not reconnect", for expired session alone.
-- `/health` watcher stay plain `fetch` poll, must never move onto socket.
-- Elysia call `.ws()` route's `beforeHandle` **twice**, guarded by `typeof === "function"`, so it
-  must be single idempotent function, never array. Register companion plain `GET` on
-  same path, else browser hit 404 on endpoint that exists.
-- **Pushed topic replace polling, so emitter count must match writer count** (`res:logs`:
-  `beginLog`, `routeLog`, `finishLog`; `res:usage` only `finishLog`, nothing else count tokens).
-- **Topic name resource; every query-key branch reading it in its entry** (`res:usage` cover
-  console `["usage",…]` and `["client","usage",…]`). Topic classes, `res:*` prefix mapping,
-  `plugin:*` no-`seq` contract, coalescing: `ARCHITECTURE.md#push-transport`.
-- Telemetry is process-local: `/metrics` reads neither store nor `coord`; provider HTTP gains no
-  trace header; tracing off allocates no spans. See the [observability design](docs/superpowers/specs/2026-09-04-observability-design.md).
-- Stdout hold operational events; `request_logs` hold completed requests. Do not restore duplicate
-  per-request access lines. `requestId` join both.
-- Console read only captured stdout: `OMNI_LOG_FILE`, journald, or none. `OMNI_LOG_FILE` name
-  existing capture; not create one.
-- Docker `scratch` runtime contain gateway + built console, no shell; non-root `bun`, `HEALTHCHECK`
-  via `omni health --env-only` (gateway ignores root `.env`). npm package contain CLI, gateway,
-  dashboard. Kustomize base in `k8s/`; `secret.yaml`
-  gitignored, `secret.example.yaml` committed.
-- OpenAI OAuth route to narrower Codex surface. OAuth-specific encoding stay behind existing `oauth`
-  flag.
-- Snapshot is database alone. `request_bodies/` excluded; after restore, body rows and artifact
-  files disagree until `sweepOrphans` reconcile. Snapshot still carry encrypted credentials and
-  API-key hashes; downloads `no-store`.
-- Body `put` write `OGBA` raw (`sealArtifact`), read legacy/raw/gzip; roll back only to >= v0.13.5
-  (older reader call binary `corrupt`). Pins: writer-format + mixed-corpus tests in store
-  `test/contract/bodies.test.ts`. `MAX_ENVELOPE_BYTES` caps pre-read; binary `+38` (`parseBinary`).
-  Artifact gunzip keeps native `maxOutputLength` + consumed-input checks; Web decompression lacks
-  both. Bun migration boundaries: `docs/bun-builtins-audit.md`.
-- Lifecycle and swap rules below explained in `ARCHITECTURE.md#replacing-the-database-while-it-is-open`
-  and `#stopping-and-restarting`. Read section before changing any.
-- Restart ask systemd, never self-SIGTERM; `--no-block` required.
-- Quiesce latch gate `/v1/*` only; `/api/*` and `/health` stay live through swap.
-- `store.close()` idempotent, `reopen()` tolerate closed handle, so restore = close → swap →
-  reopen. Repo methods forward per call: bind one to local and it die at next swap.
-- Swap forwarder in `sqlite/store.ts` hand-writes one arrow per repo method; TypeScript permits
-  lower arity, so every added parameter must be forwarded. Pin: `packages/store/test/swap.test.ts`.
-- `vacuum()` must checkpoint, or page count fall while file keep every page.
-- In `store/src/logPage.ts`, person-entered `model`, `requestedModel`, `resolvedModel`, `errorCode`
-  use case-insensitive escaped substring search; all other fields, especially scoped `apiKeyId`, use
-  `=`. Dialect supplies `LIKE`/`ILIKE`; escape `_` and `%` explicitly. Pin:
-  `test/contract/usage.test.ts`.
-- Restore compare admin password hash across swap, invalidate sessions only when differ.
-  **Nothing may sit between swap and that comparison.** `swapIn` rebuild `usage_rollup` last
-  and guarded, for that reason; cost documented in `README.md`.
-- `omni db restore` refuse while gateway running, no override.
-- Plugin ordering traps, both silent when reversed: channel registry build **before**
-  `loadPlugins` in `apps/gateway/src/index.ts`; route's `close` read `registry.topics(id)`
-  **before** `registry.remove(id)`. Tables, migrations, events, channels, externals, asset
-  paths: `ARCHITECTURE.md#plugins`.
-- Literal `../` never reach route handler — `URL` normalise first, so test asserting 404 for
-  it prove nothing. Only percent-encoded forms reach guard; `realpath` already decide every case.
+- `OMNI_BASE_URL` must be the public origin (decides `Secure` cookies, OAuth callbacks). Changing
+  `OMNI_ENCRYPTION_KEY` invalidates stored credentials.
+- The gateway reads **no** `.env`: config is process env only (`omni-gateway-core/src/lib.rs`). Pin:
+  `crates/omni-gateway-core/tests/config.rs`. The CLI merges the root's `.env` explicitly and passes it
+  to the gateway it spawns.
+- CLI root (`omni-cli/src/context.rs` `resolve`): `--root` > `OMNI_ROOT` > cwd holding `.env` or
+  `omnigateway.db` > `~/.config/omnigateway`. Database: `--db` > root `.env` > ambient `OMNI_DB_PATH` >
+  `omnigateway.db`. `--root` without `--db` drops ambient `OMNI_DB_PATH`, warns on stderr, and doctor
+  reports it. Unpinned.
+- Only the 1.x-served providers are dispatched: `anthropic`, `openai`, `antigravity`, `custom`.
+  Others (`kimi`, `kilo`, `grok`, `muse`, `qoder`) stay in the catalog and routing registry; a target
+  naming one reaches `INTERNAL "no adapter for provider …"` at attempt time. Unpinned.
+- `1m` and `concurrency` are process-local on a single node; `5h`/`1w` are seeded from the store and
+  survive restart. In Rust the single-node gauge has **no TTL** (freed on `Drop`).
+- A success writes health only when `success_would_change` (`omni-router/src/breaker.rs`) says the
+  snapshot row differs from blank; checked before the attempt in `dispatch.rs`. Missing row = healthy.
+  Pin: `quota_breaker_resolve.rs` `success_would_change_is_exactly_whether_record_success_changes_the_row`.
+  Postgres trigger `WHEN` (`migrations/postgres/002_health_measurements.sql`) is a strict subset.
+- Migrations under `crates/omni-store/migrations/{sqlite,postgres}/` are frozen bytes: installed
+  databases record ids. Never edit one; add the next. Pins: `crates/omni-store/tests/{migrate,pg_migrate}.rs`.
+- The writer (`omni-store/src/writer/`) is the one writer of `request_logs`; completion is applied at
+  most once per id, rollups folded in the same transaction. Pins: `crates/omni-store/tests/writer.rs`,
+  `pg_writer.rs`. Pending rows hold placeholder metrics; inspect `state`, not `status`.
+- `usage_rollup` derived from `request_logs`; `rebuild_rollup` (`omni-store/src/rollup.rs`) reproduces
+  it; doctor audits (`diagnostics::audit_rollup`). Day offset is fixed per install
+  (`OMNI_DAY_OFFSET_MINUTES`); thread it through both stores. Pin: `contract.rs`
+  `the_configured_day_offset_cuts_the_daily_bucket`.
+- `quota_windows` hold provider observations. Missing data = unknown, never unlimited. Probe failure
+  never disables a credential. Pins: `omni-control/src/quota_runtime.rs` tests.
+- Limit names (`api_keys.limits` JSON keys) are a storage contract failing **closed**: unknown name is
+  a parse failure (`omni-ratelimit/src/limits.rs`). Pin: `crates/omni-store/tests/limits.rs`.
+- Refuse at auth, degrade at list. Unparseable `limits` refuse the key as `INTERNAL "api key
+  configuration is unusable"` (`snapshot.rs`), never `AUTH`; the key list still returns the row. Pin:
+  `crates/omni-gateway-core/tests/snapshot.rs` `a_revoked_key_and_unreadable_limits_are_refused_*`.
+- Admission claims the `1m` window and gauge **before any await** and rolls back on refusal. Per-model
+  overrides (`LimitConfig::model_override`) claim key-wide **and** model subject in one admission,
+  roll back both. Pins: `crates/omni-gateway-core/tests/ratelimit.rs`
+  (`a_burst_against_a_1m_ceiling_*`, `a_refusal_by_either_scope_rolls_back_the_other`),
+  `crates/omni-cluster-limit/tests/cluster.rs`.
+- Five fields editable after minting, each written whole (`omni-control/src/body_schema.rs`):
+  `limits`, `models`, `expiry` (past instant allowed — "expire now"), `guardrail` (`null` = none,
+  empty after trim refused), `smart-routing` (`{enabled}`). `bodyLoggingOptOut` deliberately not
+  editable. Routes: `PUT /api/keys/:id/{limits,models,expiry,guardrail,smart-routing}`.
+- **Guardrail fails closed**: only a bare `ALLOW` from a finished reply (`endTurn`/`stopSequence`)
+  admits (`parse_verdict`, `omni-gateway/src/screening.rs`). Judged after admission, inside the
+  event sequence (`screen_first`); classifier dispatched with `request_transforms: false`. Pins:
+  `crates/omni-gateway/tests/guardrail.rs`, `server.rs` `a_policy_key_with_no_guardrail_model_*`.
+- Smart routing never falls back external; fails closed. Pins: `crates/omni-gateway/tests/smart_routing.rs`,
+  `screening_dispatch.rs`.
+- Long windows over-count, never under-count. Single node: buckets seeded through the writer
+  (`ratelimit_seed.rs`); debits follow the committed row (`LogObserver`). Seeding does not block
+  (deliberate divergence from 0.x, documented in `ratelimit.rs`).
+- Cluster gauge slots are named per admission (random uuid, never `requestId`) and renewed under a
+  one-day cap (`GAUGE_TTL_MS`, `MAX_RENEWED_MS`, `omni-cluster-limit/src/lib.rs`). Probe slots expire at
+  180 s and are not renewed (`Probes::claim`, `omni-gateway/src/load.rs`). Pins:
+  `crates/omni-coord/tests/contract.rs` (`a_named_gauge_slot_renews_*`, `a_blank_holder_is_refused`),
+  `crates/omni-cluster-limit/tests/cluster.rs` `a_long_request_keeps_its_slot_by_renewal`.
+- `limitUsage` counts committed rows only; `concurrency.used` is `null`, not `0` (`omni-control/src/api.rs`).
+- `Target.credential_id` is a hard filter: no spill from a disabled, breakered, rate-limited or spent
+  account; `pin:missing` once per target only when no account resolves. Nothing validates pin
+  existence at write time; doctor reports dangling pins. Pins: `filters.rs` `a_pin_*`.
+- Breaker probe: router marks open-past-cooldown and `halfOpen` as `probe`; dispatch claims
+  `probe:<healthKey>`; a lost claim (`breaker:probing`) consumes no attempt; success closes the breaker
+  **at commit**. Pin (router half): `filters.rs` `admits_an_open_breaker_*_as_a_probe`. Dispatch half
+  unpinned.
+- `provider:missing` once per target, first guard (`filters.rs`). Pin:
+  `a_target_naming_a_provider_that_is_not_installed_is_excluded_once`.
+- Format and existence are two questions. Credential creation checks the id grammar **and**
+  `catalog::descriptor` (`omni-control/src/credentials.rs` `parse_create`); target writes check grammar
+  only (`model_schema.rs`). `custom` target requires `endpointId`, nothing else may carry one. Grammar
+  mirrored by `SAFE_PROVIDER_ID` (`theme/tokens.ts`) at all three Rust sites, held by `rustMirrors.test.ts`.
+- `ProviderModelChoice.auth` enforced at write time (`omni-control/src/models.rs`), never at routing.
+  Unpinned.
+- `CONNECT_ATTEMPT_TIMEOUT` (3 s, `omni-providers/src/http/mod.rs`) stays above one TCP retransmit.
+  Pin: `http_client.rs` `connect_attempt_timeout_is_longer_than_one_tcp_retransmit`.
+- Streams carry `: keepalive` every 10 s (`KEEPALIVE`, `omni-gateway/src/lib.rs`), 4 s on Responses.
+  Pin: `server.rs` `an_idle_stream_carries_keepalive_comments`. `requestDeadlineMs` default 0 =
+  unlimited. Connection idle budget `IDLE_TIMEOUT` 255 s; inference routes are exempt
+  (`omni-gateway/src/http.rs`). Pins: `http.rs` tests, `server.rs`
+  `a_silent_upstream_stream_with_keepalives_outlives_the_idle_timeout`.
+- Socket registry closes connections with `1001` on restart; `4401` means "do not reconnect", for
+  expired session alone (`stream_transport.rs`). Pin: `expired_session_upgrade_and_next_shared_heartbeat`.
+  Heartbeat re-verifies every 20 s.
+- `/health` stays plain polling, never on the socket.
+- **Emitter count matches writer count**: the writer's `LogObserver::committed` (`stream_transport.rs`
+  `Hub`) emits `res:logs` per row event and `res:usage` per finish; admin mutations emit their
+  resource (`admin_routes.rs` `frozen_resource_publisher_routes`). Topic covers every query-key branch
+  reading it (console `["usage",…]` and client `["client","usage",…]`); clients may hold only
+  `res:usage`/`res:logs` (`stream.rs` `authorised`). `ARCHITECTURE.md#push-transport`.
+- Telemetry is process-local: `/metrics` reads neither store nor coord; provider HTTP gains no trace
+  header (`otlp.rs` `TraceHttp`). Unpinned. Design: [observability](docs/superpowers/specs/2026-09-04-observability-design.md).
+- Stdout holds operational events; `request_logs` hold completed requests; `requestId` joins both.
+  Console reads only captured stdout: `OMNI_LOG_FILE`, journald, or none (`omni-gateway/src/console.rs`).
+- Docker `scratch` runtime: binary + console, non-root `bun` user, `HEALTHCHECK` via
+  `omni health --env-only`. npm ships one native binary per platform plus `public/`. Kustomize base in
+  `k8s/`; `secret.yaml` gitignored.
+- Snapshot is the database alone (`VACUUM INTO`); `request_bodies/` excluded and reconciled by the
+  orphan sweep. Downloads `no-store`.
+- Bodies: writer emits `OGBA` raw (`seal`, `omni-store/src/pg/bodies.rs`); readers accept raw, gzip and
+  legacy `enc:v1:` hex; `MAX_ENVELOPE_BYTES` caps before read. Pin: `pg/bodies.rs`
+  `a_sealed_envelope_opens_and_a_flipped_byte_does_not`, `crates/omni-store/tests/pg_cross_read.rs`.
+- Lifecycle and swap: `ARCHITECTURE.md#replacing-the-database-while-it-is-open` and
+  `#stopping-and-restarting`. Read before changing any.
+- Restart asks systemd, never self-signals; `--no-block` required (`omni-gateway/src/lifecycle.rs`).
+  Pin: `supervision_and_stubbed_commands`.
+- Quiesce latch gates `/v1/*` only; `/api/*` and `/health` stay live through a swap
+  (`quiesce.rs`, `server.rs`).
+- Swap (`omni-control/src/database.rs` restore/import, `omni-gateway/src/database_swap.rs`): close
+  every registered owner (`omni-store/src/lifecycle.rs`), unlink stale `-wal`/`-shm`, rename, reopen;
+  compare password hashes; `rebuild_rollup` last and guarded — **nothing between swap and that
+  comparison**. Pin: `database.rs` tests `swap_exact_sequence_*`, `failures_preserve_frozen_half_swap_*`.
+- `vacuum` checkpoints (`VACUUM; PRAGMA wal_checkpoint(TRUNCATE)`). Unpinned.
+- Log filters (`omni-store/src/logs.rs`, `pg/logs.rs`): typed text (`model`, `requestedModel`,
+  `resolvedModel`, `errorCode`) is case-insensitive escaped substring (`LIKE`/`ILIKE … ESCAPE '\'`);
+  ids, especially scoped `apiKeyId`, use `=`. Unpinned in Rust.
+- `omni db restore` refuses while the gateway runs, no override (`omni-cli/src/database.rs`). Unpinned.
+- Literal `../` never reaches a route: `normalize_path` (`static_files.rs`) resolves dot segments
+  first; `canonicalize` decides containment. Pin: `crates/omni-gateway/tests/static_paths.rs`.
 
 ## Subagent workflow
 
@@ -691,9 +477,5 @@ Detailed compatibility rules + measured client behavior belong in `docs/superpow
 
 When gitignored `graphify-out/graph.json` exists, query it first for codebase questions; use
 `path`/`explain` for focused relationships and the wiki/report only for broad navigation. If absent,
-run `/graphify .` or read source directly. After code edits run `graphify update .`.
-
-Known graphify limitation: AST barrel re-exports dangle at `index` instead of defining modules,
-under-ranking core IR/store types. Every `graphify update .` reintroduces it for `GatewayError`,
-`ChatRequest`, `Store`, `ProviderId`, `StreamEvent`, `Logger`, and `HttpClient`; do not trust their
-inbound-degree rankings.
+run `/graphify .` or read source directly. After code edits run `graphify update .`. A graph built
+before the TS deletion still holds `apps/gateway`/`packages/` nodes: rebuild it.
