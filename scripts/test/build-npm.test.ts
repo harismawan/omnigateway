@@ -147,4 +147,6 @@ test.skipIf(Bun.which("npm") === null)(
       verifyPacked({ version: "1.0.0", assets, tarballs: [...tarballs.slice(1), ...again] }),
     ).rejects.toThrow(/linux-x64/);
   },
+  // Six real `npm pack` runs: ~2 s warm, past Bun's 5 s default on a cold CI runner.
+  30_000,
 );
