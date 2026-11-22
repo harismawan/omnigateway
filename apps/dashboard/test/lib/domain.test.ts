@@ -263,8 +263,8 @@ test("a target naming no endpoint is served by an account that names none either
  *
  * The check used to read `target.provider === "custom" && …`, so an `endpointId`
  * on a non-custom target was ignored. It now keys on the field being present, so
- * such a target is served only by an account that matches it. `sqlite/config.ts`
- * reads targets back with `JSON.parse` and no validation, so a restored or
+ * such a target is served only by an account that matches it.
+ * `crates/omni-store/src/models.rs` reads targets back with no schema check, so a restored or
  * hand-edited database is exactly where this arises — and failing closed on a
  * constraint the row states is the safer direction than serving it from an
  * account that does not meet it.
@@ -335,8 +335,9 @@ test("an account carrying an empty endpoint id serves nothing", () => {
  * row unroutable.
  *
  * Write paths cannot mint such a row — the control schema requires `endpointId`
- * on the custom arm and `putModel` independently refuses one with no live
- * endpoint — but `sqlite/config.ts` parses stored targets without validation, so
+ * on the custom arm and model writes in `crates/omni-control` independently
+ * refuse one with no live endpoint — but `crates/omni-store/src/models.rs`
+ * parses stored targets without schema validation, so
  * a restore or a hand edit supplies one. The consequence was not a failed
  * request: it was a request sent to an arbitrary endpoint's origin with that
  * endpoint's key, and an `omni doctor` that called the pin healthy. That is the
@@ -364,8 +365,8 @@ test("an account bound to an endpoint refuses a target that names none", () => {
 });
 
 /**
- * `providerData` is `Record<string, unknown>` and `sqlite/credentials.ts` reads
- * it back with a bare `JSON.parse`, so `endpointId` can hold any JSON value.
+ * `providerData` is `Record<string, unknown>` and `crates/omni-store/src/credentials.rs`
+ * reads it back as untyped JSON, so `endpointId` can hold any JSON value.
  *
  * These exist because the commit that fixed this shipped **no test at all**, and
  * reverting it passed the entire suite. A present-but-uncomparable id must match
@@ -375,8 +376,9 @@ test("an account bound to an endpoint refuses a target that names none", () => {
  * `""` is on this list and was the last one to get there. It is a *string*, so
  * the type-based guard let it through and it was then read as "no endpoint" —
  * serving every target that names none, the exact fail-open the rest of the list
- * closes. Nothing legitimate writes it: `customProviderData` reads the
- * field through `requiredString`, which refuses empty, and a non-custom account
+ * closes. Nothing legitimate writes it: custom-credential creation in
+ * `crates/omni-control/src/credentials.rs` reads the field through `required`,
+ * which refuses empty, and a non-custom account
  * holds no `endpointId` key at all.
  */
 const CORRUPT: readonly unknown[] = [0, 42, null, false, {}, [], ["endpoint-a"], ""];
@@ -399,7 +401,7 @@ test("a pin does not rescue an account whose endpoint id is not a string", () =>
 });
 
 test("a corrupt target id does not match the identically corrupt account id", () => {
-  // `sqlite/config.ts` parses stored *targets* with a bare `JSON.parse` too, so
+  // `crates/omni-store/src/models.rs` parses stored *targets* untyped too, so
   // the same corrupt value can arrive on both sides of the comparison at once —
   // the one case where mapping unusable ids to a shared value would be visibly
   // wrong, since a raw comparison of two equal values matches.

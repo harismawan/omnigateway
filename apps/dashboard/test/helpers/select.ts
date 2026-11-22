@@ -22,7 +22,7 @@ function optionsIn(list: HTMLElement): HTMLElement[] {
 
 /**
  * Opens a `Select` and clicks the row whose value — or, failing that, whose
- * visible label — is `wanted`. The same matching `user.selectOptions` did for
+ * visible label — equals the third argument. The same matching `user.selectOptions` did for
  * the native control this replaced, so a test reads the same either way.
  */
 export async function choose(user: Clicker, trigger: HTMLElement, wanted: string): Promise<void> {

@@ -184,6 +184,34 @@ test("the provider-id pattern is the one credential creation enforces", () => {
   }
 });
 
+test("the model-target schema enforces the same provider-id rule", () => {
+  // `model_schema.rs` checks UTF-16 code units: a-z first, then a-z/0-9/`-`,
+  // at most 32 — the same three facts as `credentials.rs`, spelled by number.
+  const path = "crates/omni-control/src/model_schema.rs";
+  const check = owned(
+    path,
+    /(if key == "provider"\s*&& !\(s\.len\(\) <= \d+[\s\S]*?\)\s*\{\s*return Err\(error\(&p, "must be a lowercase provider id"\)\);)/,
+  );
+  const longest = num(owned(path, /if key == "provider"\s*&& !\(s\.len\(\) <= (\d+)/));
+  expect(check).toContain(".is_some_and(|u| matches!(u, 97..=122))");
+  expect(check).toContain(".all(|u| matches!(u,97..=122|48..=57|45))");
+  expect(SAFE_PROVIDER_ID.test("a".repeat(longest))).toBe(true);
+  expect(SAFE_PROVIDER_ID.test("a".repeat(longest + 1))).toBe(false);
+});
+
+test("the log filter enforces the same provider-id rule", () => {
+  const path = "crates/omni-control/src/logs.rs";
+  const check = owned(
+    path,
+    /("provider"\s*if v\.len\(\) > \d+[\s\S]*?=>\s*\{\s*return Err\(Failure::bad\("provider: must be a lowercase provider id"\)\);)/,
+  );
+  const longest = num(owned(path, /"provider"\s*if v\.len\(\) > (\d+)/));
+  expect(check).toContain(".is_some_and(u8::is_ascii_lowercase)");
+  expect(check).toContain(".all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')");
+  expect(SAFE_PROVIDER_ID.test("a".repeat(longest))).toBe(true);
+  expect(SAFE_PROVIDER_ID.test("a".repeat(longest + 1))).toBe(false);
+});
+
 test("every provider the shipped catalog names passes the console's pattern", () => {
   const catalog: unknown = JSON.parse(rust("crates/omni-control/data/provider-catalog.json"));
   if (typeof catalog !== "object" || catalog === null) throw new Error("catalog is not an object");

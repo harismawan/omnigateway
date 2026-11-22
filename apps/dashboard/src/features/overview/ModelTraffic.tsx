@@ -35,9 +35,10 @@ const ShareTrack = styled.div`
 
 /**
  * `$color` lands in the stylesheet unescaped, so it comes from `providerColor`
- * and never from a template built here. `target.provider` is read back through
- * `sqlite/config.ts`'s bare `JSON.parse`, which is the read path
- * `providerIdSchema` does not stand on.
+ * and never from a template built here. `target.provider` is read back by
+ * `model_from_parts` in `crates/omni-store/src/models.rs` with no provider-id
+ * check, which is the read path the write-side schema
+ * (`crates/omni-control/src/model_schema.rs`) does not stand on.
  */
 const Segment = styled.div<{ $color: string; $grow: number }>`
   flex: ${({ $grow }) => $grow} 0 0;

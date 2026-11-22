@@ -32,7 +32,7 @@ export type SectionProps = {
  * all resolve loading, failure, and emptiness the same way rather than each
  * inventing its own placeholder.
  *
- * In `ui` rather than beside the usage deck because the client surface renders
+ * In `src/ui/` rather than beside the usage deck because the client surface renders
  * the same four states over its own scoped reads, and two copies of this ladder
  * are two places a state gets forgotten.
  */

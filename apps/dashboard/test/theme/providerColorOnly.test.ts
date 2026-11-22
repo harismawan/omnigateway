@@ -7,9 +7,10 @@
  * `` `var(--p-${provider})` `` into a styled-components interpolation,
  * `ActivityTail.tsx` wrote the same shape into an inline `style`, and
  * `ModelsBoard.tsx`'s `Pip` wrote it into a `background`. All three are read
- * paths — `target.provider` comes back through `sqlite/config.ts`'s bare
- * `JSON.parse` and `log.resolvedProvider` off a request row — so none meets
- * `providerIdSchema`, and styled-components does not escape what it is handed.
+ * paths — `target.provider` comes back through `model_from_parts` in
+ * `crates/omni-store/src/models.rs`, unchecked, and `log.resolvedProvider` off a
+ * request row — so none meets the write-side provider-id check in
+ * `crates/omni-control`, and styled-components does not escape what it is handed.
  * An id closing the declaration and opening its own puts attacker-authored rules
  * in the console's sheet.
  *
