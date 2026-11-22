@@ -490,8 +490,8 @@ mapping is nowhere one-to-one:
   $1.50/$7.50 from 1 January 2027; the standard figure is stored on purpose,
   because a table holding the promotional rate is right today and silently wrong
   on a date nobody is watching for. Traffic before the changeover is therefore
-  over-costed by 2x against list. Every other family is already on its standard
-  rate, so this is the only group where the two differ.
+  over-costed by 2x against list. Gemini 4 Carbon and Argon (added later, see
+  below) follow the same rule; every other family is on its only rate.
 - Pro and 2.5 Pro price in two bands by prompt size; the ≤200K band is carried,
   so a long-context request is under-costed.
 - `cacheWrite5m`/`cacheWrite1h` are **0 as a real price**: Google bills cache
@@ -533,10 +533,15 @@ account available to probe: `gemini-4-carbon`, `-argon`, `-neon` and
 This is the source the catalog note says not to reason from, and it is used
 knowingly: the public API names one id per model with thinking as a request
 parameter, while `v1internal` has so far spelled every row its own way (tier
-suffixes, `gemini-pro-agent`). The rows therefore carry no tier suffix, the
-encoder sends no budget for them, and **whether `v1internal` serves these ids is
-unverified**. A 400 under one of them is an id to correct after a
-`fetchAvailableModels` probe, not an encoder bug. The default stays
+suffixes, `gemini-pro-agent`). The rows therefore carry no tier suffix, and
+**whether `v1internal` serves these ids is unverified**. In `adaptive` mode the
+encoder sends no budget; `budget`, `off` and `betweenTools` still send
+`thinkingBudget`, which Google documents for Gemini 4 as levels instead. So a 400
+under one of these rows is either an id to correct or a budget this family
+refuses, and only a `fetchAvailableModels` probe plus a request settles which.
+The quota probe matches groups by `displayName` containing "gemini"; if Gemini 4
+arrives as a second such group, both write one `(credential, windowType)` row and
+the later overwrites the earlier — also unverified. The default stays
 `gemini-3.8-flash-high`, the probed row.
 
 Limits are the public ones: 1,048,576 context, 65,536 synchronous output (the

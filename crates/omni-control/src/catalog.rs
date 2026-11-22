@@ -1,5 +1,6 @@
-//! Built-in provider descriptors (`PROVIDER_DESCRIPTORS`), generated from the
-//! frozen TS registry. Never edit the data file by hand.
+//! Built-in provider descriptors, the same data as the TS registry's
+//! `PROVIDER_DESCRIPTORS`. Edit both together; `scripts/test/
+//! providerCatalogData.test.ts` fails when the data file drifts from it.
 //!
 //! Operator metadata only: registry order, catalog rows, pricing, limits,
 //! model auth, capabilities and presentation. Gateway routing keeps its own
