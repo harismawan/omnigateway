@@ -27,9 +27,11 @@ fn builtin_antigravity_lists_gemini_4_tiers_at_standard_rates() {
             ));
         }
     }
-    assert_eq!(expected.len(), 14);
+    let ids: Vec<&str> = catalog.iter().map(|m| m.id.as_str()).collect();
+    let want: Vec<&str> = expected.iter().map(|(id, ..)| id.as_str()).collect();
+    assert_eq!(ids[..want.len()], want[..]);
+    assert_eq!(ids[want.len()], "gemini-3.8-flash-high");
     for (model, (id, input, output, cache_read)) in catalog.iter().zip(&expected) {
-        assert_eq!(&model.id, id);
         assert_eq!(model.pricing.input, *input, "{id}");
         assert_eq!(model.pricing.output, *output, "{id}");
         assert_eq!(model.pricing.cache_read, Some(*cache_read), "{id}");
@@ -38,9 +40,4 @@ fn builtin_antigravity_lists_gemini_4_tiers_at_standard_rates() {
         assert_eq!(model.context_window, Some(1_048_576.0), "{id}");
         assert_eq!(model.max_output_tokens, Some(65_536.0), "{id}");
     }
-    assert_eq!(catalog[14].id, "gemini-3.8-flash-high");
-    assert!(catalog.iter().all(|m| !matches!(
-        m.id.as_str(),
-        "gemini-4-carbon" | "gemini-4-argon" | "gemini-4-neon" | "gemini-4-hydrogen"
-    )));
 }

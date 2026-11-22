@@ -531,9 +531,12 @@ A live `fetchAvailableModels` on 2026-11-22 (free-tier account, connected for
 the probe) lists Gemini 4 the way it lists 3.8 Flash: one id per family and
 thinking tier — `gemini-4-{carbon,argon,neon,hydrogen}-{high,medium,low}`, plus
 `gemini-4-neon-xhigh` and `gemini-4-hydrogen-xhigh` — and recommends
-`gemini-4-neon-high` as its default. The catalog carries those fourteen. It also
-lists `gemini-4-hydrogen-tiered-{high,xhigh}`, `gemini-4-hydrogen-sonar` and
-`gemini-pro-orchestrator{,-argon,-neon}`, left out like every `-tiered` id.
+`gemini-4-neon-high` as its default. The catalog carries those fourteen. Left
+out: `gemini-4-hydrogen-tiered-{high,xhigh}`, which pick their own depth like
+every `-tiered` id; `gemini-4-hydrogen-sonar`, which has no `displayName`; and
+`gemini-pro-orchestrator{,-argon,-neon}` with `gemini-flash-worker-agy`
+("Gemini 4 Hydrogen (Orchestrator)"), the IDE agent harness's planner and worker
+roles rather than chat models.
 
 **No request has reached one.** The same account answered every
 `streamGenerateContent` — Gemini 4 and the previously serving

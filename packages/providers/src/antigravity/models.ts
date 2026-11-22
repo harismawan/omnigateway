@@ -110,8 +110,9 @@ const GEMINI_4_NEON = { input: 3, output: 15, cacheRead: 0.15, ...NO_CACHE_WRITE
 const GEMINI_4_HYDROGEN = { input: 1.5, output: 7.5, cacheRead: 0.075, ...NO_CACHE_WRITE };
 
 export const ANTIGRAVITY_MODELS: ProviderModelCatalogEntry = {
-  // The newest family's High tier, matching what the live catalog marks
-  // `recommended` and what Antigravity's own client defaults to.
+  // The last row known to serve. The live catalog's own default is now
+  // `gemini-4-neon-high`, but no Gemini 4 request has been served yet (see
+  // below), so a new target points at the probed row until one has.
   defaultModel: "gemini-3.8-flash-high",
   // OAuth only. There is no API key that reaches `v1internal`: the surface is
   // the IDE's, and it authenticates with a Google account.
@@ -122,10 +123,14 @@ export const ANTIGRAVITY_MODELS: ProviderModelCatalogEntry = {
     // thinking tier (`-low`/`-medium`/`-high`, plus `-xhigh` on Neon and
     // Hydrogen), the same tier-as-model shape as 3.8 Flash. The public API's
     // bare `gemini-4-neon` and friends are not in that catalog and an earlier
-    // edit that shipped them was wrong. The probe also lists `-tiered-*`,
-    // `-sonar` and `gemini-pro-orchestrator*` rows, left out like the other
-    // `-tiered` ids above. **Listed, not yet served**: the account was refused
-    // for every model (Terms of Service), so no request has reached one.
+    // edit that shipped them was wrong. Also listed and left out:
+    // `gemini-4-hydrogen-tiered-*` (picks its own depth, like every `-tiered`
+    // id above); `gemini-4-hydrogen-sonar` (no `displayName`, so nothing says
+    // what it is); and `gemini-pro-orchestrator{,-argon,-neon}` plus
+    // `gemini-flash-worker-agy` ("Gemini 4 Hydrogen (Orchestrator)"), which
+    // are the IDE agent harness's planner and worker roles, not chat models an
+    // operator picks. **Listed, not yet served**: the account was refused for
+    // every model (Terms of Service), so no request has reached one.
     //
     // The probe advertises 262,144 output on Carbon, Neon and Hydrogen and
     // 65,536 on Argon; the rows carry 65,536 because that is the encoder's
