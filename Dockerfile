@@ -47,9 +47,6 @@ WORKDIR /app
 RUN apk add --no-cache build-base perl linux-headers
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates crates
-# Rust embeds the same migration SQL as the frozen TS store.
-COPY packages/store/src/sqlite/migrations packages/store/src/sqlite/migrations
-COPY packages/store/src/postgres/migrations packages/store/src/postgres/migrations
 ARG OMNI_VERSION=0.0.0-dev
 ENV OMNI_CLI_VERSION=$OMNI_VERSION
 RUN cargo build --locked --release -p omni-gateway --bin omnigateway

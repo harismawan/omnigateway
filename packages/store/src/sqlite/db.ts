@@ -1,24 +1,64 @@
 import { Database } from "bun:sqlite";
-import init001 from "./migrations/001_init.sql" with { type: "text" };
-import usageDaily002 from "./migrations/002_usage_daily.sql" with { type: "text" };
-import quotaSnapshot003 from "./migrations/003_quota_snapshot.sql" with { type: "text" };
-import requestState004 from "./migrations/004_request_state.sql" with { type: "text" };
-import rtkMetrics005 from "./migrations/005_rtk_metrics.sql" with { type: "text" };
-import rtkUsage006 from "./migrations/006_rtk_usage.sql" with { type: "text" };
-import quotaSamples007 from "./migrations/007_quota_samples.sql" with { type: "text" };
-import bodyLogging008 from "./migrations/008_body_logging.sql" with { type: "text" };
-import keyLimits009 from "./migrations/009_key_limits.sql" with { type: "text" };
-import usageRollup010 from "./migrations/010_usage_rollup.sql" with { type: "text" };
-import pluginMigrations011 from "./migrations/011_plugin_migrations.sql" with { type: "text" };
-import nodes012 from "./migrations/012_nodes.sql" with { type: "text" };
-import healthMeasurements013 from "./migrations/013_health_measurements.sql" with { type: "text" };
-import keyExpiry014 from "./migrations/014_key_expiry.sql" with { type: "text" };
-import logKeyset015 from "./migrations/015_log_keyset.sql" with { type: "text" };
-import logFilterIndexes016 from "./migrations/016_log_filter_indexes.sql" with { type: "text" };
-import logTextSearch017 from "./migrations/017_log_text_search.sql" with { type: "text" };
-import modelWindowIndex018 from "./migrations/018_model_window_index.sql" with { type: "text" };
-import keyGuardrail019 from "./migrations/019_key_guardrail.sql" with { type: "text" };
-import keySmartRouting020 from "./migrations/020_key_smart_routing.sql" with { type: "text" };
+import init001 from "../../../../crates/omni-store/migrations/sqlite/001_init.sql" with {
+  type: "text",
+};
+import usageDaily002 from "../../../../crates/omni-store/migrations/sqlite/002_usage_daily.sql" with {
+  type: "text",
+};
+import quotaSnapshot003 from "../../../../crates/omni-store/migrations/sqlite/003_quota_snapshot.sql" with {
+  type: "text",
+};
+import requestState004 from "../../../../crates/omni-store/migrations/sqlite/004_request_state.sql" with {
+  type: "text",
+};
+import rtkMetrics005 from "../../../../crates/omni-store/migrations/sqlite/005_rtk_metrics.sql" with {
+  type: "text",
+};
+import rtkUsage006 from "../../../../crates/omni-store/migrations/sqlite/006_rtk_usage.sql" with {
+  type: "text",
+};
+import quotaSamples007 from "../../../../crates/omni-store/migrations/sqlite/007_quota_samples.sql" with {
+  type: "text",
+};
+import bodyLogging008 from "../../../../crates/omni-store/migrations/sqlite/008_body_logging.sql" with {
+  type: "text",
+};
+import keyLimits009 from "../../../../crates/omni-store/migrations/sqlite/009_key_limits.sql" with {
+  type: "text",
+};
+import usageRollup010 from "../../../../crates/omni-store/migrations/sqlite/010_usage_rollup.sql" with {
+  type: "text",
+};
+import pluginMigrations011 from "../../../../crates/omni-store/migrations/sqlite/011_plugin_migrations.sql" with {
+  type: "text",
+};
+import nodes012 from "../../../../crates/omni-store/migrations/sqlite/012_nodes.sql" with {
+  type: "text",
+};
+import healthMeasurements013 from "../../../../crates/omni-store/migrations/sqlite/013_health_measurements.sql" with {
+  type: "text",
+};
+import keyExpiry014 from "../../../../crates/omni-store/migrations/sqlite/014_key_expiry.sql" with {
+  type: "text",
+};
+import logKeyset015 from "../../../../crates/omni-store/migrations/sqlite/015_log_keyset.sql" with {
+  type: "text",
+};
+import logFilterIndexes016 from "../../../../crates/omni-store/migrations/sqlite/016_log_filter_indexes.sql" with {
+  type: "text",
+};
+import logTextSearch017 from "../../../../crates/omni-store/migrations/sqlite/017_log_text_search.sql" with {
+  type: "text",
+};
+import modelWindowIndex018 from "../../../../crates/omni-store/migrations/sqlite/018_model_window_index.sql" with {
+  type: "text",
+};
+import keyGuardrail019 from "../../../../crates/omni-store/migrations/sqlite/019_key_guardrail.sql" with {
+  type: "text",
+};
+import keySmartRouting020 from "../../../../crates/omni-store/migrations/sqlite/020_key_smart_routing.sql" with {
+  type: "text",
+};
 import { backfillDaily, backfillRtkUsage, hostDayOffsetMinutes, rebuildRollup } from "./rollup.ts";
 
 /**

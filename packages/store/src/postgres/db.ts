@@ -1,12 +1,28 @@
 import { SQL } from "bun";
-import init001 from "./migrations/001_init.sql" with { type: "text" };
-import healthMeasurements002 from "./migrations/002_health_measurements.sql" with { type: "text" };
-import keyExpiry003 from "./migrations/003_key_expiry.sql" with { type: "text" };
-import logKeyset004 from "./migrations/004_log_keyset.sql" with { type: "text" };
-import logFilterIndexes005 from "./migrations/005_log_filter_indexes.sql" with { type: "text" };
-import modelWindowIndex006 from "./migrations/006_model_window_index.sql" with { type: "text" };
-import keyGuardrail007 from "./migrations/007_key_guardrail.sql" with { type: "text" };
-import keySmartRouting008 from "./migrations/008_key_smart_routing.sql" with { type: "text" };
+import init001 from "../../../../crates/omni-store/migrations/postgres/001_init.sql" with {
+  type: "text",
+};
+import healthMeasurements002 from "../../../../crates/omni-store/migrations/postgres/002_health_measurements.sql" with {
+  type: "text",
+};
+import keyExpiry003 from "../../../../crates/omni-store/migrations/postgres/003_key_expiry.sql" with {
+  type: "text",
+};
+import logKeyset004 from "../../../../crates/omni-store/migrations/postgres/004_log_keyset.sql" with {
+  type: "text",
+};
+import logFilterIndexes005 from "../../../../crates/omni-store/migrations/postgres/005_log_filter_indexes.sql" with {
+  type: "text",
+};
+import modelWindowIndex006 from "../../../../crates/omni-store/migrations/postgres/006_model_window_index.sql" with {
+  type: "text",
+};
+import keyGuardrail007 from "../../../../crates/omni-store/migrations/postgres/007_key_guardrail.sql" with {
+  type: "text",
+};
+import keySmartRouting008 from "../../../../crates/omni-store/migrations/postgres/008_key_smart_routing.sql" with {
+  type: "text",
+};
 
 /**
  * Anything that can run a statement: the pool, a reserved connection, or the

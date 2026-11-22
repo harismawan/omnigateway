@@ -74,7 +74,7 @@ test("successWouldChange is exactly whether recordSuccess would change the row",
 // Read from whichever migration most recently defined the trigger, so a later
 // migration that replaces it is the one compared — a fixed `002` would keep
 // passing against a trigger no longer installed.
-const MIGRATIONS = join(import.meta.dir, "../../store/src/postgres/migrations");
+const MIGRATIONS = join(import.meta.dir, "../../../crates/omni-store/migrations/postgres");
 const healthTrigger = readdirSync(MIGRATIONS)
   .sort()
   .reverse()

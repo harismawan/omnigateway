@@ -1,38 +1,64 @@
 import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
+import init001 from "../../../crates/omni-store/migrations/sqlite/001_init.sql" with {
+  type: "text",
+};
+import usageDaily002 from "../../../crates/omni-store/migrations/sqlite/002_usage_daily.sql" with {
+  type: "text",
+};
+import quotaSnapshot003 from "../../../crates/omni-store/migrations/sqlite/003_quota_snapshot.sql" with {
+  type: "text",
+};
+import requestState004 from "../../../crates/omni-store/migrations/sqlite/004_request_state.sql" with {
+  type: "text",
+};
+import rtkMetrics005 from "../../../crates/omni-store/migrations/sqlite/005_rtk_metrics.sql" with {
+  type: "text",
+};
+import rtkUsage006 from "../../../crates/omni-store/migrations/sqlite/006_rtk_usage.sql" with {
+  type: "text",
+};
+import quotaSamples007 from "../../../crates/omni-store/migrations/sqlite/007_quota_samples.sql" with {
+  type: "text",
+};
+import bodyLogging008 from "../../../crates/omni-store/migrations/sqlite/008_body_logging.sql" with {
+  type: "text",
+};
+import keyLimits009 from "../../../crates/omni-store/migrations/sqlite/009_key_limits.sql" with {
+  type: "text",
+};
+import usageRollup010 from "../../../crates/omni-store/migrations/sqlite/010_usage_rollup.sql" with {
+  type: "text",
+};
+import pluginMigrations011 from "../../../crates/omni-store/migrations/sqlite/011_plugin_migrations.sql" with {
+  type: "text",
+};
+import nodes012 from "../../../crates/omni-store/migrations/sqlite/012_nodes.sql" with {
+  type: "text",
+};
+import healthMeasurements013 from "../../../crates/omni-store/migrations/sqlite/013_health_measurements.sql" with {
+  type: "text",
+};
+import keyExpiry014 from "../../../crates/omni-store/migrations/sqlite/014_key_expiry.sql" with {
+  type: "text",
+};
+import logKeyset015 from "../../../crates/omni-store/migrations/sqlite/015_log_keyset.sql" with {
+  type: "text",
+};
+import logFilterIndexes016 from "../../../crates/omni-store/migrations/sqlite/016_log_filter_indexes.sql" with {
+  type: "text",
+};
+import logTextSearch017 from "../../../crates/omni-store/migrations/sqlite/017_log_text_search.sql" with {
+  type: "text",
+};
+import modelWindowIndex018 from "../../../crates/omni-store/migrations/sqlite/018_model_window_index.sql" with {
+  type: "text",
+};
+import keyGuardrail019 from "../../../crates/omni-store/migrations/sqlite/019_key_guardrail.sql" with {
+  type: "text",
+};
 import { openDb } from "../src/sqlite/db.ts";
 import { createKeyRepo } from "../src/sqlite/keys.ts";
-import init001 from "../src/sqlite/migrations/001_init.sql" with { type: "text" };
-import usageDaily002 from "../src/sqlite/migrations/002_usage_daily.sql" with { type: "text" };
-import quotaSnapshot003 from "../src/sqlite/migrations/003_quota_snapshot.sql" with {
-  type: "text",
-};
-import requestState004 from "../src/sqlite/migrations/004_request_state.sql" with { type: "text" };
-import rtkMetrics005 from "../src/sqlite/migrations/005_rtk_metrics.sql" with { type: "text" };
-import rtkUsage006 from "../src/sqlite/migrations/006_rtk_usage.sql" with { type: "text" };
-import quotaSamples007 from "../src/sqlite/migrations/007_quota_samples.sql" with { type: "text" };
-import bodyLogging008 from "../src/sqlite/migrations/008_body_logging.sql" with { type: "text" };
-import keyLimits009 from "../src/sqlite/migrations/009_key_limits.sql" with { type: "text" };
-import usageRollup010 from "../src/sqlite/migrations/010_usage_rollup.sql" with { type: "text" };
-import pluginMigrations011 from "../src/sqlite/migrations/011_plugin_migrations.sql" with {
-  type: "text",
-};
-import nodes012 from "../src/sqlite/migrations/012_nodes.sql" with { type: "text" };
-import healthMeasurements013 from "../src/sqlite/migrations/013_health_measurements.sql" with {
-  type: "text",
-};
-import keyExpiry014 from "../src/sqlite/migrations/014_key_expiry.sql" with { type: "text" };
-import logKeyset015 from "../src/sqlite/migrations/015_log_keyset.sql" with { type: "text" };
-import logFilterIndexes016 from "../src/sqlite/migrations/016_log_filter_indexes.sql" with {
-  type: "text",
-};
-import logTextSearch017 from "../src/sqlite/migrations/017_log_text_search.sql" with {
-  type: "text",
-};
-import modelWindowIndex018 from "../src/sqlite/migrations/018_model_window_index.sql" with {
-  type: "text",
-};
-import keyGuardrail019 from "../src/sqlite/migrations/019_key_guardrail.sql" with { type: "text" };
 import { NARROWED_SQL } from "../src/sqlite/usage.ts";
 
 type TableRow = { name: string };
