@@ -291,10 +291,13 @@ struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
 impl Captured {
     fn install() -> (Self, tracing::subscriber::DefaultGuard) {
-        // A callsite first reached on a thread with no subscriber (a parallel
-        // test's writer) caches interest that a scoped capture can miss until
-        // the cache is rebuilt. A global WARN subscriber writing nowhere keeps
-        // every WARN callsite enabled, so the scoped one sees each line.
+        // With one dispatcher registered, tracing-core computes a callsite's
+        // interest from `get_default` on whichever thread reaches it first;
+        // a parallel test's writer on a thread with no subscriber caches
+        // `never`, and this capture misses lines until the next `Dispatch`
+        // rebuilds the cache (`rebuild_interest_cache` after `set_default`
+        // would not help: registration can happen later, elsewhere). A global
+        // WARN subscriber writing nowhere keeps every WARN callsite enabled.
         static GLOBAL: std::sync::Once = std::sync::Once::new();
         GLOBAL.call_once(|| {
             let sink = tracing_subscriber::fmt()
