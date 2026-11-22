@@ -1579,7 +1579,10 @@ describe("the catalog's list prices", () => {
     "Gemini 4 Hydrogen": { input: 1.5, output: 7.5, cacheRead: 0.075 },
   };
 
-  /** The family a row's label names, with any `(High)`/`(Low)` tier removed. */
+  /**
+   * The family a row's label names, with any `(XHigh)`/`(High)`/`(Medium)`/`(Low)` tier
+   * removed.
+   */
   const familyOf = (label: string) => label.replace(/\s*\((?:XHigh|High|Medium|Low)\)$/, "");
 
   test("every row carries its family's published rate", () => {
