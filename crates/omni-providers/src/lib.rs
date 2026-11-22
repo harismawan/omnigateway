@@ -14,6 +14,7 @@ pub mod codec;
 pub mod custom;
 pub mod http;
 pub mod http_error;
+pub mod kilo;
 pub mod kimi;
 pub mod oauth;
 pub mod openai;

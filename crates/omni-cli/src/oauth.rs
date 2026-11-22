@@ -68,7 +68,7 @@ pub fn connect(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
         .ok_or((2, "provider is required".into()))?;
     if !matches!(
         provider.as_str(),
-        "openai" | "anthropic" | "antigravity" | "kimi"
+        "openai" | "anthropic" | "antigravity" | "kimi" | "kilo"
     ) {
         return Err((
             2,
@@ -90,7 +90,7 @@ pub fn connect(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
             return Err((1, "BAD_REQUEST: invalid credential for reconnect".into()));
         }
     }
-    let result = if provider == "kimi" {
+    let result = if provider == "kimi" || provider == "kilo" {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -242,13 +242,23 @@ pub fn connect(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
 /// The URL block goes straight to stderr even under `--json`: it is the
 /// instruction the operator must act on, not progress chatter.
 async fn device_connect(provider: &str, json: bool) -> Result<FlowResult> {
-    use omni_providers::kimi::oauth as kimi;
     let client = Client::new();
-    let initial = kimi::start();
-    let device_id = kimi::minted_device_id(&initial).map_err(gateway)?;
-    let request = kimi::begin_request(&device_id).map_err(gateway)?;
-    let response = send(&client, provider, request, "begin").await?;
-    let start = kimi::begin_result(response.0, &response.1, &device_id).map_err(gateway)?;
+    let start = if provider == "kilo" {
+        // Kilo mints no client identity and needs no PKCE pair: begin is one
+        // POST with an empty body.
+        use omni_providers::kilo::oauth as kilo;
+        let response = send(&client, provider, kilo::begin_request(), "begin").await?;
+        #[allow(clippy::cast_precision_loss)]
+        let at = now() as f64;
+        kilo::begin_result(response.0, &response.1, at).map_err(gateway)?
+    } else {
+        use omni_providers::kimi::oauth as kimi;
+        let initial = kimi::start();
+        let device_id = kimi::minted_device_id(&initial).map_err(gateway)?;
+        let request = kimi::begin_request(&device_id).map_err(gateway)?;
+        let response = send(&client, provider, request, "begin").await?;
+        kimi::begin_result(response.0, &response.1, &device_id).map_err(gateway)?
+    };
     eprintln!(
         "\nOpen this URL to authorize {provider}:\n  {}",
         start.authorize_url
@@ -261,12 +271,44 @@ async fn device_connect(provider: &str, json: bool) -> Result<FlowResult> {
     let deadline = now() + 600_000;
     let mut announced = false;
     loop {
-        let (request, device) = kimi::exchange_request(&start.pending).map_err(gateway)?;
-        let response = send(&client, provider, request, "exchange").await?;
-        #[allow(clippy::cast_precision_loss)]
-        let at = now() as f64;
-        match kimi::poll_result(response.0, &response.1, &device, at) {
-            Ok(result) => return Ok(result),
+        let outcome = if provider == "kilo" {
+            use omni_providers::kilo::oauth as kilo;
+            #[allow(clippy::cast_precision_loss)]
+            let at = now() as f64;
+            let request = kilo::exchange_request(&start.pending, at).map_err(gateway)?;
+            let response = send(&client, provider, request, "exchange").await?;
+            kilo::poll_result(response.0, &response.1)
+        } else {
+            use omni_providers::kimi::oauth as kimi;
+            let (request, device) = kimi::exchange_request(&start.pending).map_err(gateway)?;
+            let response = send(&client, provider, request, "exchange").await?;
+            #[allow(clippy::cast_precision_loss)]
+            let at = now() as f64;
+            kimi::poll_result(response.0, &response.1, &device, at)
+        };
+        match outcome {
+            Ok(mut result) => {
+                if provider == "kilo" {
+                    // Best-effort organization read: a failure here must not
+                    // fail a connect the operator already approved.
+                    use omni_providers::kilo::oauth as kilo;
+                    let access = String::from_utf16_lossy(&result.access_token);
+                    if let Ok(Ok((status, text))) = tokio::time::timeout(
+                        std::time::Duration::from_secs(15),
+                        send(&client, provider, kilo::org_request(&access), "exchange"),
+                    )
+                    .await
+                        && let Some(org) = kilo::org_id(status, &text)
+                    {
+                        omni_ir::deep::insert(
+                            &mut result.provider_data,
+                            "orgId".into(),
+                            serde_json::Value::String(org),
+                        );
+                    }
+                }
+                return Ok(result);
+            }
             Err(omni_providers::oauth::DeviceError::Gateway(e)) => return Err(gateway(e)),
             Err(omni_providers::oauth::DeviceError::Pending) => {
                 if !announced {
@@ -517,6 +559,13 @@ pub fn refresh(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
     // Bind the operator-read version: JS-rounded numbers, replacement TEXT,
     // distinct BLOB bytes. Same snapshot as fresh, released before provider HTTP.
     let provider = text(field(&c, "provider"));
+    if provider == "kilo" {
+        // Kilo issues neither a refresh token nor an expiry: AUTH records that
+        // the credential is unusable until the operator reconnects.
+        let e = omni_providers::kilo::oauth::refresh_refusal();
+        s.connection().execute("UPDATE credentials SET enabled=0,disabled_reason='tokenRejected',disabled_at=?,updated_at=? WHERE id=?",rusqlite::params![now(),now(),id]).map_err(error)?;
+        return Err(gateway(e));
+    }
     let token = secret(&s, &key, id)?
         .ok_or_else(|| (1, format!("AUTH: credential {id} has no refresh token")))?;
     let prior =

@@ -117,7 +117,9 @@ impl Providers {
         let mut kimi = descriptor(caps(true, false, false), &["kimi-", "moonshot"]);
         kimi.catalog = catalog("kimi");
         p.register("kimi", kimi);
-        p.register("kilo", descriptor(all, &[]));
+        let mut kilo = descriptor(all, &[]);
+        kilo.catalog = catalog("kilo");
+        p.register("kilo", kilo);
         p.register("grok", descriptor(all, &["grok-"]));
         let mut antigravity = descriptor(all, &["gemini-"]);
         antigravity.catalog = catalog("antigravity");

@@ -1050,3 +1050,136 @@ async fn kimi_retryable_failure_before_commit_fails_over() {
     }
     flush(h).await;
 }
+
+#[tokio::test]
+async fn kilo_registered_codec_dispatches_the_openrouter_stream() {
+    let f = fixture(&["c0"]);
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute(
+        "UPDATE credentials SET provider='kilo',auth_type='oauth',access_token=api_key,provider_data='{\"orgId\":\"org-42\"}'",
+        [],
+    )
+    .expect("provider");
+    let h = harness(&f, vec![sse_ok(2)]);
+    let mut d = dispatch(h.deps.clone(), req("kilo/anthropic/claude-sonnet-5"));
+    let events = drain(&mut d).await;
+    assert!(matches!(events.first(), Some(StreamEvent::Start { .. })));
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    let log = d.log.lock().expect("log").clone();
+    assert_eq!(
+        (
+            log.status,
+            log.attempts,
+            log.input_tokens,
+            log.output_tokens
+        ),
+        (200, 1, 10, 4)
+    );
+    {
+        let calls = h.script.seen.lock().expect("seen");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].provider, "kilo");
+        // An OAuth credential goes to the OpenRouter path, not the gateway one.
+        assert_eq!(
+            calls[0].url,
+            "https://api.kilo.ai/api/openrouter/chat/completions"
+        );
+        assert!(
+            calls[0]
+                .headers
+                .contains(&("Authorization".into(), "Bearer sk-up".into()))
+        );
+        assert!(
+            calls[0]
+                .headers
+                .contains(&("X-Kilocode-OrganizationID".into(), "org-42".into()))
+        );
+        assert!(
+            calls[0]
+                .headers
+                .contains(&("X-KILOCODE-EDITORNAME".into(), "vscode".into()))
+        );
+        let sent: serde_json::Value = serde_json::from_str(&calls[0].body).expect("body");
+        assert_eq!(sent["model"], "anthropic/claude-sonnet-5");
+        assert_eq!(sent["stream"], true);
+        assert_eq!(
+            sent["stream_options"],
+            serde_json::json!({"include_usage": true})
+        );
+    }
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn kilo_non_streaming_client_is_served_by_collecting_the_stream() {
+    let f = fixture(&["c0"]);
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute(
+        "UPDATE credentials SET provider='kilo',auth_type='oauth',access_token=api_key,provider_data='{}'",
+        [],
+    )
+    .expect("provider");
+    let h = harness(&f, vec![sse_ok(1)]);
+    let request = Request {
+        request: chat("kilo/anthropic/claude-sonnet-5", false),
+        request_id: "req_t".into(),
+        api_key_id: Some("k1".into()),
+        route_started_at: 1_000,
+    };
+    let mut d = dispatch(h.deps.clone(), request);
+    let events = drain(&mut d).await;
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    {
+        let calls = h.script.seen.lock().expect("seen");
+        assert_eq!(calls.len(), 1);
+        let sent: serde_json::Value = serde_json::from_str(&calls[0].body).expect("body");
+        // The request going out streams either way; a non-streaming upstream
+        // would return JSON the SSE parser yields nothing from.
+        assert_eq!(sent["stream"], true);
+        // An account with no organization sends no organization header.
+        assert!(
+            !calls[0]
+                .headers
+                .iter()
+                .any(|(n, _)| n == "X-Kilocode-OrganizationID")
+        );
+    }
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn kilo_retryable_failure_before_commit_fails_over() {
+    let f = fixture(&["c0", "c1"]);
+    set_setting(&f.path, "routingStrategy", "\"priority\"");
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute(
+        "UPDATE credentials SET provider='kilo',auth_type='oauth',access_token=api_key,provider_data='{}',tier=CASE id WHEN 'c0' THEN 1 ELSE 2 END",
+        [],
+    )
+    .expect("provider");
+    let h = harness(
+        &f,
+        vec![status(500, "{\"error\":{\"message\":\"boom\"}}"), sse_ok(1)],
+    );
+    let mut d = dispatch(h.deps.clone(), req("kilo/anthropic/claude-sonnet-5"));
+    let events = drain(&mut d).await;
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    let log = d.log.lock().expect("log").clone();
+    assert_eq!((log.status, log.attempts), (200, 2));
+    assert_eq!(log.credential_id.as_deref(), Some("c1"));
+    {
+        let calls = h.script.seen.lock().expect("seen");
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|c| c.provider == "kilo"));
+    }
+    flush(h).await;
+}

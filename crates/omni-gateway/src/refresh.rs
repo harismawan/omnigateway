@@ -274,6 +274,18 @@ impl Refresher {
         if let omni_store::Secret::Unreadable(error) = &c.secrets.refresh_token {
             return Err(GatewayError::new(ErrorCode::Internal, error.to_string()));
         }
+        if c.provider == "kilo" {
+            // Kilo issues neither a refresh token nor an expiry, so this path
+            // should be unreachable; AUTH records that the credential is
+            // unusable until the operator reconnects, rather than retrying.
+            let error = omni_providers::kilo::oauth::refresh_refusal();
+            self.store
+                .disable_rejected_token(&c.id, (self.now)())
+                .await
+                .map_err(storage)?;
+            self.routing_committed(crate::routing::RoutingChange::Credential { id: c.id.clone() });
+            return Err(error);
+        }
         let token = c.secrets.refresh_token.as_deref().ok_or_else(|| {
             GatewayError::new(
                 ErrorCode::Auth,

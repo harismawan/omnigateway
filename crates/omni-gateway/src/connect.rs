@@ -19,6 +19,7 @@ const PROVIDERS: &[(&str, &str)] = &[
     ("openai", "http://localhost:1455/auth/callback"),
     ("antigravity", "https://antigravity.google/oauth-callback"),
     ("kimi", ""),
+    ("kilo", ""),
 ];
 fn bad(s: &str) -> GatewayError {
     GatewayError::new(ErrorCode::BadRequest, s)
@@ -213,6 +214,29 @@ impl ConnectFlows {
             let response = runner.send(request, 30).await?;
             let start =
                 omni_providers::kimi::oauth::begin_result(response.0, &response.1, &device_id)?;
+            return self
+                .store_flow(provider, label, credential, &start, "device", false)
+                .await;
+        }
+        if *provider == "kilo" {
+            // Device begin: Kilo mints no client identity and needs no PKCE
+            // pair, so the whole start of the flow is this single POST.
+            let request = omni_providers::kilo::oauth::begin_request();
+            let mut runner = crate::oauth_runner::ExchangeRunner::new(
+                app.deps.refresher.http.as_ref(),
+                crate::oauth_runner::ExchangeConfig {
+                    provider: "kilo",
+                    step: "begin",
+                    max_requests: 1,
+                    origins: crate::oauth_runner::Origins::Allowlist(
+                        omni_providers::kilo::oauth::AUTH_ORIGINS,
+                    ),
+                },
+            );
+            let response = runner.send(request, 30).await?;
+            #[allow(clippy::cast_precision_loss)]
+            let now = (app.deps.refresher.now)() as f64;
+            let start = omni_providers::kilo::oauth::begin_result(response.0, &response.1, now)?;
             return self
                 .store_flow(provider, label, credential, &start, "device", false)
                 .await;
@@ -420,6 +444,41 @@ async fn device_exchange(
             #[allow(clippy::cast_precision_loss)]
             let now = (host.now)() as f64;
             omni_providers::kimi::oauth::poll_result(response.0, &response.1, &device, now)
+        }
+        "kilo" => {
+            #[allow(clippy::cast_precision_loss)]
+            let now = (host.now)() as f64;
+            let request = omni_providers::kilo::oauth::exchange_request(pending, now)?;
+            // Two requests: the poll, then the best-effort organization read.
+            let mut runner = crate::oauth_runner::ExchangeRunner::new(
+                host.http.as_ref(),
+                crate::oauth_runner::ExchangeConfig {
+                    provider: "kilo",
+                    step: "exchange",
+                    max_requests: 2,
+                    origins: crate::oauth_runner::Origins::Allowlist(
+                        omni_providers::kilo::oauth::AUTH_ORIGINS,
+                    ),
+                },
+            );
+            let response = runner.send(request, 15).await?;
+            let mut result = omni_providers::kilo::oauth::poll_result(response.0, &response.1)?;
+            // Best-effort: an account with no organization is normal, and a
+            // failed read must not fail a connect the operator already
+            // approved — nor surface as AUTH, which disables credentials.
+            let access = String::from_utf16_lossy(&result.access_token);
+            if let Ok((status, text)) = runner
+                .send(omni_providers::kilo::oauth::org_request(&access), 15)
+                .await
+                && let Some(org) = omni_providers::kilo::oauth::org_id(status, &text)
+            {
+                omni_ir::deep::insert(
+                    &mut result.provider_data,
+                    "orgId".into(),
+                    serde_json::Value::String(org),
+                );
+            }
+            Ok(result)
         }
         #[cfg(test)]
         "device-fixture" => tests::device_fixture(host, pending, prior).await,
@@ -2082,5 +2141,558 @@ mod tests {
                 .expect("present");
             assert_eq!(stored.enabled, code != ErrorCode::Auth, "{status} {body}");
         }
+    }
+
+    // --- kilo device flow ----------------------------------------------------
+    // Mirrors control/test/oauth/kilo.test.ts against the real host wiring:
+    // the non-RFC status ladder, the local expiry deadline, the best-effort
+    // organization read, and the refresh refusal.
+
+    const KILO_NOW: f64 = 1_000_000.0;
+    const KILO_CODES_URL: &str = "https://api.kilo.ai/api/device-auth/codes";
+    const KILO_PROFILE_URL: &str = "https://api.kilo.ai/api/profile";
+    const KILO_FLOW: &str = r#"{"provider":"kilo","label":"kilo","pending":{"verifier":"","challenge":"","state":"","redirectUri":"","deviceCode":"KILO-CODE-1","interval":3,"extra":{"expiresAt":1300000}}}"#;
+    const KILO_EXPIRED_FLOW: &str = r#"{"provider":"kilo","label":"kilo","pending":{"verifier":"","challenge":"","state":"","redirectUri":"","deviceCode":"KILO-CODE-1","interval":3,"extra":{"expiresAt":999999}}}"#;
+    const KILO_APPROVED: &str =
+        r#"{"status":"approved","token":"kilo-token-1","userEmail":"user@example.com"}"#;
+
+    enum KiloReply {
+        Response(u16, &'static str),
+        Reset,
+    }
+
+    /// Answers each call from a queue and records what was asked, so tests
+    /// can assert on the poll URL and the organization read's bearer.
+    struct KiloStub {
+        replies: std::sync::Mutex<std::collections::VecDeque<KiloReply>>,
+        seen: std::sync::Mutex<Vec<omni_providers::http::HttpRequest>>,
+    }
+    impl KiloStub {
+        fn new(replies: Vec<KiloReply>) -> Arc<Self> {
+            Arc::new(Self {
+                replies: std::sync::Mutex::new(replies.into()),
+                seen: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+        fn requests(&self) -> Vec<omni_providers::http::HttpRequest> {
+            self.seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+    impl omni_providers::http::HttpClient for KiloStub {
+        fn send(
+            &self,
+            req: omni_providers::http::HttpRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = std::result::Result<
+                            omni_providers::http::HttpResponse,
+                            omni_providers::http::HttpError,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            self.seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(req.clone());
+            let reply = self
+                .replies
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front();
+            Box::pin(async move {
+                match reply {
+                    Some(KiloReply::Response(status, body)) => {
+                        Ok(omni_providers::http::HttpResponse {
+                            status,
+                            headers: omni_providers::http::Headers::new(),
+                            body: omni_providers::http::ResponseBody::from_bytes(body),
+                        })
+                    }
+                    Some(KiloReply::Reset) => {
+                        Err(omni_providers::http::HttpError::ConnectionClosed)
+                    }
+                    None => panic!("unexpected request to {}", req.url),
+                }
+            })
+        }
+    }
+
+    /// A stored kilo flow with a fixed clock, so expiry arithmetic is pinnable.
+    async fn kilo_harness(
+        http: Arc<dyn omni_providers::http::HttpClient>,
+        flow: &'static str,
+    ) -> (
+        tempfile::TempDir,
+        Arc<crate::refresh::Refresher>,
+        Arc<omni_gateway_core::snapshot::SnapshotHolder>,
+        Arc<ConnectFlows>,
+    ) {
+        let dir = tempfile::tempdir().expect("dir");
+        let store = Arc::new(
+            omni_store::Store::open(
+                omni_store::StoreConfig::Sqlite {
+                    path: dir.path().join("db"),
+                },
+                0,
+            )
+            .await
+            .expect("store"),
+        );
+        let key = omni_crypto::field::derive_key("test-key");
+        let holder = Arc::new(
+            omni_gateway_core::snapshot::SnapshotHolder::build(
+                &omni_store::SqliteStore::open(dir.path().join("db"), 0).expect("sqlite"),
+                key.clone(),
+                0.0,
+            )
+            .expect("snapshot"),
+        );
+        let host = Arc::new(crate::refresh::Refresher::new(store, key, http, || {
+            1_000_000
+        }));
+        let flows = Arc::new(ConnectFlows::default());
+        flows
+            .coord
+            .kv_set("oauth:pending:dev", flow, 600_000)
+            .await
+            .expect("put");
+        (dir, host, holder, flows)
+    }
+
+    #[tokio::test]
+    async fn kilo_begin_request_bytes_and_reply_shape() {
+        let request = omni_providers::kilo::oauth::begin_request();
+        assert_eq!(request.url, KILO_CODES_URL);
+        assert_eq!(request.method, "POST");
+        // The endpoint takes no parameters at all: the body is "", not "{}".
+        assert_eq!(request.body, "");
+        assert_eq!(
+            request.headers,
+            vec![
+                ("Content-Type".to_owned(), "application/json".to_owned()),
+                ("X-KILOCODE-EDITORNAME".to_owned(), "vscode".to_owned()),
+                ("User-Agent".to_owned(), "Kilo-Code/4.140.0".to_owned()),
+                ("Accept".to_owned(), "application/json".to_owned()),
+            ]
+        );
+
+        let start = omni_providers::kilo::oauth::begin_result(
+            200,
+            r#"{"code":"KILO-CODE-1","verificationUrl":"https://kilo.ai/device?c=1","expiresIn":600}"#,
+            KILO_NOW,
+        )
+        .expect("begin result");
+        assert_eq!(start.authorize_url, "https://kilo.ai/device?c=1");
+        // One value serves as both: the operator reads it, and the poll redeems it.
+        assert_eq!(start.user_code.as_deref(), Some("KILO-CODE-1"));
+        assert_eq!(start.pending.device_code.as_deref(), Some("KILO-CODE-1"));
+        assert_eq!(start.pending.interval, Some(3.0));
+        assert_eq!(
+            start
+                .pending
+                .extra
+                .get("expiresAt")
+                .and_then(serde_json::Value::as_f64),
+            Some(KILO_NOW + 600_000.0)
+        );
+
+        let flows = ConnectFlows::default();
+        let reply = flows
+            .store_flow("kilo", string("kilo"), None, &start, "device", false)
+            .await
+            .expect("reply");
+        let value: serde_json::Value = serde_json::from_str(&reply).expect("json");
+        assert_eq!(value["kind"], "device");
+        assert_eq!(value["userCode"], "KILO-CODE-1");
+        assert_eq!(value["supportsManualPaste"], false);
+        assert_eq!(value["pollIntervalMs"], 3000);
+        assert_eq!(value["authorizeUrl"], "https://kilo.ai/device?c=1");
+        let flow = flows
+            .pending(value["flowId"].as_str().expect("id"), false)
+            .await
+            .expect("stored");
+        assert!(device_flow(&flow));
+    }
+
+    #[test]
+    fn kilo_begin_defaults_the_code_lifetime_and_verification_url() {
+        let start = omni_providers::kilo::oauth::begin_result(
+            200,
+            r#"{"code":"KILO-CODE-1","verificationUrl":"https://kilo.ai/device"}"#,
+            KILO_NOW,
+        )
+        .expect("begin result");
+        assert_eq!(
+            start
+                .pending
+                .extra
+                .get("expiresAt")
+                .and_then(serde_json::Value::as_f64),
+            Some(KILO_NOW + 300_000.0)
+        );
+        let bare = omni_providers::kilo::oauth::begin_result(200, r#"{"code":"c"}"#, KILO_NOW)
+            .expect("begin result");
+        assert_eq!(bare.authorize_url, "https://kilo.ai");
+    }
+
+    #[test]
+    fn kilo_begin_status_ladder() {
+        fn begin_err(status: u16, text: &str) -> GatewayError {
+            match omni_providers::kilo::oauth::begin_result(status, text, KILO_NOW) {
+                Err(error) => error,
+                Ok(_) => panic!("expected begin to fail: {status} {text}"),
+            }
+        }
+        // Distinct from a generic failure: an earlier authorization of the
+        // operator's is still open and has to age out.
+        let error = begin_err(429, r#"{"error":"too_many_requests"}"#);
+        assert_eq!(error.code, ErrorCode::RateLimit);
+        assert_eq!(
+            error.message,
+            "kilo has too many pending device authorizations; wait for one to expire and retry"
+        );
+        for (status, code) in [(403, ErrorCode::Auth), (500, ErrorCode::Upstream)] {
+            let error = begin_err(status, "{}");
+            assert_eq!(error.code, code, "{status}");
+            assert_eq!(
+                error.message,
+                format!("kilo refused a device code: http_{status}")
+            );
+        }
+        let error = begin_err(200, r#"{"verificationUrl":"https://kilo.ai/device"}"#);
+        assert_eq!(error.code, ErrorCode::Auth);
+        assert_eq!(
+            error.message,
+            "device code endpoint returned an unusable response"
+        );
+    }
+
+    #[tokio::test]
+    async fn kilo_poll_202_is_pending_and_keeps_the_flow() {
+        let http = KiloStub::new(vec![
+            KiloReply::Response(202, "{}"),
+            KiloReply::Response(202, "{}"),
+        ]);
+        let (_dir, host, holder, flows) = kilo_harness(http.clone(), KILO_FLOW).await;
+        let error = flows
+            .poll(host.clone(), holder.clone(), "dev".into())
+            .await
+            .expect_err("pending");
+        assert_eq!(error.message, PENDING_MARKER);
+        assert_eq!(
+            poll_reply(Err(error)).expect("reply"),
+            r#"{"status":"pending"}"#
+        );
+        let sent = http.requests();
+        assert_eq!(sent[0].url, format!("{KILO_CODES_URL}/KILO-CODE-1"));
+        assert_eq!(sent[0].method, "GET");
+        assert_eq!(sent[0].body, "");
+        // The poll is what earns the token; there is nothing to authenticate it with.
+        assert!(
+            !sent[0]
+                .headers
+                .iter()
+                .any(|(n, _)| n.eq_ignore_ascii_case("authorization"))
+        );
+        assert!(flows.pending("dev", false).await.is_ok());
+        // A second poll runs a fresh exchange against the kept flow.
+        let again = flows
+            .poll(host, holder, "dev".into())
+            .await
+            .expect_err("pending");
+        assert_eq!(again.message, PENDING_MARKER);
+        assert!(flows.pending("dev", false).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn kilo_poll_200_not_approved_is_still_pending() {
+        let http = KiloStub::new(vec![
+            KiloReply::Response(200, r#"{"status":"waiting"}"#),
+            // A non-JSON 200 is also a state on the way, not a failure.
+            KiloReply::Response(200, "<html>"),
+        ]);
+        let (_dir, host, holder, flows) = kilo_harness(http, KILO_FLOW).await;
+        for _ in 0..2 {
+            let error = flows
+                .poll(host.clone(), holder.clone(), "dev".into())
+                .await
+                .expect_err("pending");
+            assert_eq!(error.message, PENDING_MARKER);
+        }
+        assert!(flows.pending("dev", false).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn kilo_poll_403_is_a_denial_and_ends_the_flow() {
+        let http = KiloStub::new(vec![KiloReply::Response(403, "{}")]);
+        let (_dir, host, holder, flows) = kilo_harness(http, KILO_FLOW).await;
+        let error = flows
+            .poll(host, holder, "dev".into())
+            .await
+            .expect_err("denied");
+        assert_eq!(error.code, ErrorCode::Auth);
+        assert_eq!(error.message, "kilo authorization was denied");
+        assert!(poll_reply(Err(error)).is_err());
+        assert!(flows.pending("dev", false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn kilo_poll_410_means_the_code_expired() {
+        let http = KiloStub::new(vec![KiloReply::Response(410, "{}")]);
+        let (_dir, host, holder, flows) = kilo_harness(http, KILO_FLOW).await;
+        let error = flows
+            .poll(host, holder, "dev".into())
+            .await
+            .expect_err("expired");
+        assert_eq!(error.code, ErrorCode::Auth);
+        assert_eq!(
+            error.message,
+            "kilo device code expired; start the authorization again"
+        );
+        assert!(flows.pending("dev", false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn kilo_poll_other_failures_are_classified_by_status() {
+        for (status, code) in [(429, ErrorCode::RateLimit), (500, ErrorCode::Upstream)] {
+            let http = KiloStub::new(vec![KiloReply::Response(status, "{}")]);
+            let (_dir, host, holder, flows) = kilo_harness(http, KILO_FLOW).await;
+            let error = flows
+                .poll(host, holder, "dev".into())
+                .await
+                .expect_err("refused");
+            assert_eq!(error.code, code, "{status}");
+            assert_eq!(
+                error.message,
+                format!("kilo refused the device code poll: http_{status}")
+            );
+            assert!(flows.pending("dev", false).await.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn kilo_code_past_its_stated_lifetime_is_not_polled_at_all() {
+        let http = KiloStub::new(Vec::new());
+        let (_dir, host, holder, flows) = kilo_harness(http.clone(), KILO_EXPIRED_FLOW).await;
+        let error = flows
+            .poll(host, holder, "dev".into())
+            .await
+            .expect_err("expired");
+        assert_eq!(error.code, ErrorCode::Auth);
+        assert_eq!(
+            error.message,
+            "kilo device code expired; start the authorization again"
+        );
+        assert!(http.requests().is_empty());
+        assert!(flows.pending("dev", false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn kilo_exchange_without_a_device_code_is_a_programming_error() {
+        let http = KiloStub::new(Vec::new());
+        let (_dir, host, _holder, _flows) = kilo_harness(http.clone(), KILO_FLOW).await;
+        let pending = PendingFlow {
+            verifier: String::new(),
+            challenge: String::new(),
+            state: String::new(),
+            redirect_uri: String::new(),
+            device_code: None,
+            interval: None,
+            extra: serde_json::Map::new(),
+        };
+        match device_exchange("kilo", &host, &pending, &serde_json::Value::Null).await {
+            Err(DeviceError::Gateway(error)) => {
+                assert_eq!(error.code, ErrorCode::Internal);
+                assert_eq!(
+                    error.message,
+                    "kilo exchange requires a pending flow produced by begin()"
+                );
+            }
+            Err(DeviceError::Pending) => panic!("expected internal error, got pending"),
+            Ok(_) => panic!("expected internal error, got a completed flow"),
+        }
+        assert!(http.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn kilo_approved_poll_persists_token_email_and_organization() {
+        let http = KiloStub::new(vec![
+            KiloReply::Response(200, KILO_APPROVED),
+            KiloReply::Response(
+                200,
+                r#"{"organizations":[{"id":"org-42"},{"id":"org-99"}]}"#,
+            ),
+        ]);
+        let (_dir, host, holder, flows) = kilo_harness(http.clone(), KILO_FLOW).await;
+        let id = flows
+            .poll(host.clone(), holder.clone(), "dev".into())
+            .await
+            .expect("approved");
+        assert_eq!(
+            poll_reply(Ok(id.clone())).expect("reply"),
+            serde_json::json!({"status":"complete","id":id}).to_string()
+        );
+        let sent = http.requests();
+        assert_eq!(sent.len(), 2);
+        // The organization is read with the token the poll just returned.
+        assert_eq!(sent[1].url, KILO_PROFILE_URL);
+        assert_eq!(sent[1].method, "GET");
+        assert!(
+            sent[1]
+                .headers
+                .iter()
+                .any(|(n, v)| n == "Authorization" && v == "Bearer kilo-token-1")
+        );
+        let rows = host.store.list_credentials(&host.key).await.expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].provider, "kilo");
+        assert_eq!(
+            rows[0].secrets.access_token.as_deref(),
+            Some("kilo-token-1")
+        );
+        // Kilo issues neither, and inventing either would have the scheduler
+        // chase a refresh that can only fail.
+        assert_eq!(rows[0].secrets.refresh_token.as_deref(), None);
+        assert_eq!(rows[0].expires_at, None);
+        assert_eq!(rows[0].account_email.as_deref(), Some("user@example.com"));
+        assert_eq!(rows[0].provider_data, serde_json::json!({"orgId":"org-42"}));
+        let connected = &holder.load().routing.credentials[0];
+        assert_eq!(connected.id, id);
+        assert_eq!(connected.expires_at, None);
+        assert!(flows.pending("dev", false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn kilo_account_with_no_organization_connects_without_one() {
+        let http = KiloStub::new(vec![
+            KiloReply::Response(200, KILO_APPROVED),
+            KiloReply::Response(200, r#"{"organizations":[]}"#),
+        ]);
+        let (_dir, host, holder, flows) = kilo_harness(http, KILO_FLOW).await;
+        flows
+            .poll(host.clone(), holder, "dev".into())
+            .await
+            .expect("approved");
+        let rows = host.store.list_credentials(&host.key).await.expect("rows");
+        assert_eq!(
+            rows[0].secrets.access_token.as_deref(),
+            Some("kilo-token-1")
+        );
+        assert_eq!(rows[0].provider_data, serde_json::json!({}));
+    }
+
+    #[tokio::test]
+    async fn kilo_failed_profile_read_still_completes_the_connect() {
+        // An operator who watched the browser say "approved" must not be told
+        // the connect failed because a secondary read did — nor may the
+        // failure surface as AUTH, which disables credentials.
+        for failure in [
+            KiloReply::Response(500, r#"{"error":"boom"}"#),
+            KiloReply::Response(401, r#"{"error":"unauthorized"}"#),
+            KiloReply::Reset,
+        ] {
+            let http = KiloStub::new(vec![KiloReply::Response(200, KILO_APPROVED), failure]);
+            let (_dir, host, holder, flows) = kilo_harness(http, KILO_FLOW).await;
+            flows
+                .poll(host.clone(), holder, "dev".into())
+                .await
+                .expect("approved despite the failed organization read");
+            let rows = host.store.list_credentials(&host.key).await.expect("rows");
+            assert_eq!(
+                rows[0].secrets.access_token.as_deref(),
+                Some("kilo-token-1")
+            );
+            assert_eq!(rows[0].provider_data, serde_json::json!({}));
+            assert!(rows[0].enabled);
+        }
+    }
+
+    #[tokio::test]
+    async fn kilo_approved_poll_without_a_token_is_refused() {
+        let http = KiloStub::new(vec![KiloReply::Response(
+            200,
+            r#"{"status":"approved","userEmail":"u@example.com"}"#,
+        )]);
+        let (_dir, host, holder, flows) = kilo_harness(http, KILO_FLOW).await;
+        let error = flows
+            .poll(host, holder, "dev".into())
+            .await
+            .expect_err("no token");
+        assert_eq!(error.code, ErrorCode::Auth);
+        assert_eq!(
+            error.message,
+            "kilo approved the authorization without a token"
+        );
+        assert!(flows.pending("dev", false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn kilo_refresh_refuses_and_disables_without_a_request() {
+        let dir = tempfile::tempdir().expect("dir");
+        let store = Arc::new(
+            omni_store::Store::open(
+                omni_store::StoreConfig::Sqlite {
+                    path: dir.path().join("db"),
+                },
+                0,
+            )
+            .await
+            .expect("store"),
+        );
+        let key = omni_crypto::field::derive_key("test-key");
+        let http = KiloStub::new(Vec::new());
+        let host = Arc::new(crate::refresh::Refresher::new(
+            store.clone(),
+            key.clone(),
+            http.clone(),
+            || 1_000_000,
+        ));
+        let tokens = omni_store::credentials::TokenUpdate {
+            access_token: Some("kilo-token-1".into()),
+            refresh_token: None,
+            api_key: None,
+            id_token: None,
+            expires_at: None,
+            updated_at: 0,
+        };
+        store
+            .save_oauth(
+                &key,
+                &omni_store::credentials::OAuthCredential {
+                    id: "k1",
+                    provider: "kilo",
+                    label: "kilo",
+                    provider_data: "{}",
+                    account_email: None,
+                    tokens: &tokens,
+                    reconnect: false,
+                },
+            )
+            .await
+            .expect("save");
+        let credential = store
+            .credential(&key, "k1")
+            .await
+            .expect("read")
+            .expect("present");
+        let error = host.refresh(&credential).await.expect_err("refused");
+        assert_eq!(error.code, ErrorCode::Auth);
+        assert_eq!(
+            error.message,
+            "kilo tokens cannot be refreshed; reconnect the kilo account to get a new one"
+        );
+        assert!(http.requests().is_empty());
+        let stored = store
+            .credential(&key, "k1")
+            .await
+            .expect("read")
+            .expect("present");
+        assert!(!stored.enabled);
     }
 }
