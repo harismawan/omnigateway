@@ -38,9 +38,6 @@ export type BreakerState = "closed" | "open" | "halfOpen";
 export type AuthType = "oauth" | "apiKey";
 export type WindowType = "fiveHour" | "daily" | "weekly";
 
-/** The ponytail ruleset an operator picks between; `off` injects nothing. */
-export type PonytailMode = "off" | "lite" | "full" | "ultra";
-
 /** The RTK filter ids `request_logs.rtk_filters` stores. */
 export type RtkFilterId =
   | "git-diff"
@@ -263,7 +260,6 @@ export type Settings = {
   quotaPollIntervalMs: number;
   rtkEnabled: boolean;
   autoCacheEnabled: boolean;
-  ponytailMode: PonytailMode;
   bodyLoggingEnabled: boolean;
   bodyLoggingCaptureStreamChunks: boolean;
   snapshotKeepLatest: number;

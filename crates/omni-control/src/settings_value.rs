@@ -72,7 +72,14 @@ pub(crate) fn decode(raw: Option<&str>) -> JsValue {
     let normalized = settings_json(Some(&Value::Object(projection).to_string()));
     let mut out = defaults;
     if let JsValue::Object(fields) = &stored {
-        for (k, v) in fields {
+        // `ponytailMode` is a retired setting (removed in 1.x): a row written
+        // before then still holds it, so it alone is dropped here, keeping it
+        // out of every read and of the next write. Other unknown keys are
+        // copied back out as before.
+        for (k, v) in fields
+            .iter()
+            .filter(|(k, _)| !k.iter().copied().eq("ponytailMode".encode_utf16()))
+        {
             set_units(&mut out, k, v.clone());
         }
     }
@@ -80,7 +87,6 @@ pub(crate) fn decode(raw: Option<&str>) -> JsValue {
         "weights",
         "rtkEnabled",
         "autoCacheEnabled",
-        "ponytailMode",
         "bodyRetentionDays",
         "bodyLoggingEnabled",
         "bodyLoggingCaptureStreamChunks",
@@ -162,6 +168,17 @@ pub fn trim_units(mut units: &[u16]) -> &[u16] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_stored_ponytail_mode_is_stripped_while_other_unknown_keys_are_echoed() {
+        let out = decode(Some(r#"{"ponytailMode":"full","extra":7,"maxAttempts":5}"#));
+        assert_eq!(get(&out, "ponytailMode"), None);
+        assert!(matches!(get(&out, "extra"), Some(JsValue::Number(7.0))));
+        assert!(matches!(
+            get(&out, "maxAttempts"),
+            Some(JsValue::Number(5.0))
+        ));
+        assert_eq!(get(&decode(None), "ponytailMode"), None);
+    }
     #[test]
     fn deep_success_duplicate_and_error_cleanup_on_small_stack() {
         std::thread::Builder::new()

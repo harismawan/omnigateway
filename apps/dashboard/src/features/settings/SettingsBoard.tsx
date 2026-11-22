@@ -7,7 +7,7 @@ import {
   useSettings,
   useSmartRouterModels,
 } from "../../api/queries.ts";
-import type { PonytailMode, Settings, SmartRouterModelState } from "../../api/types.ts";
+import type { Settings, SmartRouterModelState } from "../../api/types.ts";
 import { PageHead } from "../../components/Rack.tsx";
 import {
   DEFAULT_SMART_ROUTER_POLICY,
@@ -21,24 +21,11 @@ import { Field, Input, Textarea } from "../../ui/Field.tsx";
 import { Meter } from "../../ui/Meter.tsx";
 import { Module } from "../../ui/Panel.tsx";
 import { Grid, Legend, Mono, Row, Spacer, Stack } from "../../ui/primitives.ts";
-import { Autocomplete, Select } from "../../ui/Select.tsx";
+import { Autocomplete } from "../../ui/Select.tsx";
 import { describeError, Failure, SkeletonRows } from "../../ui/States.tsx";
 import { Toggle } from "../../ui/Toggle.tsx";
 import { AccessPanel } from "./AccessPanel.tsx";
 import { AgentSetup } from "./AgentSetup.tsx";
-
-/**
- * The ponytail levels, in the order an operator escalates through them.
- *
- * A `Record` over the union rather than a list: adding a level upstream then
- * fails this build instead of quietly offering one fewer option than exists.
- */
-const PONYTAIL_LEVELS: Record<PonytailMode, string> = {
-  off: "Off",
-  lite: "Lite — names the lazier option",
-  full: "Full — the ladder enforced",
-  ultra: "Ultra — challenges the requirement",
-};
 
 type WeightKey = keyof Settings["weights"];
 
@@ -64,7 +51,6 @@ type LimitKey = Exclude<
   | "weights"
   | "rtkEnabled"
   | "autoCacheEnabled"
-  | "ponytailMode"
   | "bodyLoggingEnabled"
   | "bodyLoggingCaptureStreamChunks"
   | "guardrailModel"
@@ -161,8 +147,7 @@ const Blurb = styled.p`
 `;
 
 /**
- * The switches and the one mode select, laid out as cards rather than as a
- * module apiece.
+ * The switches, laid out as cards rather than as a module apiece.
  *
  * One switch per full-width row put four unrelated booleans on four separate
  * faces, so reading what this gateway does to a request meant scrolling past
@@ -199,41 +184,6 @@ const OptionName = styled.label`
   color: ${({ theme }) => theme.color.ink};
   cursor: pointer;
 `;
-
-/** A card whose control is too wide to sit beside its name. */
-const Choice = styled(Option)`
-  grid-template-columns: 1fr;
-
-  ${OptionBlurb} {
-    grid-column: 1;
-  }
-`;
-
-/**
- * The mode card, wearing the same name and blurb as the switches beside it.
- *
- * `Field` is not used here even though it would associate the label for free:
- * its legend is the silkscreened uppercase one, which next to three sentence-
- * case switch names reads as a different kind of control in the same grid.
- */
-function ChoiceOption({
-  label,
-  children,
-  blurb,
-}: {
-  label: string;
-  children: (props: { id: string }) => ReactNode;
-  blurb: ReactNode;
-}) {
-  const id = useId();
-  return (
-    <Choice>
-      <OptionName htmlFor={id}>{label}</OptionName>
-      {children({ id })}
-      <OptionBlurb>{blurb}</OptionBlurb>
-    </Choice>
-  );
-}
 
 function SwitchOption({
   label,
@@ -344,7 +294,6 @@ const ModelWarning = styled.p`
 type Draft = Record<string, string> & {
   rtkEnabled?: string;
   autoCacheEnabled?: string;
-  ponytailMode?: string;
   bodyLoggingEnabled?: string;
   bodyLoggingCaptureStreamChunks?: string;
   guardrailModel?: string;
@@ -363,7 +312,6 @@ function toDraft(settings: Settings): Draft {
   for (const limit of LIMITS) draft[limit.id] = String(settings[limit.id]);
   draft.rtkEnabled = String(settings.rtkEnabled);
   draft.autoCacheEnabled = String(settings.autoCacheEnabled);
-  draft.ponytailMode = settings.ponytailMode;
   draft.bodyLoggingEnabled = String(settings.bodyLoggingEnabled);
   draft.bodyLoggingCaptureStreamChunks = String(settings.bodyLoggingCaptureStreamChunks);
   // Blank is how "no classifier" is typed, and how it reads back.
@@ -479,17 +427,6 @@ function parseDraft(
       ...limits,
       rtkEnabled: draft.rtkEnabled === "true",
       autoCacheEnabled: draft.autoCacheEnabled === "true",
-      // The control offers the four names and nothing else, so the draft can
-      // only hold one of them; `off` is what an absent draft field means, the
-      // same answer the store gives a value it does not recognise.
-      // `hasOwn`, not `in`: `in` walks the prototype chain, so "toString" would
-      // pass the guard and then be cast to a mode nothing can render. The
-      // console has no `isPonytailMode` of its own to call, so this is the
-      // local answer, and the `Record` below is what keeps the option list honest.
-      ponytailMode:
-        draft.ponytailMode !== undefined && Object.hasOwn(PONYTAIL_LEVELS, draft.ponytailMode)
-          ? (draft.ponytailMode as PonytailMode)
-          : "off",
       bodyLoggingEnabled: draft.bodyLoggingEnabled === "true",
       bodyLoggingCaptureStreamChunks: draft.bodyLoggingCaptureStreamChunks === "true",
       // Sent as `null` rather than omitted when blank: omitting it would keep
@@ -701,23 +638,6 @@ export function SettingsBoard() {
                   Marks the end of the system prompt on Anthropic requests carrying no breakpoint of
                   their own. Requests that mark one are untouched.
                 </SwitchOption>
-
-                <ChoiceOption
-                  label="Lazy senior dev mode"
-                  blurb="Appends the ponytail ruleset, about 1,240 tokens, to every system prompt. A request already carrying it is left alone."
-                >
-                  {(props) => (
-                    <Select
-                      {...props}
-                      value={draft.ponytailMode ?? "off"}
-                      options={Object.entries(PONYTAIL_LEVELS).map(([mode, label]) => ({
-                        value: mode,
-                        label,
-                      }))}
-                      onValueChange={(next) => setDraft({ ...draft, ponytailMode: next })}
-                    />
-                  )}
-                </ChoiceOption>
               </Options>
             </Module>
 

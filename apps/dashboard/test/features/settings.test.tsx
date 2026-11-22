@@ -6,7 +6,7 @@ import { DEFAULT_SMART_ROUTER_POLICY } from "../../src/lib/domain.ts";
 import { createFetchStub } from "../helpers/fetchStub.ts";
 import { model, settings } from "../helpers/fixtures.ts";
 import { renderWithProviders } from "../helpers/render.tsx";
-import { choose, suggestionsOf } from "../helpers/select.ts";
+import { suggestionsOf } from "../helpers/select.ts";
 
 function stubSettings(overrides: Parameters<typeof createFetchStub>[0] = {}) {
   return createFetchStub({
@@ -545,22 +545,25 @@ describe("SettingsBoard", () => {
     expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
   });
 
-  test("picks a ponytail level and sends the setting", async () => {
+  test("offers no ponytail control and never sends the retired setting", async () => {
     const user = userEvent.setup();
     const stub = stubSettings({ "PUT /api/settings": () => ({ ok: true }) });
     renderWithProviders(<SettingsBoard />);
 
-    const select = (await screen.findByLabelText("Lazy senior dev mode")) as HTMLButtonElement;
-    expect(select.value).toBe("off");
-    await choose(user, select, "ultra");
+    await screen.findByRole("switch", { name: "Enable RTK compression" });
+    expect(screen.queryByLabelText("Lazy senior dev mode")).toBeNull();
+    expect(screen.queryByText(/ponytail/i)).toBeNull();
+    await user.click(screen.getByRole("switch", { name: "Enable RTK compression" }));
     await user.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {
       const put = stub.calls.find((call) => call.init?.method === "PUT");
-      const body = JSON.parse(String(put?.init?.body)) as { ponytailMode: string };
-      expect(body.ponytailMode).toBe("ultra");
+      const body = JSON.parse(String(put?.init?.body)) as { rtkEnabled: boolean };
+      expect(body.rtkEnabled).toBe(true);
+      expect(Object.hasOwn(body, "ponytailMode")).toBe(false);
     });
   });
+
   test("the classifier model and timeout load, save, and clear to null", async () => {
     const user = userEvent.setup();
     const stub = stubSettings({
