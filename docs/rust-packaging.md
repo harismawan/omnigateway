@@ -28,7 +28,11 @@ same allocator default into generated units and the final TS npm notice.
 For a shell launch of a release archive, use
 `MIMALLOC_PURGE_DELAY=${MIMALLOC_PURGE_DELAY:-1} ./omnigateway`.
 
-## First Rust promotion (operator action)
+## First Rust promotion (operator action, done for v1.0.0)
+
+Completed on 2026-11-22: v1.0.0 was promoted by hand under Recreate, then
+`RollingUpdate` was restored and `FIRST_RUST_RELEASE` deleted, so promotion is
+automatic again. Kept as the procedure for any later non-rolling cutover.
 
 Before tagging the first Rust release, set the repository Actions variable
 `FIRST_RUST_RELEASE=true`. The promotion job opens its normal PR but leaves it

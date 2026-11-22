@@ -316,9 +316,13 @@ executable.
    not proof of shared limits; do not accept a fallback fleet as healthy shared
    coordination. D4 evidence must already cover the actual writer/seed lifecycle.
 
-Keep Recreate for any rollback to TS. Only the following Rust-to-Rust release
-may restore RollingUpdate after review of that release's compatibility; do not
-infer rolling compatibility across companion/lineage changes.
+After the v1.0.0 cutover the Deployment is back on RollingUpdate and
+`FIRST_RUST_RELEASE` is unset, so each release now promotes and rolls
+automatically. Before tagging, check that the release is rolling-compatible:
+only additive migrations, and unchanged Redis scripts, companions and lineage.
+If it is not, set `FIRST_RUST_RELEASE=true`, switch the strategy to Recreate in
+the promotion PR, and run the step 3 sweep before merging it. Any rollback to TS
+needs Recreate too.
 
 ## 6. Operator smoke and acceptance stop point
 
@@ -375,8 +379,8 @@ policies or other data. Use the nominated compatible rollback version.
 
 - **Binary-only rollback, data unchanged:** restore the old unit/entrypoint or
   image with the same root, environment and encryption key. For fleet rollback
-  retain Recreate and sweep actual `omni:b:*` keys as in step 5 before TS starts
-  and reseeds. Start only TS, rerun the ordinary smoke and then reopen traffic.
+  switch the strategy to Recreate and sweep actual `omni:b:*` keys as in step 5
+  before TS starts and reseeds. Start only TS, rerun the ordinary smoke and then reopen traffic.
 - **Backup restore needed:** retain a copy of the failed state for diagnosis;
   agree to loss of writes since the chosen restore point. SQLite CLI
   `omni db restore <id>` refuses while a gateway is running, with no override.
