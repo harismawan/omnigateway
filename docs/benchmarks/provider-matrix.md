@@ -67,10 +67,10 @@ Intended real-measurement command (quiet host, fresh OUT, at least three rounds)
 ```sh
 export OMNI_RUST_BINARY=/path/to/release/omnigateway
 BASE_GATEWAY=/path/to/frozen-ts HEAD_GATEWAY="sh $PWD/scripts/run-rust-gateway.sh" \
-CLI='bun apps/cli/src/index.ts' OUT=/tmp/opencode/bench-real ROUNDS=5 MAX_LOAD=1 LOAD_WAIT=600 \
+CLI='bun apps/cli/src/index.ts' OUT=/tmp/bench-real ROUNDS=5 MAX_LOAD=1 LOAD_WAIT=600 \
 bash scripts/bench-rounds.sh --duration 20s --warmup 3s --boots 5 \
   --gateway-cpus 0-3 --upstream-cpus 4-5 --load-cpus 6-7 --fresh-process
-bun scripts/bench-compare.ts /tmp/opencode/bench-real/base /tmp/opencode/bench-real/head
+bun scripts/bench-compare.ts /tmp/bench-real/base /tmp/bench-real/head
 # For same-gateway base/head, optionally append --require-same-env.
 ```
 
@@ -194,13 +194,13 @@ From this worktree (gateway processes run in scratch directories):
 
 ```sh
 bash scripts/bench-matrix.sh \
-  --gateway /tmp/opencode/merge-anthropic/ts \
+  --gateway /tmp/merge-anthropic/ts \
   --cli 'bun apps/cli/src/index.ts' --duration 2s --warmup 1s --boots 1 \
-  --out /tmp/opencode/bench-matrix/ts-custom.json
-OMNI_RUST_BINARY=/tmp/opencode/merge-anthropic/rust \
+  --out /tmp/bench-matrix/ts-custom.json
+OMNI_RUST_BINARY=/tmp/merge-anthropic/rust \
   bash scripts/bench-matrix.sh --gateway "sh $PWD/scripts/run-rust-gateway.sh" \
   --cli 'bun apps/cli/src/index.ts' --duration 2s --warmup 1s --boots 1 \
-  --out /tmp/opencode/bench-matrix/rust-custom.json
+  --out /tmp/bench-matrix/rust-custom.json
 ```
 
 For measurement on a quiet host:
@@ -208,12 +208,12 @@ For measurement on a quiet host:
 ```sh
 export OMNI_RUST_BINARY=/path/to/release/omnigateway
 BASE_GATEWAY=/path/to/frozen-ts HEAD_GATEWAY="sh $PWD/scripts/run-rust-gateway.sh" \
-CLI='bun apps/cli/src/index.ts' OUT=/tmp/opencode/bench-matrix/real ROUNDS=5 MAX_LOAD=1 \
+CLI='bun apps/cli/src/index.ts' OUT=/tmp/bench-matrix/real ROUNDS=5 MAX_LOAD=1 \
 bash scripts/bench-rounds.sh --duration 20s --warmup 3s --boots 5 \
   --gateway-cpus 0-3 --upstream-cpus 4-5 --load-cpus 6-7
 DURATION=20s bash scripts/bench-upstream-check.sh
-bun scripts/bench-capacity.ts /tmp/opencode/bench-matrix/upstreams /tmp/opencode/bench-matrix/real/base/*.json /tmp/opencode/bench-matrix/real/head/*.json
-bun scripts/bench-compare.ts /tmp/opencode/bench-matrix/real/base /tmp/opencode/bench-matrix/real/head
+bun scripts/bench-capacity.ts /tmp/bench-matrix/upstreams /tmp/bench-matrix/real/base/*.json /tmp/bench-matrix/real/head/*.json
+bun scripts/bench-compare.ts /tmp/bench-matrix/real/base /tmp/bench-matrix/real/head
 ```
 
 The runner alternates AB/BA round order, retains results, records uptime/load
@@ -224,9 +224,9 @@ Use at least three interleaved rounds (five above is preferred). Direct recordin
 sanity can be reproduced:
 
 ```sh
-OUT=/tmp/opencode/bench-recording-new DURATION=2s \
+OUT=/tmp/bench-recording-new DURATION=2s \
 UPSTREAM_CPUS=4-5 LOAD_CPUS=6-7 bash scripts/bench-load-recording.sh
-bun scripts/bench-load-recording-summary.ts /tmp/opencode/bench-recording-new
+bun scripts/bench-load-recording-summary.ts /tmp/bench-recording-new
 ```
 
 This alternates recording off/on across three rounds at concurrency 64 and 1,
@@ -265,10 +265,10 @@ unchanged. Hashing occurs before calibration/measurement.
 For a short functional two-round selection check (not a performance claim):
 
 ```sh
-OMNI_RUST_BINARY=/tmp/opencode/bench-gate/bin/main-327f240f \
-BASE_GATEWAY=/tmp/opencode/bench-gate/bin/ts-frozen-f9cc6678 \
+OMNI_RUST_BINARY=/tmp/bench-gate/bin/main-327f240f \
+BASE_GATEWAY=/tmp/bench-gate/bin/ts-frozen-f9cc6678 \
 HEAD_GATEWAY="sh $PWD/scripts/run-rust-gateway.sh" \
-CLI='bun apps/cli/src/index.ts' OUT=/tmp/opencode/bench-matrix/check-rounds \
+CLI='bun apps/cli/src/index.ts' OUT=/tmp/bench-matrix/check-rounds \
 ROUNDS=2 ALLOW_BUSY=1 bash scripts/bench-rounds.sh \
   --only 'custom-chat.*' --duration 2s --warmup 1s --boots 1
 ```

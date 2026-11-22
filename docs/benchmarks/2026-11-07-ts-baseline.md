@@ -35,10 +35,10 @@ the CLI, admin API and wire contracts.
 - **Build.** `bun scripts/build-binary.ts` at `4e524dd4`.
 
 ```sh
-bun scripts/build-binary.ts /tmp/opencode/bench/omnigateway
+bun scripts/build-binary.ts /tmp/bench/omnigateway
 
 # single
-bun scripts/bench-gateway.ts --gateway /tmp/opencode/bench/omnigateway \
+bun scripts/bench-gateway.ts --gateway /tmp/bench/omnigateway \
   --cli "bun apps/cli/src/index.ts" --out docs/benchmarks/<date>-<label>.json
 
 # cluster
@@ -47,7 +47,7 @@ docker run -d --rm --name omni-bench-pg --network host --cpuset-cpus 4 \
   postgres:17-alpine -c max_connections=300 -c shared_buffers=256MB
 docker run -d --rm --name omni-bench-redis --network host --cpuset-cpus 4 \
   valkey/valkey:8-alpine valkey-server --port 56379 --save "" --appendonly no
-bun scripts/bench-gateway.ts --gateway /tmp/opencode/bench/omnigateway \
+bun scripts/bench-gateway.ts --gateway /tmp/bench/omnigateway \
   --cli "bun apps/cli/src/index.ts" --cluster --replicas 2 \
   --gateway-cpus 0-1,2-3 --upstream-cpus 5 \
   --database-url postgres://postgres:omni@127.0.0.1:55432/omni_bench_cluster \
