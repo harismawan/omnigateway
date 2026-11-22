@@ -25,7 +25,9 @@ fn code_for_status(status: u16) -> ErrorCode {
 /// for the forms upstreams send — IMF-fixdate, RFC 850, asctime, RFC 2822 with
 /// a zone, ISO 8601 — with one stated difference: a zoneless date-time is read
 /// as UTC, where JS reads local time. JSC also accepts free-form strings
-/// (`"5, 7"` is a date in 2001); those are `None` here.
+/// (`"5, 7"` is a date in 2001); those are `None` here: no usable hint, so
+/// the breaker parks for its default (`DEFAULT_RATE_LIMIT_MS`) and egress
+/// sends no `Retry-After`, rather than reading a past date as "retry now".
 pub fn parse_retry_after(header: Option<&str>, now_ms: f64) -> Option<f64> {
     let header = header?;
     let seconds = js::string_to_number(header);

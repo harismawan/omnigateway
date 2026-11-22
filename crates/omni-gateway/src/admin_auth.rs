@@ -4,9 +4,9 @@
 //! administrator (`viewer`) and the holder of one API key (`client`) — live
 //! behind [`SessionKv`]: `sess:<kind>:<sha256hex(token)>`
 //! holding `{"expiresAt":<ms>,"principal":{…}}` with the session TTL. Single
-//! node uses [`MemoryKv`], a map a restart empties; a
-//! cluster coordinator (roadmap D2) implements the same trait over the same
-//! key schema and JSON.
+//! node uses [`MemoryKv`], a map a restart empties; cluster mode uses
+//! [`CoordKv`], the coordinator's `kv` (`omni:kv:sess:…` in Redis), over the
+//! same key schema and JSON.
 //!
 //! Password checks and hashing are Argon2id (`omni_crypto::password`), run on
 //! the blocking pool and bounded to one per CPU. Store reads and writes go

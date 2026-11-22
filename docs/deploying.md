@@ -211,15 +211,10 @@ kubectl apply -k k8s
 
 Releases deploy by GitOps: a `v*` tag publishes `ghcr.io/harismawan/omnigateway:<version>`
 and the workflow commits that version into `k8s/kustomization.yaml` on `main`, which Argo
-CD syncs. Rolling back is editing `newTag` by hand — **except across the first release after
-v0.10.3**, whose migration drops columns every older image writes on the success path. For that
-deploy scale to one replica first (the rolling update's surviving replica is the one that breaks),
-and take a snapshot before it: rolling `newTag` back does not roll the schema back, and the old
-image fails every successful request against it. Details in the README's "Upgrading" note and the
-header of `crates/omni-store/migrations/postgres/002_health_measurements.sql`. Once the release
-that writes binary body artifacts is deployed, never set `newTag` below v0.13.5, and never skip
-v0.13.5 on the way up: an older replica beside a new one calls every new body unreadable
-(see [Recording bodies](operations.md#recording-bodies)).
+CD syncs. Rolling back is editing `newTag` by hand, within 1.x: rolling `newTag` back does not
+roll the schema back, so never set it below the release that last migrated the database
+(take a backup — `pg_dump` on Postgres — before a release that migrates, and restore it to go
+further back).
 
 A derived image can stage plugin files with `COPY plugins/ /data/plugins/`,
 which does not need a shell. The directory can also hold files on the data
