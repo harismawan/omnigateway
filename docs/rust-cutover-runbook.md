@@ -291,6 +291,11 @@ executable.
    perform a complete verification scan; repeat sweep if any matches remain
    ```
 
+   Two implementations of exactly this: `omnigateway cluster-cutover-sweep` (reads
+   `OMNI_REDIS_URL`; inside the image) and `scripts/cutover-redis-sweep.sh` (a
+   `valkey-cli`/`redis-cli` wrapper: dry-run by default, `--apply` unlinks, then
+   verifies zero remain and prints the counts to record).
+
    `SCAN` can return empty pages before cursor zero, and duplicate names; continue
    to zero and tolerate already-unlinked names. `omni:b:*` is a **SCAN pattern**,
    never a literal key supplied to UNLINK. Unlink only returned names, safely
