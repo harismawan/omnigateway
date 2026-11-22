@@ -348,10 +348,14 @@ async fn a_failed_reconciliation_read_is_reported_as_unknown() {
     let db = TestDb::create(&base, "reread_fails").await;
     seeded(&db).await;
     let proxy = Proxy::start(upstream(&base)).await;
+    // One pooled connection, created by the mutation itself, at the default
+    // connect timeout: a tight one let a slow first handshake (SCRAM through
+    // the proxy on a loaded runner) fail as a pool timeout, retried into
+    // `failed` before the COMMIT was ever sent. The re-read needs no timeout
+    // to fail: once the fault fires the proxy closes every new connection.
     let mut cfg = PgConfig::new(proxy.url(&db.url));
     cfg.max_connections = 1;
     cfg.wait_timeout = Duration::from_millis(200);
-    cfg.connect_timeout = Duration::from_millis(200);
     let store = PgStore::open(cfg, 0).await.expect("open through the proxy");
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
     let health = HealthWriter::spawn(
@@ -365,6 +369,7 @@ async fn a_failed_reconciliation_read_is_reported_as_unknown() {
     proxy.arm(Fault::LoseAck);
     assert!(health.handle().send("c1", "m", Arc::new(plus_one)));
     let stats = health.close().await.expect("close");
+    assert_eq!(proxy.fired(), 1, "the COMMIT reached the proxy: {stats:?}");
     assert_eq!(stats.uncertain, 1, "{stats:?}");
     match rx.try_recv().expect("an outcome") {
         HealthCommitted::Uncertain { observed, .. } => {
