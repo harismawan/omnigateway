@@ -1,5 +1,5 @@
 //! Shared breaker health: the store's atomic read-modify-write
-//! (`credentials.updateHealth` in `packages/store/src/postgres/credentials.ts`)
+//! (`PgStore::update_health`)
 //! and the immediate, bounded persistence path that carries failures and
 //! breaker transitions to it independently of the request-log batches
 //! (spec: "Breaker state transitions are not batched"; "A failure or state
@@ -32,7 +32,7 @@ fn blank(cred: &str, model: &str) -> CredentialHealth {
     }
 }
 
-/// `recordFailure`'s shape: one more failure on whatever the row holds now,
+/// A failure record's shape: one more failure on whatever the row holds now,
 /// opening the breaker at the threshold.
 fn fail(threshold: i64) -> impl Fn(Option<CredentialHealth>) -> CredentialHealth + Send + Sync {
     move |current| {
@@ -76,7 +76,7 @@ async fn health_row(db: &TestDb, model: &str) -> Option<(String, i32, Option<i64
         .map(|r| (r.get(0), r.get(1), r.get(2)))
 }
 
-/// `updateHealth`: absent reads as `None`, the mutation sees the stored row,
+/// `update_health`: absent reads as `None`, the mutation sees the stored row,
 /// the row written is the one returned, and a mutation the database refuses
 /// (no such credential, a value its columns cannot hold) changes nothing
 /// and says so.
@@ -116,8 +116,8 @@ async fn update_health_reads_applies_and_writes_in_one_transaction() {
         health_row(&db, "m").await,
         Some(("open".into(), 3, Some(T0)))
     );
-    // The fractional instant a `Retry-After` makes is rounded by BIGINT, as
-    // TS's float8 bind is.
+    // The fractional instant a `Retry-After` makes is rounded by BIGINT: the
+    // value binds as float8 and the column rounds it.
     let written = store
         .update_health("c1", "m", &|_| CredentialHealth {
             rate_limited_until: Some(1.5),

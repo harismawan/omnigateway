@@ -12,7 +12,7 @@ workspace = true
 
 [dependencies]
 omni-ir = { path = "../omni-ir" }
-# Types only (`@omni/store/types`); the router never opens a connection.
+# Types only; the router never opens a connection.
 omni-store = { path = "../omni-store" }
 serde_json.workspace = true
 

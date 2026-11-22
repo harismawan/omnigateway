@@ -417,7 +417,7 @@ pub fn set_models(store: &SqliteStore, id: &str, models: Option<&[String]>) -> R
 pub fn set_guardrail(store: &SqliteStore, id: &str, policy: Option<&str>) -> Result<(), String> {
     let policy = policy.map(omni_ir::js::trim);
     if let Some(p) = policy {
-        // Frozen Zod counts Unicode code points for string size checks.
+        // Zod counts Unicode code points for string size checks.
         let length = p.chars().count();
         if length == 0 {
             return Err(

@@ -1,11 +1,9 @@
-//! Ingress parity: every client body in `dialects.json` was run through the
-//! real TS `parseAnthropicRequest` / `parseOpenAIRequest` /
-//! `parseResponsesRequest`. Rust must accept exactly what TS accepted,
-//! producing the same IR, and refuse exactly what TS refused, with the same
-//! code, status and message.
+//! Ingress conformance: the vectors in `dialects.json` pin the exact
+//! accepted/refused set — the same IR on acceptance, the same code, status
+//! and message on refusal. Regenerating them is a deliberate wire change.
 
 use omni_dialects::ingress::{self, Headers, IngressOptions};
-/// The TS exporter replaces `crypto.randomUUID` with this counter, reset per case.
+/// The vector exporter replaces `crypto.randomUUID` with this counter, reset per case.
 fn counter_ids() -> impl FnMut() -> String {
     let mut n = 0u32;
     move || {
@@ -31,8 +29,8 @@ fn model_allowlist_refuses_with_the_ts_message() {
 
 #[test]
 fn parse_body_is_none_exactly_where_json_parse_throws() {
-    // `request.json()` throws a SyntaxError in TS, which the route renders as
-    // INTERNAL; 5b decides that status. Here only the parse result matters.
+    // A SyntaxError body is rendered as INTERNAL by the route layer; 5b
+    // decides that status. Here only the parse result matters.
     assert!(ingress::parse_body("{").is_none());
     assert!(ingress::parse_body("").is_none());
     assert!(ingress::parse_body(" {\"a\":1} ").is_some());

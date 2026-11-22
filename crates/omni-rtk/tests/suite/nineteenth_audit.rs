@@ -1,4 +1,5 @@
-//! `packages/rtk/test/nineteenth-audit.test.ts` (rounds 19, 21–23).
+//! Audit regression suite: git anchor retention (combined diffs, binary
+//! patches, stat/log rows) and unknown-origin detection bounds.
 
 use super::common::*;
 use regex::Regex;
@@ -468,8 +469,8 @@ fn stat_log_corpus() -> Vec<String> {
     cat(&[lines, filler(120, "stat")])
 }
 
-/// The test's own independent grammar, transcribed from the TS test (not from
-/// production). Fixture rows are ASCII, so Rust and JS `\s`/`\d` agree.
+/// The test's own independent grammar (not from production). Fixture rows
+/// are ASCII, so Rust and JS `\s`/`\d` agree.
 fn diff_document_row() -> Regex {
     Regex::new(r"^(?:diff --(?:git|cc|combined) |--- |\+\+\+ |@@+ |index [0-9a-f]+(?:,[0-9a-f]+)*\.\.|mode [0-7]+(?:,[0-7]+)*\.\.|(?:old|new|new file|deleted file) mode |(?:similarity|dissimilarity) index |(?:rename|copy) (?:from|to) |Binary files |GIT binary patch$|(?:literal|delta) \d+$|\\ No newline|[ +-]*[-+]| .+files? changed)").expect("regex")
 }

@@ -1,5 +1,5 @@
-//! The time buckets the long windows are summed from (gateway-core state): `memoryCoord().buckets`
-//! in `packages/coord/src/index.ts`.
+//! Contract tests for `Buckets`: the time buckets the long windows are
+//! summed from.
 
 use omni_gateway_core::buckets::Buckets;
 use omni_ratelimit::buckets::Counts;

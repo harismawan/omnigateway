@@ -1,7 +1,7 @@
 //! Shared X3 operator cell semantics.
 pub use omni_store::operator_cell::Cell;
 
-/// Frozen output.table passes cells directly to stripAnsi's text.replace.
+/// The operator table passes cells directly to the ANSI strip's `text.replace`.
 pub fn table_text(value: &omni_ir::jsjson::JsValue) -> Result<String, String> {
     use omni_ir::jsjson::JsValue;
     match value {
@@ -70,7 +70,7 @@ fn number(n: f64) -> String {
     s
 }
 
-/// bun:sqlite binds safe integral JS numbers as INTEGER, except negative zero.
+/// Safe integral numbers bind as INTEGER, except negative zero.
 pub(crate) fn bind_number(n: f64) -> rusqlite::types::Value {
     if n.is_finite()
         && n.fract() == 0.0

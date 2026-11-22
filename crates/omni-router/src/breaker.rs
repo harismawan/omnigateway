@@ -1,4 +1,4 @@
-//! The circuit breaker (`packages/router/src/breaker.ts`).
+//! The circuit breaker.
 
 use omni_ir::error::ErrorCode;
 use omni_ir::js::math_round;
@@ -75,7 +75,7 @@ pub struct Failure<'a> {
     pub jitter: f64,
 }
 
-/// `recordFailure`. Instants keep any fraction, as TS's do.
+/// Instants keep any fraction.
 #[allow(clippy::cast_precision_loss)]
 pub fn record_failure(current: &CredentialHealth, opts: &Failure<'_>) -> CredentialHealth {
     match penalty(opts.code) {

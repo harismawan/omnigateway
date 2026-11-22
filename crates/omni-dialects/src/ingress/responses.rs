@@ -1,4 +1,4 @@
-//! `POST /v1/responses`, stateless: `ingress/responses.ts`.
+//! `POST /v1/responses`, stateless.
 
 use std::collections::HashSet;
 
@@ -112,7 +112,7 @@ fn text(t: String) -> ContentBlock {
     })
 }
 
-/// `safeToken(String(type))` for a value that may be `undefined`.
+/// `safe_token(String(type))` for a value that may be `undefined`.
 fn token_of(v: Option<&Value>) -> String {
     safe_token(&omni_ir::js::to_string(v)).to_string()
 }
@@ -423,7 +423,7 @@ fn read_cache_key(raw: Option<&Value>) -> Option<String> {
     (n > 0 && n <= 512).then(|| trimmed.to_string())
 }
 
-/// `parseResponsesRequest`.
+/// Parse a Responses body into the IR.
 pub fn parse(
     body: &Value,
     headers: &Headers,

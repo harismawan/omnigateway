@@ -99,7 +99,7 @@ test("the main package pins every platform at its own version and refuses Window
   for (const file of ["postinstall.js", "lib/run.js", "lib/platform.js"]) {
     expect(existsSync(join(out, "omnigateway", file))).toBe(true);
   }
-  // No 0.x migration bridge: 1.x is installed fresh.
+  // No migration bridge: the package is installed fresh.
   expect(existsSync(join(out, "omnigateway", "gateway.js"))).toBe(false);
   expect(manifest.files).not.toContain("gateway.js");
   for (const file of ["bin/omni", "bin/omnigateway"]) {

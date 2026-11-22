@@ -1,5 +1,5 @@
 -- Whether a gateway API key is judged for confidential content before routing
--- (`apps/gateway/src/smartRouter/`): a request the local classifier calls
+-- (`omni-gateway`'s `screening.rs`): a request the local classifier calls
 -- confidential is sent to the operator's local model instead of the model it
 -- named. Only consulted while the global `smartRouterEnabled` setting is on.
 --
@@ -9,7 +9,7 @@
 -- operator never connected to it.
 --
 -- Its own column rather than a member of `limits`. A routing switch is not a
--- limit, and nesting it there would bind it to the `@omni/ratelimit/catalog`
+-- limit, and nesting it there would bind it to the `omni-ratelimit` limits
 -- storage contract, which fails closed on any name it does not know. The cost is
 -- accepted and documented: a rollback to a build without this column ignores it
 -- and stops judging — smart routing fails open across a downgrade, sending

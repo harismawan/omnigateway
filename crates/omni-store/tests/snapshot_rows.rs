@@ -1,4 +1,4 @@
-//! The snapshot reads degrade per row where TS keeps serving: one malformed
+//! Contract tests for per-row snapshot degradation: one malformed
 //! virtual model does not take the others down, and quota windows are read.
 
 mod common;

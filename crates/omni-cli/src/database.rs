@@ -339,7 +339,7 @@ fn snapshots(dir: &Path) -> Vec<Value> {
         };
         out.push(json!({"id":name,"filename":name,"createdAt":at,"sizeBytes":size_of(&f.path()),"reason":reason}));
     }
-    // Stable sort: frozen TS retains directory enumeration order on ties.
+    // Stable sort: ties retain directory enumeration order.
     out.sort_by_key(|s| std::cmp::Reverse(s["createdAt"].as_i64()));
     out
 }

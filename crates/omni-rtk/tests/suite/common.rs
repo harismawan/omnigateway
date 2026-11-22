@@ -1,8 +1,8 @@
-//! Shared fixtures for the ported `packages/rtk/test` suite.
+//! Shared fixtures for the RTK regression suite.
 //!
-//! TS asserts `transformRequest(...).request` is (`toBe`) or is not the input
-//! object. The Rust API returns `Cow::Borrowed` exactly when TS returns the
-//! input object, so `unchanged` is that identity, not a value comparison.
+//! The suite asserts whether `transform_request(...).request` is the input
+//! object. The API returns `Cow::Borrowed` exactly when the request is
+//! unchanged, so `unchanged` tests that identity, not a value comparison.
 
 #![allow(dead_code)]
 

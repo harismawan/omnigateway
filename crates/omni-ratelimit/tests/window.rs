@@ -1,4 +1,5 @@
-//! Port of `packages/ratelimit/test/window.test.ts`.
+//! Contract tests for `SlidingWindow`: counts, resets, the entry bound,
+//! clamping and aging.
 
 use omni_ratelimit::window::SlidingWindow;
 
@@ -254,7 +255,7 @@ fn history_is_independent_of_the_current_limit() {
 
 /// With the gateway's admission discipline (record only when `count < limit`)
 /// the bounded window answers every count and reset exactly as the unbounded
-/// TS one, across a long random script with aging.
+/// reference model, across a long random script with aging.
 #[test]
 fn bounded_and_unbounded_agree_under_admission() {
     let mut seed: u64 = 0x2545_F491_4F6C_DD1D;

@@ -1,4 +1,4 @@
-//! A failed upstream response as a `GatewayError` (`packages/providers/src/http.ts`).
+//! A failed upstream response as a `GatewayError`.
 
 use omni_ir::error::{ErrorCode, GatewayError};
 use omni_ir::js::{self, prop, utf16_prefix};
@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::http::Headers;
 
-/// `codeForStatus`.
+/// The error code for an upstream status.
 fn code_for_status(status: u16) -> ErrorCode {
     match status {
         401 | 403 => ErrorCode::Auth,
@@ -19,14 +19,13 @@ fn code_for_status(status: u16) -> ErrorCode {
     }
 }
 
-/// `parseRetryAfter`: milliseconds, from seconds or an HTTP date.
+/// `Retry-After` as milliseconds, from seconds or an HTTP date.
 ///
 /// Seconds follow `Number()` exactly. Dates accept what `Date.parse` accepts
 /// for the forms upstreams send — IMF-fixdate, RFC 850, asctime, RFC 2822 with
 /// a zone, ISO 8601 — with one stated difference: a zoneless date-time is read
 /// as UTC, where JS reads local time. JSC also accepts free-form strings
-/// (`"5, 7"` is a date in 2001); those are `None` here, and in TS they clamp to
-/// `0` because they lie in the past.
+/// (`"5, 7"` is a date in 2001); those are `None` here.
 pub fn parse_retry_after(header: Option<&str>, now_ms: f64) -> Option<f64> {
     let header = header?;
     let seconds = js::string_to_number(header);

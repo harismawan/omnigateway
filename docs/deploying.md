@@ -81,8 +81,8 @@ carried no bytes for about five.
 
 `requestDeadlineMs` defaults to `0`, so there is no longest expected request to
 size a timeout against: an inference request ends when the provider finishes or
-the client disconnects. The three inference routes clear Bun's own per-request
-socket ceiling to match, so nothing inside the gateway will cut a long reply
+the client disconnects. The three inference routes disable the per-request
+socket ceiling, so nothing inside the gateway will cut a long reply
 short — which makes the proxy in front of it the only remaining limit.
 
 For **streaming** that is already handled: the keepalive comments mean the

@@ -1,5 +1,5 @@
-//! Counters in time buckets for the long windows: `memoryCoord().buckets` in
-//! `packages/coord/src/index.ts`, for one key. State, so it lives here and
+//! Counters in time buckets for the long windows, for one key.
+//! State, so it lives here and
 //! not in `omni-ratelimit`, which only judges counts it is handed.
 //!
 //! A window is the sum of its live buckets — those whose start is within
@@ -74,7 +74,7 @@ impl Buckets {
     pub fn seed(&mut self, now: f64, rows: &[(f64, Counts)]) {
         let mut held = BTreeMap::new();
         for (start, counts) in rows {
-            // `Map.set` in TS: a later row for the same bucket replaces.
+            // A later row for the same bucket replaces.
             held.insert(key(self.bucket_of(*start)), *counts);
         }
         self.held = Some(held);

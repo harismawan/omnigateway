@@ -1,4 +1,5 @@
-//! `packages/rtk/test/eighteenth-audit.test.ts`.
+//! Audit regression suite: patch/log routing by origin and shape, and
+//! trailing-row accounting.
 
 use super::common::*;
 

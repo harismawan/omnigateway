@@ -1,4 +1,5 @@
-//! `packages/rtk/test/sixteenth-audit.test.ts`.
+//! Audit regression suite: embedded-diff/banner retention and omission-marker
+//! placement across parsers.
 
 use super::common::*;
 

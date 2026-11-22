@@ -230,7 +230,7 @@ pub(crate) struct Link {
     releases_dropped: AtomicU64,
     last_fault_log: Mutex<Option<Instant>>,
     last_release_log: Mutex<Option<Instant>>,
-    /// A debit went to memory while Redis was away (TS `lostDebit`).
+    /// A debit went to memory while Redis was away.
     lost_debit: AtomicBool,
     pub(crate) runtime: tokio::runtime::Handle,
 }
@@ -364,9 +364,8 @@ impl Link {
         }
     }
 
-    /// Counts and (at most once per interval) logs a fault. The message and
-    /// fields are TS's: the reason is the fault's kind, never the server's
-    /// text.
+    /// Counts and (at most once per interval) logs a fault. The reason logged
+    /// is the fault's kind, never the server's text.
     pub(crate) fn fault(&self, fault: &Fault) {
         self.healthy.store(false, Ordering::SeqCst);
         self.faults.fetch_add(1, Ordering::SeqCst);
@@ -1010,7 +1009,7 @@ impl Link {
     }
 
     /// Connects (the `redis` crate's handshake: AUTH, SELECT) and loads
-    /// every script (TS `loadScripts`), checking each digest, under the
+    /// every script, checking each digest, under the
     /// connect timeout.
     async fn open(&self) -> Result<Conn, Fault> {
         let attempt = async {
@@ -1195,7 +1194,7 @@ pub(crate) fn server_fault(e: &RedisError) -> Fault {
     )
 }
 
-/// TS `reseedAfterOutage`: debits made while Redis was away were dropped by
+/// Reseed after an outage: debits made while Redis was away were dropped by
 /// the memory fallback, so every bucket hash goes and the next admission
 /// reseeds from the store. Boxed: it calls `call`, which spawns it.
 fn reseed_after_outage(link: Arc<Link>) -> BoxFuture<()> {

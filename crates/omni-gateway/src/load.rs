@@ -1,10 +1,10 @@
 //! In-flight accounting and recent use per (credential, model), the
-//! single-process `createLoadRegistry` (`dispatch/loadRegistry.ts`) that
+//! single-process load registry that
 //! `rank` reads: counts for the load term and round-robin, the last release
 //! and an EWMA of time-to-first-token for latency.
 //!
 //! Bounded: a pair's history is forgotten [`HISTORY_TTL`] after its last
-//! release (TS keeps it for the process's life; past an hour the router's
+//! release (past an hour the router's
 //! idle/latency terms for a pair nobody uses are moot), and at most
 //! [`HISTORY_CAP`] pairs are kept, oldest release first out.
 //!
@@ -30,8 +30,8 @@ struct State {
     /// When expired history was last swept; sweeps run at most once a
     /// minute, or at once when over the cap.
     swept_at: f64,
-    /// `localCounts()`: in-flight slots per provider, in the insertion order
-    /// of TS's `Map` (an entry leaves at zero and re-enters at the end).
+    /// In-flight slots per provider, in insertion order
+    /// (an entry leaves at zero and re-enters at the end).
     providers: Vec<(String, u64)>,
 }
 
@@ -93,7 +93,7 @@ impl LoadRegistry {
         }
     }
 
-    /// `localCounts()`: this process's in-flight slots per provider.
+    /// This process's in-flight slots per provider.
     pub fn provider_counts(&self) -> Vec<(String, u64)> {
         self.lock().providers.clone()
     }
@@ -178,8 +178,8 @@ impl LoadRegistry {
 }
 
 /// A claimed slot. Released once: by [`LoadSlot::release`], or on drop with
-/// the TTFT recorded by [`LoadSlot::observed`] (TS's attempt `finally` calls
-/// `releaseSlot(log.ttftMs)` on every way out, a cancel included).
+/// the TTFT recorded by [`LoadSlot::observed`] (every way out of an attempt
+/// releases it, a cancel included).
 #[derive(Debug)]
 #[must_use = "dropping the slot releases it"]
 pub struct LoadSlot {
@@ -339,7 +339,7 @@ mod tests {
         assert!((e - 130.0).abs() < 1e-9);
     }
 
-    /// `localCounts()`: a `Map` per provider, entries leaving at zero and
+    /// Per-provider counts keep insertion order, entries leaving at zero and
     /// re-entering last, as `omni_inflight` lists them.
     #[test]
     fn provider_counts_keep_map_order() {

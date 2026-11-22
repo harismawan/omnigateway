@@ -1,9 +1,9 @@
 # OmniGateway
 
-For an offline Rust cluster cutover or Postgres lineage replacement, see
-[the bucket sweep procedure](docs/rust-cluster-cutover.md) before starting any replica.
+For a Postgres lineage replacement or DB restore, see
+[the bucket sweep procedure](docs/rust-cluster-bucket-sweep.md) before starting any replica.
 
-Rust local service commands and diagnostic migration limits are documented in
+Local service commands and their limits are documented in
 [Rust CLI service boundary](docs/rust-cli-service.md).
 
 One endpoint in front of the AI accounts you already pay for.
@@ -116,11 +116,12 @@ Without it everything still works, through a small Node launcher. The
 postinstall only creates those links; it never touches a service or a
 database.
 
-### Coming from 0.x
+### Upgrading an existing installation
 
-`1.0.0` is a fresh install of the Rust gateway; nothing is converted for you.
-It reads an existing 0.x SQLite database as it is (same schema), so to keep
-your data point it at the old installation and replace the service yourself:
+An upgrade is a fresh install of the binary; nothing is converted for you.
+The gateway reads an existing SQLite database as it is (same schema), so to
+keep your data point it at the old installation and replace the service
+yourself:
 
 ```bash
 omni stop                                  # or: systemctl --user stop omnigateway
@@ -133,7 +134,8 @@ systemctl --user restart omnigateway
 Use the same `.env` and `OMNI_ENCRYPTION_KEY`, or the stored accounts cannot be
 decrypted. Plugins (their data stays) and accounts for Grok, Kimi, Kilo, Muse
 and Qoder are not served by 1.x; `omni doctor` lists what it found. Cluster
-installations follow the [cutover runbook](docs/rust-cutover-runbook.md).
+installations: after a Postgres restore or replacement, follow
+[the bucket sweep procedure](docs/rust-cluster-bucket-sweep.md).
 
 ## Getting started
 
@@ -442,14 +444,14 @@ Several replicas behind a load balancer are **cluster mode** on Postgres and
 Redis. All of it, with the nginx block and the Kubernetes base, is in
 [docs/deploying.md](docs/deploying.md).
 
-In Rust cluster mode, the database panel reports Postgres size and table stats
+In cluster mode, the database panel reports Postgres size and table stats
 with credentials redacted. Clearing captured bodies leaves request logs intact.
 The snapshot list is empty; use Postgres backup tooling rather than SQLite
 snapshot, import, restore, or vacuum actions. Authenticated `/metrics` exposes
 process-local `omni_request_log_writer_*_total` counters for optional and
 terminal queue drops, persistence failures, and completion delivery loss.
-Unlike the TypeScript gateway, Rust cluster inference returns HTTP 503 before admission if the request-log writer is closed or its bounded wait queue is full or expires (4 seconds).
-On the authenticated Rust `/metrics` endpoint, `omni_request_log_writer_reservation_refused_total`
+Cluster inference returns HTTP 503 before admission if the request-log writer is closed or its bounded wait queue is full or expires (4 seconds).
+On the authenticated `/metrics` endpoint, `omni_request_log_writer_reservation_refused_total`
 counts these refusals by `reason` (`closed`, `cap`, `deadline`). `revalidation` separately counts
 503s caused by a failed primary key or settings read after waiting. The response does not expose the cause.
 The cluster-only `omni_request_log_writer_queued` and `omni_request_log_writer_credits_in_use`
@@ -457,8 +459,8 @@ gauges distinguish queued entries from the total budget in use, which also inclu
 The gauges are sampled independently and exclude batches already dequeued for persistence.
 
 When incoming log events outpace the Postgres writer and half or less of its
-queue credit is free, Rust cluster mode may skip `Begin` and `Route` log events
-instead of waiting as the TypeScript gateway does. Authenticated `/metrics`
+queue credit is free, cluster mode may skip `Begin` and `Route` log events
+instead of waiting. Authenticated `/metrics`
 reports these skips in `omni_request_log_writer_optional_dropped_total`;
 `omni_request_log_writer_terminal_dropped_total` tracks terminal queue loss
 separately. This policy never sheds `Finish` events and does not change completed
@@ -641,7 +643,7 @@ built: [docs/roadmap.md](docs/roadmap.md).
 
 ## Plugins
 
-Not supported in 1.x; the 0.x plugin guide is on the `bun-checkpoint` branch.
+Not supported in 1.x.
 
 ## Development
 
@@ -649,7 +651,7 @@ Contributing, or running from a checkout? See
 [ARCHITECTURE.md](ARCHITECTURE.md) for how the system fits together,
 [CLAUDE.md](CLAUDE.md) for the repository map, architectural boundaries, and
 conventions, and `docs/superpowers/specs/` for the design documents
-behind each feature. The 0.x TypeScript gateway is on the `bun-checkpoint` branch.
+behind each feature.
 
 The gateway is Rust (toolchain pinned in `rust-toolchain.toml`); the console is
 built with Bun 1.4.4.

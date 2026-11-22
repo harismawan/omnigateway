@@ -1,5 +1,6 @@
 -- The Postgres half of the sqlite migration of the same name. `BIGINT`, like
--- every other epoch-ms column in this schema, and read back through `numOrNull`.
+-- every other epoch-ms column in this schema, and read back as a nullable JS
+-- number.
 --
 -- Nullable rather than `NOT NULL DEFAULT`: the column is a deadline, and every
 -- finite default is a date on which somebody's client stops working. NULL is

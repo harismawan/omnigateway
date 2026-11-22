@@ -1,19 +1,18 @@
-//! `dispatch` (`apps/gateway/src/dispatch/index.ts`, with `attempt.ts` and
-//! `classify.ts`): resolve the model, rank its candidates, then try them in
+//! `dispatch`: resolve the model, rank its candidates, then try them in
 //! order. Before the commit point (the first `blockDelta`) a retryable failure
 //! moves to the next candidate; after it, a failure is forwarded in-stream.
 //!
 //! Resolution and ranking run eagerly, and the head candidate's load slot is
-//! claimed then, as TS claims it before its generator starts. The attempts run
+//! claimed then, before the stream starts. The attempts run
 //! lazily inside the returned stream, so a streaming response's head goes out
-//! before any upstream is called, exactly as in TS.
+//! before any upstream is called.
 //!
 //! Cancellation is structural: dropping the stream drops the upstream
 //! [`omni_providers::EventStream`] (closing the socket) and every load slot and
 //! probe claim this request holds.
 //!
-//! Health is applied to the in-memory snapshot under one lock (TS applies it
-//! inside a store transaction) and written through the writer: a
+//! Health is applied to the in-memory snapshot under one lock and written
+//! through the writer: a
 //! [`BreakerTransition`] whenever the breaker state or `opened_at` changes, a
 //! [`HealthMeasurement`] otherwise.
 
@@ -128,8 +127,8 @@ fn event_size(e: &StreamEvent) -> usize {
 /// `DISPATCH_REFRESH_LEAD_MS`.
 pub const REFRESH_LEAD_MS: i64 = 120_000;
 
-/// The stream of a dispatch: events, then at most one `Err` (a throw TS lets
-/// escape the generator), then the end.
+/// The stream of a dispatch: events, then at most one `Err` (a failure that
+/// escapes the attempt loop), then the end.
 pub type EventsStream = Pin<Box<dyn Stream<Item = Result<StreamEvent, GatewayError>> + Send>>;
 
 /// What every dispatch shares: one per process.
@@ -143,7 +142,7 @@ pub struct Deps {
     pub providers: Providers,
     /// This process's own recent health writes, by `healthKey`, with when
     /// they were made. Held under one lock, which also serializes the
-    /// read-modify-write as TS's store transaction does. See [`HealthOverlay`].
+    /// read-modify-write. See [`HealthOverlay`].
     pub health: Arc<HealthOverlay>,
     pub shared_health: Option<omni_store::writer::HealthHandle>,
     /// `/metrics` series (off unless `OMNI_METRICS_TOKEN` is set).
@@ -193,13 +192,13 @@ pub struct Request {
 /// Per-call choices, independent of the installation's dispatch dependencies.
 #[derive(Debug, Clone, Copy)]
 pub struct DispatchOptions {
-    /// Whether operator transforms may run. Both are currently unported;
+    /// Whether operator transforms may run. Both are currently unimplemented;
     /// screening callers explicitly opt out rather than relying on defaults.
     pub request_transforms: bool,
     /// Revalidate the model against dispatch's own snapshot before routing.
     pub local_only: bool,
     /// Whether attempt selection writes pending/route rows. Classifier calls
-    /// have their own completed row, never the parent's `onRoute` callback.
+    /// have their own completed row, never the parent's route row.
     pub on_route: bool,
 }
 
@@ -239,12 +238,12 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// `reasonField`: an upstream's words wait for debug.
+/// The reason rule: an upstream's words wait for debug.
 fn reason_shown(e: &GatewayError) -> bool {
     e.provider.is_none() || e.gateway_authored || tracing::enabled!(tracing::Level::DEBUG)
 }
 
-/// `reportRejection`: the one line saying why a request failed.
+/// The one line saying why a request failed.
 pub fn report_rejection(log: &RequestLog, e: &GatewayError, surface: Option<&str>) {
     let reason = reason_shown(e).then_some(e.message.as_str());
     macro_rules! line {
@@ -270,7 +269,8 @@ pub fn report_rejection(log: &RequestLog, e: &GatewayError, surface: Option<&str
     }
 }
 
-/// Node's own message for a transport failure, as `describeError` reads it.
+/// A transport failure's message in the fixed errno-style form clients see
+/// (`connect ECONNREFUSED …`, `getaddrinfo ENOTFOUND …`, `socket hang up`).
 pub fn describe_transport(e: &HttpError) -> String {
     match e {
         HttpError::Connect(io) => {
@@ -297,7 +297,7 @@ pub fn describe_transport(e: &HttpError) -> String {
     }
 }
 
-/// `classify` over what an attempt can raise.
+/// Classification of what an attempt can raise.
 fn classify_send(e: SendError) -> GatewayError {
     match e {
         SendError::Gateway(g) => g,
@@ -340,7 +340,7 @@ fn int(x: f64) -> i64 {
 }
 
 impl Deps {
-    /// `persistHealth`: applies `transition` to the pair's current row.
+    /// Applies `transition` to the pair's current row.
     fn persist_health(
         &self,
         c: &Cand,
@@ -468,7 +468,7 @@ pub struct Refusal {
 /// `LOCAL_ONLY_MESSAGE`.
 pub const LOCAL_ONLY_MESSAGE: &str = "confidential routing is not configured";
 
-/// `screenFirst`'s refused branch: its own row (no attempt, no target) and
+/// The screening refusal branch: its own row (no attempt, no target) and
 /// one in-stream `error` event, which the route renders exactly as any other
 /// pre-commit failure.
 pub fn refused(deps: &Deps, req: &Request, refusal: &Refusal, surface: &str) -> Dispatched {
@@ -536,8 +536,8 @@ pub fn dispatch_with_options(
         })]))
     };
 
-    // RTK and ponytail run here in TS; both default off and neither is
-    // ported, so the request goes as sent (see the report).
+    // RTK and ponytail would run here; both default off and neither is
+    // implemented, so the request goes as sent (see the report).
     let resolved = if options.local_only {
         omni_router::local_only_model(&req.request.model, &snapshot.routing, &deps.providers)
             .ok_or_else(|| GatewayError::new(ErrorCode::Internal, LOCAL_ONLY_MESSAGE))
@@ -762,7 +762,7 @@ fn run(mut s: RunState) -> EventsStream {
                 l.resolved_provider = Some(c.target.provider.clone());
                 l.resolved_model = Some(c.target.model.clone());
             }
-            // `onRoute`: the pending row on the first attempt, a route update on each failover.
+            // The route row: pending on the first attempt, a route update on each failover.
             // A refusal is counted in the writer's `dropped` and warned about
             // by the writer task, rate-limited; never a line per request.
             if s.on_route && began {
@@ -817,7 +817,7 @@ fn run(mut s: RunState) -> EventsStream {
             }
 
             loop {
-                // ---- attempt (`attempt.ts`)
+                // ---- attempt
                 let attempt: Result<(), GatewayError> = 'attempt: {
                     let stale = retry_secrets.is_none() && preemptive_refresh_required;
                     if stale {

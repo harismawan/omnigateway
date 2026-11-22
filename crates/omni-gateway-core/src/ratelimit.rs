@@ -1,6 +1,5 @@
-//! The API-key rate limiter, single mode: `ApiKeyRateLimiter` from
-//! `apps/gateway/src/auth/rateLimit.ts` over `memoryCoord`, with the
-//! arithmetic in `omni-ratelimit`.
+//! The API-key rate limiter, single mode: everything answered from process
+//! memory, with the arithmetic in `omni-ratelimit`.
 //!
 //! Everything a request asks is answered from memory under one short lock,
 //! with no I/O:
@@ -11,7 +10,7 @@
 //! - the long windows (`5h`, `1w`) from time buckets seeded from the store
 //!   and debited by every completed request once its row is committed.
 //!
-//! **Ordering, not bookkeeping** (TS `rateLimit.ts`: "row first, then the
+//! **Ordering, not bookkeeping** ("row first, then the
 //! debit"). The request-log writer is the only writer of `request_logs`.
 //! After each batch commits it delivers that batch's completions, and it
 //! runs every seed read on its own connection between batches, sending the
@@ -20,23 +19,22 @@
 //! debit was delivered (and ignored, the window being unseeded) before the
 //! seed; a row committed after it is debited after the seed is installed.
 //! The accepted cost: a long-window debit lags its completion by up to one
-//! writer batch (~200 ms), as TS's debit follows its row's write.
+//! writer batch (~200 ms): a debit follows its row's write.
 //!
-//! Differences from TS, both deliberate:
+//! Two deliberate properties:
 //!
 //! - **Seeding does not block** (spec ruling). A subject whose long window
 //!   is unseeded is admitted against the limits it can check, and a seed is
 //!   asked of the request-log writer ([`RateLimiter::spawn_consumer`]). Until
 //!   it lands, a key can overshoot that window by the requests admitted
 //!   meanwhile. [`RateLimiter::preseed`] seeds every limited key at boot.
-//! - **A refusal's exact reset is read from memory.** TS asks the store for
-//!   the oldest retained row (`oldestSince`) on the refusal path. Here the
+//! - **A refusal's exact reset is read from memory.** The
 //!   seed also loads every retained row's `at`, debits append to it, and the
-//!   refusal reads its head. Same answer, no store read before the 429 is
-//!   written.
+//!   refusal reads its head — the oldest retained row plus the window, with
+//!   no store read before the 429 is written.
 //!
-//! The gauge has no TTL: a slot is freed by `Drop`, so the leak TS's TTL and
-//! renewal exist to heal cannot happen.
+//! The gauge has no TTL: a slot is freed by `Drop`, so a leaked slot cannot
+//! happen.
 
 use crate::buckets::Buckets;
 use omni_ir::error::{ErrorCode, GatewayError};
@@ -47,7 +45,7 @@ use omni_ratelimit::{CounterSnapshot, HeadroomByDimension, Violation, Window, Wi
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-/// The long windows, in `LONG_WINDOWS` order.
+/// The long windows, shortest first.
 const LONG: [Window; 2] = [Window::H5, Window::W1];
 
 /// `GRAIN_MS`: a minute of five hours, an hour of a week.
@@ -76,8 +74,8 @@ pub const SEED_TIMEOUT_MS: f64 = 5_000.0;
 const MAX_PENDING_SEEDS: usize = 4_096;
 
 /// Retained row stamps per subject and long window, for a refusal's exact
-/// reset (the oldest retained row's `at` plus the window, which TS reads from
-/// the store). Past it the oldest are dropped, which can only make a refusal's
+/// reset (the oldest retained row's `at` plus the window).
+/// Past it the oldest are dropped, which can only make a refusal's
 /// reset later (the safe side). Divergence can persist below the cap until
 /// omitted rows expire. A fixed bound,
 /// so the memory does not follow the request rate (it was 2^20, 16 MiB per
@@ -85,7 +83,7 @@ const MAX_PENDING_SEEDS: usize = 4_096;
 pub const MAX_LONG_STAMPS: usize = 65_536;
 pub(crate) const MAX_STAMPS: usize = MAX_LONG_STAMPS;
 
-/// `modelSubjectId`: `encodeURIComponent` keeps `/` and `:` out of the
+/// `encodeURIComponent` keeps `/` and `:` out of the
 /// model part, so no model name can spell another subject's key.
 pub fn model_subject_id(key_id: &str, model: &str) -> String {
     let mut out = String::with_capacity(key_id.len() + 3 + model.len());
@@ -132,7 +130,7 @@ fn any_long_limit(l: &LimitScope) -> bool {
             .is_some_and(|s| s.five_hours.flatten().is_some() || s.one_week.flatten().is_some())
 }
 
-/// `subjectsOf`: key-wide first (when it limits anything), then the model's
+/// Key-wide first (when it limits anything), then the model's
 /// override.
 fn subjects_of(key_id: &str, limits: &LimitConfig, model: &str) -> Vec<Subject> {
     let mut out = Vec::new();
@@ -155,7 +153,7 @@ fn subjects_of(key_id: &str, limits: &LimitConfig, model: &str) -> Vec<Subject> 
     out
 }
 
-/// `requestsOnly`: what `count_tokens` is judged against.
+/// What `count_tokens` is judged against.
 fn requests_only(l: &LimitScope) -> LimitScope {
     LimitScope {
         requests: l.requests.clone(),
@@ -361,7 +359,7 @@ pub struct RateLimitExceeded {
 }
 
 impl RateLimitExceeded {
-    /// The `GatewayError` TS throws: `RATE_LIMIT`, its fixed message, and
+    /// The refusal's `GatewayError`: `RATE_LIMIT`, its fixed message, and
     /// the wait.
     pub fn to_gateway_error(&self) -> GatewayError {
         GatewayError::new(ErrorCode::RateLimit, "API key rate limit exceeded")
@@ -583,12 +581,12 @@ impl RateLimiter {
         result.map(|_| ())
     }
 
-    /// `debit`: one completed request against the long windows. Call it
+    /// One completed request against the long windows. Call it
     /// only once the row is committed, in commit order: the writer delivers
     /// committed completions to [`Self::apply`], which calls this. `row_at`
     /// is the row's `at`; `now` stamps the bucket.
     ///
-    /// A window not yet seeded ignores it, exactly as TS's buckets do: the
+    /// A window not yet seeded ignores it: the
     /// seed that follows reads the row instead ("row first, then the
     /// debit"). Because seeds are read on the writer's connection and
     /// delivered on the same ordered path, a row is counted either by the
@@ -612,8 +610,8 @@ impl RateLimiter {
     }
 
     /// [`Self::debit`] of the key-wide subject alone: a completion whose
-    /// requested model TS could not encode. TS's `debit` adds to the key's
-    /// subject, then `modelSubjectId` throws before any model's.
+    /// requested model cannot be encoded into a subject id. The key's
+    /// subject is still debited; no model's can be.
     pub fn debit_key_only(&self, key_id: &str, tokens: f64, cost_usd: f64, row_at: f64, now: f64) {
         self.debit_subjects(&[key_id.to_owned()], tokens, cost_usd, row_at, now);
     }
@@ -650,7 +648,7 @@ impl RateLimiter {
         }
     }
 
-    /// `recordOverride`: a model's override limits, for a completion this
+    /// A model's override limits, for a completion this
     /// process debits without admitting (the guardrail's classifier).
     pub fn record_override(&self, key_id: &str, limits: &LimitConfig, model: &str) {
         if let Some(cluster) = &self.cluster {

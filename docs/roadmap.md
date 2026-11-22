@@ -41,8 +41,6 @@ Designed:
 [2026-09-04-observability-design.md](superpowers/specs/2026-09-04-observability-design.md).
 
 Nothing exposes a scrape endpoint, and the `k8s/` kustomize base ships without one.
-The 0.x socket registry (`bun-checkpoint`) already computed `{connections, dropped,
-queued}` that no route read.
 
 ### Searching captured bodies
 
@@ -59,10 +57,10 @@ to storage.
 **Spend and quota alerting** — a webhook when a key crosses a budget, or when an
 account's quota pace says it will not survive the window.
 
-The 0.x plugin host, event bus, `RequestCompleted` and broadcast channel existed for
-exactly this; 1.x has none of them, so this waits on plugin support returning. Putting a notifier in the core buys a
+1.x has no plugin host, event bus or broadcast channel, so this waits on plugin
+support returning. Putting a notifier in the core buys a
 configuration surface, a retry policy and an outbound origin that nobody asked the
-gateway for. The 0.x plugin guide is on `bun-checkpoint`.
+gateway for.
 
 ## Deliberately not planned
 

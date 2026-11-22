@@ -1,8 +1,7 @@
 //! Bootstrap (`loadCodeAssist`, `onboardUser`) and quota
 //! (`retrieveUserQuotaSummary`) in the App 2.34 / CLI 1.5.13 shape captured on
 //! 2026-11-21 (`scripts/antigravity-capture`): `daily-cloudcode-pa`, the Hub UA,
-//! no `Accept`, and `tierId`. The same contract as
-//! `packages/control/test/oauth/antigravity.test.ts`.
+//! no `Accept`, and `tierId`.
 use omni_providers::antigravity::oauth::{load_request, onboard_request};
 use omni_providers::oauth::AuthRequest;
 use serde_json::json;

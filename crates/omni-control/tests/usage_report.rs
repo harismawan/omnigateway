@@ -72,7 +72,7 @@ fn a_split_is_the_last_field_and_an_empty_report_is_an_empty_array() {
 fn a_failed_read_leaves_no_partial_report() {
     let (_dir, store) = store();
     // Two i64::MAX cells overflow SQLite's integer SUM: the statement fails
-    // on its first step, as it does in TS (500 INTERNAL there and here).
+    // on its first step (500 INTERNAL).
     store
         .connection()
         .execute_batch(

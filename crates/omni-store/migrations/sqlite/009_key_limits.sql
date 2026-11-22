@@ -25,8 +25,8 @@ ALTER TABLE api_keys ADD COLUMN limits TEXT NOT NULL DEFAULT '{}';
 --
 -- Only a value the reader accepts is carried over. `rate_limit_per_min` was
 -- `INTEGER` with no `CHECK`, so a hand-edited install can hold `0`, `-5` or
--- `1.5` in it, while the new schema is `z.number().int().positive()`. Backfilled
--- unconditionally, each of those writes a matrix `parseLimitConfig` refuses —
+-- `1.5` in it, while the new schema is a positive integer. Backfilled
+-- unconditionally, each of those writes a matrix `parse_limit_config` refuses —
 -- which is `limits: null`, which is every request for that key answered
 -- `INTERNAL` at the auth chokepoint. An upgrade must not manufacture the
 -- unreadable row the design describes as arising only from meddling.

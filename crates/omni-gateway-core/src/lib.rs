@@ -2,8 +2,7 @@
 //! configuration, the routing snapshot with its background refresher, and
 //! the in-memory rate limiter.
 //!
-//! The gateway reads **no implicit `.env`** (spec ruling): the shipped TS
-//! binary is compiled with `autoloadDotenv: false`, and `omni start` /
+//! The gateway reads **no implicit `.env`** (spec ruling): `omni start` /
 //! `omni service` hand the root's `.env` over explicitly. Configuration is
 //! the process environment only.
 

@@ -1,7 +1,7 @@
-//! Postgres migrations against `openPg` in `packages/store/src/postgres/db.ts`:
-//! the same eight files, the same ledger, the same advisory lock, from every
-//! partial state a TS build could have left a database in, and in both
-//! directions (TS continues what Rust migrated, Rust continues what TS did).
+//! Contract tests for the Postgres migration walk: the eight files, the
+//! ledger, the advisory lock, resumed from every partial state an older
+//! build could have left a database in (each file applied as its own batch
+//! with a ledger row).
 
 mod common;
 
@@ -35,7 +35,7 @@ async fn advisory_locks_held(client: &tokio_postgres::Client) -> i64 {
         .get(0)
 }
 
-/// What `openPg` leaves after walking `upto` migrations: each file run as one
+/// What an older walk leaves after `upto` migrations: each file run as one
 /// simple-protocol batch and a ledger row, in one transaction.
 async fn legacy(db: &TestDb, upto: usize) {
     let client = db.client().await;

@@ -1,8 +1,7 @@
-//! Provider credentials with their secrets decrypted, and credential health,
-//! from `packages/store/src/sqlite/credentials.ts`.
+//! Provider credentials with their secrets decrypted, and credential health.
 //!
-//! TS decrypts lazily, per purpose. The Rust gateway holds decrypted secrets
-//! in its snapshot instead (spec, "The request path" rule 1), so this read
+//! The gateway holds decrypted secrets
+//! in its snapshot (spec, "The request path" rule 1), so this read
 //! opens every present field once, keyed by `token_version` so a refresh is
 //! seen as a new value.
 
@@ -19,9 +18,9 @@ pub enum Secret {
     /// The column is NULL.
     Absent,
     Present(String),
-    /// The column holds a value that does not open under this key. TS throws
-    /// at the first use of such a field; here only this credential is
-    /// affected, and its use fails rather than the whole snapshot.
+    /// The column holds a value that does not open under this key. Only this
+    /// credential is affected: its use fails at the first use of the field,
+    /// rather than the whole snapshot.
     Unreadable(FieldError),
 }
 
@@ -44,7 +43,7 @@ impl std::fmt::Debug for Secret {
     }
 }
 
-/// `CredentialSecrets`, decrypted.
+/// The decrypted secret material.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialSecrets {
     pub access_token: Secret,
@@ -53,15 +52,16 @@ pub struct CredentialSecrets {
     pub id_token: Secret,
 }
 
-/// `Credential` plus its decrypted secrets. Serializes as TS's `Credential`
-/// (what `omni credentials list --json` prints): the secrets never serialize.
+/// A credential plus its decrypted secrets. Serializes as the wire
+/// `Credential` (what `omni credentials list --json` prints): the secrets
+/// never serialize.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Credential {
     #[serde(skip)]
     pub lone_endpoint: Option<Vec<u16>>,
     pub id: String,
-    /// `ProviderId`: a validated string, open because plugins add providers.
+    /// A validated string, open because plugins add providers.
     pub provider: String,
     pub label: String,
     pub auth_type: AuthType,
@@ -71,7 +71,7 @@ pub struct Credential {
     /// Epoch ms as a JS number, or `None` when the token does not expire.
     pub expires_at: Option<f64>,
     pub account_email: Option<String>,
-    /// Provider-specific durable state; an open record in TS.
+    /// Provider-specific durable state; an open record.
     pub provider_data: serde_json::Value,
     pub disabled_reason: Option<DisabledReason>,
     pub disabled_at: Option<i64>,
@@ -86,7 +86,7 @@ pub struct Credential {
 }
 
 impl Credential {
-    /// `openForInference`: the access token for OAuth, the API key otherwise.
+    /// The inference secret: the access token for OAuth, the API key otherwise.
     pub fn inference_secret(&self) -> &Secret {
         if self.auth_type == AuthType::OAuth {
             &self.secrets.access_token
@@ -272,7 +272,7 @@ fn to_credential(r: &Row<'_>, key: &FieldKey) -> Result<Credential, StoreError> 
     })
 }
 
-/// `CredentialRepo.list`, ordered by tier then label, secrets decrypted.
+/// All credentials, ordered by tier then label, secrets decrypted.
 pub fn get(conn: &Connection, key: &FieldKey, id: &str) -> Result<Option<Credential>, StoreError> {
     let mut stmt = conn.prepare_cached("SELECT * FROM credentials WHERE id=?")?;
     let mut rows = stmt.query([id])?;
@@ -312,10 +312,10 @@ fn read_list(
     Ok(out)
 }
 
-/// `CredentialHealth`: what routing decides on for one (credential, model).
+/// What routing decides on for one (credential, model).
 ///
-/// The instants are JS numbers: `recordFailure` adds a fractional
-/// `Retry-After` and TS stores the fraction (the INTEGER-affinity column
+/// The instants are JS numbers: a failure may add a fractional
+/// `Retry-After` and the fraction is stored (the INTEGER-affinity column
 /// keeps a non-integral REAL as REAL), so they are `f64` end to end.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -495,7 +495,7 @@ fn health_from_row(r: &rusqlite::Row<'_>) -> Result<CredentialHealth, StoreError
 
 const H: &str = "credential_health";
 
-/// `CredentialRepo.listHealth`.
+/// Every stored health row.
 pub fn list_health(conn: &Connection) -> Result<Vec<CredentialHealth>, StoreError> {
     read_health_rows(conn, false)
 }
@@ -522,7 +522,7 @@ fn read_health_rows(conn: &Connection, isolate: bool) -> Result<Vec<CredentialHe
     Ok(out)
 }
 
-/// `UPSERT_HEALTH` in `packages/store/src/sqlite/credentials.ts`.
+/// The credential-health upsert: insert, or replace every mutable column.
 const UPSERT_HEALTH: &str = "INSERT INTO credential_health
    (credential_id, model, breaker_state, consecutive_failures, opened_at,
     rate_limited_until)
@@ -533,11 +533,11 @@ const UPSERT_HEALTH: &str = "INSERT INTO credential_health
    opened_at = excluded.opened_at,
    rate_limited_until = excluded.rate_limited_until";
 
-/// `CredentialRepo.updateHealth` on SQLite: read the stored row, apply the
+/// Health mutation on SQLite: read the stored row, apply the
 /// mutation, write it, in one `IMMEDIATE` transaction (the write lock is
 /// taken first, so no other connection can land between the read and the
 /// write). [`StoreError::Refused`] for a row the foreign key refuses (no
-/// such credential); nothing is written then, as TS's call throws.
+/// such credential); nothing is written then.
 ///
 /// The transaction is an RAII guard: an error, a failed COMMIT, or a panic
 /// in `apply` unwinding through here all roll it back, so the connection is

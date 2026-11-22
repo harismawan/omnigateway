@@ -195,7 +195,7 @@ pub fn connect(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
             .map(|s| omni_ir::js::trim(s))
             .filter(|s| !s.is_empty())
             .unwrap_or(provider);
-        // Frozen create seals every secret and binds full metadata before its one INSERT.
+        // Create seals every secret and binds full metadata before its one INSERT.
         let access =
             omni_crypto::field::encrypt(&key, &String::from_utf16_lossy(&result.access_token));
         let refresh = result
@@ -214,7 +214,7 @@ pub fn connect(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
         let at = now();
         s.connection().execute("INSERT INTO credentials(id,provider,label,auth_type,enabled,tier,weight,access_token,refresh_token,api_key,id_token,expires_at,account_email,provider_data,disabled_reason,disabled_at,created_at,updated_at) VALUES(?,?,?,'oauth',1,1,1,?,?,NULL,?,?,?,?,NULL,NULL,?,?)",rusqlite::params![id,provider,label,access,refresh,id_token,result.expires_at,email,data,at,at]).map_err(error)?;
     } else {
-        // Reconnect deliberately keeps the frozen secrets-write / metadata-write boundary.
+        // Reconnect deliberately keeps the secrets-write / metadata-write boundary.
         persist(&s, &key, &id, &empty, &result, None)?;
     }
     Ok(if flags.contains_key("json") {
@@ -478,7 +478,7 @@ pub fn refresh(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
     let result = rt.block_on(async {
         let response = send(&Client::new(), &provider, request, "refresh").await?;
         let result = token_result(&provider, &response, Some(&token), &prior)?;
-        // Frozen builtin step results still pass through the host's shape guard.
+        // Builtin step results still pass through the host's shape guard.
         if provider == "openai" && matches!(field(&c, "providerData"), J::Null) {
             return Err((1, "UPSTREAM: openai oauth refresh threw".into()));
         }

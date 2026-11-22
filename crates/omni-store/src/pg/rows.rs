@@ -1,6 +1,6 @@
 //! The snapshot and operator reads on Postgres, mapped to the same types the
-//! SQLite readers produce, the way `packages/store/src/postgres/*.ts` maps
-//! them: `BIGINT` instants and counters to JS numbers, `BOOLEAN` flags as
+//! SQLite readers produce: `BIGINT` instants and counters to JS numbers,
+//! `BOOLEAN` flags as
 //! they are, and every TEXT-held JSON parsed by the one reader both
 //! backends share.
 
@@ -38,7 +38,7 @@ fn to_key(r: &Row) -> Result<ApiKey, StoreError> {
         hash: r.try_get("hash")?,
         model_allowlist,
         lone_allowlist,
-        // `parseLimits`: unreadable marks the key rather than failing the read.
+        // Unreadable limits mark the key rather than failing the read.
         limits: keys::parse_stored_limits(&limits),
         body_logging_opt_out: r.try_get("body_logging_opt_out")?,
         created_at: r.try_get("created_at")?,
@@ -327,7 +327,7 @@ fn to_credential(r: &Row, key: &FieldKey) -> Result<Credential, StoreError> {
         enabled: r.try_get("enabled")?,
         tier: f64::from(r.try_get::<_, i32>("tier")?),
         weight: r.try_get("weight")?,
-        // Frozen numOrNull reads the BIGINT as a JS number.
+        // A nullable BIGINT instant reads as a JS number.
         expires_at: r
             .try_get::<_, Option<i64>>("expires_at")?
             .map(|at| at as f64),

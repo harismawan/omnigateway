@@ -11,7 +11,7 @@
 //! **Pool.** At most 16 connections per replica (the spec's ceiling), a 1 s
 //! wait for a free one, a 5 s connect timeout, and every statement under a
 //! 5 s `statement_timeout`. The migration walk runs on a connection of its
-//! own without a statement timeout, as `openPg` does: a migration on a large
+//! own without a statement timeout: a migration on a large
 //! table may take longer, and its lock wait is expected to.
 //!
 //! **Driver.** `tokio-postgres` with `deadpool-postgres`, not sqlx: the batch
@@ -92,8 +92,8 @@ impl PgConfig {
     }
 }
 
-/// The URL as it may be shown: host and database, never the password
-/// (`redacted` in `store.ts`). Both places libpq takes one are masked: the
+/// The URL as it may be shown: host and database, never the password.
+/// Both places libpq takes one are masked: the
 /// authority's `user:password@`, and a `password=` query parameter.
 pub fn redacted(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else {
@@ -180,7 +180,7 @@ impl std::fmt::Debug for PgStore {
 pub type PgClient = deadpool_postgres::Client;
 
 impl PgStore {
-    /// `openPg`: run the migration walk under the advisory lock on a
+    /// Run the migration walk under the advisory lock on a
     /// connection of its own, then open the pool. `day_offset_minutes` is the
     /// fixed offset every daily bucket uses.
     pub async fn open(config: PgConfig, day_offset_minutes: i64) -> Result<Self, StoreError> {
@@ -235,7 +235,7 @@ impl PgStore {
         })
     }
 
-    /// The database as it may be shown (`databasePath` in TS).
+    /// The database as it may be shown.
     pub fn database_path(&self) -> String {
         redacted(&self.url)
     }
@@ -393,7 +393,7 @@ impl PgStore {
     ) -> Result<(), StoreError> {
         let sealed = input.tokens.sealed(key);
         let client = self.client().await?;
-        // Bun sends JS numbers on the float8 path. Let PG assign to BIGINT:
+        // JS numbers bind on the float8 path. Let PG assign to BIGINT:
         // it rounds the fraction and rejects non-finite or out-of-range values.
         if input.reconnect {
             client.execute("UPDATE credentials SET access_token=$1,refresh_token=$2,api_key=$3,id_token=$4,expires_at=$5::float8::bigint,updated_at=$6,token_version=token_version+1 WHERE id=$7", &[&sealed[0],&sealed[1],&sealed[2],&sealed[3],&input.tokens.expires_at,&input.tokens.updated_at,&input.id]).await?;
@@ -482,7 +482,7 @@ impl PgStore {
 
     // --- Operator (CLI and control) reads and writes. ---
 
-    /// `KeyRepo.create`, with the row the caller built.
+    /// Insert a key row, with the row the caller built.
     pub async fn create_key(&self, key: &ApiKey) -> Result<(), StoreError> {
         rows::create_key(&self.client().await?, key).await
     }
@@ -503,7 +503,7 @@ impl PgStore {
         rows::edit_key(&self.client().await?, id, edit).await
     }
 
-    /// The key with TS's raw allowlist semantics (see `keys::get_operator`).
+    /// The key with raw allowlist semantics (see `keys::get_operator`).
     pub async fn get_operator_key(&self, id: &str) -> Result<Option<ApiKey>, StoreError> {
         rows::get_operator_key(&self.client().await?, id).await
     }
@@ -553,7 +553,7 @@ impl PgStore {
         rows::operator_credentials(&self.client().await?).await
     }
 
-    /// `ConfigRepo.putSettings`: merge the patch and commit one row.
+    /// Merge the patch and commit one row.
     pub async fn put_settings(
         &self,
         patch: &serde_json::Value,
@@ -575,7 +575,7 @@ impl PgStore {
 
     // --- Maintenance. ---
 
-    /// `heartbeat` then the `sweepPending` read: this node's liveness row,
+    /// Heartbeat then the sweep's read: this node's liveness row,
     /// the day-old ones forgotten, and every pending row of this node or of
     /// a node with no live heartbeat, as the 499 `interrupted` completions
     /// the boot sweep sends through the writer.
@@ -587,7 +587,7 @@ impl PgStore {
         usage::sweep_pending(&self.client().await?, node_id, now).await
     }
 
-    /// `MaintenanceRepo.stats().schemaVersion`: the newest applied id.
+    /// The newest applied migration id.
     pub async fn schema_version(&self) -> Result<i32, StoreError> {
         let c = self.client().await?;
         Ok(

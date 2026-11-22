@@ -1,10 +1,10 @@
-//! The structured-output request in whichever spelling the client used,
-//! ported from `packages/providers/src/responseFormat.ts` (the parts the
-//! OpenAI-shaped encoders use: the reader and `moveToResponsesText`).
+//! The structured-output request in whichever spelling the client used
+//! (the parts the OpenAI-shaped encoders use: the reader and the
+//! responses-text move).
 //!
-//! The IR here is parsed JSON, so the cycle and `canSerialize` checks TS runs
-//! for in-process plugin values cannot fire and are not ported; the depth cap,
-//! which can, is.
+//! The IR here is parsed JSON, so the cycle and serializability checks needed
+//! for in-process plugin values cannot fire and are not implemented; the
+//! depth cap, which can, is.
 //!
 //! Mutation helpers are crate-private; callers use a scoped provider codec.
 //! ```compile_fail
@@ -176,7 +176,7 @@ fn too_deep(schema: &Map<String, Value>) -> bool {
     true
 }
 
-/// `moveToResponsesText`: moves a structured-output request onto a
+/// Moves a structured-output request onto a
 /// Responses-shaped body. Returns the degradation to record, if any.
 pub(crate) fn move_to_responses_text(
     req: &ChatRequest,

@@ -1,7 +1,7 @@
-//! `packages/coord/test/contract.ts`, ported: the one suite every `Coord`
+//! Contract tests for `Coord`: the one suite every implementation
 //! runs. Each test runs against `MemoryCoord`, and against `RedisCoord` on a
 //! freshly flushed logical database when `OMNI_TEST_REDIS_URL` names a server
-//! (skipped with a note otherwise, as the TS suite skips).
+//! (skipped with a note otherwise).
 //!
 //! `make` receives a clock; the Redis implementation expires `kv`, leases and
 //! locks against the server's clock, so those tests also sleep out real time.

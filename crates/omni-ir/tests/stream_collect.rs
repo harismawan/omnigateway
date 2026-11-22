@@ -1,5 +1,5 @@
-//! `collect()` parity, ported from `packages/ir/test/stream.test.ts`, plus the
-//! canonical JSON form the vector suites compare against.
+//! `collect()` conformance, plus the canonical JSON form the vector suites
+//! compare against.
 
 use omni_ir::jsjson::JsValue;
 use omni_ir::stream::{

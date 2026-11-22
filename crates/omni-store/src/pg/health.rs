@@ -1,4 +1,4 @@
-//! `CredentialRepo.updateHealth` on Postgres (`packages/store/src/postgres/credentials.ts`):
+//! The health mutation on Postgres:
 //! the shared, atomic read-modify-write every replica's breaker goes through.
 //!
 //! One transaction: the advisory lock on `hashtext(credential|model)` (so
@@ -24,7 +24,7 @@
 //!   same list in the writers' shared classifier, so the label here and
 //!   the retry there cannot disagree;
 //! - class 23, a deferred constraint checked at COMMIT: a refusal of the
-//!   values, as TS's call throws. Not retried.
+//!   values. Not retried.
 //!
 //! Everything else at COMMIT is [`StoreError::UncertainCommit`]: a
 //! connection-level error (closed, I/O, unexpected message), any
@@ -41,11 +41,10 @@
 //! cannot tell it from a lost acknowledgement, so it is conservatively
 //! uncertain, never retried.
 //!
-//! Frozen TS does not re-apply either: `updateHealth` awaits `sql.begin`
-//! and has no retry loop, so a lost COMMIT acknowledgement makes it throw
-//! once. What the gateway then does depends on the call site (see the d1
-//! report, fix round 3). The Rust health path keeps the no-re-application
-//! and adds a re-read, reported as an observation, not an acknowledgement.
+//! The health path never re-applies: a lost COMMIT acknowledgement fails
+//! the mutation once. What the gateway then does depends on the call site.
+//! The uncertain outcome adds a re-read, reported as an observation, not an
+//! acknowledgement.
 
 use super::PgStore;
 use crate::credentials::CredentialHealth;
@@ -57,8 +56,8 @@ use tokio_postgres::error::SqlState;
 /// pair has none yet) to the row to store.
 pub type HealthApply<'a> = &'a (dyn Fn(Option<CredentialHealth>) -> CredentialHealth + Send + Sync);
 
-/// `UPSERT_HEALTH`, with the instants bound as TS binds a JS number into a
-/// `BIGINT`: as `float8`, which Postgres rounds half to even, and refuses
+/// The health upsert; the instants bind into the
+/// `BIGINT` columns as `float8`, which Postgres rounds half to even, and refuses
 /// when not finite or out of range.
 const UPSERT_HEALTH: &str = "INSERT INTO credential_health
    (credential_id, model, breaker_state, consecutive_failures, opened_at, rate_limited_until)
@@ -164,11 +163,11 @@ pub(crate) fn commit_error(e: tokio_postgres::Error) -> StoreError {
 }
 
 impl PgStore {
-    /// `updateHealth(credentialId, model, apply)`: reads the stored row under
+    /// Reads the stored row under
     /// the pair's lock, applies `apply`, writes the result, all in one
     /// transaction, and returns the row `apply` proposed. That is what was
     /// written except where the column rounds it: a fractional instant comes
-    /// back fractional, as TS's does, and is stored rounded to the BIGINT.
+    /// back fractional and is stored rounded to the BIGINT.
     ///
     /// A panic in `apply` unwinds through here: the dropped transaction
     /// sends ROLLBACK (releasing the pair's lock) before its connection is
@@ -176,7 +175,7 @@ impl PgStore {
     ///
     /// [`StoreError::Refused`] when the database refuses the values (no such
     /// credential, a count or instant its columns cannot hold); nothing is
-    /// written then, as TS's call throws.
+    /// written then.
     pub async fn update_health(
         &self,
         credential_id: &str,

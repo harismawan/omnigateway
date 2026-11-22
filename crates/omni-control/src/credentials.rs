@@ -147,7 +147,7 @@ pub fn list(s: &SqliteStore) -> Result<String> {
         JsValue::Array(rows(s, None)?),
     )])))
 }
-/// Frozen CLI status propagates JSON.parse diagnostics; HTTP retains its safe failures.
+/// CLI status propagates JSON.parse diagnostics; HTTP retains its safe failures.
 pub fn cli_list(s: &SqliteStore) -> std::result::Result<String, String> {
     Ok(stringify(&obj(vec![(
         "credentials",
@@ -362,7 +362,7 @@ fn health_response(
             } else {
                 start.map(|start| {
                     let elapsed = (q.observed_at - start) / 3_600_000.0;
-                    // Frozen tests raw `window.used === 0`, not ToNumber(used).
+                    // Tests raw `window.used === 0`, not ToNumber(used).
                     if elapsed <= 0.0 || get(raw, "used") == Some(&JsValue::Number(0.0)) {
                         0.0
                     } else {
@@ -469,7 +469,7 @@ fn health_response(
     ])
 }
 /// Raw quota projection for CLI status, without health/burn/last-used reads.
-/// Like listQuota in frozen TS, unrelated request logs cannot affect this read.
+/// Unrelated request logs cannot affect this read.
 pub fn status_quota(s: &SqliteStore) -> Result<JsValue> {
     status_quota_with(s, false)
 }

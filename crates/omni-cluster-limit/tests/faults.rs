@@ -78,7 +78,7 @@ fn lim(c: &Arc<RedisCoord>, clock: &ManualClock, usage: Arc<MemUsage>) -> Cluste
 
 /// Nothing listening: every admission is answered locally at once, with a
 /// warn and the metric, and the local limiter still enforces `1m` and
-/// `concurrency` per process (TS `memoryCoord` semantics); long windows are
+/// `concurrency` per process (`MemoryCoord` semantics); long windows are
 /// not enforced and nothing reads the store.
 #[tokio::test(flavor = "current_thread")]
 async fn unreachable_fails_open_locally_and_enforces_minute_and_concurrency() {
@@ -185,7 +185,7 @@ async fn wait_remote(l: &ClusterLimiter, key: &str, what: &str) {
 
 /// Stopped mid-traffic, then started (empty: scripts and state gone):
 /// admissions keep flowing locally, bounded; a debit made during the outage
-/// is lost and counted, and on recovery every bucket hash is dropped (TS's
+/// is lost and counted, and on recovery every bucket hash is dropped (the
 /// lost-debit policy) so the next admission reseeds from the store.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stopped_server_fails_open_and_recovers_with_a_reseed() {

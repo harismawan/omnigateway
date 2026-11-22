@@ -1,5 +1,6 @@
-//! A Postgres database the frozen TS store wrote is read by Rust, and one the
-//! Rust store wrote is read by TS: keys, encrypted credentials, health,
+//! Cross-read contract on Postgres: raw-SQL rows (the shape an older store
+//! left) are read by the store, and the store's writes read back as raw
+//! cells: keys, encrypted credentials, health,
 //! quota, models, settings, usage sums and rollups, body envelopes, and the
 //! NULL / numeric / BIGINT edge values in between.
 

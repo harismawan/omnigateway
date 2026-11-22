@@ -9,33 +9,33 @@
 //!   ceiling), and the 5h/1w bucket sums; on a refusal it rolls every claim
 //!   back in the same step. The decision, headroom and `Retry-After` are
 //!   computed here with `omni-ratelimit` from the figures the script
-//!   returns, exactly as TS `ApiKeyRateLimiter` computes them from its
-//!   per-step calls. A refusal on a long window takes its reset (TS
-//!   `oldestSince` + window) from the row ranges the same script reads out
+//!   returns. A refusal on a long window takes its reset
+//!   from the row ranges the same script reads out
 //!   of the bucket hash — no store read on the request path, refusals
 //!   included (see [`scripts::ADMIT_SRC`] for exactness).
 //! - **Concurrency release is immediate**, never batched:
 //!   [`Admission::release`] (or drop) queues one detached `GAUGE_RELEASE`
 //!   on D2's ordered queue, so a `concurrency: 1` key's next request on this
-//!   process is judged after it. Slots are named and renewed (TS's 300 s TTL,
+//!   process is judged after it. Slots are named and renewed (300 s TTL,
 //!   100 s renewal, one-day cap).
 //! - **Debits are batched** ([`ClusterLimiter::debit`]): queued per bucket
 //!   with every cost in order and the row's commit id, applied as one
-//!   [`scripts::DEBIT_BATCH`] call per batch with TS's per-debit float
-//!   arithmetic. A row a seed already counted (on any replica) is skipped
+//!   [`scripts::DEBIT_BATCH`] call per batch with per-debit float
+//!   arithmetic in debit order (ruling I5). A row a seed already counted
+//!   (on any replica) is skipped
 //!   by its commit; see [`debit`](crate) docs. Storage is bounded; a debit
 //!   lost to a bound or a fault is counted and arms the coordinator's
-//!   lost-debit flag (TS's policy: every bucket hash is dropped on recovery
+//!   lost-debit flag (every bucket hash is dropped on recovery
 //!   and reseeded from the store).
-//! - **Unseeded long windows admit** (the spec's one deliberate difference
-//!   from TS): the request is judged against what could be checked, and a
+//! - **Unseeded long windows admit** (deliberate): the request is judged
+//!   against what could be checked, and a
 //!   background seeder takes `omni:lock:seed:<bucket>`, reads
 //!   [`UsageSource::seed_read`] (counts, row ranges and the read's commit
 //!   snapshot, under a deadline) and installs all of it in one
 //!   [`scripts::SEED_INSTALL`] call. Boot and new-key pre-seeding:
 //!   [`ClusterLimiter::preseed`] / [`ClusterLimiter::preseed_now`].
 //! - **Redis outage fails open** to a per-process limiter (D2's
-//!   `MemoryCoord`, TS's `memoryCoord` semantics) with a rate-limited `warn`
+//!   `MemoryCoord`) with a rate-limited `warn`
 //!   and [`Metrics::local_admissions`]; long windows are not enforced there.
 //! - **Load publication** ([`load`]): this replica's in-flight counts per
 //!   (credential, model), written every 100 ms in one script call with a
@@ -66,13 +66,13 @@ use judge::Observed;
 pub use judge::RateLimitExceeded;
 use subject::{LONG, Subject, any_long_limit, any_request_limit, bucket_key, requests_only};
 
-/// TS `GAUGE_TTL_MS`.
+/// How long a concurrency slot lives without a renewal.
 pub const GAUGE_TTL_MS: u64 = 300_000;
-/// TS `RENEW_INTERVAL_MS`.
+/// How often held slots are renewed.
 pub const RENEW_INTERVAL: Duration = Duration::from_millis(100_000);
-/// TS `MAX_RENEWED_MS`.
+/// The cap on how long a slot may be kept renewed.
 pub const MAX_RENEWED_MS: f64 = 86_400_000.0;
-/// TS `SEED_LOCK_MS`: how long one seed may hold the lock, and how long a
+/// How long one seed may hold the lock, and how long a
 /// second asker waits for it.
 pub const SEED_LOCK_MS: u64 = 5_000;
 
@@ -83,8 +83,8 @@ pub const SEED_LOCK_MS: u64 = 5_000;
 pub trait UsageSource: Send + Sync {
     /// One consistent read of everything a seed installs (ruling I1/I2):
     ///
-    /// - `rows`: TS `store.usage.sumBuckets(apiKeyId, sinceMs, grainMs,
-    ///   model)`;
+    /// - `rows`: the done rows' counts per grain bucket, at or after
+    ///   `since_ms` (narrowed to `model` when given);
     /// - `ranges`: per grain bucket of each done row's own `at`, the least
     ///   and greatest `at` of the done rows at or after `since_ms`
     ///   (narrowed to `model` when given);
@@ -118,13 +118,13 @@ pub struct SeedRead {
 /// `(bucket start, least at, greatest at)` of the done rows in one bucket.
 pub type RowRange = (f64, f64, f64);
 
-/// TS `onRejected`: called once per refusal with its dimension and window.
+/// Called once per refusal with its dimension and window.
 pub type OnRejected = Arc<dyn Fn(Dimension, Option<Window>) + Send + Sync>;
 
-/// Options; defaults are TS's constants and the spec's intervals.
+/// Options; defaults are the constants above and the spec's intervals.
 #[derive(Clone)]
 pub struct ClusterLimiterOptions {
-    /// What gauge expiry is computed against (TS: the coordinator's `now`).
+    /// What gauge expiry is computed against (the coordinator's `now`).
     pub clock: Clock,
     pub gauge_ttl_ms: u64,
     pub renew_interval: Duration,
@@ -205,7 +205,7 @@ pub struct Metrics {
     /// The seed found the window already seeded (another replica won).
     pub seeds_already: AtomicU64,
     pub seed_failures: AtomicU64,
-    /// The seed lock could not be taken; seeded anyway (TS).
+    /// The seed lock could not be taken; seeded anyway.
     pub seed_lock_unavailable: AtomicU64,
     pub debits_queued: AtomicU64,
     /// Bucket entries that met a complete picture.
@@ -242,7 +242,7 @@ pub(crate) struct Inner {
     pub(crate) usage: Arc<dyn UsageSource>,
     pub(crate) opts: ClusterLimiterOptions,
     pub(crate) metrics: Metrics,
-    /// TS `this.limits`: the limits last seen per subject, so a debit knows
+    /// The limits last seen per subject, so a debit knows
     /// whether a long window is configured. Bounded by configured keys.
     limits: Mutex<HashMap<String, LimitScope>>,
     pub(crate) seeds: seed::Seeds,
@@ -265,7 +265,7 @@ impl Inner {
         (self.opts.clock)()
     }
 
-    /// How often a contended seed lock is retried (TS `LOCK_POLL_MS`).
+    /// How often a contended seed lock is retried.
     pub(crate) fn coord_lock_poll(&self) -> Duration {
         Duration::from_millis(50)
     }
@@ -363,7 +363,7 @@ impl Admission {
         }
     }
 
-    /// TS `renew`: moves every held slot's expiry out by the gauge TTL.
+    /// Moves every held slot's expiry out by the gauge TTL.
     pub async fn renew(&self) {
         if let Some(held) = &self.held {
             renew(&held.inner, &held.slots, held.local).await;
@@ -382,7 +382,7 @@ async fn renew(inner: &Inner, slots: &[Slot], local: bool) {
         if local {
             local::renew(inner, &slot.subject, &slot.holder).await;
         } else {
-            // A fault leaves the slot to its TTL, as TS's renewal does.
+            // A fault leaves the slot to its TTL.
             let _renewed = inner
                 .remote
                 .gauge_renew(
@@ -433,7 +433,7 @@ pub(crate) enum Mode {
 /// One subject as the script is asked about it.
 pub(crate) struct Ask {
     pub(crate) subject: Subject,
-    /// What it is judged against (`requestsOnly` for consume).
+    /// What it is judged against (`requests_only` for consume).
     pub(crate) scope: LimitScope,
     pub(crate) holder: Option<String>,
 }
@@ -642,7 +642,7 @@ impl ClusterLimiter {
         &self.inner.metrics
     }
 
-    /// TS `admit`: judges a request that will be dispatched and claims its
+    /// Judges a request that will be dispatched and claims its
     /// concurrency slots. `now` is the request's one clock reading.
     pub async fn admit(
         &self,
@@ -673,7 +673,7 @@ impl ClusterLimiter {
         self.run(asks, Mode::Admit, now).await
     }
 
-    /// TS `consume`: a `count_tokens` request, charged to `requests` only,
+    /// A `count_tokens` request, charged to `requests` only,
     /// holding no slot.
     pub async fn consume(
         &self,
@@ -774,7 +774,7 @@ impl ClusterLimiter {
         if combined.violation.is_some() {
             if verdict {
                 // Unreachable (the script tests the same predicate on the
-                // same figures); give the claims back as TS's rollback would.
+                // same figures); give the claims back.
                 bump(&inner.metrics.verdict_mismatches);
                 tracing::error!("rate limit script admitted a refused request; rolling back");
                 rollback_remote(inner, &asks, now).await;
@@ -828,13 +828,13 @@ impl ClusterLimiter {
         })
     }
 
-    /// TS `debit`: one completed request against the long windows of every
+    /// One completed request against the long windows of every
     /// subject this process admitted (or [`Self::record_override`]d) with a
     /// long window. Batched; applied within `debit_interval`, or by
     /// [`Self::flush_debits`]. Call it once the request's row is committed.
-    /// `row_at` is the row's `at` (TS `startedAt`): it places the row in the
+    /// `row_at` is the row's `at`: it places the row in the
     /// row ranges a refusal's reset is read from; the counts are stamped
-    /// with the clock now, as TS's `buckets.add(…, now)`. `commit` is the
+    /// with the clock now. `commit` is the
     /// commit id of the store transaction that completed the row (on
     /// Postgres the writer batch's `pg_current_xact_id()`): a seed whose
     /// read saw that commit already counted the row, and the debit is then
@@ -910,7 +910,7 @@ impl ClusterLimiter {
         }
     }
 
-    /// TS `recordOverride`: an override's limits, for a completion this
+    /// An override's limits, for a completion this
     /// process debits without admitting (the guardrail's classifier).
     pub fn record_override(&self, key_id: &str, limits: &LimitConfig, model: &str) {
         if let Some(o) = limits.model_override(model) {
@@ -1078,7 +1078,7 @@ impl Drop for SlotCleanup<'_> {
     }
 }
 
-/// TS `rollback` for every claim, through the per-step scripts.
+/// Rolls back every claim, through the per-step scripts.
 async fn rollback_remote(inner: &Inner, asks: &[Ask], now: f64) {
     for a in asks {
         let _rolled = inner

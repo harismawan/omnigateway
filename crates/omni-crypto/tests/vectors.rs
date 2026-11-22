@@ -1,4 +1,4 @@
-//! Crypto and hashing parity against vectors exported from the TS build.
+//! Crypto and hashing against pinned reference vectors.
 
 use omni_crypto::{cloak, field};
 use serde_json::Value;
@@ -19,8 +19,8 @@ fn field_decrypt_rejects_malformed_values() {
         );
     }
 }
-/// `Bun.hash.xxHash64` itself (the TS gateway's hash) over every tail and
-/// stripe boundary and four seeds; `tests/data/xxh64.json` names its Bun.
+/// xxHash64 over every tail and stripe boundary and four seeds, pinned by
+/// `tests/data/xxh64.json`.
 #[test]
 fn xxhash64_matches_bun_on_every_length() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/xxh64.json");

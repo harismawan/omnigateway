@@ -1,7 +1,7 @@
-//! JS `RegExp` source → Rust `regex` syntax, so every pattern below is the TS
-//! source verbatim rather than a hand re-derivation of it.
+//! JS `RegExp` source → Rust `regex` syntax: every pattern below is kept
+//! verbatim rather than hand re-derived.
 //!
-//! The TS patterns are non-`u` JS regular expressions. Where JS and Rust read
+//! The patterns are non-`u` JS regular expressions. Where JS and Rust read
 //! the same syntax differently, this rewrites it to the JS meaning:
 //!
 //! - `\s`/`\S` are the ECMAScript WhiteSpace + LineTerminator set (it has
@@ -16,7 +16,7 @@
 //!   [`normalize_terminators`]).
 //!
 //! Lookaround and backreferences have no Rust equivalent and are rejected;
-//! the three TS lookaheads are hand-written at their call sites.
+//! the three lookaheads are hand-written at their call sites.
 //!
 //! Rust's leftmost-first semantics pick the same match and captures as a JS
 //! backtracker for these (backreference-free) patterns, and its engine is
@@ -36,7 +36,7 @@ const DOT: &str = r"[^\n\r\x{2028}\x{2029}]";
 /// use character is to these patterns.
 const HALF: char = '\u{E000}';
 
-/// A translated TS pattern, matched over the input's UTF-16 unit sequence.
+/// A translated JS pattern, matched over the input's UTF-16 unit sequence.
 #[derive(Debug)]
 pub(crate) struct JsRegex(Regex);
 
@@ -171,7 +171,7 @@ fn restore_groups(
     Some(out)
 }
 
-/// Compiles a static TS pattern. Every call site is covered by a test, so a
+/// Compiles a static JS pattern. Every call site is covered by a test, so a
 /// failure here is a programming error in a literal, not a runtime input.
 #[allow(clippy::panic)]
 pub(crate) fn compile(src: &str, flags: &str) -> JsRegex {

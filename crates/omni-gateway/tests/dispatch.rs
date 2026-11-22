@@ -821,7 +821,7 @@ async fn pre_commit_buffering_is_capped_and_then_commits_without_failover() {
     // second candidate is never called.
     assert_eq!(h.script.calls(), 1);
     match events.last() {
-        // The decoder's own terminal event, yielded as TS yields it.
+        // The decoder's own terminal event, yielded in-stream.
         Some(StreamEvent::Error { code, message, .. }) => {
             assert_eq!(*code, ErrorCode::Upstream);
             assert_eq!(message, "upstream stream ended before [DONE]");

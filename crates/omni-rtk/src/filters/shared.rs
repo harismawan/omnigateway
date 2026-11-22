@@ -1,4 +1,4 @@
-//! `packages/rtk/src/filters/shared.ts`: the bounded line scan, the shared
+//! The bounded line scan, the shared
 //! parser budget and the omission-marker renderer.
 //!
 //! Every length here is a UTF-16 code-unit count, as JS `string.length`
@@ -52,7 +52,7 @@ impl ParserBudget {
     }
 
     /// A budget that also records each charge, for tests that pin when a
-    /// parser pays (TS subclasses `ParserBudget` for this).
+    /// parser pays.
     pub fn recording(input_code_units: usize) -> Self {
         Self {
             log: Some(RefCell::new(Vec::new())),
@@ -212,20 +212,18 @@ pub fn render_selection(
     })
 }
 
-/// `selectBlock`: charges `end - start + 1` records, then selects the rows.
+/// Charges `end - start + 1` records, then selects the rows.
 ///
-/// Total over every `ParsedBlock`, including ones no parser produces. TS
-/// computes the count in doubles; this matches it without unchecked
-/// arithmetic:
-/// - `start == end + 1`: TS charges 0 and returns true, selecting nothing.
-///   Same here.
-/// - `start > end + 1`: TS charges a *negative* count, crediting the shared
-///   budget. The port charges 0 instead. Crediting would let a malformed
-///   helper call widen every later parser's allowance, and the budget only
-///   ever shrinks here. No internal caller can build such a block, so this
-///   deviation is unreachable from `transform_request`.
+/// Total over every `ParsedBlock`, including ones no parser produces. The
+/// count is computed without unchecked arithmetic:
+/// - `start == end + 1`: charges 0 and returns true, selecting nothing.
+/// - `start > end + 1`: charges 0. A *negative* count would credit the shared
+///   budget, letting a malformed helper call widen every later parser's
+///   allowance, and the budget only ever shrinks here. No internal caller
+///   can build such a block, so this case is unreachable from
+///   `transform_request`.
 /// - a span too long for `usize` (`start = 0, end = usize::MAX`) saturates,
-///   fails the charge and selects nothing, as TS fails its huge charge.
+///   fails the charge and selects nothing.
 pub fn select_block(
     input: &BoundedText<'_>,
     selected: &mut BTreeSet<usize>,
@@ -355,7 +353,7 @@ mod tests {
             .sum()
     }
 
-    /// TS `selectBlock` on `{start: 1, end: 0}` charges `0` and returns true
+    /// `select_block` on `{start: 1, end: 0}` charges `0` and returns true
     /// with nothing selected; on `{start: 0, end: MAX}` it charges a huge
     /// count and returns false. Neither may panic here.
     #[test]

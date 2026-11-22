@@ -1,7 +1,6 @@
-//! The Lua scripts. Their text is byte-for-byte what the TS gateway loaded, so
-//! a fleet mid-cutover ran the same server-side logic, and every node of one
-//! fleet must load the same digests. `scripts_are_byte_stable` pins the digest
-//! of each: changing a script is deliberate and updates its digest with it.
+//! The Lua scripts. Every node of one fleet must load the same digests.
+//! `scripts_are_byte_stable` pins the digest of each: changing a script is
+//! deliberate and updates its digest with it.
 //!
 //! Each script is the atomic half of one primitive: what the in-memory
 //! implementation does between one call and the next return, done server-side
@@ -175,7 +174,7 @@ pub static LEASE_ACQUIRE: LazyLock<CoordScript> =
 pub static LEASE_RELEASE: LazyLock<CoordScript> =
     LazyLock::new(|| CoordScript::new("LEASE_RELEASE", LEASE_RELEASE_SRC));
 
-/// Loaded at every connect, in TS `SCRIPTS` order.
+/// Loaded at every connect, in this order.
 pub(crate) fn builtin() -> [&'static CoordScript; 13] {
     [
         &WINDOW_CLAIM,
@@ -198,8 +197,8 @@ pub(crate) fn builtin() -> [&'static CoordScript; 13] {
 mod tests {
     use super::*;
 
-    /// The `EVALSHA` digest (SHA-1 of the text) of every built-in script, as
-    /// it was when the scripts were last proven equal to the TS gateway's.
+    /// The pinned `EVALSHA` digest (SHA-1 of the text) of every built-in
+    /// script.
     /// Every process in a fleet loads these digests, so a script that changes
     /// by one byte is a different script: a node on the old text and a node
     /// on the new one run different server-side logic against the same keys.

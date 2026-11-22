@@ -1,4 +1,4 @@
-//! Codex browser authorization, ported from providers/openai/oauth.ts.
+//! Codex browser authorization.
 use crate::oauth::{AuthorizeStart, PendingFlow};
 
 pub fn start(redirect: &str, verifier: &str, challenge: &str, state: &str) -> AuthorizeStart {

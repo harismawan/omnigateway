@@ -1,4 +1,4 @@
-//! Scoring (`packages/router/src/score.ts`).
+//! Scoring.
 
 use crate::filters::Pair;
 use crate::quota::quota_headroom;

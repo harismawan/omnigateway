@@ -1,15 +1,14 @@
 //! A5 review round 1, over HTTP against an in-process gateway:
 //!
 //! - I1: model identity in key allowlists and per-model limits is exact
-//!   UTF-16, as `Array.prototype.includes` and `Object.hasOwn` compare it.
+//!   UTF-16 code-unit equality.
 //!   A lone surrogate is never the U+FFFD it is stored as, and two different
 //!   lone surrogates are never each other.
 //! - I2: one unreadable key row does not stop boot or the snapshot refresh;
-//!   that key alone is refused, as TS's `findByHash` refuses it at auth.
+//!   that key alone is refused at auth.
 //! - I3: admin summaries carry a fractional `revokedAt` as the number it is.
 //!
-//! Every expected answer here was taken from the frozen TS binary
-//! (`/tmp/opencode/a5-fix1/probe`).
+//! Every expected answer here is the wire contract; pinned here.
 
 mod common;
 
@@ -200,7 +199,7 @@ async fn a_lone_surrogate_never_matches_the_replacement_character_or_another_sur
     .await;
     assert_eq!(s, 401);
 
-    // A lone-surrogate model the key admits is TS's URIError, never served.
+    // A lone-surrogate model the key admits is a URIError, never served.
     let (s, b) = call(
         &g.base,
         "POST",
@@ -245,7 +244,7 @@ async fn a_lone_surrogate_never_matches_the_replacement_character_or_another_sur
     )
     .await;
     assert_eq!((s, b.as_str()), (200, r#"{"input_tokens":9}"#));
-    // `\ud800` names its own override: TS's URIError building its subject.
+    // `\ud800` names its own override: a URIError building its subject.
     let (s, b) = call(
         &g.base,
         "POST",
@@ -442,12 +441,12 @@ async fn summaries_carry_fractional_dates_as_numbers() {
     stop(g).await;
 }
 
-/// Review A5-R2 (the reviewer's repro, answers from the frozen binary): a
+/// Review A5-R2 (the reviewer's repro; expected answers pinned here): a
 /// chat for `"\ud800"`, refused early, must not debit the genuine U+FFFD
-/// override's live long window. TS debits the key-wide subject, then
-/// `encodeURIComponent` throws before any model subject. After a restart
-/// the U+FFFD seed reads the stored replacement-character row, in both
-/// builds alike (TS: 200 live, 429 after restart).
+/// override's live long window. The key-wide subject is debited, then the
+/// subject's percent-encoding throws before any model subject. After a
+/// restart the U+FFFD seed reads the stored replacement-character row
+/// (200 live, 429 after restart).
 #[tokio::test(flavor = "multi_thread")]
 async fn an_early_refused_lone_model_never_debits_the_replacement_character_model() {
     let f = fixture(&["c0"]);
@@ -515,8 +514,8 @@ async fn an_early_refused_lone_model_never_debits_the_replacement_character_mode
 }
 
 /// The other half of review A5-R2: the same refused request *is* a completed
-/// request against the key-wide subject, as in TS, whose `debit` adds to the
-/// key's buckets before `modelSubjectId` throws (frozen binary: 200, 500,
+/// request against the key-wide subject: the debit adds to the
+/// key's buckets before the model subject throws (200, 500,
 /// then 429).
 #[tokio::test(flavor = "multi_thread")]
 async fn an_early_refused_lone_model_still_debits_the_key_wide_subject() {

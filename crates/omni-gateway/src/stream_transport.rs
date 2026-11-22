@@ -572,7 +572,7 @@ fn deliver(state: &mut State, topic: &str, payload: Value, seq: Option<f64>) {
     }
 }
 
-// Bun's 16 MiB backpressureLimit has closeOnBackpressureLimit=false.
+// The 16 MiB backpressure limit never closes the socket.
 // Stop feeding at the registry's lower 512 KiB watermark; never close on it.
 fn drain(
     entry: &mut Entry,
@@ -595,8 +595,8 @@ fn drain(
     }
 }
 
-// Elysia only JSON-parses a text message whose first character is one of
-// these prefixes. Leading whitespace is not stripped by its ws adapter.
+// A text message is JSON-parsed only when its first character is one of
+// these prefixes. Leading whitespace is not stripped.
 pub fn parse_text(text: &str) -> Value {
     parse_text_parts(text).0
 }
@@ -845,7 +845,7 @@ async fn run(
     });
     let mut codec = Codec::new(stream_codec::MAX_PAYLOAD);
     let mut buf = [0; 8192];
-    // Frozen starts the registry timer at application construction, not open.
+    // The registry timer starts at application construction, not socket open.
     // Every socket therefore shares the same phase, including revalidation.
     let next_tick = hub.heartbeat_epoch
         + Duration::from_secs((hub.heartbeat_epoch.elapsed().as_secs() / 20 + 1) * 20);
@@ -871,7 +871,7 @@ async fn run(
             _=stop.changed()=>{close=Some((1001,"restart"));break;}
             _=heartbeat.tick()=>{
                 hub.report_drops();
-                // Date.now() has millisecond precision in the frozen registry.
+                // The pong deadline has millisecond precision.
                 if last_pong.elapsed().as_millis()>60_000 {close=Some((1001,"pong deadline"));break;}
                 if tx.try_send((stream_codec::encode(9,b""),0)).is_err(){close=Some((1001,"ping failed"));break;}
                 if validation.is_some() && validation_started.elapsed()>=Duration::from_secs(60) { validation.take().expect("validation").abort(); }
@@ -888,9 +888,9 @@ async fn run(
                     let event=match codec.next_event(){Ok(Some(e))=>e,Ok(None)=>break,Err(code)=>{close=Some((code,if code==1009 {"Received too big message"} else {codec.error_reason}));break 'connection;}};
                     let wire=match event {
                         Event::Ping(p)=>Some(stream_codec::encode(10,&p)),
-                        // Frozen Elysia passes a raw socket to pong(), whereas
-                        // routes/stream.ts looks up ws.raw. Thus no registry
-                        // pong is recorded, even for a compliant client.
+                        // No registry pong is recorded, even for a compliant
+                        // client: the pong path never looks up the registry
+                        // entry. A kept wire behavior.
                         Event::Pong(_)=>None,
                         Event::Close(p)=>{drop(tx.send((stream_codec::encode(8,&p),0)).await);break 'connection;},
                         Event::Text(text)=>{for wire in hub.text_message(id,kind,&text){if tx.send((stream_codec::encode(1,wire.as_bytes()),0)).await.is_err(){break 'connection;}} None},

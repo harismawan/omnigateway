@@ -1,7 +1,7 @@
 //! The health rows this process wrote, until the store surely has them.
 //!
-//! TS applies a health transition to the row on disk inside one transaction,
-//! so it never computes from a stale row. Here the row reaches the store
+//! A health transition must never compute from a stale row. Here the row
+//! reaches the store
 //! through the batched writer, and the snapshot refresher can rebuild from
 //! the store before that batch commits, which would put the older row back.
 //! The overlay is what the next transition starts from, and what is patched

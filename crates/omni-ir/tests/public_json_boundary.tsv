@@ -172,7 +172,7 @@ omni-providers/src/antigravity/cloak.rs :: fn original<'a>(&'a self, name: &'a s
 omni-providers/src/antigravity/profile.rs :: fn headers(extra: Vec<(String, String)>) -> Vec<(String, String)>	scalar/string API; no arbitrary JSON ownership
 omni-providers/src/antigravity/profile.rs :: fn initialize()	scalar/string API; no arbitrary JSON ownership
 omni-providers/src/antigravity/wire.rs :: fn to_wire( req: &ChatRequest, model: &str, project: &str, request_id: &str, cloak: &ToolCloak, ) -> Result<(Value, Vec<String>), crate::codec::BuildError>	Value is JsValue here; takes borrowed IR, uses iterative release on both success and failures
-omni-providers/src/antigravity/codec.rs :: fn build_request( &self, input: &CodecInput<'_>, ) -> Result<CodecRequest<DecodeState>, GatewayError>	borrows IR; jsjson serialization and deep disposal of assembled envelope; 39990-level build/serialize/drop pinned on 2 MiB threads; Rust serializes beyond frozen engine threshold
+omni-providers/src/antigravity/codec.rs :: fn build_request( &self, input: &CodecInput<'_>, ) -> Result<CodecRequest<DecodeState>, GatewayError>	borrows IR; jsjson serialization and deep disposal of assembled envelope; 39990-level build/serialize/drop pinned on 2 MiB threads; serialization is stack-safe beyond the 40000-container acceptance limit
 omni-providers/src/anthropic/cloak.rs :: fn name<'a>(&'a self, name: &'a str) -> &'a str	borrows IR names only; produces string maps, never clones/releases nested JSON
 omni-providers/src/anthropic/decode.rs :: fn is_fingerprint_message(message: &str) -> bool	scalar/string API; no arbitrary JSON ownership
 omni-providers/src/antigravity/oauth.rs :: fn refresh_request(token: &str) -> AuthRequest	request contains only strings and header pairs

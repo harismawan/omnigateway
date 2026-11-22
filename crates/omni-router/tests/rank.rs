@@ -1,4 +1,4 @@
-//! Port of `packages/router/test/rank.test.ts` and `score.test.ts`.
+//! Ranking and scoring regressions.
 
 mod common;
 
@@ -329,7 +329,7 @@ fn weighted_selection_will_not_draw_a_failing_credential_at_full_weight() {
     assert_eq!(ids(&rank(&i).candidates)[0], "well");
 }
 
-// ---- score.test.ts
+// ---- scoring
 
 #[test]
 fn scores_latency_by_how_much_slower_it_is_not_by_rank_order() {

@@ -124,7 +124,7 @@ pub fn human(
             let mut parts = Vec::new();
             scope(&k["limits"], "", &mut parts);
             // Every override, a lone-surrogate name included (it prints as
-            // U+FFFD, as it does from TS), in JS own-key order.
+            // U+FFFD), in JS own-key order.
             if let Some(jsjson::JsValue::Object(models)) =
                 omni_control::settings_value::get(exact, "models")
             {

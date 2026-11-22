@@ -16,8 +16,7 @@
 -- clients on a date the operator never chose, and the failure surfaces days
 -- later as an authentication error with nothing in it that names this change.
 -- Adding the column and stopping is what keeps that promise, so the absence of
--- an `UPDATE` here is load-bearing rather than an omission —
--- `packages/store/test/migrations.test.ts` pins it.
+-- an `UPDATE` here is load-bearing rather than an omission.
 --
 -- No index. The column is read only after a row has already been found by
 -- `hash` or by `id`, both of which are unique, so there is no scan for an index

@@ -1,4 +1,4 @@
-//! `packages/rtk/src/catalog.ts`: the filter-family vocabulary. A storage
+//! The filter-family vocabulary. A storage
 //! contract — `request_logs.rtk_filters` holds these spellings.
 
 use serde_json::Value;

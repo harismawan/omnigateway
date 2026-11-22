@@ -1,4 +1,4 @@
-//! `postgresPlans.test.ts` for the Rust statements: the narrowed per-model
+//! Contract tests for the Postgres query plans: the narrowed per-model
 //! reads seek `idx_request_logs_key_model_at` (migration 6), with sequential
 //! scans off so a small fixture plans as a large one would.
 
@@ -38,7 +38,7 @@ async fn the_narrowed_reads_seek_the_model_window_index() {
             .any(|l| l.contains("Index Cond:") && l.contains("requested_model = "))
     };
     // The assertion bites: the same rows read through a model predicate the
-    // index cannot seek (TS's own example) leave the model as a filter.
+    // index cannot seek leave the model as a filter.
     {
         let (k, m, z) = ("k1", "opus", 0_i64);
         let unseekable =
@@ -72,7 +72,7 @@ async fn the_narrowed_reads_seek_the_model_window_index() {
             plan.contains("idx_request_logs_key_model_at"),
             "{sql}\n{plan}"
         );
-        // As TS's `/Index Cond: .*requested_model = /`: the model is part of
+        // `Index Cond: … requested_model = `: the model is part of
         // the seek, not a residual filter applied row by row.
         assert!(seeks_on_model(&plan), "{plan}");
     }

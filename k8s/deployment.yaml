@@ -9,12 +9,6 @@ spec:
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      # One up before one down: the surviving replica keeps serving while the
-      # new one boots, migrates under the advisory lock, and turns ready —
-      # when the migration only adds. A release whose migration drops or
-      # renames what the old image writes, or that changes the Redis scripts,
-      # companions or lineage, is not rolling-compatible: deploy it with
-      # Recreate (and the runbook's sweep), as the TS→Rust cutover was.
       maxSurge: 1
       maxUnavailable: 0
   template:

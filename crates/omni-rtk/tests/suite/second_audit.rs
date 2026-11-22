@@ -1,4 +1,5 @@
-//! `packages/rtk/test/second-audit.test.ts`.
+//! Audit regression suite: git-status porcelain retention, tree/path-list
+//! omission units, build/test inference and warning dedup.
 
 use super::common::*;
 use omni_rtk::command::classify_command;

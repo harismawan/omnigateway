@@ -318,8 +318,8 @@ fn normalize(provider: &str, pending: &PendingFlow, code: &str) -> Result<String
     Ok(format!("{code}#{state}"))
 }
 fn exchange_failure(provider: &str) -> GatewayError {
-    // Frozen step runner raises transport failures into the exchange generator.
-    // Neither built-in catches them, so rethrow classifies them as UPSTREAM.
+    // Transport failures escape the exchange steps uncaught, so they
+    // classify as UPSTREAM.
     GatewayError::new(
         ErrorCode::Upstream,
         format!("{provider} oauth exchange threw"),
@@ -405,7 +405,7 @@ async fn complete(
             omni_providers::anthropic::oauth::token_result(response.0, &response.1, None, now)?
         }
     };
-    // The frozen connect host validates flow secrets before persistence.
+    // Flow secrets are validated before persistence.
     if result
         .refresh_token
         .as_ref()
@@ -466,7 +466,7 @@ async fn complete(
     Ok(id)
 }
 
-/// Frozen exchange runner limits, applied before transport. The other two providers
+/// Exchange runner limits, applied before transport. The other two providers
 /// retain their existing single-request path, including its byte ordering.
 struct AntigravityExchange<'a> {
     host: &'a crate::refresh::Refresher,
@@ -531,7 +531,7 @@ async fn antigravity_exchange(
     let token = runner
         .send(ag::exchange_request(code, pending)?, 30)
         .await?;
-    // Frozen computes expiry only after all bootstrap calls have completed.
+    // Expiry is computed only after all bootstrap calls have completed.
     let mut result = ag::token_result(token.0, &token.1, None, 0.0, &serde_json::Value::Null)?;
     let access = String::from_utf16_lossy(&result.access_token);
     let email = runner.send(ag::email_request(&access), 15).await?;

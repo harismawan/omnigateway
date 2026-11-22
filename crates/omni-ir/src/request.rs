@@ -1,24 +1,23 @@
-//! The canonical request, ported from `packages/ir/src/request.ts`.
+//! The canonical request.
 //!
-//! Each TS discriminated union is an internally tagged enum on the same
-//! discriminant (`type`, `kind` or `mode`) with the same spellings, so a
-//! `ChatRequest` serialized by TS deserializes here unchanged. Fields the TS
-//! types carry as `unknown` or `Record<string, unknown>` stay
+//! Each tagged union is an internally tagged enum on its discriminant
+//! (`type`, `kind` or `mode`) with fixed wire spellings; the shape is
+//! byte-stable. Fields the wire contract leaves open stay
 //! [`serde_json::Value`] / [`serde_json::Map`]: the gateway forwards them
 //! verbatim and must not narrow what a client may put there.
 //!
-//! `Serialize` writes the same TS shape with absent fields omitted. Struct
-//! keys come out in declaration order, which is not always the order a TS
-//! ingress happened to build them in; values held as `Value`/`Map` keep theirs.
+//! `Serialize` writes the wire shape with absent fields omitted. Struct
+//! keys come out in declaration order; values held as `Value`/`Map` keep
+//! their own key order.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-/// Which provider serves a request. A string, as in TS: plugin providers have
+/// Which provider serves a request. A string: plugin providers have
 /// ids no closed enum could contain.
 pub type ProviderId = String;
 
-/// The 1M-context beta (`packages/ir/src/betas.ts`).
+/// The 1M-context beta.
 pub const CONTEXT_1M_BETA: &str = "context-1m-2025-08-07";
 
 /// A caller-placed cache breakpoint. `type` is always `ephemeral`.
@@ -129,8 +128,8 @@ pub struct ToolResultBlock {
     pub cache_control: Option<CacheControl>,
 }
 
-/// A tool result's `images` / `files` / `native` entries are typed blocks in
-/// TS (`{type: "image", ...}`), so they serialize with that discriminant
+/// A tool result's `images` / `files` / `native` entries are typed blocks on
+/// the wire (`{type: "image", ...}`), so they serialize with that discriminant
 /// first. Deserialization ignores the tag, which the list position fixes.
 mod tagged {
     use serde::Serialize;
@@ -201,7 +200,7 @@ pub enum ContentBlock {
 }
 
 impl ContentBlock {
-    /// The TS `type` discriminant, as degradation strings spell it.
+    /// The `type` discriminant, as degradation strings spell it.
     pub fn type_name(&self) -> &'static str {
         match self {
             ContentBlock::Text(_) => "text",
@@ -363,8 +362,8 @@ pub enum ReasoningConfig {
     Off,
 }
 
-/// The canonical request. Numbers are `f64` because they are JS numbers in
-/// TS, and the wire encoders print them with `JSON.stringify` rules.
+/// The canonical request. Numbers are `f64` because they are JS numbers on
+/// the wire, and the wire encoders print them with `JSON.stringify` rules.
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatRequest {
@@ -438,7 +437,7 @@ impl CanonicalRequest {
 }
 
 impl ChatRequest {
-    /// `req.vendor?.[name]`, when it is the object TS types it as.
+    /// `req.vendor?.[name]`, when it holds an object.
     pub fn vendor_bag(&self, name: &str) -> Option<&Map<String, Value>> {
         self.vendor.as_ref()?.get(name)?.as_object()
     }

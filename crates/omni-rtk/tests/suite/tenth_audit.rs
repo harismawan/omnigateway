@@ -1,4 +1,5 @@
-//! `packages/rtk/test/tenth-audit.test.ts`.
+//! Audit regression suite: omission-marker placement between complete
+//! tree/listing/grep fragments.
 
 use super::common::*;
 

@@ -1,4 +1,4 @@
-//! How the router reads a quota snapshot (`packages/router/src/quota.ts`).
+//! How the router reads a quota snapshot.
 
 use omni_ir::js::{math_max, math_min};
 use omni_store::{AuthType, Credential, QuotaWindow};

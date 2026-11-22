@@ -1,4 +1,4 @@
-//! `redisCoord`: the fleet's coordinator on Redis or Valkey, and what it does
+//! The fleet's coordinator on Redis or Valkey, and what it does
 //! when the server is not there.
 //!
 //! Two layers:
@@ -7,12 +7,12 @@
 //!   [`Fault`] on a transport fault, a timeout or a server error. A caller
 //!   that wants to choose its own degraded mode (D3's combined admission
 //!   script turning a fault into local limiting) uses this.
-//! - [`RedisCoord`] — the [`Coord`] TS's `redisCoord` is: on a fault, the
+//! - [`RedisCoord`] — the fail-open [`Coord`]: on a fault, the
 //!   proxy-path primitives (window, gauge, buckets, pubsub, incr) fall through
 //!   to an embedded [`MemoryCoord`], so limits degrade to per-process and no
 //!   request is refused over it; a lease that cannot be confirmed is not
 //!   held; a lock that cannot be taken is `LOCK_UNAVAILABLE`; and `kv` is
-//!   [`CoordError::Unavailable`] (TS `OVERLOADED`), because a session verified
+//!   [`CoordError::Unavailable`], because a session verified
 //!   against a fallback map is one a password change elsewhere cannot end.
 //!
 //! Plumbing (spec "Redis"): one command connection — the `redis` crate's
@@ -25,7 +25,7 @@
 //! from the start. Every awaited call has a deadline; both connections
 //! reconnect with backoff.
 //!
-//! Key schema (identical to TS; `NS` = `omni:`):
+//! Key schema (byte-stable; `NS` = `omni:`):
 //!
 //! | primitive | key | type |
 //! |---|---|---|
@@ -117,8 +117,8 @@ pub enum Fault {
 }
 
 impl Fault {
-    /// The closed reason logged with a fault, as TS `describeError` names
-    /// `TimedOut` "command timed out".
+    /// The closed reason logged with a fault; `TimedOut` is named
+    /// "command timed out".
     pub fn reason(&self) -> &'static str {
         match self {
             Self::NotConnected => "not connected",
@@ -133,21 +133,21 @@ impl Fault {
     }
 }
 
-/// Construction options. Defaults are TS's constants.
+/// Construction options.
 #[derive(Clone)]
 pub struct RedisCoordOptions {
-    /// What gauge expiry is computed against (TS `now`).
+    /// What gauge expiry is computed against.
     pub now: Clock,
-    /// TS `COMMAND_TIMEOUT_MS` / `commandTimeoutMs`.
+    /// The deadline for one awaited command.
     pub command_timeout: Duration,
-    /// TS `connectionTimeout`: one connect attempt, scripts included.
+    /// One connect attempt, scripts included.
     pub connect_timeout: Duration,
-    /// TS `CONNECT_WAIT_MS`: how long construction waits for the first
+    /// How long construction waits for the first
     /// connect (and first subscribe) to settle.
     pub connect_wait: Duration,
-    /// TS `faultLogIntervalMs`.
+    /// The minimum interval between repeated fault logs.
     pub fault_log_interval: Duration,
-    /// TS `LOCK_POLL_MS`.
+    /// How often a contended lock is retried.
     pub lock_poll: Duration,
     pub reconnect_min: Duration,
     pub reconnect_max: Duration,
@@ -290,8 +290,8 @@ fn nonnegative(n: i64) -> u64 {
 }
 
 /// `SCAN MATCH` treats `* ? [ ] \` as glob syntax; a literal prefix escapes
-/// them. (TS passes the prefix raw; every prefix TS writes is free of them,
-/// so the two agree on every real key.)
+/// them. (Every prefix this crate writes is free of them, so escaping
+/// changes no real key's match.)
 fn glob_escape(prefix: &str) -> String {
     let mut out = String::with_capacity(prefix.len() + 1);
     for c in prefix.chars() {
@@ -368,7 +368,7 @@ impl Remote {
 
     /// Queues a release script — `EVAL`, sent whole so a lost script cache
     /// cannot reorder it — ahead of every command submitted after this
-    /// returns, and does not wait for it (TS `void evalScript(...)`).
+    /// returns, and does not wait for it.
     ///
     /// `idempotent` asserts the script is safe to run twice (a named gauge
     /// slot; a token compare-and-delete): such a release is kept across a
@@ -390,8 +390,8 @@ impl Remote {
         self.link.release(whole, idempotent)
     }
 
-    /// Records that a long-window debit did not reach the server (TS
-    /// `lostDebit = true`): the next successful call drops every `omni:b:*`
+    /// Records that a long-window debit did not reach the server: the next
+    /// successful call drops every `omni:b:*`
     /// hash so the next admission reseeds from the store. For callers that
     /// debit through [`Remote`] directly (D3's batched debits).
     pub fn note_lost_debit(&self) {
@@ -722,7 +722,7 @@ impl Remote {
     }
 
     /// `PUBLISH omni:pubsub {"topic","payload"}`. Refused while the pub/sub
-    /// connection is not listening, as TS refuses: a process is always its
+    /// connection is not listening: a process is always its
     /// own audience, so the publish must then go through memory.
     pub async fn publish(&self, topic: &str, payload: &str) -> Result<(), Fault> {
         if !self.listening() {
@@ -788,7 +788,7 @@ impl Remote {
     }
 
     /// `SCAN` + `UNLINK` of every `omni:kv:<prefix>*`, the whole operation
-    /// under one `command_timeout` (TS wraps it in one deadline too): every
+    /// under one `command_timeout`: every
     /// page and every `UNLINK` gets what is left of it. Up to 1 000 000 keys.
     pub async fn kv_del_prefix(&self, prefix: &str) -> Result<(), Fault> {
         let deadline = tokio::time::Instant::now() + self.link.opts.command_timeout;
@@ -803,17 +803,18 @@ impl Remote {
     }
 
     /// Discards the long-window namespace, including seed companions. Call
-    /// only with writers and seeders stopped, before cutover or a lineage
-    /// change, not at each normal replica startup.
-    pub async fn sweep_buckets_for_cutover(&self) -> Result<(), Fault> {
+    /// only with writers and seeders stopped, before a lineage change or an
+    /// incompatible bucket-format change, not at each normal replica startup.
+    pub async fn sweep_buckets(&self) -> Result<(), Fault> {
         link::sweep_buckets(&self.link).await
     }
 }
 
 // --- RedisCoord: the Coord, failing open ---------------------------------
 
-/// TS `redisCoord`. Construct with [`RedisCoord::connect`] inside a Tokio
-/// runtime; [`RedisCoord::close`] (or drop) stops its two connections.
+/// The fail-open [`Coord`] on Redis. Construct with [`RedisCoord::connect`]
+/// inside a Tokio runtime; [`RedisCoord::close`] (or drop) stops its two
+/// connections.
 pub struct RedisCoord {
     remote: Remote,
     fallback: MemoryCoord,
@@ -832,8 +833,8 @@ impl std::fmt::Debug for RedisCoord {
 impl RedisCoord {
     /// Opens both connections in the background and waits — at most
     /// `connect_wait` — for each one's first attempt to settle, so the first
-    /// call neither waits on a connect nor fails one that was about to land
-    /// (TS `ready` / `listened`). Fails only on a malformed URL.
+    /// call neither waits on a connect nor fails one that was about to land.
+    /// Fails only on a malformed URL.
     pub async fn connect(url: &str, opts: RedisCoordOptions) -> Result<Self, redis::RedisError> {
         let client = redis::Client::open(url)?;
         // Both connections speak RESP2 (the reply guard and the pub/sub
@@ -893,9 +894,8 @@ impl RedisCoord {
                 }
             }
         };
-        // Past the wait, calls simply read the state (TS: `Promise.race`
-        // with a sleep): a server still connecting is a fault answered at
-        // once, never a wait.
+        // Past the wait, calls simply read the state: a server still
+        // connecting is a fault answered at once, never a wait.
         let settled = tokio::time::timeout(wait, async {
             first_attempt.await;
             // Only fails if the listener task ended, i.e. at close.

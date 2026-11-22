@@ -1,4 +1,4 @@
-//! Frozen classifier contracts and smart-routing orchestration.
+//! Classifier contracts and smart-routing orchestration.
 
 use serde_json::{Value, json};
 use std::collections::VecDeque;
@@ -28,7 +28,7 @@ fn judge_cache() -> &'static Mutex<VerdictCache> {
     CACHE.get_or_init(|| Mutex::new(VerdictCache::default()))
 }
 
-/// IR strings are UTF-8, but a frozen head/tail cap can bisect a pair. Carry
+/// IR strings are UTF-8, but a head/tail cap can bisect a surrogate pair. Carry
 /// those units through prompt construction as collision-free markers, then
 /// restore their JSON escapes at the bare transport seam (before encoding).
 struct JudgeTransport {
@@ -304,7 +304,7 @@ fn unavailable() -> SmartDecision {
     })
 }
 
-/// Lazy like frozen `screenFirst`: constructing this outcome does not screen.
+/// Lazy: constructing this outcome does not screen.
 /// The SSE head can therefore be sent while classification is still pending.
 pub fn screen_first(
     deps: Arc<Deps>,
@@ -689,7 +689,7 @@ impl VerdictCache {
     }
 }
 
-/// The frozen regex fences any matching tag prefix, without requiring `>`.
+/// The fence regex matches any tag prefix, without requiring `>`.
 pub fn fence(text: &str, sections: &[&str]) -> String {
     let mut out = String::new();
     for (i, c) in text.char_indices() {
@@ -1084,7 +1084,7 @@ fn human_wrote(message: &Value) -> bool {
             .iter()
             .any(|b| b["type"] == "text")
 }
-/// JSON rather than a Rust string field preserves pair-bisecting TS caps.
+/// JSON rather than a Rust string field preserves pair-bisecting caps.
 pub fn judged_text_json(request: &Value, turns: f64) -> String {
     let window = if !turns.is_finite() || turns.fract() != 0.0 || turns < 1.0 {
         1.0

@@ -1,6 +1,6 @@
 -- Which process owns a pending request, and which processes are alive.
 --
--- `sweepPending` used to retire every pending row at boot, on the premise that
+-- The boot sweep used to retire every pending row, on the premise that
 -- an installation is one process. With several, a replica booting into a live
 -- fleet would mark every other replica's in-flight request interrupted, and the
 -- real owner would then complete it a second time — into rollups that add.

@@ -6,8 +6,8 @@
 //!
 //! The load is the bench's shape (`writer_throughput.rs`): two events per
 //! request, a Begin then its Finish a millisecond later, one key, one model,
-//! and request ids either random (v4, as TS mints) or time-ordered (v7, as
-//! the Rust gateway mints). Offered as fast as the writer takes them: the
+//! and request ids either random (v4, the legacy mint) or time-ordered (v7, as
+//! the gateway mints). Offered as fast as the writer takes them: the
 //! channel is sized to the whole run, so nothing is dropped and the figure
 //! is what the writer committed per second of wall time.
 

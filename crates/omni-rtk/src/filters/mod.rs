@@ -1,4 +1,4 @@
-//! `packages/rtk/src/filters`: one module per family.
+//! One module per filter family.
 
 pub mod build;
 pub mod diagnostics;

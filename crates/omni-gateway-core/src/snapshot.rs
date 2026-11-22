@@ -5,9 +5,8 @@
 //! One `Arc<GatewaySnapshot>` behind an [`ArcSwap`]: a request loads it once
 //! and keeps that view for its life; a rebuild swaps a new one in without
 //! blocking anyone. The [`SnapshotHolder::spawn_refresher`] task polls
-//! `PRAGMA data_version` and rebuilds off the request path, as TS's
-//! `createRoutingSnapshotCache` does on its next `get` after the version
-//! moves. Health is patched in place, as TS applies `healthSaved`.
+//! `PRAGMA data_version` and rebuilds off the request path when the version
+//! moves. Health is patched in place.
 //!
 //! Degradation per model: a `virtual_models` row that does not read is left
 //! out with a `warn` naming it, and every other model is served.
@@ -24,7 +23,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-/// One key in the snapshot: readable, or a row TS's `toKey` throws on,
+/// One key in the snapshot: readable, or a row that failed to parse,
 /// which is refused at auth with that error and nothing else.
 pub type KeyEntry = Result<Arc<ApiKey>, Arc<KeyRowError>>;
 
@@ -88,7 +87,7 @@ pub enum AuthOutcome {
     Refused(GatewayError),
 }
 
-/// `extractToken`: `Bearer <token>` (case-insensitive), a bare token, or none.
+/// `Bearer <token>` (case-insensitive), a bare token, or none.
 pub fn extract_token(header: Option<&str>) -> Option<&str> {
     let value = trim(header?);
     if value.is_empty() {
@@ -108,7 +107,7 @@ pub fn extract_token(header: Option<&str>) -> Option<&str> {
     Some(value)
 }
 
-/// `apiKeyHeader`: the one credential header to authenticate, refusing two
+/// The one credential header to authenticate, refusing two
 /// that disagree. `Ok(None)` is neither header present.
 pub fn api_key_header<'a>(
     authorization: Option<&'a str>,
@@ -128,11 +127,11 @@ fn auth(message: &str) -> GatewayError {
     GatewayError::new(ErrorCode::Auth, message).gateway_authored()
 }
 
-/// Judges a found (or missing) key, as `authenticateApiKey` does after its
-/// store lookup: usable first, then limits readable.
+/// Judges a found (or missing) key after its store lookup: usable first,
+/// then limits readable.
 fn judge(entry: Option<&KeyEntry>, now_ms: i64) -> Result<AuthenticatedKey, GatewayError> {
-    // `findByHash` throws for a row `toKey` cannot read, before any other
-    // check: the proxy answers it as `INTERNAL` with the thrown message.
+    // An unreadable row fails before any other check: the proxy answers it
+    // as `INTERNAL` with the parse error's message.
     let key = match entry {
         Some(Err(unreadable)) => {
             return Err(
@@ -143,8 +142,7 @@ fn judge(entry: Option<&KeyEntry>, now_ms: i64) -> Result<AuthenticatedKey, Gate
         Some(Ok(key)) => Some(key),
         None => None,
     };
-    // `toKey` logs this on every read of the row, usable or not, before
-    // `authenticateApiKey` judges it.
+    // Logged on every read of the row, usable or not, before it is judged.
     if let Some(k) = key
         && k.limits.is_none()
     {
@@ -169,8 +167,8 @@ fn judge(entry: Option<&KeyEntry>, now_ms: i64) -> Result<AuthenticatedKey, Gate
 }
 
 impl GatewaySnapshot {
-    /// `authenticateApiKey` against the snapshot. `header` is the value
-    /// `apiKeyHeader` chose (Bearer or x-api-key).
+    /// API-key authentication against the snapshot. `header` is the raw
+    /// header value (Bearer or x-api-key).
     pub fn authenticate(&self, header: Option<&str>, now_ms: i64) -> AuthOutcome {
         let Some(raw) = extract_token(header) else {
             return AuthOutcome::Refused(auth("missing or malformed Authorization header"));
@@ -526,7 +524,7 @@ impl SnapshotHolder {
         .map_err(|e| StoreError::Writer(format!("snapshot patch task: {e}")))?
     }
 
-    /// `healthSaved`: this process's own health write, patched into the
+    /// This process's own health write, patched into the
     /// held snapshot so routing sees it before the next rebuild.
     pub fn patch_health(&self, row: CredentialHealth) {
         let _publication = self

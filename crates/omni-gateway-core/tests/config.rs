@@ -1,5 +1,5 @@
-//! `load_config` against TS `loadConfig` (`packages/control/src/config.ts`)
-//! run under Bun: the same outcome, field for field, or the same error text.
+//! Contract tests for `load_config`: the pinned outcome, field for field,
+//! or the pinned error text.
 
 use omni_gateway_core::config::load_config;
 /// No `.env` is read: a `.env` beside the working directory changes nothing.

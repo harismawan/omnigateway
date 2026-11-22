@@ -1,4 +1,4 @@
-//! Shared fixtures: a migrated store seeded the way the TS CLI seeds it, a
+//! Shared fixtures: a migrated store seeded the way the CLI seeds it, a
 //! scripted upstream `HttpClient`, and helpers to read rows back.
 
 #![allow(dead_code)]

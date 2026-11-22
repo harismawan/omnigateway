@@ -1,5 +1,4 @@
-//! Eligibility (`packages/router/src/filters.ts`, and `servesTarget` /
-//! `credentialExpired` from `@omni/store/types`).
+//! Eligibility: [`serves_target`] and credential expiry.
 
 use crate::providers::Providers;
 use crate::quota::rolled_over;
@@ -70,7 +69,7 @@ pub fn required_providers(request: &ChatRequest) -> BTreeSet<String> {
         }
     }
     // `system`: top-level native blocks only. A tool result's own native
-    // parts are read inside messages alone, as TS reads them.
+    // parts are read inside messages alone.
     for block in request.system.iter().flatten() {
         if let ContentBlock::ProviderNative(b) = block {
             owners.insert(b.provider.clone());
@@ -137,7 +136,7 @@ pub fn serves_target(target: &Target, account: &Credential) -> bool {
         None => Named::None,
         Some(Value::String(s)) if s.is_empty() => Named::None,
         Some(Value::String(s)) => Named::Id(s),
-        // A target value is compared raw in TS; a non-string never equals an
+        // A target value is compared raw; a non-string never equals an
         // account's string or `undefined`, and never equals the symbol.
         Some(_) => Named::Unusable,
     };

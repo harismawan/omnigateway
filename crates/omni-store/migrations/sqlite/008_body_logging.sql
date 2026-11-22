@@ -8,11 +8,11 @@
 -- routing tables live in. A prompt corpus inlined here would make the operating
 -- database grow without bound, make every `VACUUM` copy it, and put plaintext
 -- rows one `sqlite3` invocation away. The artifact instead lives at
--- `<dirname(databasePath)>/request_bodies/YYYY/MM/DD/<request_id>.json.enc`,
+-- `<dirname(database path)>/request_bodies/YYYY/MM/DD/<request_id>.json.enc`,
 -- encrypted under the same key as provider credentials, and this row records
--- only where it is and whether it can still be trusted. OmniRoute reached the
--- same layout the expensive way: its `call_logs_v1_legacy` table exists purely
--- to drain inline blobs it had already shipped into file artifacts.
+-- only where it is and whether it can still be trusted. Inlining bodies first
+-- and filing them later costs a whole drain migration over the largest data
+-- in the database.
 --
 -- `rel_path` is relative so moving an installation does not invalidate every
 -- row, and nullable because a row can exist with no artifact behind it: capture

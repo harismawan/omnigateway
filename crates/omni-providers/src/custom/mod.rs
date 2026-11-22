@@ -1,6 +1,6 @@
-//! A custom OpenAI-compatible endpoint (`packages/providers/src/custom`).
+//! A custom OpenAI-compatible endpoint.
 //!
-//! Forked per provider, as in TS: no other provider's codec is imported.
+//! Forked per provider: no other provider's codec is imported.
 
 pub(crate) mod codec;
 pub mod decode;

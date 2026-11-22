@@ -1,5 +1,5 @@
-//! `api_keys.limits`, parsed as `parseLimitConfig` in
-//! `packages/ratelimit/src/catalog.ts` parses it.
+//! The stored `api_keys.limits` value and its strict parser
+//! (`parse_limit_config`).
 //!
 //! The names are a storage contract and the schema is strict: an unknown key,
 //! a zero, a fraction where a count belongs, or a `__proto__` anywhere is a
@@ -7,16 +7,16 @@
 //! key, which is "unreadable" and is refused at auth; it must never collapse
 //! into "unlimited".
 //!
-//! Every pair is tri-state, as in TS: absent (`None`), explicit `null`
+//! Every pair is tri-state: absent (`None`), explicit `null`
 //! (`Some(None)`, also unlimited), or a ceiling (`Some(Some(n))`). The two
 //! unlimited spellings are kept apart only so the value re-serializes exactly.
 
 pub use indexmap::IndexMap;
 use serde_json::{Map, Value};
 
-/// `MAX_MODEL_OVERRIDES`.
+/// The most model overrides one limits value may carry.
 pub const MAX_MODEL_OVERRIDES: usize = 64;
-/// `MAX_MODEL_NAME_LENGTH`, in code points (zod 4.6's `max` on a string).
+/// The longest model name, in code points.
 pub const MAX_MODEL_NAME_LENGTH: usize = 256;
 
 /// `WINDOW_MS`: every window is counted sliding.
@@ -27,7 +27,7 @@ pub const WINDOW_MS_1W: u64 = 7 * 24 * 60 * 60 * 1000;
 /// Absent, explicit null, or a value.
 pub type Pair<T> = Option<Option<T>>;
 
-/// `countWindows`: `requests` or `tokens` at the three windows.
+/// `requests` or `tokens` at the three windows.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CountWindows {
     pub one_minute: Pair<u64>,
@@ -35,7 +35,7 @@ pub struct CountWindows {
     pub one_week: Pair<u64>,
 }
 
-/// `spendWindows`: dollars, so fractional, and no `1m`.
+/// Dollars, so fractional, and no `1m`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SpendWindows {
     pub five_hours: Pair<f64>,
@@ -65,9 +65,9 @@ pub struct LimitConfig {
     /// apart rather than folded to U+FFFD, which would make `"\ud800"`,
     /// `"\udc00"` and a literal U+FFFD one model (`Object.hasOwn` tells them
     /// apart). [`Self::model_override`] never sees them: a well-formed
-    /// request model cannot equal one. TS throws building such a model's
-    /// subject id (`encodeURIComponent`), so they are matched only to refuse
-    /// as it does. [`Self::to_js`] writes them back where they stood;
+    /// request model cannot equal one. No subject id can be built from such
+    /// a name (`encodeURIComponent` would throw), so they are matched only
+    /// to refuse. [`Self::to_js`] writes them back where they stood;
     /// [`Self::to_json_well_formed`] cannot represent them and omits them.
     pub lone_models: Vec<LoneModel>,
 }
@@ -102,7 +102,7 @@ impl SpendWindows {
 }
 
 impl LimitScope {
-    /// `setsAnyLimit`: whether any ceiling is set, rather than only nulls and empties.
+    /// Whether any ceiling is set, rather than only nulls and empties.
     pub fn sets_any_limit(&self) -> bool {
         set(self.concurrency).is_some()
             || self.requests.as_ref().is_some_and(CountWindows::sets_any)
@@ -153,7 +153,7 @@ impl LimitScope {
 }
 
 impl LimitConfig {
-    /// `modelOverride`: the override one model carries. An own-key lookup, so
+    /// The override one model carries. An own-key lookup, so
     /// `constructor` is a model name like any other.
     pub fn model_override(&self, model: &str) -> Option<&LimitScope> {
         self.models.as_ref()?.get(model)
@@ -249,14 +249,14 @@ impl serde::Serialize for LimitConfig {
     }
 }
 
-/// `parseLimits` in `packages/store/src/sqlite/keys.ts`: `JSON.parse`, then
-/// `parseLimitConfig`, with any failure read as unreadable (`None`).
+/// Parses a stored limits string: JSON first, then [`parse_limit_config`],
+/// with any failure read as unreadable (`None`).
 pub fn parse_limits(raw: &str) -> Option<LimitConfig> {
     let value: Value = serde_json::from_str(raw).ok()?;
     parse_limit_config(&value)
 }
 
-/// `parseLimitConfig` over an already-parsed value.
+/// The strict parse over an already-parsed value.
 pub fn parse_limit_config(value: &Value) -> Option<LimitConfig> {
     parse_limit_config_with_lone(value, Vec::new())
 }
@@ -322,8 +322,8 @@ fn parse_limit_config_inner(value: &Value) -> Option<LimitConfig> {
     })
 }
 
-/// `assertNoProto`: `__proto__` as a key at any depth is refused, because zod
-/// would otherwise drop it and report a ceiling stored that never was.
+/// `__proto__` as a key at any depth is refused: a JSON parser that drops
+/// it would report a ceiling stored that never was.
 fn names_proto(value: &Value) -> bool {
     match value {
         Value::Object(m) => m.iter().any(|(k, v)| k == "__proto__" || names_proto(v)),
@@ -349,7 +349,7 @@ fn parse_models(value: &Value) -> Option<IndexMap<String, LimitScope>> {
     (out.len() <= MAX_MODEL_OVERRIDES).then_some(out)
 }
 
-/// `limitConfigBaseSchema`, strict.
+/// One scope, strict: an unknown key is a refusal.
 fn parse_scope(obj: &Map<String, Value>) -> Option<LimitScope> {
     let mut scope = LimitScope::default();
     for (k, v) in obj {

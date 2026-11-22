@@ -1,4 +1,4 @@
-//! Structured output and final vendor merge, in TS wire assembly order.
+//! Structured output and final vendor merge, in wire assembly order.
 use crate::response_format::{ResponseFormatRead, read_response_format, readable_format};
 use omni_ir::request::ChatRequest;
 use serde_json::{Value, json};

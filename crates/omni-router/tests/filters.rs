@@ -1,5 +1,5 @@
-//! Port of `packages/router/test/filters.test.ts`, `providerNative.test.ts`
-//! and `blockPositions.test.ts` (the logic in the router itself).
+//! Filter, provider-native and block-position regressions (the logic in
+//! the router itself).
 
 mod common;
 
@@ -640,7 +640,7 @@ fn inherited_js_keys_are_not_providers() {
     );
 }
 
-// ---- providerNative.test.ts
+// ---- provider native
 
 fn web_search() -> Value {
     json!({ "kind": "provider", "provider": "anthropic", "family": "webSearch",
@@ -785,7 +785,7 @@ fn an_account_dropped_for_its_own_reason_is_not_also_reported_as_unservable() {
     assert_eq!(reasons(&eligible(&input(&r, &m, &s))), ["disabled"]);
 }
 
-// ---- blockPositions.test.ts
+// ---- block positions
 
 #[test]
 fn every_predicate_that_reads_blocks_reads_every_position() {
@@ -850,8 +850,8 @@ fn a_breaker_is_admitted_the_instant_its_cooldown_has_elapsed() {
     assert_eq!(at(970_001), 0);
 }
 
-/// TS reads `toolResult.native` inside messages only; a system-prompt tool
-/// result's native parts name no owner (packages/router/src/filters.ts).
+/// `toolResult.native` is read inside messages only; a system-prompt tool
+/// result's native parts name no owner.
 #[test]
 fn a_tool_result_native_part_in_the_system_prompt_names_no_owner() {
     let block = json!({ "type": "toolResult", "toolUseId": "t", "content": "",

@@ -1,4 +1,4 @@
-//! `packages/rtk/src/filters/packages.ts`.
+//! Package-manager output compression.
 
 use super::diagnostics::WarningGaps;
 use super::shared::{BoundedText, MAX_OUTPUT, Severity};

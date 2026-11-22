@@ -1,9 +1,9 @@
-//! The system prompt as text (`packages/providers/src/system.ts`), recording
-//! every block that could not become text.
+//! The system prompt as text, recording every block that could not become
+//! text.
 
 use omni_ir::request::ContentBlock;
 
-/// `systemText`: `None` when the request has no system prompt at all; the
+/// `None` when the request has no system prompt at all; the
 /// text blocks joined with a blank line otherwise. Each non-text block is
 /// recorded as `<provider>:system-<type>-dropped`.
 pub fn system_text(

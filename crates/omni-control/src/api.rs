@@ -1,25 +1,25 @@
-//! The control operations behind `routes/admin.ts`'s keys, models, catalog
+//! The control operations behind the admin routes' keys, models, catalog
 //! and settings handlers, for request bodies of any shape.
 //!
-//! The CLI builds its inputs from flags, so it never handed these operations
+//! The CLI builds its inputs from flags, so it never hands these operations
 //! arbitrary JSON; the HTTP surface does. Everything here is therefore
 //! [`JsValue`] end to end: a body's lone surrogates, out-of-range numbers,
 //! duplicate keys and nesting depth survive validation, storage and the
 //! response exactly as `JSON.parse` → zod → `JSON.stringify` treats them.
-//! Validation is the oracle-tested port in [`crate::body_schema`],
+//! Validation is oracle-tested in [`crate::body_schema`],
 //! [`crate::model_schema`] and [`crate::settings`]; storage goes through the
 //! same `omni_store` primitives the CLI uses.
 //!
-//! Errors are `(code, message)`: `code` is the `GatewayError` code TS throws
+//! Errors are `(code, message)`: `code` is a `GatewayError` code
 //! (`BAD_REQUEST`, `MODEL_UNAVAILABLE`, ...), or `None` for anything else (a
-//! `TypeError`, a store failure), which the route reports as `500 INTERNAL
-//! "internal error"`, as `apiErrorResponse` does.
+//! type error, a store failure), which the route reports as `500 INTERNAL
+//! "internal error"`.
 use crate::settings_value::get;
 use omni_ir::jsjson::{JsValue, stringify};
 use omni_store::SqliteStore;
 
 /// A failed operation: a `GatewayError` code and message, or `None` for
-/// anything TS would not have thrown as a `GatewayError`.
+/// anything that is not a `GatewayError`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Failure {
     pub code: Option<&'static str>,
@@ -74,8 +74,7 @@ fn object(fields: Vec<(&str, JsValue)>) -> JsValue {
     JsValue::Object(fields.into_iter().map(|(k, v)| field(k, v)).collect())
 }
 
-/// A JS string as UTF-8 for SQLite: what `bun:sqlite` binds (lone
-/// surrogates become U+FFFD).
+/// A JS string as UTF-8 for SQLite: lone surrogates become U+FFFD.
 fn utf8(units: &[u16]) -> String {
     String::from_utf16_lossy(units)
 }
@@ -842,8 +841,7 @@ pub async fn put_model_postgres(
 }
 
 /// `PUT /api/models/:id`: `putModel(store, id, body)`. `id` is `None` where
-/// the path parameter does not decode (Elysia hands the handler `null`),
-/// which no body's id can match.
+/// the path parameter does not decode, which no body's id can match.
 pub fn put_model(store: &SqliteStore, id: Option<&str>, body: &JsValue) -> Result<()> {
     let Some(id) = id else {
         crate::model_schema::parse(body).map_err(Failure::from_control)?;
@@ -1026,7 +1024,7 @@ fn public_rows(catalog: Option<&JsValue>) -> Vec<PublicRow> {
     out
 }
 
-/// `String.prototype.localeCompare` under Bun's default (root/`en`) ICU
+/// `String.prototype.localeCompare` semantics: default (root/`en`) ICU
 /// collation.
 pub(crate) fn locale_compare(a: &[u16], b: &[u16]) -> std::cmp::Ordering {
     static COLLATOR: std::sync::OnceLock<icu_collator::CollatorBorrowed<'static>> =
@@ -1048,7 +1046,7 @@ pub type Account = (String, JsValue);
 
 /// The accounts `providerCatalog` reads (`store.credentials.list()`):
 /// provider and parsed `provider_data`, every row (a row that does not
-/// parse fails the route, as `JSON.parse` throws in TS).
+/// parse fails the route).
 pub fn accounts(store: &SqliteStore) -> Result<Vec<Account>> {
     project_accounts(crate::credentials::rows(store, None)?)
 }
@@ -1342,7 +1340,7 @@ mod tests {
         .collect();
         v.sort_by(|a, b| locale_compare(a, b));
         let got: Vec<String> = v.iter().map(|u| utf8(u)).collect();
-        // Bun 1.4.4: ['b','a','B',...].sort((a, b) => a.localeCompare(b))
+        // Root ICU collation of ['b','a','B',...] by localeCompare.
         assert_eq!(got.join("|"), "_x|-a|1|a|A|ä|a b|ab|b|B|é|z|Z");
     }
 }

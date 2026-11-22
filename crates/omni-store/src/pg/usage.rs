@@ -1,13 +1,12 @@
 //! The rate limiter's seed reads and the operator's sliding sum on Postgres,
-//! from `packages/store/src/postgres/usage.ts` (`sumSince`, `sumBuckets`,
-//! `NARROWED_SQL`), plus the boot sweep of `sweepPending`.
+//! plus the boot sweep of pending requests.
 //!
 //! Run by the limiter's seeder (through the writer, ordered after the
 //! commits before it) and by operator commands, never on the request path.
 //!
-//! Sums arrive as `numeric` (a `SUM` of `BIGINT`) or `BIGINT`, and TS turns
-//! each with `Number(string)`; they are cast to `float8` here, which is the
-//! same correctly rounded decimal-to-double conversion.
+//! Sums arrive as `numeric` (a `SUM` of `BIGINT`) or `BIGINT`; they are cast
+//! to `float8` here, the same correctly rounded decimal-to-double conversion
+//! `Number(string)` gives.
 
 use super::query_rows;
 use crate::error::StoreError;
@@ -97,7 +96,7 @@ fn counts(r: &tokio_postgres::Row, from: usize) -> Result<Counts, StoreError> {
     })
 }
 
-/// `NARROWED_SQL.sumSince`, its output cast.
+/// The model-narrowed sliding-window sum, its counts cast to float8.
 pub const SUM_SINCE_MODEL: &str = "SELECT COUNT(*)::float8 AS requests,
         COALESCE(SUM(input_tokens + output_tokens
                      + cache_read_tokens + cache_write_tokens), 0)::float8 AS tokens,
@@ -119,7 +118,7 @@ const SUM_SINCE_EDGE: &str = "SELECT COUNT(*)::float8 AS requests,
    FROM request_logs
   WHERE api_key_id = $1 AND state = 'done' AND at >= $2 AND at < $3";
 
-/// `sumSince`: exact sliding window, rollup whole hours plus the partial edge.
+/// Exact sliding window, rollup whole hours plus the partial edge.
 pub async fn sum_since(
     c: &impl GenericClient,
     api_key_id: &str,
@@ -151,7 +150,7 @@ pub async fn sum_since(
     })
 }
 
-/// `NARROWED_SQL.sumBuckets`, its output cast.
+/// The model-narrowed bucket sums, its counts cast to float8.
 pub const BUCKETS_MODEL: &str = "SELECT (at / $1) * $2 AS bucket, COUNT(*)::float8 AS requests,
         COALESCE(SUM(input_tokens + output_tokens
                      + cache_read_tokens + cache_write_tokens), 0)::float8 AS tokens,
@@ -175,7 +174,7 @@ const BUCKETS_LOG: &str = "SELECT (at / $1) * $2 AS bucket, COUNT(*)::float8 AS 
   WHERE api_key_id = $3 AND state = 'done' AND at >= $4
   GROUP BY 1";
 
-/// `sumBuckets(apiKeyId, sinceMs, grainMs, requestedModel)`: one row per
+/// One row per
 /// bucket start. Key-wide at the hour grain it reads `usage_rollup`; every
 /// other read groups `request_logs` (done rows only).
 pub async fn sum_buckets(
@@ -270,7 +269,7 @@ pub async fn seed_rows(
 }
 
 impl super::PgStore {
-    /// `sumSince` on a pooled connection.
+    /// The sliding-window sum on a pooled connection.
     pub async fn sum_since(
         &self,
         api_key_id: &str,
@@ -302,7 +301,7 @@ impl super::PgStore {
     }
 }
 
-/// `heartbeat` (`maintenance.ts`) then `sweepPending`'s read (`usage.ts`).
+/// Heartbeat then the pending sweep's read (see `usage::sweep_pending`).
 pub(crate) async fn sweep_pending(
     c: &impl GenericClient,
     node_id: &str,

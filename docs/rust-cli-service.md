@@ -4,7 +4,7 @@
 `doctor` manage the local installation. The release archive contains
 `omnigateway` and its `omni` symlink; service launch resolves the symlink to the
 canonical server identity. A standalone CLI needs an existing adjacent
-`omnigateway` companion. It never builds one, launches Bun, or guesses a global
+`omnigateway` companion. It never builds one or guesses a global
 installation path.
 
 Foreground start inherits output and emits no CLI success document, including
@@ -24,8 +24,8 @@ Plugins remain unsupported. Doctor reads directory/manifest metadata only,
 never executes plugin code, and marks each installed plugin non-loadable with
 an explicit unsupported problem. Unavailable metadata is null; orphan plugin
 table checks are null/not checked, never a fabricated clean result. No plugin
-tables are removed. This is a deliberate migration boundary, not plugin runtime
-compatibility. Native Darwin supervision has not been established by Linux tests.
+tables are removed. This is a deliberate data-preservation boundary, not plugin
+runtime compatibility. Native Darwin supervision has not been established by Linux tests.
 Doctor may open/migrate a database through the ordinary store constructor; the
 rollup audit itself only reads. Unavailable database diagnostics stay null.
 

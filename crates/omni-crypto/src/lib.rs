@@ -1,6 +1,6 @@
-//! Byte-exact crypto and hashing contracts shared with the TS build.
+//! Byte-exact crypto and hashing contracts for wire and storage formats.
 //!
-//! A difference from the TS output is a wire or storage incompatibility,
+//! Outputs are wire or storage contracts: a difference is an incompatibility,
 //! never a style choice.
 
 pub mod apikey;
@@ -12,7 +12,7 @@ pub mod password;
 pub mod qoder;
 pub mod session;
 
-/// `crypto.timingSafeEqual` after a length check: unequal lengths are
+/// Constant-time equality after a length check: unequal lengths are
 /// `false` at once (the length is not secret), equal lengths are compared in
 /// time independent of where they differ. `black_box` keeps the optimizer from
 /// turning the folded difference into an early exit.
@@ -27,7 +27,7 @@ pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     std::hint::black_box(diff) == 0
 }
 
-/// Lowercase hex of `bytes` (`Buffer.toString("hex")`).
+/// Lowercase hex of `bytes`.
 pub fn hex_lower(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);

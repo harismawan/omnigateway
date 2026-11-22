@@ -1,17 +1,17 @@
-//! Rate-limit arithmetic, ported from `packages/ratelimit`.
+//! Rate-limit arithmetic.
 //!
 //! Pure: no clock, no I/O, `now` a parameter wherever time matters. The
 //! caller observes the counters (a ring for `1m`, buckets for the long
 //! windows, a gauge for concurrency) and this crate judges them.
 //!
-//! Instants and amounts are `f64` because they are JS numbers in TS, and the
-//! headroom figures reach response headers through `String(n)`.
+//! Instants and amounts are `f64`, matching the JS-number spelling the
+//! headroom figures reach response headers in (`String(n)`).
 //!
 //! **Precondition: every counter, limit and instant is finite.** They come
 //! from integer rows, positive parsed limits and this gateway's own sums, so
-//! NaN cannot arise. TS's `Math.max(0, x)` would propagate a NaN where the
-//! `f64::max` used here clamps it to zero; that difference is unreachable
-//! under the precondition, which debug builds assert at each entry point.
+//! NaN cannot arise. The `f64::max` used here would clamp a NaN to zero;
+//! the precondition keeps that case unreachable, and debug builds assert it
+//! at each entry point.
 
 pub mod buckets;
 pub mod limits;
@@ -205,7 +205,7 @@ pub struct Decision {
 }
 
 impl Decision {
-    /// The empty decision `combineAll` answers for no subjects.
+    /// The empty decision [`combine_all`] answers for no subjects.
     pub fn unlimited() -> Self {
         Self {
             allowed: true,
@@ -263,7 +263,7 @@ fn counters_finite(c: &CounterSnapshot) -> bool {
     c.concurrency.is_finite() && dim(&c.requests) && dim(&c.tokens) && dim(&c.spend)
 }
 
-/// `lastToClear`: the latest reset, then the larger overshoot, then walk order.
+/// The latest reset, then the larger overshoot, then walk order.
 pub fn last_to_clear(violations: &[Violation]) -> Option<Violation> {
     let mut chosen: Option<Violation> = None;
     for candidate in violations {
@@ -384,7 +384,7 @@ pub fn combine(key: &Decision, model: &Decision) -> Decision {
     }
 }
 
-/// `combineAll`: key-wide first, which is `combine`'s tie order.
+/// Key-wide first, which is `combine`'s tie order.
 pub fn combine_all(decisions: &[Decision]) -> Decision {
     let Some((first, rest)) = decisions.split_first() else {
         return Decision::unlimited();
@@ -392,13 +392,13 @@ pub fn combine_all(decisions: &[Decision]) -> Decision {
     rest.iter().fold(first.clone(), |acc, d| combine(&acc, d))
 }
 
-/// `retryAfterMs`: never negative, zero for no violation.
+/// Never negative, zero for no violation.
 pub fn retry_after_ms(violation: Option<&Violation>, now: f64) -> f64 {
     debug_assert!(now.is_finite() && violation.is_none_or(|v| v.reset_at.is_finite()));
     violation.map_or(0.0, |v| (v.reset_at - now).max(0.0))
 }
 
-/// `afterThisRequest` (`routes/proxy.ts`): `remaining` once the request being
+/// `remaining` once the request being
 /// served is counted. Only `requests` moves; tokens and spend debit later.
 pub fn after_this_request(headroom: &HeadroomByDimension) -> HeadroomByDimension {
     debug_assert!(headroom.requests.is_none_or(|r| r.remaining.is_finite()));
@@ -409,7 +409,7 @@ pub fn after_this_request(headroom: &HeadroomByDimension) -> HeadroomByDimension
     out
 }
 
-/// `withReset`: every reported dimension sitting on `window` takes `reset_at`.
+/// Every reported dimension sitting on `window` takes `reset_at`.
 pub fn with_reset(
     headroom: &HeadroomByDimension,
     window: Window,
@@ -427,7 +427,7 @@ pub fn with_reset(
     out
 }
 
-/// `refusedHeadroom`: on a refusal, the refused dimension's header is the
+/// On a refusal, the refused dimension's header is the
 /// violated entry itself, so it names the same instant as `Retry-After`.
 pub fn refused_headroom(decision: &Decision, violation: &Violation) -> HeadroomByDimension {
     debug_assert!(violation.limit.is_finite() && violation.used.is_finite());

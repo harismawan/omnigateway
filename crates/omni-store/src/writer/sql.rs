@@ -1,7 +1,7 @@
 //! The statements a batch runs, and the multi-row upsert helper.
 //!
-//! Column lists are the TS ones (`usage.ts` `COLUMNS`, `rollup.ts` `UPSERT` and
-//! `HOURLY_UPSERT`, `credentials.ts` `UPSERT_HEALTH`). The rollup upserts set
+//! Column lists are the storage contract, in their fixed orders (the rows
+//! are pinned by `tests/writer.rs`). The rollup upserts set
 //! absolute values rather than adding: the batch has already folded each row
 //! in memory, starting from what the row held, with SQLite's own arithmetic
 //! (see `num.rs`).
@@ -11,7 +11,7 @@ use rusqlite::limits::Limit;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, Transaction, params_from_iter};
 
-/// `usage.ts` `COLUMNS`, in its order.
+/// The `request_logs` columns, in their stored order.
 pub(crate) const LOG_COLUMNS: [&str; 26] = [
     "id",
     "state",
@@ -41,7 +41,7 @@ pub(crate) const LOG_COLUMNS: [&str; 26] = [
     "rtk_filters",
 ];
 
-/// `usage_daily`'s key, then the counters, as `rollup.ts` `UPSERT` binds them.
+/// `usage_daily`'s key, then the counters, in the upsert's bind order.
 pub(crate) const DAILY_KEY: [&str; 6] = [
     "day",
     "provider",
@@ -73,7 +73,7 @@ pub(crate) const HOURLY_COUNTERS: [&str; 6] = [
     "cost_usd",
 ];
 
-/// `credentials.ts` `UPSERT_HEALTH`, verbatim in effect.
+/// The credential-health upsert, identical to the one in `credentials.rs`.
 pub(crate) const UPSERT_HEALTH: &str = "INSERT INTO credential_health
    (credential_id, model, breaker_state, consecutive_failures, opened_at,
     rate_limited_until)

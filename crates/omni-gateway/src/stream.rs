@@ -1,4 +1,4 @@
-//! Pure `/api/stream` contracts, ported from frozen stream/{protocol,ring,coalescer}.
+//! Pure `/api/stream` contracts: protocol, ring and coalescer.
 //! Transport, sources and coordinator integration intentionally live outside these types.
 
 use serde_json::{Value, json};

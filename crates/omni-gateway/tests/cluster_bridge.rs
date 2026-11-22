@@ -31,20 +31,20 @@ use omni_gateway::cluster::PgUsage;
 use std::sync::Arc;
 
 #[tokio::test]
-async fn cutover_unlinks_discovered_bucket_and_companion_names_only() {
+async fn bucket_sweep_unlinks_discovered_bucket_and_companion_names_only() {
     let Ok(url) = std::env::var("OMNI_TEST_D4_SWEEP_REDIS_URL") else {
         return;
     };
     let coord = omni_coord::redis::RedisCoord::connect(&url, Default::default())
         .await
-        .expect("disposable cutover coord");
+        .expect("disposable sweep coord");
     let remote = coord.remote();
     let now = 1_800_000_000_000.0;
     for name in ["d4:counts", "d4:counts:companion"] {
         remote
             .buckets_seed(name, 60_000.0, 18_000_000.0, now, &[])
             .await
-            .expect("seed cutover fixtures");
+            .expect("seed sweep fixtures");
     }
     remote
         .kv_set("d4:preserved", "value", 60_000)
@@ -52,11 +52,11 @@ async fn cutover_unlinks_discovered_bucket_and_companion_names_only() {
         .expect("other namespace");
     let binary = env!("CARGO_BIN_EXE_omnigateway");
     let output = std::process::Command::new(binary)
-        .arg("cluster-cutover-sweep")
+        .arg("cluster-bucket-sweep")
         .env_clear()
         .env("OMNI_REDIS_URL", &url)
         .output()
-        .expect("cutover command");
+        .expect("sweep command");
     assert!(
         output.status.success(),
         "{}",
@@ -69,7 +69,7 @@ async fn cutover_unlinks_discovered_bucket_and_companion_names_only() {
                 .await
                 .expect("read")
                 .is_none(),
-            "uncleared cutover key {name}"
+            "unswept key {name}"
         );
     }
     assert_eq!(

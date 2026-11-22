@@ -1,4 +1,5 @@
-//! `packages/rtk/test/ninth-audit.test.ts`.
+//! Audit regression suite: grep/listing omission quotas and context-separator
+//! placement.
 
 use super::common::*;
 

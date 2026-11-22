@@ -1,9 +1,8 @@
-//! The key-edit request schemas (`packages/control/src/schemas.ts`:
-//! `keyCreateSchema`, `keyLimitsSchema`, `keyModelsSchema`, `keyExpirySchema`,
-//! `keyGuardrailSchema`, `keySmartRoutingSchema`, and `limitConfigSchema` from
-//! `@omni/ratelimit/catalog`) as zod 4.6.1 runs them, over [`JsValue`] so a
-//! body's lone surrogates and out-of-range numbers survive, and
-//! [`parse_or_throw`]'s message is `parseOrThrow`'s: the *first* issue, its
+//! The key-edit request schemas (`keyCreateSchema`, `keyLimitsSchema`,
+//! `keyModelsSchema`, `keyExpirySchema`, `keyGuardrailSchema`,
+//! `keySmartRoutingSchema`, and `limitConfigSchema`) as zod 4.6.1 runs them,
+//! over [`JsValue`] so a body's lone surrogates and out-of-range numbers
+//! survive, and [`parse_or_throw`]'s message is the *first* issue, its
 //! path `safeToken`-ed and dot-joined, `(root)` when empty.
 //!
 //! The evaluation order is zod's: object shape keys in declaration order (all
@@ -550,7 +549,7 @@ pub fn key_smart_routing() -> Z {
     strict(vec![("enabled", Z::Bool)])
 }
 
-/// Every schema by its TS export name, for the oracle test.
+/// Every schema by its export name, for the oracle test.
 pub fn by_name(name: &str) -> Option<Z> {
     Some(match name {
         "keyCreateSchema" => key_create(),

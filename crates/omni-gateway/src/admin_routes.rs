@@ -1,9 +1,9 @@
-//! `routes/admin.ts`'s keys, models, catalog, settings and password
+//! The keys, models, catalog, settings and password
 //! handlers (roadmap A5), on the router [`crate::api`] owns.
 //!
-//! Each handler does what TS's does in the same order: the guard
-//! (`requireReader` for reads, `requireAdmin` for writes), the body
-//! (`readJson` / `readJsonRecord`), one `@omni/control` operation, and the
+//! Each handler runs in the same order: the guard
+//! (`require_reader` for reads, `require_admin` for writes), the body
+//! (`read_json`), one `omni_control` operation, and the
 //! JSON answer. The operations are `omni_control::api`'s, shared with
 //! nothing request-path: they run on the blocking pool against the control
 //! connection ([`ControlStore`]), never the `/v1` one.
@@ -11,7 +11,7 @@
 //! A config write commits to SQLite, which moves `PRAGMA data_version` on
 //! the snapshot refresher's connection: the routing snapshot (and so `/v1`
 //! key admission and model resolution) picks it up on its next poll.
-//! Unlike TS there is no in-process `emit`: the poll is the one path, for a
+//! There is no in-process change notification: the poll is the one path, for a
 //! write from this process and from any other alike.
 use std::sync::{Arc, Mutex};
 
@@ -193,8 +193,8 @@ impl ControlStore {
     }
 
     /// One operation on the blocking pool. A failure that is not a
-    /// `GatewayError` is `500 INTERNAL "internal error"` and logged here (TS
-    /// logs nothing; the reason is useful and carries no request data).
+    /// `GatewayError` is `500 INTERNAL "internal error"` and logged here (the
+    /// reason is useful and carries no request data).
     pub(crate) async fn run<T: Send + 'static>(
         &self,
         f: impl FnOnce(&SqliteStore) -> Result<T, Failure> + Send + 'static,
@@ -281,10 +281,10 @@ impl Admin {
     }
 }
 
-/// `fast-decode-uri-component`, which Elysia's router runs on every path
-/// parameter: `None` where it returns `null` (a bad escape or ill-formed
-/// UTF-8). The router matched on the raw (normalized) path, so `%2F` in a
-/// parameter is a `/` in the id and never a segment break.
+/// The percent-decoding every path parameter goes through: `None` for a
+/// bad escape or ill-formed UTF-8. The router matched on the raw
+/// (normalized) path, so `%2F` in a parameter is a `/` in the id and never
+/// a segment break.
 pub fn decode_param(raw: &str) -> Option<String> {
     if !raw.contains('%') {
         return Some(raw.to_owned());
@@ -293,7 +293,7 @@ pub fn decode_param(raw: &str) -> Option<String> {
 }
 
 /// The admin route for a method and normalized path, if it is one.
-/// `HEAD` reaches every `GET` route, as Elysia's does.
+/// `HEAD` reaches every `GET` route.
 pub fn route(method: &hyper::Method, path: &str) -> Option<Admin> {
     use hyper::Method as M;
     let get = matches!(*method, M::GET | M::HEAD);
@@ -453,7 +453,7 @@ async fn serve_inner(
         }
         Admin::RequestBody(id) => {
             require_admin(req.headers(), &app.admin).await?;
-            // Frozen GET does not apply the writer's safe-id predicate. An
+            // The GET does not apply the writer's safe-id predicate. An
             // invalid percent escape decodes to null and is an absent lookup.
             let Some(id) = id else {
                 return Ok(json_ok(String::from(
@@ -922,7 +922,7 @@ async fn change_password(app: &App, req: Request<Incoming>) -> Result<Response<B
 async fn viewer_password(app: &App, req: Request<Incoming>) -> Result<Response<Body>, ApiError> {
     require_admin(req.headers(), &app.admin).await?;
     let body = read_json(req, app.idle_timeout).await?;
-    // `readJsonRecord`: any object (arrays included); `"password" in body`.
+    // The body rule: any object (arrays included); a `password` field present.
     let field = match &body {
         JsValue::Object(fields) => fields
             .iter()
@@ -945,8 +945,8 @@ async fn viewer_password(app: &App, req: Request<Incoming>) -> Result<Response<B
             ));
         }
         Some(JsValue::Null) => None,
-        // Hashed as its UTF-8 encoding: a lone surrogate is U+FFFD, as
-        // Argon2 sees it in TS too. The length rule counts UTF-16 units.
+        // Hashed as its UTF-8 encoding: a lone surrogate is U+FFFD before
+        // Argon2 sees it. The length rule counts UTF-16 units.
         Some(JsValue::String(units)) => Some(units.clone()),
         Some(_) => {
             return Err(ApiError::gateway(

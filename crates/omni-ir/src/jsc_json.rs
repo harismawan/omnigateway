@@ -1,9 +1,9 @@
-//! The message Bun's `JSON.parse` throws for a body that is not JSON.
+//! The `JSON.parse` refusal message for a body that is not JSON.
 //!
-//! TS answers such a body with `500 INTERNAL` and the `SyntaxError`'s own
-//! message (`request.json()` → `asGatewayError` → `describeError`), so the
-//! client sees JavaScriptCore's wording. This is a port of the error paths of
-//! JSC's `LiteralParser` in StrictJSON mode (`parseRecursively`,
+//! Such a body is answered with `500 INTERNAL` and the `SyntaxError`'s own
+//! message, so the client sees JavaScriptCore's wording; the message is
+//! byte-stable (clients match on it). This module implements the error paths
+//! of JSC's `LiteralParser` in StrictJSON mode (`parseRecursively`,
 //! `parsePrimitiveValue`, the lexer's `lexString`/`lexNumber`/`lexIdentifier`
 //! and `getErrorMessage`), run only after `serde_json` has refused a body.
 //!
@@ -424,8 +424,8 @@ enum KeyStep {
 mod tests {
     use super::parse_error;
 
-    /// Every message measured against Bun 1.4.4's `JSON.parse` (and
-    /// `Request.json()` for the empty body).
+    /// Every message is byte-stable `JSON.parse` refusal wording (including
+    /// the empty-body case, which fails before the parser runs).
     #[test]
     fn messages_match_bun() {
         let cases: &[(&str, Option<&str>)] = &[

@@ -1,4 +1,4 @@
-//! `getSettings` in `packages/store/src/sqlite/config.ts`: the same stored row
+//! Contract tests for `settings::get`: the same stored row
 //! reads back as the same object, byte for byte once stringified.
 
 mod common;

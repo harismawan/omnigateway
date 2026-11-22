@@ -1,9 +1,9 @@
-//! Console session tokens (`createAdminAuth`'s `issue` and `sessionKey`).
+//! Console session tokens.
 //!
 //! A token is unpadded base64url of 32 CSPRNG bytes. It is never stored:
 //! sessions are keyed on `sess:<kind>:<sha256hex(token)>`, the digest taken
-//! over the token's UTF-8 bytes (`Bun.CryptoHasher.update(string)`), so the
-//! key schema is shared with TS and with a later cluster coordinator.
+//! over the token's UTF-8 bytes, so the key schema is shared with a later
+//! cluster coordinator.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;

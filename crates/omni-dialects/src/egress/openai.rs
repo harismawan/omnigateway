@@ -1,4 +1,4 @@
-//! OpenAI Chat Completions egress: `egress/openai.ts`.
+//! OpenAI Chat Completions egress.
 
 use std::collections::HashMap;
 
@@ -61,7 +61,7 @@ fn usage_value(u: &Usage) -> JsValue {
     ])
 }
 
-/// `openaiStream`, one event at a time.
+/// The Chat Completions stream encoder, one event at a time.
 pub struct OpenAiStream {
     request_id: String,
     created: i64,

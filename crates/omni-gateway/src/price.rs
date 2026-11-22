@@ -1,9 +1,9 @@
-//! `priceOf` (`dispatch/price.ts`): one request's cost in dollars.
+//! One request's cost in dollars.
 
 use omni_ir::stream::Usage;
 use omni_store::models::TargetPricing;
 
-/// `writeOverInput` per provider descriptor (five-minute, one-hour).
+/// Write-over-input multipliers per provider descriptor (five-minute, one-hour).
 fn write_over_input(provider: &str) -> (f64, f64) {
     match provider {
         "anthropic" => (1.25, 2.0),
@@ -11,7 +11,7 @@ fn write_over_input(provider: &str) -> (f64, f64) {
     }
 }
 
-/// `splitWrites`.
+/// Cache writes split into five-minute and one-hour token counts.
 fn split_writes(u: &Usage) -> (f64, f64) {
     match (u.cache_write_5m_tokens, u.cache_write_1h_tokens) {
         (Some(five), Some(hour)) => (five, hour),
@@ -27,7 +27,7 @@ fn split_writes(u: &Usage) -> (f64, f64) {
     }
 }
 
-/// `priceOf(prices, usage, provider)`.
+/// The request's cost in dollars.
 pub fn price_of(prices: &TargetPricing, usage: &Usage, provider: &str) -> f64 {
     let (five_fallback, hour_fallback) = write_over_input(provider);
     let read_rate = prices.cache_read_rate();
@@ -68,7 +68,7 @@ mod tests {
             output_tokens: 6.0,
             ..Usage::default()
         };
-        // The TS gateway logged 7.6e-05 for this request.
+        // The exact cost for this request is 7.6e-05.
         assert_eq!(price_of(&pricing(1.0, 2.0), &u, "custom"), 7.6e-5);
         let cached = Usage {
             input_tokens: 0.0,
@@ -77,7 +77,7 @@ mod tests {
             ..Usage::default()
         };
         // Read at a tenth of input; writes at 1.25× on Anthropic, free elsewhere.
-        // Bun: 0.0003000000000000001.
+        // 0.0003000000000000001 is the exact double.
         assert_eq!(
             price_of(&pricing(3.0, 15.0), &cached, "custom"),
             0.000_300_000_000_000_000_1

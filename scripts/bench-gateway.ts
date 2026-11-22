@@ -32,8 +32,7 @@
  * counts are all in. Any barrier answer but 200 (409 another in flight, 503
  * queue full, 504 server timeout of 30 s), a timeout here (60 s), or an
  * incoherent answer makes the scenario *inconclusive*: flagged, never counted
- * as zero. A gateway without the route (TS, which writes every row
- * synchronously, 404s) is checked by the rows alone.
+ * as zero. A gateway without the route (404) is checked by the rows alone.
  *
  * After each scenario (single mode) the request log is read for the
  * scenario's window: every response the clients got must have a `done` row,
@@ -214,8 +213,7 @@ const env = {
   // directory is a supported, logged configuration.
   OMNI_STATIC_DIR: join(root, "no-dashboard"),
   OMNI_LOG_LEVEL: "warn",
-  // The Rust gateway's writer barrier (`POST /__omni/bench/flush`); off
-  // without it, and unknown to TS.
+  // The writer barrier (`POST /__omni/bench/flush`); off without it.
   OMNI_BENCH: "1",
   ...(CLUSTER
     ? {
@@ -728,7 +726,7 @@ type RowCheck = {
    * The writer's counters over this scenario, from the flush barrier at its
    * start and end: exact, whenever the drops happened in it. The cancel
    * scenarios' 499 rows can hide a missing row from `missing`; this cannot.
-   * `"unsupported"`: the gateway has no barrier (TS). `"inconclusive"`: a
+   * `"unsupported"`: the gateway has no barrier. `"inconclusive"`: a
    * barrier did not answer in time.
    */
   writer: WriterDelta | "unsupported" | "inconclusive";
@@ -1974,10 +1972,9 @@ function writerCell(w: RowCheck["writer"]): string {
 }
 
 /**
- * Events the gateway's writer reported dropping, from its log: the Rust
- * gateway logs the total at shutdown (`request log writer lost events …
- * count=N`). `null` when the log has no such line (TS has no drop path: it
- * writes every row synchronously).
+ * Events the gateway's writer reported dropping, from its log: the gateway
+ * logs the total at shutdown (`request log writer lost events …
+ * count=N`). `null` when the log has no such line.
  */
 function writerDrops(): number | null {
   let total: number | null = null;

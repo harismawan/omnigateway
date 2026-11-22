@@ -1,5 +1,5 @@
 //! A minimal keep-alive chat-completions SSE upstream (`mock-c1-d0` only),
-//! for telling the gateway's latency tail apart from the Bun upstream's:
+//! for telling the gateway's latency tail apart from the bench upstream's:
 //!
 //!   target/profiling/examples/mini_upstream 18100
 //!

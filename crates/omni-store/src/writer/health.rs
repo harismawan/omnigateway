@@ -9,15 +9,15 @@
 //! write. Publishing is the caller's: every committed row goes to
 //! [`HealthWriterConfig::commit_sink`] (the row the mutation proposed, which
 //! is what was stored except that a fractional instant is stored rounded to
-//! its BIGINT; the same row TS's `updateHealth` returns and its snapshot
+//! its BIGINT; the same row the health mutation returns and the snapshot
 //! patch uses), and the cluster integration forwards it to the `routing`
 //! topic.
 //!
 //! **Why a mutation, not a row.** A replica proposing an absolute row
 //! computed from its own snapshot would overwrite another replica's failure
-//! landing in between. The request path sends the *change* (`recordFailure`,
+//! landing in between. The request path sends the *change* (a failure,
 //! a transition) as a closure; it is applied to the row the database holds
-//! under the pair's lock, as TS's `updateHealth(…, apply)` does.
+//! under the pair's lock.
 //!
 //! **Bounds.** `send` is a `try_send`: a full queue drops the mutation and
 //! counts it (the request is never held up), warned rate-limited from the
@@ -39,14 +39,9 @@
 //!   see `pg::health`). It may have committed, so it is **never
 //!   re-applied** (a `+1` would count twice). The row is re-read once and
 //!   reported to the sink as [`HealthCommitted::Uncertain`] with what that
-//!   read saw. Frozen TS does not re-apply either: `updateHealth` has no
-//!   retry loop and throws once. What happens to that throw depends on the
-//!   `persistHealth` call site in `apps/gateway/src/dispatch/index.ts`:
-//!   only the post-error-event write (821) catches and logs it; the success
-//!   writes (750, 866) turn it into that attempt's failure; the half-open
-//!   probe (586) and failure (940) writes propagate it out of `run()`. The
-//!   writer matches the store-level rule (no re-application), not those
-//!   call-site consequences, which belong to the gateway integration;
+//!   read saw. The store-level rule is no re-application: the health
+//!   mutation has no retry loop and fails once. What a caller does with
+//!   that failure belongs to the gateway integration, not this writer;
 //! - `panicked`: the mutation closure panicked (an arithmetic overflow, say).
 //!   Its transaction rolled back as it unwound; the next mutation proceeds;
 //! - `abandoned`: still queued or in flight when the worker itself ended

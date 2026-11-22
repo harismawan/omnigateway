@@ -1,20 +1,20 @@
-//! The `/api` surface (`routes/admin.ts`, `routes/http.ts`): the router the
+//! The `/api` surface: the router the
 //! admin, client and database rows extend, the request helpers every route
 //! shares, and the auth core's four routes — `GET /api/status`,
 //! `POST /api/setup`, `POST /api/login`, `POST /api/logout`.
 //!
 //! Bare hyper, not axum, like the rest of the server: routes are matched by
-//! [`crate::server::handle`] on Elysia's normalized path (dot segments
+//! [`crate::server::handle`] on the normalized path (dot segments
 //! resolved, one trailing slash folded), and everything unmatched keeps the
 //! exact fallthrough it has today (the plugin 501, the `/api` 404 guard, the
 //! `NOT_FOUND` text for other methods). axum's router, rejections and 404/405
 //! answers would each need overriding to stay byte-identical, for no gain on
 //! a surface of fixed paths. [`route`] is the table later rows add to.
 //!
-//! Every response here is Elysia's: JSON as `application/json;charset=utf-8`;
-//! an error as `{"error":{"code","message"}}` with `HTTP_STATUS[code]`
-//! (`apiErrorResponse`), and anything that is not a `GatewayError` as
-//! `500 INTERNAL "internal error"`.
+//! Every response here follows one wire contract: JSON as
+//! `application/json;charset=utf-8`; an error as `{"error":{"code","message"}}`
+//! with the code's fixed HTTP status, and anything that is not a
+//! `GatewayError` as `500 INTERNAL "internal error"`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,7 +30,7 @@ use omni_ir::jsjson::JsValue;
 use crate::admin_auth::{ADMIN_COOKIE, AdminAuth, AuthError, Principal};
 use crate::server::{App, Body, full};
 
-/// Bun's `maxRequestBodySize` default (128 MiB): a request declaring more
+/// The request-body limit (128 MiB): a request declaring more
 /// is refused 413 before any route; a body that grows past it while a route
 /// reads it is refused the same way.
 pub const API_BODY_LIMIT: u64 = 128 * 1024 * 1024;
@@ -60,8 +60,8 @@ pub enum Route {
     Database(crate::database_routes::Route),
 }
 
-/// The `/api` route for a method and normalized path, if one is ported.
-/// `HEAD` reaches every `GET` route, as Elysia's does.
+/// The `/api` route for a method and normalized path, if one is implemented.
+/// `HEAD` reaches every `GET` route.
 pub fn route(method: &Method, path: &str) -> Option<Route> {
     match (method, path) {
         (&Method::POST, "/api/database/import") => Some(Route::Swap(None)),
@@ -147,8 +147,8 @@ async fn lifecycle(
     Ok(json_ok("{\"ok\":true}".into()))
 }
 
-/// Whether a request declares a body over [`API_BODY_LIMIT`]: Bun refuses
-/// it 413 before routing, for every method but `GET` and `HEAD`.
+/// Whether a request declares a body over [`API_BODY_LIMIT`]: it is refused
+/// 413 before routing, for every method but `GET` and `HEAD`.
 pub fn declares_oversized_body(req: &Request<Incoming>) -> bool {
     if matches!(*req.method(), Method::GET | Method::HEAD) {
         return false;
@@ -160,11 +160,11 @@ pub fn declares_oversized_body(req: &Request<Incoming>) -> bool {
         .is_some_and(|n| n > API_BODY_LIMIT)
 }
 
-/// Marks a response Bun writes without a `date` header.
+/// Marks a response sent without a `date` header.
 #[derive(Debug, Clone, Copy)]
 pub struct NoDate;
 
-/// Bun's 413: no body and no `date` (hyper adds `content-length: 0`).
+/// The 413: no body and no `date` (hyper adds `content-length: 0`).
 pub fn payload_too_large() -> Response<Body> {
     let mut res = Response::new(full(Bytes::new()));
     *res.status_mut() = StatusCode::PAYLOAD_TOO_LARGE;
@@ -177,7 +177,7 @@ pub fn payload_too_large() -> Response<Body> {
 /// What a route answers when it does not succeed.
 #[derive(Debug)]
 pub enum ApiError {
-    /// `apiErrorResponse(gatewayError)`.
+    /// The `GatewayError`'s own code and message as the error body.
     Gateway(GatewayError),
     /// A response already decided (a 409 body, a 413, a hang-up).
     Response(Box<Response<Body>>),
@@ -198,7 +198,7 @@ impl ApiError {
         internal()
     }
 
-    /// `apiErrorResponse`: a non-`GatewayError` never reaches here, it is
+    /// A non-`GatewayError` never reaches here, it is
     /// already `INTERNAL "internal error"`.
     pub fn into_response(self) -> Response<Body> {
         match self {
@@ -209,7 +209,7 @@ impl ApiError {
 }
 
 impl From<AuthError> for ApiError {
-    /// `throw new Error(...)` inside an auth call: a route that wraps it
+    /// A plain error inside an auth call: a route that wraps it
     /// reports the message as `BAD_REQUEST` itself; anything else is the
     /// redacted `INTERNAL`.
     fn from(e: AuthError) -> Self {
@@ -232,8 +232,8 @@ pub fn error_response(code: ErrorCode, message: &str) -> Response<Body> {
     json(code.http_status(), body, None)
 }
 
-/// A JSON answer, with an optional `set-cookie` (written first, as Elysia's
-/// `set.headers` precede the content type).
+/// A JSON answer, with an optional `set-cookie` (written first: it precedes
+/// the content type in the header order).
 pub(crate) fn json(status: u16, body: String, cookie: Option<String>) -> Response<Body> {
     let mut res = Response::new(full(body));
     *res.status_mut() = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
@@ -264,9 +264,8 @@ fn conflict() -> ApiError {
 
 // ------------------------------------------------------------ request helpers
 
-/// `request.headers.get(name)`: every value, Latin-1 decoded and HTTP
-/// whitespace trimmed, joined with `", "` — or `"; "` for `cookie`, as
-/// Bun's `Headers` joins that one.
+/// A header's text: every value, Latin-1 decoded and HTTP
+/// whitespace trimmed, joined with `", "` — or `"; "` for `cookie`.
 pub fn header_text(headers: &HeaderMap, name: &str) -> Option<String> {
     let sep = if name.eq_ignore_ascii_case("cookie") {
         "; "
@@ -288,7 +287,7 @@ pub fn header_text(headers: &HeaderMap, name: &str) -> Option<String> {
     out
 }
 
-/// `readCookie(request, name)`: the first `name=` part's value (everything
+/// The first `name=` cookie part's value (everything
 /// after the first `=`), parts split on `;` and JS-trimmed; `None` if absent.
 pub fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     let header = header_text(headers, "cookie")?;
@@ -302,8 +301,8 @@ pub fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     None
 }
 
-/// `forwardedProto(request) === "https"`: the first hop of
-/// `x-forwarded-proto`, JS-trimmed and lowercased. No Latin-1 character
+/// Whether the first hop of
+/// `x-forwarded-proto` is `https`, JS-trimmed and lowercased. No Latin-1 character
 /// lowercases into ASCII, so an ASCII case-insensitive match is exact.
 fn forwarded_https(headers: &HeaderMap) -> bool {
     header_text(headers, "x-forwarded-proto").is_some_and(|h| {
@@ -312,13 +311,13 @@ fn forwarded_https(headers: &HeaderMap) -> bool {
     })
 }
 
-/// Whether the configured public origin is https: `URL.canParse(baseUrl)
-/// && new URL(baseUrl).protocol === "https:"`. Decided once at boot.
+/// Whether the configured public origin is https: a parseable URL whose
+/// scheme is `https:`. Decided once at boot.
 pub fn base_url_is_https(base_url: &str) -> bool {
     url::Url::parse(base_url).is_ok_and(|u| u.scheme() == "https")
 }
 
-/// `sessionCookie(request, baseUrl, token, maxAge)`. The request URL's own
+/// The session cookie for a token. The request URL's own
 /// scheme is always `http:` here: this server speaks plain HTTP/1.1 only.
 pub fn session_cookie(headers: &HeaderMap, base_https: bool, token: &str, max_age: i64) -> String {
     let secure = if base_https || forwarded_https(headers) {
@@ -329,7 +328,7 @@ pub fn session_cookie(headers: &HeaderMap, base_https: bool, token: &str, max_ag
     format!("{ADMIN_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict{secure}; Max-Age={max_age}")
 }
 
-/// `principalOf(request, admin)`.
+/// The request's principal, if its cookie names a live session.
 pub async fn principal_of(
     headers: &HeaderMap,
     admin: &AdminAuth,
@@ -340,7 +339,7 @@ pub async fn principal_of(
     }
 }
 
-/// `requireAdmin`: the operator, and nobody else.
+/// The guard for the operator, and nobody else.
 pub async fn require_admin(headers: &HeaderMap, admin: &AdminAuth) -> Result<(), ApiError> {
     match principal_of(headers, admin).await? {
         Some(Principal::Admin) => Ok(()),
@@ -348,7 +347,7 @@ pub async fn require_admin(headers: &HeaderMap, admin: &AdminAuth) -> Result<(),
     }
 }
 
-/// `requireReader`: the operator or the read-only administrator.
+/// The guard for the operator or the read-only administrator.
 pub async fn require_reader(headers: &HeaderMap, admin: &AdminAuth) -> Result<Principal, ApiError> {
     match principal_of(headers, admin).await? {
         Some(p @ (Principal::Admin | Principal::Viewer)) => Ok(p),
@@ -356,7 +355,7 @@ pub async fn require_reader(headers: &HeaderMap, admin: &AdminAuth) -> Result<Pr
     }
 }
 
-/// `requireClient`: the holder of one API key; its id.
+/// The guard for the holder of one API key; its id.
 pub async fn require_client(headers: &HeaderMap, admin: &AdminAuth) -> Result<String, ApiError> {
     match principal_of(headers, admin).await? {
         Some(Principal::Client { api_key_id }) => Ok(api_key_id),
@@ -402,14 +401,14 @@ async fn read_text(req: Request<Incoming>, idle: Duration) -> Result<String, Api
     Ok(text)
 }
 
-/// The top-level string fields a route reads from `readJsonRecord`.
+/// The top-level string fields a route reads from the JSON body.
 #[derive(Debug, Default)]
 pub struct Fields {
     values: Vec<(String, Option<String>)>,
 }
 
 impl Fields {
-    /// `typeof body?.[name] === "string" ? body[name] : null`.
+    /// The field's value when it is a string, else `None`.
     pub fn string(&self, name: &str) -> Option<&str> {
         self.values
             .iter()
@@ -418,7 +417,7 @@ impl Fields {
     }
 }
 
-/// `readJsonRecord(request)`, reduced to the named top-level fields: each
+/// The JSON body reduced to the named top-level fields: each
 /// one's value when it is a string (the last duplicate wins, as
 /// `JSON.parse`), else `None`. A body `JSON.parse` refuses is
 /// `BAD_REQUEST "invalid JSON body"`; a non-object body has no fields.
@@ -439,7 +438,7 @@ pub async fn read_json_fields(
     Ok(top_level_fields(&text, names))
 }
 
-/// `readJson(request)`: the whole body as `request.json()` parses it, kept
+/// The whole body parsed as JSON, kept
 /// as a JS value (lone surrogates, `1e400` as Infinity, duplicate keys last
 /// wins, any depth). A body `JSON.parse` refuses is `BAD_REQUEST "invalid
 /// JSON body"`.
@@ -625,12 +624,11 @@ async fn setup(app: &App, req: Request<Incoming>) -> Result<Response<Body>, ApiE
         return Err(ApiError::new(ErrorCode::BadRequest, "password is required"));
     };
     // Every failure here, the length rule or the store's, is `BAD_REQUEST`
-    // with its described message (`admin.ts`: `catch (error) { throw new
-    // GatewayError("BAD_REQUEST", describeError(error, "invalid password"))
-    // }`). The message is SQLite's own: it names neither the password nor
-    // the database path. Only an operator's own trigger could put the new
+    // with its described message (a store error falls back to "invalid
+    // password"). The message is SQLite's own: it names neither the password
+    // nor the database path. Only an operator's own trigger could put the new
     // hash in it — the hash of the password this caller just sent, never
-    // stored — and TS echoes that too.
+    // stored — and that is echoed too.
     let created = match app.admin.set_initial_password(password).await {
         Ok(created) => created,
         Err(AuthError::Password(message) | AuthError::Internal(message)) => {
@@ -749,7 +747,7 @@ mod tests {
         assert!(!session_cookie(&two, false, "t", 1).contains("Secure"));
     }
 
-    /// `requireAdmin` / `requireReader` / `requireClient` against every
+    /// `require_admin` / `require_reader` / `require_client` against every
     /// principal, no cookie, an unknown token, and an expired session.
     #[tokio::test]
     async fn guards_admit_exactly_their_principals() {

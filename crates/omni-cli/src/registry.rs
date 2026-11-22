@@ -1,4 +1,4 @@
-// Frozen TS registry order is significant for grouped help.
+// Registry order is significant: grouped help renders in this order.
 pub const COMMANDS: &[(&str, &str, &str)] = &[
     (
         "status",

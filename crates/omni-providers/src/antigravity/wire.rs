@@ -1,4 +1,4 @@
-//! Frozen Cloud Code request envelope, in JavaScript insertion order.
+//! The Cloud Code request envelope, in JavaScript insertion order.
 use super::cloak::ToolCloak;
 use crate::response_format::{ResponseFormatRead, read_response_format};
 use omni_ir::{deep, js, jsjson::JsValue as Value, request::*, text::Text};

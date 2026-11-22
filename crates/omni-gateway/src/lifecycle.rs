@@ -1,4 +1,4 @@
-//! Frozen lifecycle decisions, with effects injected independently of the host.
+//! Lifecycle decisions, with effects injected independently of the host.
 use std::{collections::HashMap, sync::Arc};
 
 use crate::api::ApiError;

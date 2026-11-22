@@ -1,4 +1,4 @@
-//! Codex's derived identifiers (`packages/providers/src/openai/codexIdentity.ts`).
+//! Codex's derived identifiers.
 
 use hmac::{Hmac, KeyInit as _, Mac as _};
 use sha1::Sha1;
@@ -6,7 +6,7 @@ use sha2::{Digest as _, Sha256};
 
 pub const NAMESPACE_OID: &str = "6ba7b812-9dad-11d1-80b4-00c04fd430c8";
 
-/// `Date.UTC(2026, 9, 1)`: the end of the window derived v7 instants fall in.
+/// 2026-10-01T00:00:00Z in epoch ms: the end of the window derived v7 instants fall in.
 const WINDOW_END_MS: u64 = 1_790_812_800_000;
 const WINDOW_MS: u64 = 365 * 24 * 60 * 60 * 1000;
 
@@ -34,14 +34,14 @@ fn sha256(seed: &str) -> [u8; 32] {
     Sha256::digest(seed.as_bytes()).into()
 }
 
-/// The first six bytes, big-endian, as `Buffer.readUIntBE(0, 6)`.
+/// The first six bytes, big-endian.
 fn read_u48(bytes: &[u8]) -> u64 {
     bytes[..6]
         .iter()
         .fold(0u64, |acc, b| (acc << 8) | u64::from(*b))
 }
 
-/// RFC 4122 UUIDv5. `namespace` is hex-decoded after stripping dashes, as TS does.
+/// RFC 4122 UUIDv5. `namespace` is hex-decoded after stripping dashes.
 pub fn uuid_v5(namespace: &str, name: &str) -> String {
     let ns_hex: String = namespace.chars().filter(|c| *c != '-').collect();
     let ns = crate::field::unhex(&ns_hex.to_ascii_lowercase()).unwrap_or_default();
@@ -51,7 +51,7 @@ pub fn uuid_v5(namespace: &str, name: &str) -> String {
     format_uuid(&with_version(&hasher.finalize(), 5))
 }
 
-/// `crypto.randomUUID()`: a random v4 UUID in lowercase hex.
+/// A random v4 UUID in lowercase hex.
 pub fn random_uuid_v4() -> String {
     format_uuid(&with_version(&rand::random::<[u8; 16]>(), 4))
 }
@@ -62,8 +62,8 @@ pub fn uuid_v4_from(seed: &str) -> String {
 }
 
 /// A UUIDv7-shaped id: `timestamp_ms` in the first 48 bits, the rest from a
-/// digest of `seed`. `timestamp_ms` is a JS number; negatives clamp to 0 and
-/// fractions floor, as `Math.max(0, Math.floor(ts))` does.
+/// digest of `seed`. `timestamp_ms` is an f64; negatives clamp to 0 and
+/// fractions floor.
 pub fn uuid_v7_from(seed: &str, timestamp_ms: f64) -> String {
     let mut bytes = [0u8; 16];
     bytes.copy_from_slice(&sha256(seed)[..16]);
@@ -92,7 +92,7 @@ pub fn thread_id_from(seed: &str) -> String {
 pub fn thread_instant(thread_id: &str, now: f64) -> f64 {
     let hex: String = thread_id.chars().filter(|c| *c != '-').collect();
     let is_v7 = hex.as_bytes().get(12) == Some(&b'7');
-    // `Number.parseInt(hex.slice(0, 12), 16)` reads the leading hex digits.
+    // The leading hex digits (at most 12) are the timestamp.
     let head: String = hex
         .chars()
         .take(12)
@@ -115,7 +115,7 @@ pub fn thread_instant(thread_id: &str, now: f64) -> f64 {
 }
 
 /// `seed` keyed with the credential's salt: HMAC-SHA256 hex with the salt's
-/// **ASCII bytes** as the key (`new Bun.CryptoHasher("sha256", salt)`).
+/// **ASCII bytes** as the key.
 pub fn keyed(salt: Option<&str>, seed: &str) -> String {
     let Some(salt) = salt else {
         return seed.to_owned();

@@ -1,5 +1,9 @@
 # Provider matrix functional verification
 
+> Historical record (pre-1.0): the compared binaries no longer exist. Kept as
+> evidence of the harness's functional coverage; commands and results below are
+> not reproducible today.
+
 Evidence root: `/tmp/opencode/bench-matrix/`. Gateways: frozen external binary
 `/tmp/opencode/merge-anthropic/ts` and dev Rust binary
 `/tmp/opencode/merge-anthropic/rust`, launched through `sh scripts/run-rust-gateway.sh`.

@@ -1,4 +1,4 @@
-//! xxHash64, as `Bun.hash.xxHash64`, and the tool-name cloak suffixes built on it.
+//! xxHash64 and the tool-name cloak suffixes built on it.
 
 const P1: u64 = 0x9E37_79B1_85EB_CA87;
 const P2: u64 = 0xC2B2_AE3D_27D4_EB4F;
@@ -25,8 +25,8 @@ fn u32_at(b: &[u8], i: usize) -> u64 {
     u64::from(u32::from_le_bytes(word))
 }
 
-/// xxHash64 of `input`: the reference algorithm (`XXH64` in xxhash.h), as
-/// `Bun.hash.xxHash64` computes it. Pinned by `tests/data/xxh64.json`.
+/// xxHash64 of `input`: the reference algorithm (`XXH64` in xxhash.h).
+/// Pinned by `tests/data/xxh64.json`.
 pub fn xxh64(input: &[u8], seed: u64) -> u64 {
     let len = input.len();
     let mut i = 0;
@@ -82,15 +82,14 @@ pub fn xxh64(input: &[u8], seed: u64) -> u64 {
     h ^ (h >> 32)
 }
 
-/// `Bun.hash.xxHash64(Buffer.from(s, "utf8"), seed)`.
+/// xxHash64 of `s`'s UTF-8 bytes.
 pub fn xxh64_utf8(s: &str, seed: u64) -> u64 {
     xxh64(s.as_bytes(), seed)
 }
 
 const SUFFIX_MASK: u64 = 0xff_ffff;
 
-/// Anthropic's alias suffix: six hex digits of the name, first one uppercased
-/// (`anthropic/cloak.ts` `suffixFor`).
+/// Anthropic's alias suffix: six hex digits of the name, first one uppercased.
 pub fn anthropic_suffix(name: &str) -> String {
     let mut hex = format!("{:06x}", xxh64_utf8(name, 0) & SUFFIX_MASK);
     if let Some(first) = hex.get_mut(0..1) {
@@ -99,7 +98,7 @@ pub fn anthropic_suffix(name: &str) -> String {
     hex
 }
 
-/// Antigravity's alias suffix: six lowercase hex digits (`antigravity/cloak.ts`).
+/// Antigravity's alias suffix: six lowercase hex digits.
 pub fn antigravity_suffix(name: &str) -> String {
     format!("{:06x}", xxh64_utf8(name, 0) & SUFFIX_MASK)
 }
@@ -110,7 +109,7 @@ mod tests {
 
     #[test]
     fn read_file_suffix_matches_the_recorded_ts_alias() {
-        // `read_file` → `ReadFileEa70ad` in the TS build.
+        // `read_file` → `ReadFileEa70ad`: the recorded alias.
         assert_eq!(anthropic_suffix("read_file"), "Ea70ad");
         assert_eq!(antigravity_suffix("read_file"), "ea70ad");
     }

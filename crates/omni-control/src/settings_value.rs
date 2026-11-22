@@ -116,7 +116,7 @@ pub(crate) fn decode(raw: Option<&str>) -> JsValue {
     out
 }
 pub fn write(store: &SqliteStore, patch: &Value, original: &JsValue) -> Result<JsValue, String> {
-    // TS putSettings reads again after validation, then merges the patch.
+    // Read again after validation, then merge the patch.
     let next = merge(read(store)?, patch, original);
     let raw = jsjson::stringify(&next).expect("settings");
     omni_store::settings::write_operator_raw(store.connection(), &raw)

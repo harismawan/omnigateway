@@ -219,7 +219,7 @@ fn a_key_miss_falls_back_to_one_read_that_populates_the_snapshot() {
 }
 
 /// Review A5-I2: a key row that does not read neither stops the boot read
-/// nor any later refresh. That key alone is refused, with TS's error; a
+/// nor any later refresh. That key alone is refused, with its parse error; a
 /// revocation, a new model and a settings change after it still land.
 #[tokio::test(flavor = "multi_thread")]
 async fn one_unreadable_key_never_poisons_boot_or_refresh() {

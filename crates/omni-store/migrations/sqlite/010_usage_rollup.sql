@@ -1,9 +1,9 @@
 -- Per-key hourly counters, so a long sliding window is read rather than scanned.
 --
--- `sumSince` is on the admission path of every request, and `bun:sqlite` is
--- synchronous: a `SELECT SUM` over a week of one key's rows blocks the entire
--- event loop for its duration — `/health`, `/api/*`, the quiesce latch, and
--- every other key's traffic with it. Measured on one machine, one key, WAL:
+-- The sliding-window sum is on the admission path of every request, and the
+-- SQLite read is synchronous: a `SELECT SUM` over a week of one key's rows
+-- blocks its event loop for its duration — `/health`, `/api/*`, the quiesce
+-- latch, and every other key's traffic with it. Measured on one machine, one key, WAL:
 -- 149ms at 0.2M rows in the window, 2.1s at 2M, 10.8s at 8M. The cost is
 -- O(accumulated history) and has no ceiling, and the eager-refresh rule makes it
 -- worst exactly when a key is busiest — a key inside the last tenth of a long
@@ -43,6 +43,6 @@ CREATE TABLE usage_rollup (
 ) WITHOUT ROWID;
 
 -- The backfill is this migration's `after` hook rather than an INSERT here, and
--- it is the same `rebuildRollup` a restore runs. Seeding an existing install and
+-- it is the same rollup rebuild a restore runs. Seeding an existing install and
 -- repairing a suspect one are the same statement, so they are the same code and
 -- cannot drift into disagreeing about which rows count.

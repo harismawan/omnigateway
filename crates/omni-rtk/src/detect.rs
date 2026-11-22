@@ -1,4 +1,4 @@
-//! `packages/rtk/src/detect.ts`: unknown-origin build/test inference. Each
+//! Unknown-origin build/test inference. Each
 //! family needs two anchors on *distinct* rows.
 
 use crate::catalog::RtkFilterId;

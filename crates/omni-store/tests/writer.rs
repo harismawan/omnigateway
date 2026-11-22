@@ -1,6 +1,6 @@
-//! The batched writer against the TS store: the same events leave the same
-//! `request_logs`, `usage_daily`, `usage_rollup` and `credential_health` rows,
-//! however the Rust side happens to batch them.
+//! Contract tests for the batched writer: the same events leave the same
+//! `request_logs`, `usage_daily`, `usage_rollup` and `credential_health` rows
+//! as applying them one at a time, however they are batched.
 
 mod common;
 
@@ -949,7 +949,7 @@ async fn futures_poll_once<F: std::future::Future + Unpin>(f: &mut F) -> Option<
 /// checkpointer) may reuse the WAL frames that reader can see, so the WAL
 /// grows past the trigger for as long as the reader stays. Once it ends, the
 /// next checkpoint resets the WAL and new writes reuse it from the start.
-/// This is SQLite's WAL design, the same under TS's `bun:sqlite`.
+/// This is SQLite's WAL design, independent of the driver.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_pinned_reader_lets_the_wal_grow_past_the_trigger() {
     let dir = tempfile::tempdir().expect("tempdir");

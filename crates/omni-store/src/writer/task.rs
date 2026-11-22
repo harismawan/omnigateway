@@ -68,7 +68,7 @@ pub struct WriterConfig {
     /// Longest an event waits, from its enqueue, before its batch is written
     /// (plus the write itself, and any write already in flight).
     pub interval: Duration,
-    /// The writer connection's `busy_timeout`; the TS pragma's 5 s by default.
+    /// The writer connection's `busy_timeout`; 5 s by default.
     pub busy_timeout: Duration,
     /// How often the writer's checkpointer copies the WAL back into the
     /// database (`wal_checkpoint(PASSIVE)` on a connection of its own, on a
@@ -88,7 +88,7 @@ pub struct WriterConfig {
     /// once every frame is copied; while some connection holds a read
     /// transaction open, the WAL keeps growing past this, however often a
     /// checkpoint runs (`a_pinned_reader_lets_the_wal_grow_past_the_trigger`).
-    /// TS's `bun:sqlite` default auto-checkpoint behaves the same way.
+    /// SQLite's default auto-checkpoint behaves the same way.
     pub wal_autocheckpoint: u32,
     /// At most one dropped-event warning per this long.
     pub drop_warn_interval: Duration,
@@ -108,7 +108,7 @@ pub struct WriterConfig {
     ///
     /// Either is warned at most once per `drop_warn_interval`. Under a
     /// sustained full sink long-window limits are therefore not enforced
-    /// until the limiter drains: fail-open, the direction TS takes on a
+    /// until the limiter drains: fail-open by design on a
     /// coordinator fault. `1m` and `concurrency` never depend on the sink.
     pub commit_sink: Option<mpsc::Sender<Committed>>,
     /// Added to every seed read. Zero in production; tests use it to make a
@@ -163,8 +163,7 @@ pub struct WriterStats {
     /// Events accepted into the channel whose batch could not be persisted
     /// (after retrying a busy database). Distinct from `dropped`.
     pub failed: u64,
-    /// Health rows the foreign key refused: no such credential, which TS's
-    /// `updateHealth` would also have thrown on.
+    /// Health rows the foreign key refused: no such credential.
     pub health_refused: u64,
     /// Log events refused for their values (Postgres: a number its column
     /// cannot hold) while the rest of their batch committed. Not persisted:
@@ -293,7 +292,7 @@ impl DropWarner {
         if !due {
             return;
         }
-        // TS `LogFields` names: `count` is dropped since the last warning,
+        // Warning field names: `count` is dropped since the last warning,
         // `rawCount` the total ever dropped.
         tracing::warn!(
             count = total - self.reported,
@@ -1376,8 +1375,8 @@ impl Sink {
                     attempt += 1;
                 }
                 Err(e) => {
-                    // Spending is independent of persistence, just as frozen
-                    // finishLog debits even when usage.append throws.
+                    // Spending is independent of persistence: a finish
+                    // debits even when its row could not be written.
                     let debits = events.iter().filter_map(failure_debit).collect();
                     self.deliver(debits).await;
                     c.failed_batches.fetch_add(1, Ordering::Relaxed);

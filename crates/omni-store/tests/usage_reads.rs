@@ -1,5 +1,5 @@
-//! The rate-limit seed reads against `store.usage.sumBuckets` and
-//! `oldestSince` in `packages/store/src/sqlite/usage.ts`, on the same file.
+//! Contract tests for the rate-limit seed reads: bucket sums and capped
+//! newest stamps (`usage::sum_buckets`, `usage::done_stamps`), on one file.
 
 mod common;
 

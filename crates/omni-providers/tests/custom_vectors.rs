@@ -1,7 +1,7 @@
-//! The custom provider end to end against vectors produced by calling the real
-//! TS `customAdapter.send` (codecAdapter → wire encoders → parseSse →
-//! decoders), plus `httpError` / `parseRetryAfter` and the literals pinned in
-//! `packages/providers/test/customCodec.test.ts`.
+//! The custom provider end to end (adapter → wire encoders → SSE parser →
+//! decoders) against conformance vectors, plus [`omni_providers::http_error`]
+//! and the pinned literals. The vectors pin the exact wire bytes; regenerating
+//! them is a deliberate wire change.
 
 mod common;
 
@@ -130,7 +130,7 @@ async fn run(request: &ChatRequest, creds: Credentials, fake: &Fake) -> Value {
     }
 }
 
-/// The literals `customCodec.test.ts` pins, restated here so a regenerated
+/// The pinned literals, restated here so a regenerated
 /// vector file cannot silently move them.
 #[tokio::test]
 async fn custom_codec_test_literals() {

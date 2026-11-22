@@ -2,7 +2,7 @@
 //! per-request Redis load operation.
 //!
 //! - [`LoadPublisher`] writes this replica's in-flight counts per
-//!   (credential, model) `healthKey` every `interval` (100 ms) in one
+//!   (credential, model) health key every `interval` (100 ms) in one
 //!   [`crate::scripts::LOAD_PUBLISH`] call: the replica's hash
 //!   (`omni:load:r:<replica>`) is replaced whole and given a TTL, and the
 //!   replica is listed in the index (`omni:load:idx`, scored by expiry). A
@@ -12,7 +12,7 @@
 //! - The same tick refreshes the snapshot ([`crate::scripts::LOAD_SNAPSHOT`]):
 //!   every *other* live replica's counts summed per key. [`LoadView::counts`]
 //!   is that plus this process's own exact local counts, which is what
-//!   ranking reads (TS `createLoadRegistry().counts()`).
+//!   ranking reads.
 //!
 //! Bounded: at most `min(max_keys, fleet_max_keys)` keys are published per
 //! tick (the busiest first). The snapshot script reads at most
@@ -23,10 +23,6 @@
 //! replica (it is the fleet's publisher bound, not a per-reader choice). A local copy older than `ttl` (refreshes failing — the
 //! coordinator is down) is not read: ranking falls back to this process's
 //! own counts rather than a picture that may hold dead replicas.
-//!
-//! These keys are new (TS keeps fleet load in `omni:g:load:*` gauges with a
-//! per-request acquire/release); a mixed TS+Rust fleet does not see each
-//! other's load, which only affects ranking quality during a cutover.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

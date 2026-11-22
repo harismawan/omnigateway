@@ -1,4 +1,4 @@
-//! OpenAI Responses egress: `egress/responses.ts`.
+//! OpenAI Responses egress.
 
 use std::collections::HashSet;
 
@@ -49,7 +49,7 @@ pub struct ResponsesRender {
     pub request_id: String,
     /// `Math.floor(now / 1000)` at the request's start.
     pub created: i64,
-    /// `customToolNames(body)`: tools the client declared freeform.
+    /// Tools the client declared freeform.
     pub custom_tool_names: HashSet<String>,
 }
 
@@ -194,7 +194,7 @@ enum Merge {
     Moved(JsValue),
 }
 
-/// `responsesStream`, one event at a time.
+/// The Responses stream encoder, one event at a time.
 pub struct ResponsesStream {
     render: ResponsesRender,
     model: Text,

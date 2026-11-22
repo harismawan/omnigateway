@@ -1,15 +1,15 @@
-//! The subset of zod 4.6.1 the TS ingress schemas use, reproduced exactly.
+//! The subset of zod 4.6.1 semantics the ingress schemas implement.
 //!
-//! The TS parsers run zod schemas and send the *first* issue's message to the
-//! client, so what has to match is not only accept/reject but which issue comes
-//! first and how it is worded. That depends on zod's evaluation order (shape
-//! keys in declaration order, then unknown keys), on which issues "abort"
+//! The parsers send the *first* issue's message to the client, so the
+//! contract is not only accept/reject but which issue comes first and how it
+//! is worded. That depends on zod's evaluation order (shape keys in
+//! declaration order, then unknown keys), on which issues "abort"
 //! (a union keeps the one option whose issues all `continue`), and on the
-//! English locale's message templates. Each of those is ported from
-//! `zod/src/v4/core/{schemas,checks,util}.ts` and `locales/en.ts`.
+//! English locale's message templates. All of that is byte-stable wire
+//! behavior (clients match on the messages).
 //!
 //! [`check`] reports issues; [`rebuild`] produces zod's *output* for a value
-//! that passed, which differs from the input where TS reads it back: object
+//! that passed, which differs from the input where it is read back: object
 //! keys come out in schema order, a stripped object loses unknown keys, a
 //! record loses a top-level `__proto__`, and a `.default()` fills in.
 
@@ -141,7 +141,7 @@ pub fn nullish(z: Z) -> Z {
     opt(nullable(z))
 }
 
-/// `cacheControlSchema` (`ingress/schemas.ts`).
+/// The `cache_control` schema.
 pub fn cache_control() -> Z {
     obj(vec![
         ("type", one_of(&["ephemeral"])),

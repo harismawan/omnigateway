@@ -557,7 +557,9 @@ compaction would give back, and every table by size — and takes snapshots.
 `omni db stats` prints the same figures. On Postgres both show the server's own
 size, the `request_bodies` table and the per-table listing instead; there is no
 file, so nothing here compacts, snapshots or restores it — `pg_dump` is the
-backup.
+backup. After restoring or replacing the Postgres lineage, run the
+[cluster bucket sweep](rust-cluster-bucket-sweep.md) before starting any
+replica: the Redis long-window counts belong to the old lineage.
 
 **What a snapshot is.** One self-contained SQLite file, written into a
 `snapshots/` directory beside the database. The write-ahead log is folded in, so

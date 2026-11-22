@@ -1,4 +1,4 @@
-//! `packages/rtk/src/filters/search.ts`: grep/rg output grouped by file.
+//! grep/rg output grouped by file.
 
 use super::shared::{BoundedText, MAX_OUTPUT};
 use crate::command::GrepMode;

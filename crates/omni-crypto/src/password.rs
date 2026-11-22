@@ -1,45 +1,44 @@
-//! Console passwords (`packages/control/src/adminAuth.ts`, `Bun.password`).
+//! Console password hashing and verification.
 //!
-//! New hashes are argon2id with the OWASP baseline TS writes — m=19456 KiB,
+//! New hashes are argon2id with the OWASP baseline — m=19456 KiB,
 //! t=2, p=1, a 32-byte salt and a 32-byte output — as a PHC string
 //! (`$argon2id$v=19$m=19456,t=2,p=1$<salt>$<hash>`, unpadded standard
-//! base64), which `Bun.password.verify` reads back.
+//! base64), the format installed databases store.
 //!
 //! [`verify`] reads any argon2 PHC string (`argon2id`, `argon2i`, `argon2d`,
-//! with the parameters it names), as `Bun.password.verify` does, so hashes
-//! written by Bun and by the earlier `@node-rs/argon2` build (16-byte salts)
-//! both verify. Anything else is "no", as TS's `passwordMatches` reads a
-//! verify that throws.
+//! with the parameters it names), so stored hashes verify — both the
+//! 32-byte-salt format above and earlier hashes with 16-byte salts.
+//! Anything else is "no": a verify that would throw reads as "no".
 //!
-//! # Known differences from `Bun.password.verify`
+//! # Verification limits
 //!
-//! - A bcrypt hash (`$2b$…`) is "no" here; Bun verifies it. Nothing in this
-//!   gateway has ever written one: only a hand edit of `settings` could.
+//! - A bcrypt hash (`$2b$…`) is "no". Nothing in this gateway has ever
+//!   written one: only a hand edit of `settings` could.
 //! - A hash naming more than [`MAX_MEMORY_KIB`] of memory is "no" rather than
-//!   attempted: allocation failure aborts a Rust process, where Bun throws
-//!   (also "no"). Again only a hand edit could write one.
+//!   attempted: allocation failure aborts the process. Again only a hand
+//!   edit could write one.
 
 use argon2::{
     Algorithm, Argon2, Params, PasswordHash, PasswordHasher as _, PasswordVerifier as _, Version,
 };
 use rand::Rng as _;
 
-/// `ARGON2.memoryCost` (KiB).
+/// Argon2 memory cost (KiB).
 pub const MEMORY_KIB: u32 = 19_456;
-/// `ARGON2.timeCost`.
+/// Argon2 time cost (iterations).
 pub const TIME_COST: u32 = 2;
-/// Bun's parallelism (fixed at 1).
+/// Parallelism (fixed at 1).
 pub const PARALLELISM: u32 = 1;
-/// Bun's salt length in bytes.
+/// Salt length in bytes.
 pub const SALT_BYTES: usize = 32;
-/// Bun's output length in bytes.
+/// Output length in bytes.
 pub const OUTPUT_BYTES: usize = 32;
 /// The largest memory cost [`verify`] will attempt (1 GiB).
 pub const MAX_MEMORY_KIB: u32 = 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PasswordError {
-    /// `Bun.password.hash("")` throws this; the length rule makes it
+    /// An empty password is refused; the length rule makes it
     /// unreachable from the routes.
     #[error("password must not be empty")]
     Empty,
@@ -53,7 +52,7 @@ fn hasher() -> Result<Argon2<'static>, PasswordError> {
     Ok(Argon2::new(Algorithm::Argon2id, Version::V0x13, params))
 }
 
-/// `Bun.password.hash(password, ARGON2)`: a fresh PHC string. CPU- and
+/// A fresh PHC string with the baseline parameters. CPU- and
 /// memory-heavy (~19 MiB, tens of ms): call it off the async runtime.
 pub fn hash(password: &str) -> Result<String, PasswordError> {
     if password.is_empty() {
@@ -67,8 +66,8 @@ pub fn hash(password: &str) -> Result<String, PasswordError> {
         .to_string())
 }
 
-/// `passwordMatches(stored, password)`: false for an absent hash, a hash
-/// that does not parse, and a wrong password. The comparison of outputs is
+/// False for an absent hash, a hash that does not parse, and a wrong
+/// password. The comparison of outputs is
 /// constant-time (`password_hash::Output`'s equality). As heavy as [`hash`].
 pub fn verify(stored: Option<&str>, password: &str) -> bool {
     let Some(stored) = stored else {
@@ -95,11 +94,11 @@ pub fn verify(stored: Option<&str>, password: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// `adminAuth.test.ts`: "verifies existing legacy hashes from @node-rs/argon2".
+    /// A stored legacy hash with a 16-byte salt.
     const LEGACY: &str = "$argon2id$v=19$m=19456,t=2,p=1$l3SA90jOgwe6OXTFGCdu6Q$MlCWIoHV+Wa1DwZZkoJpnR4syDmJlkdiJdeDzjzHL9o";
-    /// Written by `Bun.password.hash("hunter2hunter2", ARGON2)` (Bun 1.4.4).
+    /// A stored argon2id hash of "hunter2hunter2" (32-byte salt).
     const BUN: &str = "$argon2id$v=19$m=19456,t=2,p=1$B6B5xf9ucRl7Z7ofsuZ0IDgFoSXxe8xqWUTD9F6VQrE$Pd/RIhT6ELx3h7ET31ABelOkbM2jeJpBLynHoqRuaG0";
-    /// `Bun.password.hash("hunter2hunter2", {algorithm: "argon2i", ...})`.
+    /// A stored argon2i hash of "hunter2hunter2".
     const BUN_I: &str = "$argon2i$v=19$m=19456,t=2,p=1$75mkeoyElYJP922T7Zpmu3ptDW4/JX+q6CTJMXAa0ug$4M0vQUlTMZwUs8vCMFe00TulwxfHhYcczuMn2C9IaY0";
 
     #[test]

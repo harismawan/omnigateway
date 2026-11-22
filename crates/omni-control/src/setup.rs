@@ -301,7 +301,7 @@ fn describe(model: &V, credentials: &[V]) -> Result<V, String> {
     let mut context: Option<f64> = None;
     let mut output: Option<f64> = None;
     // JSON strings are iterable. Their character targets have no model fields,
-    // so neither limits nor a catalog label is selected by the frozen consumer.
+    // so neither limits nor a catalog label is selected by the consumer.
     let targets = match get(model, "targets").ok_or("missing targets")? {
         V::Array(targets) => targets.as_slice(),
         V::String(_) => &[],

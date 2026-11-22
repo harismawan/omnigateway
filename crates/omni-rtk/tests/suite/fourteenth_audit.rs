@@ -1,11 +1,12 @@
-//! `packages/rtk/test/fourteenth-audit.test.ts`.
+//! Audit regression suite: listing filename retention, header-before-row
+//! charge order and budget stability.
 
 use super::common::*;
 use omni_rtk::filters::listings::compress_listing;
 use omni_rtk::filters::shared::{BoundedText, ChargeKind, ParserBudget, scan_text};
 
-/// TS subclasses `ParserBudget` to record charges; the Rust budget has a
-/// recording constructor instead. Returns `(records charged, output)`.
+/// The budget's recording constructor captures each charge. Returns
+/// `(records charged, output)`.
 fn record_charges(text: &str, parse: &dyn Fn(&BoundedText<'_>) -> String) -> (u64, String) {
     let scanned = scan_text(text).expect("scannable fixture");
     let input = BoundedText {

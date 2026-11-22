@@ -1,11 +1,11 @@
-//! Subjects and the limit predicates of `apps/gateway/src/auth/rateLimit.ts`
-//! (`subjectsOf`, `modelSubjectId`, `bucketKey`, `anyLimit`,
-//! `anyRequestLimit`, `anyLongLimit`, `requestsOnly`, `GRAIN_MS`).
+//! Subjects and the limit predicates: which counters a request is judged
+//! against (`subjects_of`, `model_subject_id`, `bucket_key`,
+//! `any_request_limit`, `any_long_limit`, `requests_only`, `grain_ms`).
 
 use omni_ratelimit::Window;
 use omni_ratelimit::limits::{CountWindows, LimitConfig, LimitScope};
 
-/// The long windows, in TS `LONG_WINDOWS` order.
+/// The long windows, shortest first.
 pub const LONG: [Window; 2] = [Window::H5, Window::W1];
 
 /// `GRAIN_MS`: a minute of five hours, an hour of a week.
@@ -17,7 +17,7 @@ pub fn grain_ms(window: Window) -> f64 {
     }
 }
 
-/// `modelSubjectId`: `encodeURIComponent` keeps `/` and `:` out of the
+/// `encodeURIComponent` keeps `/` and `:` out of the
 /// model part, so no model name can spell another subject's key.
 pub fn model_subject_id(key_id: &str, model: &str) -> String {
     let mut out = String::with_capacity(key_id.len() + 3 + model.len());
@@ -33,12 +33,12 @@ pub fn model_subject_id(key_id: &str, model: &str) -> String {
     out
 }
 
-/// `bucketKey`: `lim:<subject>:<window>` (the coordinator adds `omni:b:`).
+/// `lim:<subject>:<window>` (the coordinator adds `omni:b:`).
 pub fn bucket_key(subject: &str, window: Window) -> String {
     format!("lim:{subject}:{}", window.as_str())
 }
 
-/// One set of counters a request is judged against (TS `Subject`).
+/// One set of counters a request is judged against.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Subject {
     /// What the coordinator is asked about.
@@ -53,13 +53,13 @@ fn count_set(w: Option<&CountWindows>, f: fn(&CountWindows) -> Option<Option<u64
     w.and_then(f).flatten().is_some()
 }
 
-/// `anyRequestLimit`.
+/// Whether any `requests` window sets a ceiling.
 pub fn any_request_limit(l: &LimitScope) -> bool {
     let r = l.requests.as_ref();
     count_set(r, |w| w.one_minute) || count_set(r, |w| w.five_hours) || count_set(r, |w| w.one_week)
 }
 
-/// `anyLongLimit`.
+/// Whether any long window (`5h`, `1w`) sets a ceiling.
 pub fn any_long_limit(l: &LimitScope) -> bool {
     let long =
         |w: Option<&CountWindows>| count_set(w, |w| w.five_hours) || count_set(w, |w| w.one_week);
@@ -70,7 +70,7 @@ pub fn any_long_limit(l: &LimitScope) -> bool {
             .is_some_and(|s| s.five_hours.flatten().is_some() || s.one_week.flatten().is_some())
 }
 
-/// `requestsOnly`: what `count_tokens` is judged against.
+/// What `count_tokens` is judged against.
 pub fn requests_only(l: &LimitScope) -> LimitScope {
     LimitScope {
         requests: l.requests.clone(),
@@ -78,7 +78,7 @@ pub fn requests_only(l: &LimitScope) -> LimitScope {
     }
 }
 
-/// `subjectsOf`: key-wide first (when it limits anything), then the model's
+/// Key-wide first (when it limits anything), then the model's
 /// override.
 pub fn subjects_of(key_id: &str, limits: &LimitConfig, model: &str) -> Vec<Subject> {
     let mut out = Vec::with_capacity(2);

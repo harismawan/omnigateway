@@ -1,4 +1,4 @@
-//! Incremental port of the frozen Cloud Code stream decoder.
+//! Incremental Cloud Code stream decoder.
 use super::cloak::ToolCloak;
 use crate::{
     codec::{DecodeError, Flow, StreamDecoder},

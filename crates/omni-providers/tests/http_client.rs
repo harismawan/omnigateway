@@ -1,7 +1,6 @@
-//! The outbound client against raw TCP listeners: exact request bytes (checked
-//! against what the TS `nodeHttpClient` wrote to the same kind of listener, see
-//! `httpWire` in `vectors.json`), keep-alive pooling, response framing and
-//! cancellation.
+//! The outbound client against raw TCP listeners: exact request bytes (pinned
+//! by the `httpWire` vectors in `vectors.json`), keep-alive pooling, response
+//! framing and cancellation.
 
 mod common;
 
@@ -718,7 +717,7 @@ async fn antigravity_bootstrap_frames_a_non_ascii_body_by_its_utf8_bytes() {
 }
 
 /// A partial OMNI_ORDER_ANTIGRAVITY: the named header moves first and the rest
-/// keep the builder's pre-sort order, the same order the TS builder uses. The
+/// keep the builder's pre-sort order. The
 /// order is captured once per process, so the check runs in a child.
 #[test]
 fn a_partial_antigravity_order_override_leaves_the_rest_in_captured_order() {

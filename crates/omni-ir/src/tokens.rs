@@ -1,4 +1,4 @@
-//! The prompt-token estimate, ported from `packages/ir/src/tokens.ts`.
+//! The prompt-token estimate.
 //!
 //! Never billed from. Routing reads it to price a request against each
 //! target's cache-read and input rates. Lengths are UTF-16 code units, as JS

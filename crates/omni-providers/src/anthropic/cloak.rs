@@ -1,4 +1,4 @@
-//! Request-local tool aliasing, preserving TS insertion order and collisions.
+//! Request-local tool aliasing, preserving insertion order and collisions.
 use omni_ir::request::{ChatRequest, ContentBlock, ToolChoice, ToolDef};
 use std::collections::HashMap;
 

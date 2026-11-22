@@ -1,11 +1,11 @@
-//! Gateway API keys, read as `toKey` in `packages/store/src/sqlite/keys.ts`.
+//! Gateway API keys: the admission reader, per-key refusals, control writes.
 
 use crate::error::StoreError;
 use crate::limits::{LimitConfig, parse_limits};
 
 use omni_ir::jsjson::JsValue;
 
-/// `parseLimits`: `JSON.parse` then `parseLimitConfig`, `None` where either
+/// `JSON.parse` then the limits schema, `None` where either
 /// throws. A JS string may hold a lone surrogate (the `/api` surface stores
 /// what a client sent): such a `models` key is kept as its exact UTF-16
 /// (`LimitConfig::lone_models`), never folded into U+FFFD, so `"\ud800"`,
@@ -75,7 +75,7 @@ use crate::row;
 use rusqlite::{Connection, OptionalExtension as _, Row};
 use serde::Serialize;
 
-/// `ApiKey`.
+/// An API key as the store serves it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiKey {
@@ -109,7 +109,7 @@ pub struct ApiKey {
 }
 
 impl ApiKey {
-    /// `keyUsable`: not revoked, and not past an expiry (exclusive).
+    /// Usable: not revoked, and not past an expiry (exclusive).
     pub fn usable(&self, now_ms: i64) -> bool {
         self.revoked_at.is_none() && self.expires_at.is_none_or(|at| at > now_ms)
     }
@@ -127,9 +127,9 @@ impl ApiKey {
     }
 }
 
-/// A key row the gateway reader could not read, which TS's `toKey` would
-/// also have thrown on: refused at auth with `message` (what TS's thrown
-/// error says), never served and never poisoning the other keys.
+/// A key row the gateway reader could not read: refused at auth with
+/// `message` (the parse error's text), never served and never poisoning the
+/// other keys.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyRowError {
     pub id: String,
@@ -149,7 +149,7 @@ pub enum KeyEdit<'a> {
     Revoke(i64),
 }
 
-/// `JSON.stringify(parseLimitConfig(input.limits))`, as `create` stores it:
+/// `JSON.stringify` of the parsed input limits, as `create` stores it:
 /// the complete matrix, lone-surrogate overrides included.
 pub(crate) fn limits_column(key: &ApiKey) -> Result<String, StoreError> {
     Ok(key
@@ -159,7 +159,7 @@ pub(crate) fn limits_column(key: &ApiKey) -> Result<String, StoreError> {
         .to_json_text())
 }
 
-/// `setLimits`' guard: the stored text a raw limits edit writes, read with
+/// The raw limits edit's guard: the stored text it writes, read with
 /// `JSON.parse` semantics (a lone surrogate in an override name kept).
 pub(crate) fn edited_limits(raw: &str) -> Result<String, StoreError> {
     Ok(parse_stored_limits(raw)
@@ -230,11 +230,11 @@ pub fn edit(conn: &Connection, id: &str, edit: KeyEdit<'_>) -> Result<(), StoreE
 /// and those holding a lone surrogate as exact UTF-16 (see
 /// [`ApiKey::lone_allowlist`]).
 ///
-/// TS is `JSON.parse(..) as string[]`: invalid JSON throws (the error's
-/// message is JavaScriptCore's), and anything else is used by
-/// `includes(model)`. A JSON `null` is unrestricted there too. A non-string
+/// The contract is `JSON.parse(..) as string[]`: invalid JSON is an error
+/// (the message text is byte-stable wire contract), and anything else is used by
+/// `includes(model)`. A JSON `null` is unrestricted too. A non-string
 /// entry can never equal a model name, so dropping it changes no decision.
-/// Any other non-array is a hand-edited row TS would throw on (or, for a
+/// Any other non-array is a hand-edited row that would throw (or, for a
 /// string, substring-match) at the request; it reads here as deny-all, the
 /// closed direction.
 pub(crate) type Allowlist = (Option<Vec<String>>, Vec<(usize, Vec<u16>)>);
@@ -287,7 +287,7 @@ pub(crate) fn parse_allowlist(id: &str, raw: Option<String>) -> Result<Allowlist
     })
 }
 
-/// What TS's `toKey` throws on for this row's allowlist, or `None`:
+/// The allowlist parse refusal for this row, or `None`:
 /// `JSON.parse(stored)`'s message, verbatim (the refusal's message at auth),
 /// an empty column included (`JSON Parse error: Unexpected EOF`, not the
 /// request-body wording `Request.json()` gives an empty body).
@@ -295,7 +295,7 @@ pub(crate) fn allowlist_parse_error(raw: Option<&str>) -> Option<String> {
     omni_ir::jsjson::parse_js(raw?).err()
 }
 
-/// A JS number read from a date cell as `bun:sqlite` returns it: INTEGER and
+/// A date cell read as a JS number: INTEGER and
 /// REAL as numbers, TEXT through `Number(text)` (a comparison coerces it),
 /// NULL as `None`.
 fn js_instant(r: &Row<'_>, column: &str) -> Result<Option<f64>, StoreError> {
@@ -332,13 +332,13 @@ fn read_key(r: &Row<'_>, operator: bool) -> Result<ApiKey, StoreError> {
             row::opt_text(r, T, "model_allowlist")?
         },
     )?;
-    // `parseLimits`: unreadable (any cell `JSON.parse` + the schema refuse,
-    // a non-text one included) marks the key rather than failing the read.
+    // Unreadable limits (any cell `JSON.parse` + the schema refuse,
+    // a non-text one included) mark the key rather than failing the read.
     let limits = row::opt_text(r, T, "limits")
         .ok()
         .flatten()
         .and_then(|raw| parse_stored_limits(&raw));
-    // Dates as the JS numbers TS compares: only `revokedAt === null` and
+    // Dates as the JS numbers the comparisons use: only `revokedAt === null` and
     // `expiresAt > now` decide anything here, and both survive the integer
     // view (see [`expiry_instant`]). `createdAt` is display only.
     #[allow(clippy::cast_possible_truncation)]
@@ -365,8 +365,8 @@ fn read_key(r: &Row<'_>, operator: bool) -> Result<ApiKey, StoreError> {
     })
 }
 
-/// One row through [`read_key`], or the per-key refusal TS's `toKey` would
-/// have thrown for it (see [`KeyRowError`]).
+/// One row through [`read_key`], or its per-key refusal
+/// (see [`KeyRowError`]).
 fn read_key_entry(r: &Row<'_>) -> Result<Option<Result<ApiKey, KeyRowError>>, StoreError> {
     match read_key(r, false) {
         Ok(key) => Ok(Some(Ok(key))),
@@ -416,7 +416,7 @@ pub fn operator_rows(conn: &Connection, id: Option<&str>) -> Result<Vec<Operator
     };
     let mut out = Vec::new();
     while let Some(r) = rows.next()? {
-        // The cell as `bun:sqlite` returns it: an INTEGER as an integer, a
+        // The cell as a JS value: an INTEGER as an integer, a
         // REAL as its number, TEXT as a string.
         let date = |name| -> Result<serde_json::Value, StoreError> {
             use rusqlite::types::ValueRef;
@@ -441,8 +441,8 @@ pub fn operator_rows(conn: &Connection, id: Option<&str>) -> Result<Vec<Operator
     Ok(out)
 }
 
-/// One new key's columns, already encoded as `KeyRepo.create` encodes
-/// them (`JSON.stringify` of the allowlist and of the parsed limits).
+/// One new key's columns, already encoded (`JSON.stringify` of the allowlist
+/// and of the parsed limits).
 ///
 /// For callers that validated the input with JS string semantics (the
 /// `/api` surface): text that cannot be round-tripped through serde, such as
@@ -462,14 +462,14 @@ pub struct NewKeyColumns<'a> {
     pub smart_routing: bool,
 }
 
-/// `KeyRepo.create` with pre-encoded columns (see [`NewKeyColumns`]).
+/// Creates a key with pre-encoded columns (see [`NewKeyColumns`]).
 pub fn create_columns(conn: &Connection, k: &NewKeyColumns<'_>) -> Result<(), StoreError> {
     conn.execute("INSERT INTO api_keys (id,label,prefix,hash,model_allowlist,limits,body_logging_opt_out,created_at,revoked_at,expires_at,guardrail_policy,smart_routing) VALUES (?,?,?,?,?,?,?,?,NULL,?,?,?)",rusqlite::params![k.id,k.label,k.prefix,k.hash,k.model_allowlist,k.limits,i64::from(k.body_logging_opt_out),k.created_at,k.expires_at,k.guardrail_policy,i64::from(k.smart_routing)])?;
     Ok(())
 }
 
-/// `KeyRepo.setLimits` for a matrix the caller already ran through
-/// `parseLimitConfig` and encoded: written as given (see [`NewKeyColumns`]).
+/// Sets limits for a matrix the caller already parsed and encoded:
+/// written as given (see [`NewKeyColumns`]).
 pub fn set_limits_encoded(conn: &Connection, id: &str, limits: &str) -> Result<(), StoreError> {
     conn.execute(
         "UPDATE api_keys SET limits = ? WHERE id = ?",
@@ -478,7 +478,7 @@ pub fn set_limits_encoded(conn: &Connection, id: &str, limits: &str) -> Result<(
     Ok(())
 }
 
-/// Control writes inspect the target row with TS's raw allowlist semantics,
+/// Control writes inspect the target row with raw allowlist semantics,
 /// rather than using the admission reader or parsing unrelated keys.
 pub fn get_operator(conn: &Connection, id: &str) -> Result<Option<ApiKey>, StoreError> {
     conn.query_row("SELECT * FROM api_keys WHERE id = ?", [id], |r| {
@@ -504,8 +504,8 @@ pub fn get_operator(conn: &Connection, id: &str) -> Result<Option<ApiKey>, Store
     .transpose()
 }
 
-/// `KeyRepo.list`: every key, newest first. A row TS's `toKey` would throw
-/// on fails the whole list, as `keys.list()` does in TS (the admin listing).
+/// Every key, newest first. An unreadable row fails the whole list
+/// (the admin listing).
 pub fn list(conn: &Connection) -> Result<Vec<ApiKey>, StoreError> {
     list_entries(conn)?
         .into_iter()
@@ -533,8 +533,8 @@ pub fn list_entries(conn: &Connection) -> Result<Vec<Result<ApiKey, KeyRowError>
     Ok(out)
 }
 
-/// `KeyRepo.findByHash`: the one read a snapshot miss falls back to. A row
-/// TS's `toKey` would throw on is `Err(KeyRowError)` inside `Ok(Some)`.
+/// The one read a snapshot miss falls back to. An unreadable row is
+/// `Err(KeyRowError)` inside `Ok(Some)`.
 pub fn find_entry_by_hash(
     conn: &Connection,
     hash: &str,

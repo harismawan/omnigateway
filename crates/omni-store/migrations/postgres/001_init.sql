@@ -6,7 +6,7 @@
 --
 -- Types, stated once. Every timestamp is epoch milliseconds in a BIGINT, as
 -- SQLite's INTEGER held it. Every flag is BOOLEAN where SQLite stored 0/1; the
--- repos map both to the same TypeScript shape. Counters that accumulate —
+-- readers map both to the same shape. Counters that accumulate —
 -- tokens, durations, rollup sums — are BIGINT because SQLite's INTEGER is
 -- 64-bit and a per-key yearly token sum outgrows int4. Small enumerations
 -- (tier, attempts, status, versions) stay INTEGER.
@@ -245,7 +245,8 @@ CREATE INDEX idx_request_bodies_at ON request_bodies (at DESC);
 -- The plugin migration ledger, kept deliberately apart from core's
 -- `migrations`: a plugin's version 1 is its own version 1 forever, and core's
 -- next number is unaffected by how many any plugin ships. No cascade and no
--- row for the plugin's tables — see `PluginRepo.dropAll` and `orphanTables`.
+-- row for the plugin's tables: removing a plugin leaves them orphaned, never
+-- dropped.
 CREATE TABLE plugin_migrations (
   plugin_id  TEXT NOT NULL,
   version    INTEGER NOT NULL,
@@ -262,7 +263,8 @@ CREATE TABLE nodes (
 
 -- What `PRAGMA data_version` gave the SQLite store: a counter that moves when
 -- another connection commits a change routing might care about. One row,
--- bumped by a statement-level trigger on every table `buildSnapshot` reads
+-- bumped by a statement-level trigger on every table the routing snapshot
+-- reads (built in `omni-gateway-core`'s `snapshot.rs`)
 -- (and `api_keys`, which key policy reads the same way), so a replica can ask
 -- "has anyone changed the configuration" with one indexed read rather than
 -- five table scans.

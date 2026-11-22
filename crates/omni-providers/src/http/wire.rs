@@ -1,12 +1,11 @@
-//! The request bytes, exactly as `nodeHttpClient` puts them on the wire.
+//! The request bytes, exactly as `node:http` puts them on the wire.
 //!
-//! `nodeHttpClient` copies the ordered header pairs into a plain JS object,
-//! adds `Content-Length` for a non-empty body, except for Antigravity's explicit
-//! `Transfer-Encoding: chunked`, and hands it to `node:http`,
-//! which then adds `Host`, `Connection: keep-alive` and — for a bodiless
+//! The ordered header pairs are copied into a plain JS object,
+//! `Content-Length` is added for a non-empty body, except for Antigravity's
+//! explicit `Transfer-Encoding: chunked`, and the result follows `node:http`
+//! rules, which add `Host`, `Connection: keep-alive` and — for a bodiless
 //! method that carries a body by default — `Content-Length: 0`. Each of those
-//! steps has an observable quirk, and each is reproduced here (all measured
-//! against bun 1.4.4):
+//! steps has an observable quirk, and each is reproduced here:
 //!
 //! - **JS object keys.** Assigning the pairs to an object collapses exact
 //!   duplicates (last value, first position) and enumerates array-index keys

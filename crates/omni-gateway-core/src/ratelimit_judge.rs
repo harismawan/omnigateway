@@ -9,7 +9,7 @@ use omni_ratelimit::{
 };
 
 impl State {
-    /// `exactReset`: when a long window truly frees a slot, from the
+    /// The exact reset: when a long window truly frees a slot, from the
     /// retained row stamps. `None` keeps the overstated figure.
     fn exact_reset(&mut self, subject: &str, window: Window, now: f64) -> Option<f64> {
         if window == Window::M1 {
@@ -23,7 +23,7 @@ impl State {
         state.stamps.front().map(|oldest| oldest + window.ms())
     }
 
-    /// `correct`: one subject's decision with each violated long window's
+    /// One subject's decision with each violated long window's
     /// true reset, headroom moved with it.
     fn correct(&mut self, subject: &Subject, scope: &Decision, now: f64) -> Decision {
         if scope.violations.is_empty() {

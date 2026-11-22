@@ -1,4 +1,4 @@
-//! Anthropic Messages egress: `egress/anthropic.ts`.
+//! Anthropic Messages egress.
 
 use std::collections::{HashMap, HashSet};
 
@@ -69,7 +69,7 @@ fn with_type_last(data: &JsValue, t: &str) -> JsValue {
     data
 }
 
-/// `anthropicStream`, one event at a time.
+/// The Anthropic Messages stream encoder, one event at a time.
 pub struct AnthropicStream {
     request_id: String,
     model: Text,
@@ -309,8 +309,8 @@ pub fn error_body(code: ErrorCode, message: &Text) -> JsValue {
 
 /// `rfc3339`: whole seconds, rounded up, as `toISOString().slice(0, 19) + "Z"`.
 ///
-/// `None` where `toISOString` throws (an instant outside ±8.64e15 ms); TS
-/// would fail the response there, Rust leaves the header out.
+/// `None` where `toISOString` throws (an instant outside ±8.64e15 ms); the
+/// header is left out there.
 fn rfc3339(at: f64) -> Option<String> {
     let ms = (at / 1000.0).ceil() * 1000.0;
     if !ms.is_finite() || ms.abs() > 8.64e15 {

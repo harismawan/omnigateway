@@ -1,18 +1,16 @@
-//! The gateway's session authority: `createAdminAuth`
-//! (`packages/control/src/adminAuth.ts`) over a session KV.
+//! The gateway's session authority over a session KV.
 //!
 //! Sessions for three principals — the operator (`admin`), the read-only
 //! administrator (`viewer`) and the holder of one API key (`client`) — live
-//! behind [`SessionKv`], TS's `coord.kv`: `sess:<kind>:<sha256hex(token)>`
+//! behind [`SessionKv`]: `sess:<kind>:<sha256hex(token)>`
 //! holding `{"expiresAt":<ms>,"principal":{…}}` with the session TTL. Single
-//! node uses [`MemoryKv`], a map a restart empties, as `memoryCoord` is; a
+//! node uses [`MemoryKv`], a map a restart empties; a
 //! cluster coordinator (roadmap D2) implements the same trait over the same
 //! key schema and JSON.
 //!
 //! Password checks and hashing are Argon2id (`omni_crypto::password`), run on
-//! the blocking pool and bounded to one per CPU, as Bun runs them on its
-//! thread pool. Store reads and writes go through the gateway's own
-//! connection, also off the async workers.
+//! the blocking pool and bounded to one per CPU. Store reads and writes go
+//! through the gateway's own connection, also off the async workers.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -24,11 +22,11 @@ use omni_store::{SqliteStore, StoreError};
 
 /// `ADMIN_COOKIE`.
 pub const ADMIN_COOKIE: &str = "omni_admin";
-/// `ADMIN_SESSION_TTL_MS` (`app.ts`): 12 hours.
+/// The session TTL: 12 hours.
 pub const SESSION_TTL_MS: i64 = 12 * 60 * 60 * 1000;
 
-/// `Principal`. TS's fourth arm, `machine`, belongs to a plugin capability
-/// that is unreachable there and unsupported here; a stored session naming
+/// The session principal. A fourth kind, `machine`, belongs to a plugin
+/// capability that is unsupported here; a stored session naming
 /// it reads as no session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Principal {
@@ -37,7 +35,7 @@ pub enum Principal {
     Client { api_key_id: String },
 }
 
-/// `Principal["kind"]`.
+/// The principal's `kind`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Admin,
@@ -67,7 +65,7 @@ impl Principal {
         }
     }
 
-    /// `JSON.stringify(principal)`, key order as the TS literals build it.
+    /// The stored principal JSON; the key order is part of the format.
     pub fn to_json(&self) -> String {
         match self {
             Principal::Admin => r#"{"kind":"admin"}"#.to_owned(),
@@ -93,7 +91,7 @@ impl Principal {
     }
 }
 
-/// A session record as stored: `JSON.stringify({expiresAt, principal})`.
+/// A session record as stored: `{"expiresAt":<ms>,"principal":{…}}`.
 fn session_json(expires_at: i64, principal: &Principal) -> String {
     format!(
         r#"{{"expiresAt":{expires_at},"principal":{}}}"#,
@@ -177,9 +175,9 @@ impl SessionKv for CoordKv {
 
 pub type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 
-/// `memoryCoord().kv`: in-process, expiring against the injected clock.
+/// The in-process session KV, expiring against the injected clock.
 ///
-/// TS forgets an expired entry only when it is read; this one also sweeps
+/// An expired entry is forgotten when read; this also sweeps
 /// expired entries when the map has doubled since its last sweep, so
 /// sessions nobody returns to cannot accumulate. Not observable otherwise.
 pub struct MemoryKv {
@@ -271,12 +269,12 @@ impl SessionKv for MemoryKv {
 /// Why an auth operation failed.
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
-    /// A refused password (the length rule): TS throws an `Error` whose
-    /// message the routes report as `BAD_REQUEST`.
+    /// A refused password (the length rule): the routes report the
+    /// message as `BAD_REQUEST`.
     #[error("{0}")]
     Password(String),
     /// Anything else: most routes report `INTERNAL "internal error"`;
-    /// `/api/setup` reports the message as `BAD_REQUEST`, as TS's does.
+    /// `/api/setup` reports the message as `BAD_REQUEST`.
     #[error("{0}")]
     Internal(String),
 }
@@ -287,10 +285,9 @@ impl From<StoreError> for AuthError {
     }
 }
 
-/// `describeError(error, _)` of what `bun:sqlite` throws for the same
-/// failure: SQLite's own message (`sqlite3_errmsg`), or the error's name,
-/// `SQLiteError`, when that message is empty. Never the SQL, a bound
-/// parameter or the database path: SQLite's messages carry none of them.
+/// The store failure's description: SQLite's own message (`sqlite3_errmsg`),
+/// or the name `SQLiteError` when that message is empty. Never the SQL, a
+/// bound parameter or the database path: SQLite's messages carry none of them.
 fn describe_store_error(e: &StoreError) -> String {
     match e {
         StoreError::Sqlite(rusqlite::Error::SqliteFailure(_, Some(m))) if m.is_empty() => {
@@ -455,7 +452,7 @@ impl AdminAuth {
         .map_err(|e| AuthError::Internal(e.to_string()))
     }
 
-    /// `passwordMatches(stored, password)`.
+    /// Verifies a password against the stored hash.
     async fn matches(&self, stored: Option<String>, password: &str) -> Result<bool, AuthError> {
         if stored.is_none() {
             return Ok(false);
@@ -498,17 +495,17 @@ impl AdminAuth {
         Ok(None)
     }
 
-    /// `isConfigured`.
+    /// Whether an admin password is set.
     pub async fn is_configured(&self) -> Result<bool, AuthError> {
         Ok(self.password_hash(Which::Admin).await?.is_some())
     }
 
-    /// `isViewerConfigured`.
+    /// Whether a viewer password is set.
     pub async fn is_viewer_configured(&self) -> Result<bool, AuthError> {
         Ok(self.password_hash(Which::Viewer).await?.is_some())
     }
 
-    /// `setInitialPassword`: whether this call created the admin password.
+    /// Whether this call created the admin password.
     pub async fn set_initial_password(&self, password: &str) -> Result<bool, AuthError> {
         let hash = self.hash_new(Which::Admin, password).await?;
         if let AuthStore::Backend(store) = &self.store {
@@ -520,7 +517,7 @@ impl AdminAuth {
             .await
     }
 
-    /// `setPassword` (`applyPassword`): a new admin password, and every
+    /// A new admin password, and every
     /// session of every kind ended.
     pub async fn set_password(&self, password: &str) -> Result<(), AuthError> {
         let hash = self.hash_new(Which::Admin, password).await?;
@@ -536,7 +533,7 @@ impl AdminAuth {
         Ok(())
     }
 
-    /// `changePassword`: the length rule first (so a short new password
+    /// The length rule first (so a short new password
     /// answers the same whether `current` was right), then `current`.
     pub async fn change_password(&self, current: &str, next: &str) -> Result<bool, AuthError> {
         admin_password::check_length(Which::Admin, next)?;
@@ -557,7 +554,7 @@ impl AdminAuth {
         Ok(Some(self.issue(&Principal::Admin).await?))
     }
 
-    /// `setViewerPassword`: sets or (with `None`) clears the read-only
+    /// Sets or (with `None`) clears the read-only
     /// password, ending viewer sessions only.
     pub async fn set_viewer_password(&self, password: Option<&str>) -> Result<(), AuthError> {
         let hash = match password {
@@ -575,7 +572,7 @@ impl AdminAuth {
         self.invalidate_kind(Kind::Viewer).await
     }
 
-    /// `loginViewer`.
+    /// A viewer session, or `None` for a wrong or unset password.
     pub async fn login_viewer(&self, password: &str) -> Result<Option<String>, AuthError> {
         let stored = self.password_hash(Which::Viewer).await?;
         if !self.matches(stored, password).await? {
@@ -584,7 +581,7 @@ impl AdminAuth {
         Ok(Some(self.issue(&Principal::Viewer).await?))
     }
 
-    /// `loginClient`: a session for the holder of a usable raw API key.
+    /// A session for the holder of a usable raw API key.
     pub async fn login_client(&self, raw_key: &str) -> Result<Option<String>, AuthError> {
         let hash = omni_crypto::apikey::hash(raw_key);
         let now = (self.now)();
@@ -664,12 +661,12 @@ impl AdminAuth {
         Ok(())
     }
 
-    /// `invalidateSessions`.
+    /// Ends every session of every kind.
     pub async fn invalidate_sessions(&self) -> Result<(), AuthError> {
         Ok(self.kv.del_prefix(omni_crypto::session::PREFIX).await?)
     }
 
-    /// `invalidateKind`.
+    /// Ends every session of one kind.
     pub async fn invalidate_kind(&self, kind: Kind) -> Result<(), AuthError> {
         Ok(self
             .kv
@@ -978,9 +975,8 @@ mod tests {
         }
     }
 
-    /// A store refusal surfaces SQLite's own message (what `bun:sqlite`'s
-    /// `SQLiteError.message` is), `SQLiteError` when it is empty; never the
-    /// password.
+    /// A store refusal surfaces SQLite's own message, `SQLiteError` when it
+    /// is empty; never the password.
     #[tokio::test]
     async fn store_failures_carry_sqlite_s_message_only() {
         for (raise, want) in [

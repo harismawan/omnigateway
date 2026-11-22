@@ -20,8 +20,8 @@
 --
 -- `ewma_ttft_ms` and `last_used_at` were written on every successful request,
 -- and a success that changes nothing else now writes nothing. Both live in the
--- gateway's process-local `loadRegistry` instead. The console's "last used"
--- reads `request_logs` through `usage.lastUsedByCredential`, served by
+-- gateway's process-local `LoadRegistry` instead. The console's "last used"
+-- reads `request_logs` through `last_used_by_credential`, served by
 -- `idx_request_logs_cred`.
 ALTER TABLE credential_health DROP COLUMN ewma_ttft_ms;
 ALTER TABLE credential_health DROP COLUMN last_used_at;
@@ -30,7 +30,7 @@ ALTER TABLE credential_health DROP COLUMN last_used_at;
 -- commit, by every writer on every replica — on every health write, and every
 -- bump makes every replica rebuild its routing snapshot. Only a change to a
 -- column routing *decides* on needs that; a bare `consecutive_failures`
--- increment is patched into the held snapshot from the `healthSaved` change.
+-- increment is patched into the held snapshot by the gateway's health overlay.
 --
 -- The INSERT arm must stay `FOR EACH ROW`. The write is an upsert, and a
 -- statement-level INSERT trigger fires on an upsert whichever path each row

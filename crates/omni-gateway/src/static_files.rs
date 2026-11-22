@@ -1,22 +1,24 @@
-//! The dashboard catch-all (`app.ts`, `.get("/*")`) and the path handling it
-//! and the router share with Bun.
+//! The dashboard catch-all (`GET /*`) and the path handling it and the
+//! router share.
 //!
-//! - [`normalize_path`] is `new URL(request.url).pathname` for the
+//! - [`normalize_path`] is the WHATWG URL pathname for the
 //!   request-targets hyper accepts: dot segments (`.`, `..`, `%2e` forms)
 //!   resolved, `\` read as `/`, and the WHATWG path percent-encode set
 //!   applied (`"`, `{`, `}`, `^` and the rest; `%` sequences kept as sent).
-//! - [`decode_uri_component`] is `decodeURIComponent`: `None` where JS throws.
-//! - [`content_type`] is `Bun.file(path).type` for the frozen runtime (the
-//!   generated `data/static-mime.tsv`), plus whether Bun's server attaches a
-//!   `content-disposition: filename=` for that type.
+//! - [`decode_uri_component`] percent-decodes one component: `None` on a
+//!   bad escape or ill-formed UTF-8.
+//! - [`content_type`] is the fixed MIME table (`data/static-mime.tsv`),
+//!   plus whether a `content-disposition: filename=` is attached for that
+//!   type.
 //!
-//! Serving reads the directory from disk per request, as `app.ts` does, on
+//! Serving reads the directory from disk per request, on
 //! the catch-all only. Implemented routes (`/v1/*` POSTs, `GET /v1/models`,
 //! exact `/health`, `/metrics` when a token is set) are matched first and
 //! never touch it. The catch-all refuses `/api` and `/v1` paths before any
-//! filesystem work, as TS's two-prefix guard does; everything else is a
+//! filesystem work (the two-prefix guard); everything else is a
 //! dashboard path, so `/metrics` with no token, `/metrics/x` and `/health/x`
-//! are stat'ed under the root and can get the SPA index (TS parity, ruled).
+//! are stat'ed under the root and can get the SPA index (a ruled wire
+//! contract; see `tests/static_paths.rs`).
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -47,7 +49,7 @@ pub fn pathname(path: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// `new URL("http://h" + target).pathname`, for an origin-form target.
+/// The WHATWG URL pathname for an origin-form request-target.
 pub fn normalize_path(target: &str) -> String {
     let path = target.split(['?', '#']).next().unwrap_or("");
     let path = path.replace('\\', "/");
@@ -111,7 +113,7 @@ fn hex(b: u8) -> Option<u8> {
     }
 }
 
-/// `decodeURIComponent(s)`, or `None` where it throws `URIError`: a `%` not
+/// Percent-decodes one URI component; `None` where the decode fails: a `%` not
 /// followed by two hex digits, or escapes that are not well-formed UTF-8
 /// (overlong forms, surrogates and code points past U+10FFFF included).
 pub fn decode_uri_component(s: &str) -> Option<String> {
@@ -142,7 +144,7 @@ pub fn decode_uri_component(s: &str) -> Option<String> {
         for k in 1..len {
             seq.push(byte(i + 3 * k)?);
         }
-        // `from_utf8` refuses overlongs, surrogates and > U+10FFFF, as JS does.
+        // `from_utf8` refuses overlongs, surrogates and > U+10FFFF.
         std::str::from_utf8(&seq).ok()?;
         out.extend_from_slice(&seq);
         i += 3 * len;
@@ -182,7 +184,7 @@ fn mime() -> &'static Mime {
     })
 }
 
-/// `bun_paths::extension` without the dot: after the last `.` of the
+/// The extension without the dot: after the last `.` of the
 /// basename, unless that dot starts the basename.
 fn extension(path: &str) -> &str {
     let base = path.rsplit('/').next().unwrap_or(path);
@@ -192,8 +194,8 @@ fn extension(path: &str) -> &str {
     }
 }
 
-/// `Bun.file(path).type`, and whether Bun adds `content-disposition:
-/// filename="<basename>"` for a file answered with that type.
+/// The MIME type for a path, and whether `content-disposition:
+/// filename="<basename>"` is attached for a file answered with that type.
 pub fn content_type(path: &str) -> (&'static str, bool) {
     let m = mime();
     let ext = extension(path).to_ascii_lowercase();
@@ -208,7 +210,7 @@ pub fn resolve_root(dir: &str) -> Option<PathBuf> {
     std::fs::canonicalize(absolute).ok()
 }
 
-/// `path.resolve` of one path against the working directory, lexically.
+/// One path resolved against the working directory, lexically.
 fn absolute(p: &Path) -> PathBuf {
     let joined = if p.is_absolute() {
         p.to_path_buf()
@@ -235,23 +237,23 @@ fn lexical(p: &Path) -> PathBuf {
 /// What the catch-all decided for a GET or HEAD.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Decision {
-    /// TS's `{"error":{"code":"NOT_FOUND",...}}` 404.
+    /// The fixed `{"error":{"code":"NOT_FOUND",...}}` 404.
     NotFound,
     /// A regular file: its real path, cache-control, content type and
-    /// whether Bun names it in `content-disposition`.
+    /// whether it is named in `content-disposition`.
     File {
         path: PathBuf,
         cache_control: &'static str,
         content_type: &'static str,
         disposition: bool,
     },
-    /// The path resolved to a directory: Bun's 500 (`EISDIR`).
+    /// The path resolved to a directory: the fixed 500 (`EISDIR`).
     Directory,
 }
 
 /// The `/*` handler's decision, before any bytes are read.
 ///
-/// `raw_path` is the request's pathname as `new URL` gives it (normalized),
+/// `raw_path` is the request's normalized pathname,
 /// `accept` the request's `accept` header.
 pub fn decide(root: Option<&Path>, raw_path: &str, accept: Option<&str>) -> Decision {
     let Some(root) = root else {
@@ -287,9 +289,9 @@ pub fn decide(root: Option<&Path>, raw_path: &str, accept: Option<&str>) -> Deci
     {
         return Decision::NotFound;
     }
-    // `Bun.file(real).size > 0`: a directory's size is its stat size, which
+    // A size > 0 check: a directory's size is its stat size, which
     // is never 0 on the filesystems served from, so it falls through to
-    // serving and Bun answers 500.
+    // serving and answers 500.
     if let Some(real) = real {
         let meta = std::fs::metadata(&real).ok();
         let size = meta.as_ref().map_or(0, std::fs::Metadata::len);
@@ -298,7 +300,7 @@ pub fn decide(root: Option<&Path>, raw_path: &str, accept: Option<&str>) -> Deci
                 return Decision::Directory;
             }
             let shown = real.to_string_lossy().into_owned();
-            // `resolvedFilePath.endsWith(".html") ? "text/html" : file.type`.
+            // A `.html` real path is always `text/html`; else the table's type.
             let (content_type, disposition) = if shown.ends_with(".html") {
                 (
                     "text/html",
@@ -327,19 +329,18 @@ pub fn decide(root: Option<&Path>, raw_path: &str, accept: Option<&str>) -> Deci
     if decoded.starts_with("/assets/") || !navigation {
         return Decision::NotFound;
     }
-    // **Security divergence from TS** (A2 review I1): `app.ts` serves
-    // `resolve(staticRoot, "index.html")` without the realpath check every
-    // other file gets, so an `index.html` linking outside the root is served
-    // for any navigation route. Here it is canonicalized and contained like
-    // a requested file; an escaping index answers 404, as TS answers a
-    // request for `/index.html` itself.
+    // **Security hardening** (A2 review I1): the SPA index is canonicalized
+    // and contained like every requested file, never served blind from
+    // `resolve(staticRoot, "index.html")` — an `index.html` linking outside
+    // the root would otherwise be served for any navigation route. An
+    // escaping index answers 404, like a request for `/index.html` itself.
     let Ok(index) = std::fs::canonicalize(root.join("index.html")) else {
         return Decision::NotFound;
     };
     if index == root || !index.starts_with(root) {
         return Decision::NotFound;
     }
-    // `Bun.file(index).size`: 0 when missing.
+    // Size 0 when missing.
     let size = std::fs::metadata(&index).map_or(0, |m| m.len());
     if size == 0 {
         return Decision::NotFound;
@@ -359,7 +360,7 @@ pub fn decide(root: Option<&Path>, raw_path: &str, accept: Option<&str>) -> Deci
     }
 }
 
-/// Bun's `Range: bytes=...` for a whole-file 200 (`RangeRequest.rs`):
+/// `Range: bytes=...` for a whole-file 200:
 /// one range only; multi-range and malformed headers serve the whole body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Range {
@@ -442,7 +443,7 @@ pub fn parse_range(header: &[u8], total: u64) -> Range {
 
 const CHUNK: usize = 64 * 1024;
 
-/// Bun's `content-disposition` value for a file, when it writes one: the
+/// The `content-disposition` value for a file, when one is written: the
 /// basename, cut to 992 bytes, refused if it holds CR, LF, NUL or `"`.
 fn disposition_value(path: &Path) -> Option<HeaderValue> {
     use std::os::unix::ffi::OsStrExt as _;
@@ -510,8 +511,8 @@ fn file_body(path: PathBuf, start: u64, len: u64) -> Body {
     StreamBody::new(stream).boxed_unsync()
 }
 
-/// Bun's answer for a file response that turned out to be a directory, in
-/// production mode (`Cannot stream a directory as a response body`).
+/// The fixed 500 for a file response that turned out to be a directory
+/// (production mode: `Cannot stream a directory as a response body`).
 fn directory_error() -> Response<Body> {
     let mut res = Response::new(full("Something went wrong!"));
     *res.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
@@ -521,12 +522,12 @@ fn directory_error() -> Response<Body> {
 }
 
 /// The `/*` catch-all for GET and HEAD: the dashboard bundle, the SPA
-/// fallback, or TS's 404. `path` is the normalized pathname.
+/// fallback, or the fixed 404. `path` is the normalized pathname.
 pub async fn serve(root: Option<&Path>, path: &str, req: &Request<Incoming>) -> Response<Body> {
     let Some(root) = root else {
         return not_found_get(path);
     };
-    // `request.headers.get("accept")`: every value, joined with ", ".
+    // The `accept` header: every value, joined with ", ".
     let accept = {
         let all: Vec<String> = req
             .headers()
@@ -567,7 +568,7 @@ pub async fn serve(root: Option<&Path>, path: &str, req: &Request<Incoming>) -> 
             content_type,
             disposition,
         } => {
-            // Bun resolves `Range` for a whole-file GET; a request carrying
+            // `Range` is resolved for a whole-file GET; a request carrying
             // `If-Range` never matches (the response has no validators).
             let resolved = match (&range, is_get && !if_range) {
                 (Some(h), true) => parse_range(h, size),
@@ -588,7 +589,7 @@ pub async fn serve(root: Option<&Path>, path: &str, req: &Request<Incoming>) -> 
             let h = res.headers_mut();
             h.insert("cache-control", HeaderValue::from_static(cache_control));
             h.insert("content-type", HeaderValue::from_static(content_type));
-            // Bun names the file on a GET it streams; never on HEAD or 416.
+            // The file is named on a GET it streams; never on HEAD or 416.
             if disposition
                 && is_get
                 && status != StatusCode::RANGE_NOT_SATISFIABLE
@@ -621,7 +622,7 @@ pub async fn serve(root: Option<&Path>, path: &str, req: &Request<Incoming>) -> 
 mod tests {
     use super::*;
 
-    /// Bun 1.4.4 answers, probed against the frozen TS binary.
+    /// The expected answers are the wire contract; pinned here.
     #[test]
     fn ranges_as_bun() {
         let cases: &[(&str, Range)] = &[

@@ -81,7 +81,7 @@ pub fn model_auths(provider: &str, model: &str) -> Vec<&'static str> {
 
 /// `targetFromCatalog`: a target the operator then owns. Pricing is copied,
 /// capabilities are the provider's, token limits are deliberately omitted.
-/// Errors are the frozen CLI's usage messages.
+/// Errors are the CLI's usage messages.
 pub fn target(spec: &str) -> Result<JsValue, String> {
     let Some((provider, model)) = spec.split_once(':').filter(|(p, _)| !p.is_empty()) else {
         return Err(format!(

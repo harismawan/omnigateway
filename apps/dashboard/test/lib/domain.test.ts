@@ -15,10 +15,9 @@ import {
 } from "../../src/lib/domain.ts";
 
 /**
- * The console's copies of the gateway's single-copy rules, held on the cases
- * the original TypeScript tests used (`packages/store/test/{windows,keyUsable,
- * servesTarget}.test.ts` on `bun-checkpoint`). The Rust owners are named on
- * each function in `src/lib/domain.ts`, with the Rust test that pins them:
+ * The console's copies of the gateway's single-copy rules. The Rust owners
+ * are named on each function in `src/lib/domain.ts`, with the Rust test that
+ * pins them:
  *
  * - `keyUsable` → `ApiKey::usable`, `crates/omni-store/tests/key_mutations.rs`
  * - `servesTarget` → `serves_target`, `crates/omni-router/tests/filters.rs`

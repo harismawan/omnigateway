@@ -1,6 +1,6 @@
 [package]
 name = "omni-store"
-description = "SQLite and Postgres stores: migrations shared with the TS build, and the snapshot reads the gateway serves from."
+description = "SQLite and Postgres stores: byte-stable migrations, and the snapshot reads the gateway serves from."
 edition.workspace = true
 version.workspace = true
 license.workspace = true

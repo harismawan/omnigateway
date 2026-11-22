@@ -1,5 +1,5 @@
-//! `POST /v1/chat/completions`: `ingress/openai.ts`, including the Ollama
-//! `images` and SDK `attachments` sidecar carriers (`ingress/schemas.ts`).
+//! `POST /v1/chat/completions`, including the Ollama `images` and SDK
+//! `attachments` sidecar carriers.
 
 use omni_ir::error::GatewayError;
 use omni_ir::js::safe_token;
@@ -258,7 +258,7 @@ fn parse_arguments(raw: &str) -> Result<Value, GatewayError> {
     }
 }
 
-/// `parseOpenAIRequest`.
+/// Parse a Chat Completions body into the IR.
 pub fn parse(
     body: &Value,
     headers: &Headers,

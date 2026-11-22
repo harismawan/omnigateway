@@ -1,7 +1,7 @@
-//! The string unions TS stores in TEXT columns and casts without checking.
+//! The string unions stored in TEXT columns and read without checking.
 //!
-//! TS reads `breaker_state`, `auth_type`, `strategy` and `disabled_reason`
-//! with a bare `as` cast, so a row holding a name this build does not know is
+//! `breaker_state`, `auth_type`, `strategy` and `disabled_reason` are read
+//! as bare strings, so a row holding a name this build does not know is
 //! carried through as that string. `Other` keeps it rather than refusing the
 //! whole snapshot; every consumer decides what an unknown name means for it.
 
@@ -47,17 +47,17 @@ macro_rules! string_enum {
 }
 
 string_enum!(
-    /// `AuthType`.
+    /// How a credential authenticates.
     AuthType { OAuth => "oauth", ApiKey => "apiKey" }
 );
 
 string_enum!(
-    /// `BreakerState`.
+    /// The breaker's state.
     BreakerState { Closed => "closed", Open => "open", HalfOpen => "halfOpen" }
 );
 
 string_enum!(
-    /// `Strategy`.
+    /// The routing strategy.
     Strategy {
         Score => "score",
         Priority => "priority",
@@ -67,7 +67,7 @@ string_enum!(
 );
 
 string_enum!(
-    /// `DisabledReason`: why `enabled` is false.
+    /// Why `enabled` is false.
     DisabledReason {
         TokenRejected => "tokenRejected",
         ExpiredNoRefresh => "expiredNoRefresh",

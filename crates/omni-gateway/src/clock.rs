@@ -1,24 +1,23 @@
-//! The wall clock as TS reads it (`Date.now()`: integer epoch ms) and the
-//! random ids the gateway mints.
+//! The wall clock (integer epoch ms) and the random ids the gateway mints.
 
 use rand::{RngExt as _, SeedableRng as _};
 
-/// Epoch milliseconds, `Date.now()`.
+/// Epoch milliseconds.
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
-/// `crypto.randomUUID()`: a v4 UUID in lowercase hex.
+/// A v4 UUID in lowercase hex.
 pub fn uuid_v4() -> String {
     omni_crypto::codex::random_uuid_v4()
 }
 
 /// `req_` + an RFC 9562 UUIDv7, minted monotonically in this process.
 ///
-/// TS mints `req_${crypto.randomUUID()}` (v4). This is a deliberate,
-/// documented difference (spec §Writes, "Request ids: time-ordered"):
+/// Time-ordering is a deliberate, documented choice (spec §Writes,
+/// "Request ids: time-ordered"):
 /// `request_logs.id` is the table's primary key, and random v4 keys scatter
 /// every insert across that index, which capped the writer below the
 /// gateway's own throughput. v7 keys append at the index's right edge. The

@@ -1,4 +1,4 @@
-//! `packages/rtk/src/filters/tests.ts`.
+//! Test-runner output compression.
 
 use super::shared::{BoundedText, MAX_OUTPUT, plain_edges, render_selection};
 use crate::jsre::js_regex;
@@ -71,7 +71,7 @@ fn is_failure_summary(line: &str, executable: &str) -> bool {
     }
 }
 
-/// `compressTests`. `executable` defaults to `"unknown"` in TS.
+/// `executable` defaults to `"unknown"`.
 pub fn compress_tests<'a>(input: &BoundedText<'a>, executable: &str) -> Cow<'a, str> {
     let lines = &input.lines;
     let mut selected = BTreeSet::new();

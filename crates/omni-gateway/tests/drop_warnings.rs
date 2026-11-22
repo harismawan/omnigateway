@@ -78,7 +78,7 @@ async fn dropped_log_events_write_no_line_per_request() {
 
 /// Plugins are never loaded (spec non-goal). Boot warns once per plugin
 /// directory, sorted, with the release wording; a plain file and a symlink
-/// (TS's `Dirent.isDirectory()` does not follow it) are ignored; a valid
+/// (not followed) are ignored; a valid
 /// plugin's server entry is never read or run; and `plugins resolved` says 0.
 #[test]
 fn plugin_directories_warn_once_each_and_never_run() {

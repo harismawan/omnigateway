@@ -43,8 +43,8 @@ impl Default for MissConfig {
 
 #[derive(Debug, Clone)]
 pub enum MissResult {
-    /// The store has it (readable, or a row refused at auth as TS's `toKey`
-    /// throws on it); it is now in the snapshot too.
+    /// The store has it (readable, or a row refused at auth with its parse
+    /// error); it is now in the snapshot too.
     Found(crate::snapshot::KeyEntry),
     /// The store does not have it (read now, or remembered).
     Absent,

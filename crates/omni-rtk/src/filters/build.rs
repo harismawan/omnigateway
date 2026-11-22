@@ -1,4 +1,4 @@
-//! `packages/rtk/src/filters/build.ts`.
+//! Build output compression.
 
 use super::shared::{BoundedText, MAX_OUTPUT, render_gaps};
 use crate::jsre::js_regex;

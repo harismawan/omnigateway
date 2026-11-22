@@ -130,8 +130,8 @@ impl RateLimiter {
                     if c.debit_model {
                         self.debit(key, &c.requested_model, c.tokens, c.cost_usd, c.at, now);
                     } else {
-                        // The stored name is the lossy form of a model TS
-                        // could not encode: key-wide only, as TS debits.
+                        // The stored name is the lossy form of a model that
+                        // could not be encoded into a subject id: key-wide only.
                         self.debit_key_only(key, c.tokens, c.cost_usd, c.at, now);
                     }
                 }

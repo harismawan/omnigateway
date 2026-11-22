@@ -1,5 +1,4 @@
-//! Error codes, retryability and the client status map, mirroring
-//! `packages/ir/src/errors.ts`.
+//! Error codes, retryability and the client status map.
 
 use std::fmt;
 
@@ -44,7 +43,7 @@ impl ErrorCode {
         ErrorCode::Internal,
     ];
 
-    /// The TS spelling, which is also what `request_logs.error_code` stores.
+    /// The wire spelling, which is also what `request_logs.error_code` stores.
     pub fn as_str(self) -> &'static str {
         match self {
             ErrorCode::Auth => "AUTH",
@@ -118,7 +117,7 @@ impl fmt::Display for ErrorCode {
     }
 }
 
-/// `GatewayError`. `retryable` is derived from the code, as in TS.
+/// `GatewayError`. `retryable` is derived from the code.
 ///
 /// `gateway_authored` is opt-in and defaults false: set it only for a message
 /// built from literals and values this repository owns.

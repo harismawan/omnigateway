@@ -1,4 +1,5 @@
-//! `packages/rtk/test/seventeenth-audit.test.ts`.
+//! Audit regression suite: numbered-read vs git-diff routing and collapsed-row
+//! accounting.
 
 use super::common::*;
 

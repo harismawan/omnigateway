@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
-# TS→Rust cutover: remove the long-window limiter buckets (`omni:b:*`, counts and their
-# `:meta` companions) from the fleet's Redis/Valkey, as docs/rust-cutover-runbook.md §5 step 3
-# requires. Nothing else is touched: sessions (`omni:kv:*`), leases, locks, 1m windows and
-# gauges keep their keys.
+# Pretraffic bucket sweep: remove the long-window limiter buckets (`omni:b:*`, counts and
+# their `:meta` companions) from the fleet's Redis/Valkey, as docs/rust-cluster-bucket-sweep.md
+# requires after a Postgres lineage change, DB restore/replacement or xid-domain change.
+# Nothing else is touched: sessions (`omni:kv:*`), leases, locks, 1m windows and gauges keep
+# their keys.
 #
-# Run only with EVERY gateway (TS and Rust) writing to this database stopped. This script
-# cannot check that. One connection scans one node: point it at a standalone server or a
-# proxy, not at one member of a Redis Cluster.
+# Run only with EVERY gateway writing to this database stopped. This script cannot check
+# that. One connection scans one node: point it at a standalone server or a proxy, not at
+# one member of a Redis Cluster.
 #
-#   OMNI_REDIS_URL=redis://… scripts/cutover-redis-sweep.sh            # dry run: count only
-#   OMNI_REDIS_URL=redis://… scripts/cutover-redis-sweep.sh --apply    # count, UNLINK, verify
+#   OMNI_REDIS_URL=redis://… scripts/cluster-bucket-sweep.sh            # dry run: count only
+#   OMNI_REDIS_URL=redis://… scripts/cluster-bucket-sweep.sh --apply    # count, UNLINK, verify
 #
-# Needs `valkey-cli` or `redis-cli` with `--csv` (override with REDIS_CLI=…). The password is taken out of
-# the URL and handed over as REDISCLI_AUTH, so it is not in the CLI's argv; an ACL username
-# stays in the URL. `rediss://` adds `--tls` (the CLI must be built with TLS).
-# `omnigateway cluster-cutover-sweep` does the same sweep from inside the gateway binary.
+# Needs `valkey-cli` or `redis-cli` with `--csv` (override with REDIS_CLI=…). The password is
+# taken out of the URL and handed over as REDISCLI_AUTH, so it is not in the CLI's argv; an
+# ACL username stays in the URL. `rediss://` adds `--tls` (the CLI must be built with TLS).
+# `omnigateway cluster-bucket-sweep` does the same sweep from inside the gateway binary.
 set -euo pipefail
 export LC_ALL=C
 
@@ -23,7 +24,7 @@ url="${OMNI_REDIS_URL:-}"
 for arg in "$@"; do
   case "$arg" in
     --apply) apply=1 ;;
-    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
     *) echo "unknown argument: $arg (pass the URL as OMNI_REDIS_URL)" >&2; exit 2 ;;
   esac
 done

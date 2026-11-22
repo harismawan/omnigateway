@@ -1,4 +1,4 @@
-//! `packages/rtk/src/command.ts`: bounded shell-command classification.
+//! Bounded shell-command classification.
 //!
 //! Fails closed: composition, substitution, redirection, malformed quoting,
 //! structured-output flags and anything outside the approved wrappers yield

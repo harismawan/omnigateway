@@ -57,7 +57,7 @@ fn remove_body_rows(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
     for (_, rel) in &rows {
-        // Frozen path.join validates here, outside unlink's catch. Earlier
+        // The path-type check runs here, outside unlink's catch. Earlier
         // artifact deletions survive refusal; SQL deletion has not begun.
         match rel {
             rusqlite::types::Value::Null => {}
@@ -86,7 +86,7 @@ pub fn sweep_body_orphans(
     conn: &rusqlite::Connection,
     dir: &std::path::Path,
 ) -> Result<usize, String> {
-    // Frozen sweep takes this snapshot before walking, then rechecks only misses.
+    // The sweep takes this snapshot before walking, then rechecks only misses.
     // Non-TEXT cells cannot strictly equal a JavaScript path string.
     let known = conn
         .prepare("SELECT rel_path FROM request_bodies WHERE rel_path IS NOT NULL")
@@ -127,7 +127,7 @@ pub fn sweep_body_orphans(
     Ok(orphans)
 }
 
-// Bun SQLite replaces malformed TEXT bytes, but keeps other cell types distinct.
+// Malformed TEXT bytes are replaced (U+FFFD); other cell types stay distinct.
 pub(crate) fn bun_cell(cell: rusqlite::types::ValueRef<'_>) -> rusqlite::types::Value {
     match cell {
         rusqlite::types::ValueRef::Text(bytes) => {
@@ -382,8 +382,8 @@ fn size(path: &Path) -> u64 {
 /// Operations on the one live handle. Implementations must release it at close.
 pub type HashCell = Option<rusqlite::types::Value>;
 
-// Bun returns numbers for INTEGER/REAL and a fresh Uint8Array for each BLOB.
-// readRaw coalesces both an absent row and SQL NULL to JavaScript null.
+// INTEGER/REAL compare as numbers; each BLOB read is a fresh object, so two
+// BLOB cells are never equal. An absent row and SQL NULL both read as null.
 fn hashes_equal(left: &HashCell, right: &HashCell) -> bool {
     use rusqlite::types::Value as Cell;
     match (
@@ -933,11 +933,11 @@ mod restore_sequence_tests {
     }
     #[test]
     fn failures_preserve_frozen_half_swap_states_and_sequences() {
-        // packages/control/src/database.ts:603–621: "unconditional: whatever
-        // file is at `live` now"; close, unlink WAL/SHM, rename, reopen; catch
-        // retries reopen and throws SwapFailedError. No cleanup or rollback.
-        // :421–427: "A half-written file ... It goes before the failure is
-        // reported"; unlink failed undo then rethrow the ordinary write error.
+        // Unconditional: whatever file is at `live` now. Close, unlink
+        // WAL/SHM, rename, reopen; catch retries reopen and throws
+        // SwapFailedError. No cleanup or rollback. A half-written file goes
+        // before the failure is reported; unlink failed undo then rethrow
+        // the ordinary write error.
         let prefix = [
             "stat candidate",
             "inspect",
@@ -1147,7 +1147,7 @@ fn unlink(path: &Path) -> Result<(), String> {
 mod tests {
     #[test]
     fn node_join_matches_bun_posix_table() {
-        // Expected values captured from Bun path.join (dbfix1-c1-node-join.log).
+        // POSIX path.join table, pinned by dbfix1-c1-node-join.log.
         for (root, rel, expected) in [
             ("/root", "/outside", "/root/outside"),
             ("/root", "../outside", "/outside"),
@@ -1486,7 +1486,7 @@ fn prune_snapshots_in(
         };
         snapshots.push((at, reason.to_owned(), entry.path()));
     }
-    // Stable sort: frozen TS retains directory enumeration order on ties.
+    // Stable sort: ties retain directory enumeration order.
     snapshots.sort_by_key(|s| std::cmp::Reverse(s.0));
     let undo = snapshots.iter().position(|s| s.1 == "preRestore");
     let mut removed = 0;
@@ -1503,7 +1503,7 @@ fn prune_snapshots_in(
     }
     Ok(removed)
 }
-/// Frozen CLI copy confirmation URL: URL serialization, password only redacted.
+/// CLI copy confirmation URL: URL serialization, password only redacted.
 pub fn migrate_target_label(value: &str) -> String {
     match url::Url::parse(value) {
         Ok(mut url) => {

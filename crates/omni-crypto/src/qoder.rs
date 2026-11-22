@@ -1,4 +1,4 @@
-//! Qoder's wire encoding and signatures (`packages/providers/src/qoder/`).
+//! Qoder's wire encoding and signatures.
 //!
 //! The RSA half of the `Cosy-Key` wrapping is randomised PKCS#1 v1.5 padding
 //! and lives with the provider, where the embedded public key is.
@@ -48,7 +48,7 @@ pub fn encode_body(plain: &str) -> String {
 }
 
 /// The inverse of [`encode_body`], strict: the base64 must be canonical and
-/// the bytes valid UTF-8, as the TS decoder requires.
+/// the bytes valid UTF-8.
 pub fn decode_body(encoded: &str) -> Result<String, InvalidEncoding> {
     if !encoded.len().is_multiple_of(4) {
         return Err(InvalidEncoding);

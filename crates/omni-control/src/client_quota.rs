@@ -1,4 +1,4 @@
-//! Explicit frozen client quota projection. Never serializes credential records.
+//! Explicit client quota projection. Never serializes credential records.
 use crate::api::Failure;
 use omni_ir::jsjson::JsValue;
 use rusqlite::types::Value;
@@ -80,8 +80,8 @@ fn compare_numbers(a: f64, b: f64) -> std::cmp::Ordering {
     }
 }
 
-// Numeric cells first, then strings in UTF-16 order; frozen mixed-type order
-// is not reproduced (reachable only with hand-altered column affinity).
+// Numeric cells first, then strings in UTF-16 order (mixed-type rows are
+// reachable only with hand-altered column affinity).
 fn compare_cells(a: &Value, b: &Value) -> std::cmp::Ordering {
     match (primitive(a), primitive(b)) {
         (Some(a), Some(b)) => a.encode_utf16().cmp(b.encode_utf16()),
@@ -120,8 +120,8 @@ fn compare_keys(a: &[SortKey; 3], b: &[SortKey; 3]) -> std::cmp::Ordering {
         .find(|o| !o.is_eq())
         .unwrap_or(std::cmp::Ordering::Equal)
 }
-// Documented difference: reject iff SOME ordered pair of distinct rows would
-// throw in the frozen comparator, not merely pairs visited by an engine sort.
+// Reject iff SOME ordered pair of distinct rows would
+// throw in the comparator, not merely pairs visited by an engine sort.
 // At each equal-prefix group, only receivers must be strings; arguments use JS
 // ToString (including comma-joined Uint8Array). A singleton never compares.
 // Sorting/grouping three levels costs O(n log n), rather than n squared.

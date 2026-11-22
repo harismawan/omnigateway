@@ -108,7 +108,7 @@ pub fn run(flags: &HashMap<String, String>) -> Result<String, String> {
                                 let quota_id = get(q, "credentialId");
                                 let id = get(c, "id");
                                 if flags.contains_key("json") {
-                                    // Frozen Map keys use SameValueZero. BLOBs from
+                                    // Map keys use SameValueZero. BLOBs from
                                     // separate SQLite reads are distinct objects.
                                     match (quota_id, id) {
                                         (Some(J::Null), Some(J::Null)) => true,

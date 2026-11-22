@@ -3,8 +3,8 @@
 //! - [`http`]: the keep-alive HTTP/1.1 client writing headers exactly as
 //!   `node:http` does.
 //! - [`sse`]: the incremental SSE parser.
-//! - [`codec`] and [`adapter`]: the provider codec contract and its host
-//!   (`codecAdapter.ts`), with [`http_error`] classifying failed responses.
+//! - [`codec`] and [`adapter`]: the provider codec contract and its host,
+//!   with [`http_error`] classifying failed responses.
 //! - [`custom`]: the custom OpenAI-compatible provider.
 
 pub mod adapter;

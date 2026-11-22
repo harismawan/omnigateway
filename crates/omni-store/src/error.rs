@@ -40,8 +40,8 @@ pub enum StoreError {
         source: Box<StoreError>,
     },
     /// A write the database refuses for its values (a missing credential, a
-    /// number its column cannot hold): what the TS repository throws on for
-    /// that call alone. Not transient; retrying changes nothing.
+    /// number its column cannot hold): fails that call alone.
+    /// Not transient; retrying changes nothing.
     #[error("refused: {0}")]
     Refused(String),
     /// A COMMIT whose outcome is unknown: its answer never arrived (the
@@ -55,7 +55,7 @@ pub enum StoreError {
     /// transaction it ran in was rolled back as it unwound.
     #[error("panicked: {0}")]
     Panicked(String),
-    /// A row the TS reader would also have thrown on.
+    /// A row the reader cannot use.
     #[error("unreadable row: {0}")]
     Corrupt(String),
     /// Parser diagnostics may quote stored content. Only explicit wire
@@ -67,8 +67,8 @@ pub enum StoreError {
         row_id: String,
         detail: ParserDetail,
     },
-    /// A stored secret that does not decrypt under this key. TS throws here
-    /// too, at the first use of the secret.
+    /// A stored secret that does not decrypt under this key. Surfaces at the
+    /// first use of the secret.
     #[error("credential {credential_id} field {field} does not decrypt: {source}")]
     Secret {
         credential_id: String,

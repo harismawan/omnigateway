@@ -1,9 +1,10 @@
-//! `JSON.stringify` parity against vectors exported from the TS build.
+//! `JSON.stringify` conformance vectors pin the exact wire bytes;
+//! regenerating them is a deliberate wire change.
 //!
 //! Each vector's input is a tagged description (f64 bit patterns, UTF-16 code
 //! units, key order) because plain JSON cannot carry `-0`, `NaN` or lone
 //! surrogates. The test rebuilds the JS value as a [`JsValue`] and requires the
-//! writer to produce exactly what `JSON.stringify` produced.
+//! writer to produce exactly the pinned `JSON.stringify` bytes.
 
 use omni_ir::jsjson::{JsValue, stringify};
 use serde_json::Value;

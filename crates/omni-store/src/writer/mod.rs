@@ -3,8 +3,8 @@
 //! The request path hands it [`LogEvent`]s and health events through a bounded
 //! channel with `try_send`, so it never waits; a full channel drops the event,
 //! counts it, and warns at most once per interval. The task writes one
-//! transaction per batch, leaving the rows the TS store would have left after
-//! the same events one at a time (see `batch.rs`).
+//! transaction per batch, leaving the rows the same events applied one at a
+//! time would leave (see `batch.rs`).
 //!
 //! **Timing.** A batch is written once it holds 4096 events, or once its oldest
 //! event has waited 200 ms *since it was enqueued*, whichever comes first. So

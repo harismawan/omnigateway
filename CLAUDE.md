@@ -43,10 +43,6 @@ React/Bun console it serves.
 - `scripts/`: npm packaging (`build-npm.ts`), bench harness, hygiene checks, capture tools
 - `packaging/npm`: npm launcher + platform package templates
 
-The TS/Bun 0.x tree is on `bun-checkpoint`; a TS path in a crate comment (`packages/…`,
-`apps/gateway/…`, "frozen TS") refers to it. That branch is a record, not an authority: Rust tests
-pin behaviour now.
-
 Approved designs in `docs/superpowers/specs/`; matching plans in `docs/superpowers/plans/`. Read
 spec before change, but verify current code — specs and plans name the code as it was.
 
@@ -307,8 +303,8 @@ Translation invariants:
   merge (`anthropic/vendor.rs`); tool `input_schema` never closed. Depth cap 64 subschema levels. A
   refusal is noted `<provider>:response-schema-too-deep`. Pins: `response_format.rs` tests
   (`the_depth_cap_sits_at_sixty_four_subschema_levels`),
-  `crates/omni-providers/tests/outbound_depth.rs`. The 3×9 ingress×target matrix was TS-only:
-  unpinned in Rust. Design: [structured
+  `crates/omni-providers/tests/outbound_depth.rs`. The 3×9 ingress×target matrix is
+  unpinned. Design: [structured
   output](docs/superpowers/specs/2026-09-21-response-format-cross-provider-design.md).
 - Anthropic versioned tool `type` carried exactly; known versions listed in
   `omni-dialects/src/ingress/anthropic_tools.rs`; unknown dated types rejected.
@@ -440,8 +436,8 @@ Detailed compatibility rules + measured client behaviour belong in `docs/superpo
   (`ratelimit_seed.rs`); debits follow the committed row (`LogObserver`), never inside the store.
   Seed reads count `state = 'done'` rows only (`omni-store/src/usage.rs`, `pg/usage.rs`). A failed
   seed serves the request and retries, degrading long windows only (pin:
-  `a_failing_seed_read_serves_the_request_and_is_asked_again`). Seeding does not block (deliberate
-  divergence from 0.x, documented in `ratelimit.rs`).
+  `a_failing_seed_read_serves_the_request_and_is_asked_again`). Seeding does not block (deliberate,
+  documented in `ratelimit.rs`).
 - Cluster gauge slots are named per admission (random uuid, never `requestId`) and renewed under a
   one-day cap (`GAUGE_TTL_MS`, `MAX_RENEWED_MS`, `omni-cluster-limit/src/lib.rs`). Probe slots
   expire at 180 s and are not renewed (`Probes::claim`, `omni-gateway/src/load.rs`). Pins:
@@ -534,5 +530,4 @@ Detailed compatibility rules + measured client behaviour belong in `docs/superpo
 
 When gitignored `graphify-out/graph.json` exists, query it first for codebase questions; use
 `path`/`explain` for focused relationships and the wiki/report only for broad navigation. If absent,
-run `/graphify .` or read source directly. After code edits run `graphify update .`. A graph built
-before the TS deletion still holds `apps/gateway`/`packages/` nodes: rebuild it.
+run `/graphify .` or read source directly. After code edits run `graphify update .`.

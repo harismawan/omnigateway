@@ -1,5 +1,4 @@
-//! Ports of `packages/router/test/quota.test.ts`, `breaker.test.ts` and
-//! `resolve.test.ts`.
+//! Quota, breaker and resolution regressions.
 
 mod common;
 
@@ -498,7 +497,7 @@ fn a_non_ascii_prefix_resolves_by_longest_match() {
     );
 }
 
-/// TS keeps a fractional instant: failure at 1000, Retry-After 0.4 ms, no
+/// A fractional instant is kept: failure at 1000, Retry-After 0.4 ms, no
 /// jitter, resumes at 1000.4 — so at `now = 1000.5` the credential routes.
 #[test]
 fn a_fractional_rate_limit_instant_is_kept_as_ts_keeps_it() {

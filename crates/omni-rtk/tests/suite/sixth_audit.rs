@@ -1,4 +1,5 @@
-//! `packages/rtk/test/sixth-audit.test.ts`.
+//! Audit regression suite: failure-block retention across test/build/docker
+//! parsers and the aggregate budget.
 
 use super::common::*;
 

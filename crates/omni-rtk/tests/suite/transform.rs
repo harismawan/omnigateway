@@ -1,4 +1,5 @@
-//! `packages/rtk/test/transform.test.ts`.
+//! Regression suite: `transform_request` end to end — eligibility, provenance,
+//! savings and copy-on-write identity.
 
 use super::common::*;
 use omni_ir::request::{ChatRequest, ContentBlock};

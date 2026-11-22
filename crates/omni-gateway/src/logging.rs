@@ -1,12 +1,11 @@
-//! The stdout logger: `tracing` events rendered as TS's `formatLine`
-//! (`packages/ir/src/logger.ts`) writes them:
+//! The stdout logger: `tracing` events rendered in the fixed line format:
 //!
 //! `ISO-INSTANT LEVEL message  key=value key=value`
 //!
-//! The level is padded to five characters. Fields render in TS's fixed
+//! The level is padded to five characters. Fields render in the fixed
 //! `FIELD_ORDER`, which is also the allowlist: any other field (another
 //! crate's diagnostics, or anything that could carry a header or a body) is
-//! dropped, as `LogFields` refuses it at the TS API boundary. A string value containing whitespace, `=`
+//! dropped. A string value containing whitespace, `=`
 //! or `"` is written as a JSON string. `reason` is capped at 200 UTF-16 units,
 //! `model`/`requestedModel` at 120, each with a trailing `…`.
 
@@ -17,7 +16,7 @@ use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::Context;
 
-/// TS's `FIELD_ORDER`.
+/// The fixed field order, which is also the allowlist.
 pub const FIELD_ORDER: [&str; 37] = [
     "requestId",
     "surface",
@@ -209,7 +208,7 @@ fn render(level: Level, at_ms: i64, f: &Fields) -> String {
 /// Where rendered lines go.
 type Sink = Box<dyn Fn(&str) + Send + Sync>;
 
-/// The `tracing` layer writing TS-format lines to stdout at `max` and above.
+/// The `tracing` layer writing the fixed-format lines to stdout at `max` and above.
 pub struct TsFormat {
     max: Level,
     sink: Option<Sink>,
