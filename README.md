@@ -42,12 +42,6 @@ omni start
 - **Filters bulky tool history, optionally.** Built-in RTK filters shorten
   eligible large or repetitive shell and recognizable command output before
   provider dispatch, preserve errors and non-tool-result content, and default off.
-- **Enforces a coding style, optionally.** With `ponytailMode` set, the gateway
-  appends the [ponytail](https://github.com/DietrichGebert/ponytail) ruleset —
-  build the smallest thing that works — to the system prompt of every request,
-  so any client gets it without installing anything. About 1,240 tokens, cached
-  with the prompt it joins; skipped when the client already carries it.
-  Defaults off.
 - **Routes across your accounts.** Define a virtual model like `fast` or
   `smart` with several targets; the gateway ranks them by tier, health,
   remaining quota, cost, latency, and current load.
@@ -512,7 +506,6 @@ Everything else lives in the database rather than the environment, so it can be
 changed without a restart: the six routing weights, `maxAttempts`,
 `requestDeadlineMs`, the circuit breaker's `breakerThreshold` and
 `breakerCooldownMs`, `logRetentionDays`, `bodyRetentionDays`, `quotaPollIntervalMs`, `rtkEnabled`,
-`ponytailMode` (`off` | `lite` | `full` | `ultra`),
 and the two body-capture switches. Edit them with `omni settings set` or in the
 console. `quotaPollIntervalMs` is the one exception: the poller reads it once at
 boot, so a change to it takes a restart. `requestDeadlineMs` defaults to `0`,

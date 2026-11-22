@@ -30,6 +30,7 @@ omni-ir = { path = "../omni-ir" }
 omni-providers = { path = "../omni-providers" }
 omni-ratelimit = { path = "../omni-ratelimit" }
 omni-router = { path = "../omni-router" }
+omni-rtk = { path = "../omni-rtk" }
 omni-store = { path = "../omni-store" }
 arc-swap = "1"
 serde_json.workspace = true

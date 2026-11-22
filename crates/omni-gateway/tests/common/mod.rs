@@ -167,6 +167,15 @@ pub fn fixture(credentials: &[&str]) -> Fixture {
     Fixture { dir, path }
 }
 
+/// The `omni-rtk` suite's confirmed shell output RTK compresses: `bun test`
+/// with 300 passing cases.
+pub fn bun_output() -> String {
+    let mut lines = vec!["bun test v1.4.0".to_owned()];
+    lines.extend(vec!["case passed".to_owned(); 300]);
+    lines.extend(["300 pass", "0 fail", "Ran 300 tests across 10 files"].map(str::to_owned));
+    lines.join("\n")
+}
+
 pub fn set_setting(path: &Path, key: &str, value: &str) {
     let c = Connection::open(path).expect("open");
     let current: String = c

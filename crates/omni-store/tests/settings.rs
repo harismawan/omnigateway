@@ -4,7 +4,7 @@
 mod common;
 
 use omni_store::SqliteStore;
-use omni_store::settings::{DEFAULT_SMART_ROUTER_POLICY, PonytailMode};
+use omni_store::settings::{DEFAULT_SMART_ROUTER_POLICY, default_settings_json};
 
 fn store_with(dir: &std::path::Path, n: usize, raw: Option<&str>) -> SqliteStore {
     let store = SqliteStore::open(dir.join(format!("s{n}.db")), 0).expect("open");
@@ -30,7 +30,8 @@ fn typed_settings_read_the_documented_defaults_and_overrides() {
     assert_eq!(defaults.max_attempts, 3.0);
     assert!(defaults.auto_cache_enabled);
     assert!(!defaults.rtk_enabled);
-    assert_eq!(defaults.ponytail_mode, PonytailMode::Off);
+    assert!(default_settings_json().get("ponytailMode").is_none());
+    assert!(defaults.json.get("ponytailMode").is_none());
     assert_eq!(defaults.smart_router_policy, DEFAULT_SMART_ROUTER_POLICY);
     assert_eq!(defaults.guardrail_model, None);
 
@@ -45,6 +46,5 @@ fn typed_settings_read_the_documented_defaults_and_overrides() {
     assert!(edited.rtk_enabled);
     assert_eq!(edited.weights.cost, 0.4);
     assert_eq!(edited.weights.health, 3.0);
-    assert_eq!(edited.ponytail_mode, PonytailMode::Full);
     assert_eq!(edited.guardrail_model.as_deref(), Some("x"));
 }

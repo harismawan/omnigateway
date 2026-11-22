@@ -204,8 +204,17 @@ async fn boot_with(models: &[(&str, &str)], keepalive: Duration) -> Gw {
 }
 
 async fn boot_opts(models: &[(&str, &str)], options: Options) -> Gw {
+    boot_on(fixture(&["c0"]), models, options, &[]).await
+}
+
+/// `boot_opts` on a prepared fixture, with extra environment.
+async fn boot_on(
+    f: Fixture,
+    models: &[(&str, &str)],
+    options: Options,
+    extra_env: &[(&str, &str)],
+) -> Gw {
     let port = upstream().await;
-    let f = fixture(&["c0"]);
     let c = rusqlite::Connection::open(&f.path).expect("open");
     c.execute(
         "UPDATE credentials SET provider_data=? WHERE id='c0'",
@@ -233,6 +242,7 @@ async fn boot_opts(models: &[(&str, &str)], options: Options) -> Gw {
         ("OMNI_DAY_OFFSET_MINUTES", "0"),
     ]
     .into_iter()
+    .chain(extra_env.iter().copied())
     .map(|(k, v)| (k.to_owned(), v.to_owned()))
     .collect();
     let mut config = load_config(&env, || 0).expect("config");
@@ -1734,6 +1744,127 @@ fn logs(f: &Fixture) -> Vec<Vec<String>> {
         &f.path,
         "SELECT requested_model, status, error_code, state, attempts, input_tokens, output_tokens FROM request_logs ORDER BY at, id",
     )
+}
+
+async fn rtk_gw(rtk: bool, env: &[(&str, &str)]) -> Gw {
+    let f = fixture(&["c0"]);
+    set_setting(&f.path, "rtkEnabled", if rtk { "true" } else { "false" });
+    set_setting(&f.path, "bodyLoggingEnabled", "true");
+    boot_on(f, &[("m1", "mock-c3-d0")], Options::default(), env).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rtk_compresses_the_wire_body_while_the_client_body_stays_as_sent() {
+    let g = rtk_gw(true, &[("OMNI_BODY_LOGGING_ALLOWED", "true")]).await;
+    let auth = bearer(&g);
+    let body = serde_json::json!({
+        "model": "m1",
+        "messages": [
+            {"role": "user", "content": "run the tests"},
+            {"role": "assistant", "content": null, "tool_calls": [{"id": "call-1", "type": "function",
+                "function": {"name": "bash", "arguments": "{\"command\":\"bun test\"}"}}]},
+            {"role": "tool", "tool_call_id": "call-1", "content": bun_output()},
+            {"role": "user", "content": "thanks"},
+        ],
+    })
+    .to_string();
+    let (s, _, b) = call(
+        &g.base,
+        "POST",
+        "/v1/chat/completions",
+        &[("authorization", &auth)],
+        &body,
+    )
+    .await;
+    assert_eq!(s, 200, "{b}");
+    let f = stop(g).await;
+    let r = rows(&f.path, "SELECT id, rtk_applied FROM request_logs");
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0][1], "1");
+    let store = omni_store::SqliteStore::open(&f.path, 0).expect("store");
+    let read = store
+        .get_body(&key(), &r[0][0])
+        .expect("read")
+        .expect("captured");
+    let artifact: serde_json::Value = serde_json::from_str(
+        &omni_ir::jsjson::stringify(&read.artifact.expect("artifact")).expect("json"),
+    )
+    .expect("artifact");
+    let tool = |messages: &serde_json::Value| {
+        messages
+            .as_array()
+            .expect("messages")
+            .iter()
+            .find(|m| m["role"] == "tool")
+            .and_then(|m| m["content"].as_str())
+            .expect("tool message")
+            .to_owned()
+    };
+    assert_eq!(
+        tool(&artifact["client"]["request"]["messages"]),
+        bun_output()
+    );
+    let wire = tool(&artifact["attempts"][0]["request"]["messages"]);
+    // The crate's own output for the same body: a wrong-but-shorter
+    // compression fails here.
+    let mut mint = omni_dialects::ingress::random_tool_use_id;
+    let ingested = omni_dialects::ingress::ingest(
+        omni_dialects::ingress::Surface::OpenAi,
+        &body,
+        &omni_dialects::ingress::Headers::new(),
+        &mut omni_dialects::ingress::IngressOptions {
+            new_tool_use_id: &mut mint,
+        },
+    )
+    .expect("ingest");
+    let out =
+        omni_rtk::transform_request(&ingested.request, &omni_rtk::RtkConfig { enabled: true });
+    assert!(out.report.applied);
+    let expected = out
+        .request
+        .messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .find_map(|b| match b {
+            omni_ir::request::ContentBlock::ToolResult(r) => Some(r.content.clone()),
+            _ => None,
+        })
+        .expect("tool result");
+    assert_ne!(expected, bun_output());
+    assert_eq!(wire, expected);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn count_tokens_estimates_the_request_as_received_whatever_rtk_says() {
+    let body = serde_json::json!({
+        "model": "m1",
+        "messages": [
+            {"role": "user", "content": "run the tests"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "call-1", "name": "bash",
+                "input": {"command": "bun test"}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call-1",
+                "content": bun_output()}]},
+            {"role": "user", "content": "thanks"},
+        ],
+    })
+    .to_string();
+    let mut answers = Vec::new();
+    for rtk in [false, true] {
+        let g = rtk_gw(rtk, &[]).await;
+        let auth = bearer(&g);
+        let (s, _, b) = call(
+            &g.base,
+            "POST",
+            "/v1/messages/count_tokens",
+            &[("authorization", &auth)],
+            &body,
+        )
+        .await;
+        assert_eq!(s, 200, "{b}");
+        answers.push(b);
+        stop(g).await;
+    }
+    assert_eq!(answers[0], answers[1]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -58,7 +58,7 @@ graph TD
   ratelimit["omni-ratelimit<br/><i>pure limit arithmetic</i>"]
   crypto["omni-crypto"]
   ir["omni-ir<br/><i>domain model</i>"]
-  rtk["omni-rtk<br/><i>tool-result filters (unwired)</i>"]
+  rtk["omni-rtk<br/><i>tool-result filters</i>"]
 
   gateway --> core
   gateway --> control
@@ -107,7 +107,7 @@ it over `GET /api/catalog`, built from `crates/omni-control/data/provider-catalo
 only source of the built-in catalog. Constants the console copies from Rust are held to their
 owners by `apps/dashboard/test/api/rustMirrors.test.ts`, which reads Rust source.
 
-`omni-rtk` is built and tested but not called: dispatch sends the request as received (see
+`omni-rtk` is pure; dispatch calls it once per request when `rtkEnabled` is on (see
 [Dispatch](#dispatch)).
 
 ## What a request actually does
@@ -338,9 +338,15 @@ Only four providers dispatch in 1.x — `anthropic`, `openai`, `antigravity`, `c
 (`send_provider`). Others stay in the catalog and routing registry; a target naming one fails
 its attempt with `INTERNAL "no adapter for provider …"`.
 
-**RTK and ponytail are not applied.** The settings `rtkEnabled` and `ponytailMode` are stored and
-editable, and `request_logs` keeps its RTK columns, but dispatch and `count_tokens` send the
-request as received. `crates/omni-rtk` is the ported filter set, unwired.
+**RTK.** With `rtkEnabled` on, `dispatch_with_options` passes the request through
+`omni_rtk::transform_request` once, before model resolution: the router ranks and every attempt
+sends that one transformed request (unchanged requests are borrowed, never cloned). The report goes
+on the shared `RequestLog` before any attempt, so success, failover, in-stream error, 499 and
+deadline rows all carry it in `request_logs.rtk_*`; no stdout field is added. Body capture keeps
+the client request as received and each attempt's wire body after RTK. Guardrail and smart-router
+classifier calls set `request_transforms: false` and judge the request as received;
+`count_tokens` never applies RTK, so its estimate over-counts what is sent. Pins:
+`crates/omni-gateway/tests/rtk.rs`.
 
 ## Providers
 

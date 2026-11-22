@@ -37,8 +37,8 @@ React/Bun console it serves.
 - `crates/omni-ir`: provider-neutral model + JS-compatible JSON writer
 - `crates/omni-store`: SQLite (default) + Postgres (cluster) stores, migrations, batched writer
 - `crates/omni-crypto`: byte-exact field encryption, key hashing, Codex/Qoder id derivations
-- `crates/omni-rtk`: pure tool-result filters — **built and tested, not wired into dispatch** (see
-  `dispatch.rs` "RTK and ponytail")
+- `crates/omni-rtk`: pure tool-result filters, applied once per request by dispatch when
+  `rtkEnabled`
 - `apps/dashboard`: admin console (React, styled-components, Bun build), served from `dist/`
 - `scripts/`: npm packaging (`build-npm.ts`), bench harness, hygiene checks, capture tools
 - `packaging/npm`: npm launcher + platform package templates
@@ -337,11 +337,14 @@ Translation invariants:
   where the prefix grew ≥1024 tokens since the last marker; mutates wire, never IR. Unpinned in
   Rust. Design:
   [auto-cache](docs/superpowers/specs/2026-08-23-anthropic-auto-cache-full-prefix-design.md).
-- **RTK and ponytail do not run.** `rtkEnabled` and `ponytailMode` are stored and editable but
-  dispatch and `count_tokens` send the request as received (`dispatch.rs`, `server.rs` comments).
-  `request_logs.rtk_filters` stays a storage contract (`RTK_FILTER_IDS`, `omni-rtk/src/catalog.rs`;
-  read-side allowlist in `omni-store/src/maintenance.rs` `rtk_filters`): add ids freely, rename only
-  with a migration.
+- **RTK runs once per dispatch**: `dispatch_with_options`, before model resolution, gated by
+  `rtkEnabled` ∧ `DispatchOptions::request_transforms`; router and every attempt get the one
+  transformed request; report set on `RequestLog` before it is shared. Pins:
+  `crates/omni-gateway/tests/rtk.rs` (`a_deadline_timeout_still_carries_the_report`,
+  `a_guardrail_classifier_sees_the_original_*`), `server.rs` `rtk_compresses_the_wire_body_*`,
+  `count_tokens_estimates_the_request_as_received_*`. `request_logs.rtk_filters` stays a storage
+  contract (`RTK_FILTER_IDS`, `omni-rtk/src/catalog.rs`; read-side allowlist in
+  `omni-store/src/maintenance.rs` `rtk_filters`): add ids freely, rename only with a migration.
 - `Usage.input_tokens` is uncached input; cache reads and 5m/1h writes priced once (`price.rs`).
   `prompt_tokens()` (`omni-ir/src/stream.rs`) when a surface needs total prompt tokens.
 - OpenAI-chat upstreams need `stream_options.include_usage` (`custom/wire.rs`); Responses usage

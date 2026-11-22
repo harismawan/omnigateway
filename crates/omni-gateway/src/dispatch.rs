@@ -16,6 +16,7 @@
 //! [`BreakerTransition`] whenever the breaker state or `opened_at` changes, a
 //! [`HealthMeasurement`] otherwise.
 
+use std::borrow::Cow;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -32,6 +33,7 @@ use omni_router::{
     ExcludedKind, Failure, Providers, RankInput, blank_health, health_key, rank, record_failure,
     record_success, resolve_model, success_would_change,
 };
+use omni_rtk::{RtkConfig, RtkReport};
 use omni_store::writer::{
     BreakerTransition, HealthMeasurement, LogEvent, PendingLog, RequestLog, RouteTarget,
     WriterHandle,
@@ -192,8 +194,8 @@ pub struct Request {
 /// Per-call choices, independent of the installation's dispatch dependencies.
 #[derive(Debug, Clone, Copy)]
 pub struct DispatchOptions {
-    /// Whether operator transforms may run. Both are currently unimplemented;
-    /// screening callers explicitly opt out rather than relying on defaults.
+    /// Whether RTK may run (it also needs `rtkEnabled`). Screening callers
+    /// explicitly opt out rather than relying on defaults.
     pub request_transforms: bool,
     /// Revalidate the model against dispatch's own snapshot before routing.
     pub local_only: bool,
@@ -337,6 +339,22 @@ fn note(log: &Mutex<RequestLog>, entries: &[String]) {
 #[allow(clippy::cast_possible_truncation)]
 fn int(x: f64) -> i64 {
     x as i64
+}
+
+/// The RTK report in the row's `rtk_*` columns; `skipped_internal_errors`
+/// is not persisted.
+fn record_rtk(log: &mut RequestLog, report: &RtkReport) {
+    let count = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
+    log.rtk_applied = report.applied;
+    log.rtk_filter_hits = count(report.filter_hits);
+    log.rtk_original_code_units = count(report.original_code_units);
+    log.rtk_compressed_code_units = count(report.compressed_code_units);
+    log.rtk_estimated_tokens_saved = int(report.estimated_tokens_saved);
+    log.rtk_filters = report
+        .filters
+        .iter()
+        .map(|f| f.as_str().to_owned())
+        .collect();
 }
 
 impl Deps {
@@ -504,7 +522,7 @@ pub fn dispatch(deps: Arc<Deps>, req: Request) -> Dispatched {
 #[allow(clippy::too_many_lines)]
 pub fn dispatch_with_options(
     deps: Arc<Deps>,
-    req: Request,
+    mut req: Request,
     options: DispatchOptions,
 ) -> Dispatched {
     let started_at = (deps.now)();
@@ -519,6 +537,19 @@ pub fn dispatch_with_options(
     let request_id = req.request_id.clone();
     let mut base = RequestLog::new(request_id.clone(), started_at, 0);
     base.requested_model = req.request.model.clone();
+    // RTK, once per dispatch: the router and every attempt see the one
+    // transformed request, and every path that completes the row carries
+    // its report from `base`.
+    let rtk = omni_rtk::transform_request(
+        &req.request,
+        &RtkConfig {
+            enabled: options.request_transforms && settings.rtk_enabled,
+        },
+    );
+    record_rtk(&mut base, &rtk.report);
+    if let Cow::Owned(transformed) = rtk.request {
+        req.request = transformed;
+    }
     let log = Arc::new(Mutex::new(base));
 
     let fail = |log: &Arc<Mutex<RequestLog>>, code: ErrorCode, message: String| -> EventsStream {
@@ -536,8 +567,6 @@ pub fn dispatch_with_options(
         })]))
     };
 
-    // RTK and ponytail would run here; both default off and neither is
-    // implemented, so the request goes as sent (see the report).
     let resolved = if options.local_only {
         omni_router::local_only_model(&req.request.model, &snapshot.routing, &deps.providers)
             .ok_or_else(|| GatewayError::new(ErrorCode::Internal, LOCAL_ONLY_MESSAGE))

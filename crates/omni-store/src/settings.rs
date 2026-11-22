@@ -36,7 +36,6 @@ pub fn default_settings_json() -> Value {
         "quotaPollIntervalMs": 300_000,
         "rtkEnabled": false,
         "autoCacheEnabled": true,
-        "ponytailMode": "off",
         "bodyLoggingEnabled": false,
         "bodyLoggingCaptureStreamChunks": false,
         "snapshotKeepLatest": 5,
@@ -50,28 +49,6 @@ pub fn default_settings_json() -> Value {
         "smartRouterPolicy": DEFAULT_SMART_ROUTER_POLICY,
         "smartRouterTimeoutMs": 10_000,
     })
-}
-
-/// The ponytail mode setting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PonytailMode {
-    Off,
-    Lite,
-    Full,
-    Ultra,
-}
-
-impl PonytailMode {
-    /// Recognised mode strings only; anything else becomes `Off`.
-    fn read(value: Option<&Value>) -> Option<Self> {
-        match value?.as_str()? {
-            "off" => Some(Self::Off),
-            "lite" => Some(Self::Lite),
-            "full" => Some(Self::Full),
-            "ultra" => Some(Self::Ultra),
-            _ => None,
-        }
-    }
 }
 
 /// The router's scoring weights.
@@ -98,7 +75,6 @@ pub struct Settings {
     pub quota_poll_interval_ms: f64,
     pub rtk_enabled: bool,
     pub auto_cache_enabled: bool,
-    pub ponytail_mode: PonytailMode,
     pub body_logging_enabled: bool,
     pub body_logging_capture_stream_chunks: bool,
     pub snapshot_keep_latest: f64,
@@ -190,13 +166,6 @@ pub fn settings_json(raw: Option<&str>) -> Value {
     set(
         "autoCacheEnabled",
         Value::Bool(get("autoCacheEnabled").is_none() || exactly_true(get("autoCacheEnabled"))),
-    );
-    set(
-        "ponytailMode",
-        match PonytailMode::read(get("ponytailMode")) {
-            Some(_) => get("ponytailMode").cloned().unwrap_or(Value::Null),
-            None => Value::String("off".to_owned()),
-        },
     );
     set(
         "bodyRetentionDays",
@@ -301,8 +270,6 @@ impl Settings {
             quota_poll_interval_ms: num(&json, "quotaPollIntervalMs"),
             rtk_enabled: flag("rtkEnabled"),
             auto_cache_enabled: flag("autoCacheEnabled"),
-            ponytail_mode: PonytailMode::read(json.get("ponytailMode"))
-                .unwrap_or(PonytailMode::Off),
             body_logging_enabled: flag("bodyLoggingEnabled"),
             body_logging_capture_stream_chunks: flag("bodyLoggingCaptureStreamChunks"),
             snapshot_keep_latest: num(&json, "snapshotKeepLatest"),

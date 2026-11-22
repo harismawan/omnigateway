@@ -199,16 +199,6 @@ pub(crate) fn parse_patch(raw: &JsValue) -> Result<Value, String> {
                     ),
                 ));
             }
-        } else if key == "ponytailMode" {
-            if !v
-                .as_str()
-                .is_some_and(|s| ["off", "lite", "full", "ultra"].contains(&s))
-            {
-                return Err(error(
-                    key,
-                    "Invalid option: expected one of \"off\"|\"lite\"|\"full\"|\"ultra\"",
-                ));
-            }
         } else if !(default.is_null() && matches!(sv::get(raw, key), Some(JsValue::Null))) {
             let s = v.as_str().ok_or_else(|| {
                 error(
@@ -271,5 +261,45 @@ mod tests {
             Some(&JsValue::from(&serde_json::json!("model")))
         );
         assert_eq!(get(&store).expect("read"), saved);
+    }
+
+    #[test]
+    fn an_older_client_sending_ponytail_mode_still_saves_and_the_key_is_gone() {
+        let store = SqliteStore::open(":memory:", 0).expect("store");
+        omni_store::settings::write_operator_raw(
+            store.connection(),
+            r#"{"ponytailMode":"lite","extra":1}"#,
+        )
+        .expect("seed");
+        let mut input = get(&store).expect("read");
+        sv::set(
+            &mut input,
+            "ponytailMode",
+            JsValue::from(&serde_json::json!("ultra")),
+        );
+        sv::set(&mut input, "maxAttempts", JsValue::Number(5.0));
+        let saved = put(&store, &input).expect("save");
+        assert_eq!(sv::get(&saved, "maxAttempts"), Some(&JsValue::Number(5.0)));
+        assert_eq!(sv::get(&saved, "ponytailMode"), None);
+        assert_eq!(sv::get(&saved, "extra"), Some(&JsValue::Number(1.0)));
+        let raw = omni_store::settings::operator_raw(store.connection())
+            .expect("row")
+            .expect("written");
+        assert!(!raw.contains("ponytailMode"), "{raw}");
+        assert_eq!(sv::get(&get(&store).expect("read"), "ponytailMode"), None);
+        // Shapes the retired field never accepted are ignored too, never
+        // refused.
+        for shape in [serde_json::json!(7), serde_json::json!({})] {
+            let mut input = get(&store).expect("read");
+            sv::set(&mut input, "ponytailMode", JsValue::from(&shape));
+            sv::set(&mut input, "maxAttempts", JsValue::Number(4.0));
+            let saved = put(&store, &input).expect("an invalid ponytailMode is ignored");
+            assert_eq!(sv::get(&saved, "maxAttempts"), Some(&JsValue::Number(4.0)));
+            assert_eq!(sv::get(&saved, "ponytailMode"), None, "{shape}");
+            let raw = omni_store::settings::operator_raw(store.connection())
+                .expect("row")
+                .expect("written");
+            assert!(!raw.contains("ponytailMode"), "{raw}");
+        }
     }
 }
