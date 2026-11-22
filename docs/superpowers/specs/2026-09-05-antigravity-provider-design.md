@@ -33,11 +33,11 @@ The body is an envelope, not a bare Gemini request:
 ```json
 {
   "project": "<cloud code project id>",
-  "requestId": "<uuid>",
+  "requestId": "agent/<gateway request id>",
+  "request": { "contents": [], "systemInstruction": {}, "generationConfig": {}, "tools": [] },
   "model": "<upstream model id>",
   "userAgent": "antigravity",
-  "requestType": "agent",
-  "request": { "contents": [], "systemInstruction": {}, "generationConfig": {}, "tools": [] }
+  "requestType": "agent"
 }
 ```
 
@@ -56,8 +56,68 @@ received. Unknown name "…"`), so the encoder emits exactly the six keys above 
 flow's `origins` stay one host.~~
 
 **Wrong, and measured wrong — see "What the live probe found" below.** Inference
-is on `daily-cloudcode-pa.googleapis.com`; only the bootstrap and quota RPCs are
-on `cloudcode-pa.googleapis.com`.
+is on `daily-cloudcode-pa.googleapis.com`. At that probe the bootstrap and quota
+RPCs answered on `cloudcode-pa.googleapis.com` (historical; they now follow the
+2026-11-21 capture, below).
+
+## Current inference fingerprint
+
+Captured 2026-11-21 from the official **Antigravity App 2.34.0**, Linux x86_64,
+Hub UI, for an agent turn on `gemini-pro-agent`. See the
+[capture procedure](../../../scripts/antigravity-capture/README.md) and
+[sanitized fixture](../../../packages/providers/test/fixtures/antigravity-2.34.0.json).
+The CLI 1.5.13 sent the same ordered envelope and header names, but a different
+UA. The App also made a `checkpoint` request; the gateway only sends agent turns.
+
+| Field | App wire |
+| --- | --- |
+| User-Agent | `antigravity/hub/2.34.0 (aidev_client; os_type=linux; arch=amd64; cl=1026637980)` |
+| HTTP/1.1 header order | `Host`, `User-Agent`, `Transfer-Encoding`, `Authorization`, `Content-Type`, `Accept-Encoding` |
+| Framing and media type | `Transfer-Encoding: chunked`, `Content-Type: application/json`; no `Content-Length` or `Accept` |
+| Envelope order | `project`, `requestId`, `request`, `model`, `userAgent`, `requestType` |
+| Envelope identity | `userAgent: antigravity`, `requestType: agent`, `requestId: agent/<uuid-v4>/<13 decimal digits>/<uuid-v4>/1` |
+
+The gateway deliberately sends `agent/<gateway id>` instead. The two recorded
+first turns do not establish how the extra segments are derived. The gateway
+also keeps its translation and does not copy the App's tools, labels or session
+IDs or advertise the captured `Accept-Encoding: gzip`: the response readers
+do not decompress it. The shared HTTP transport emits `Connection: keep-alive`.
+Only Antigravity omits the transport's automatic length for plain chunking.
+This is an HTTP/1.1 trace from a stub, not evidence of backend acceptance or
+HTTP/2 framing. `OMNI_ANTIGRAVITY_IDE_VERSION`, `OMNI_UA_ANTIGRAVITY` and
+`OMNI_ORDER_ANTIGRAVITY` still override the version, complete UA and header order.
+
+**Compatibility risk:** omniroute reported that Google refused a non-Mac
+identity. This offline capture neither confirms nor disproves that secondhand
+report, and live acceptance of the Linux Hub default is untested. To restore
+the old UA, set `OMNI_UA_ANTIGRAVITY='antigravity/ide/2.12.2 darwin/arm64'`.
+That restores only the UA, not the previous header order, framing or envelope.
+
+**Bootstrap and quota follow the same capture** *(owner decision,
+2026-11-21)*. The App 2.34 recording supplied the bootstrap fingerprint:
+`loadCodeAssist` and `onboardUser` on `daily-cloudcode-pa`, the Hub UA, no
+`Accept` or `X-Goog-Api-Client`, order `Host, User-Agent, Content-Length,
+Authorization, Content-Type, Accept-Encoding` (`Accept-Encoding: gzip` not
+adopted, as for inference), and `onboardUser` with
+`{"tierId":…,"metadata":{"ideType":"ANTIGRAVITY"}}` — the App spelling; the old
+`tier_id` came from omniroute. The builders supply `Host` and `Content-Length`
+themselves, since the transports would otherwise append them after the ordered
+list; the order is pinned on the socket in both transports' tests. The **quota
+RPC** (`retrieveUserQuotaSummary`) was seen only from the CLI 1.5.13, on
+`daily-cloudcode-pa`; no App quota summary was recorded. Sending it with the
+App's bootstrap profile is a **gateway choice**, not an observed App request.
+Two deliberate wire differences remain on these RPCs: no `Accept-Encoding:
+gzip`, and the shared transport's trailing `Connection: keep-alive`, which the
+capture did not show. Both builders list all five headers in the captured order
+before sorting, so a partial `OMNI_ORDER_ANTIGRAVITY` reorders them identically
+on both runtimes. Token exchange and userinfo were not
+captured and keep the omniroute identity. **Live acceptance is not yet
+measured**: the earlier live probe found bootstrap and quota working on
+`cloudcode-pa`; whether `daily-cloudcode-pa` accepts them for every tier is the
+next live check. Builders: TS `antigravityBootstrapRequest` (order
+`antigravityBootstrapOrder`), Rust `oauth::code_assist_request` /
+`profile::bootstrap_headers`; pins: `packages/control/test/oauth/antigravity.test.ts`,
+`crates/omni-providers/tests/antigravity_bootstrap.rs`.
 
 ## OAuth
 
@@ -114,10 +174,12 @@ No other flow here does this. After the token, `exchange` yields:
 2. `POST v1internal:loadCodeAssist` with `{ metadata: { ideType: "ANTIGRAVITY" } }`
    — reads `cloudaicompanionProject` (a string, or an object with `id`) and the
    onboarding tier.
-3. Only when that returns no project: `POST v1internal:onboardUser` with the tier,
-   then one re-read of `loadCodeAssist`.
+3. Only when that returns no project: `POST v1internal:onboardUser` with the tier;
+   the project is read from that response (`response.cloudaicompanionProject`),
+   with no follow-up `loadCodeAssist`.
 
-Three or five yielded requests in one step, under the host's yield cap. omniroute
+Three or four requests in all (token, userinfo, load, and onboard when needed),
+under the host's four-request cap. omniroute
 polls `onboardUser` up to ten times at five-second intervals in the background;
 that is not available to a flow that must return a credential, so this takes the
 single bounded attempt its own comment describes as the inline path and lets the
@@ -428,8 +490,8 @@ mapping is nowhere one-to-one:
   $1.50/$7.50 from 1 January 2027; the standard figure is stored on purpose,
   because a table holding the promotional rate is right today and silently wrong
   on a date nobody is watching for. Traffic before the changeover is therefore
-  over-costed by 2x against list. Every other family is already on its standard
-  rate, so this is the only group where the two differ.
+  over-costed by 2x against list. Gemini 4 Carbon and Argon (added later, see
+  below) follow the same rule; every other family is on its only rate.
 - Pro and 2.5 Pro price in two bands by prompt size; the ≤200K band is carried,
   so a long-context request is under-costed.
 - `cacheWrite5m`/`cacheWrite1h` are **0 as a real price**: Google bills cache
@@ -462,6 +524,32 @@ since catalog edits reach new targets only.
 Note also that `fetchAvailableModels` answers on `daily-cloudcode-pa` and its
 `models` field is an **object keyed by id**, not an array — reading it as an
 array silently yields an empty comparison that looks like agreement.
+
+### Gemini 4 rows are from the public docs, not a probe
+
+Added 2026-11-22 at the operator's request, before 1.0.0, with no Antigravity
+account available to probe: `gemini-4-carbon`, `-argon`, `-neon` and
+`-hydrogen`, read from `ai.google.dev/gemini-api/docs/models` and `/pricing`.
+This is the source the catalog note says not to reason from, and it is used
+knowingly: the public API names one id per model with thinking as a request
+parameter, while `v1internal` has so far spelled every row its own way (tier
+suffixes, `gemini-pro-agent`). The rows therefore carry no tier suffix, and
+**whether `v1internal` serves these ids is unverified**. In `adaptive` mode the
+encoder sends no budget; `budget`, `off` and `betweenTools` still send
+`thinkingBudget`, which Google documents for Gemini 4 as levels instead. So a 400
+under one of these rows is either an id to correct or a budget this family
+refuses, and only a `fetchAvailableModels` probe plus a request settles which.
+The quota probe matches groups by `displayName` containing "gemini"; if Gemini 4
+arrives as a second such group, both write one `(credential, windowType)` row and
+the later overwrites the earlier — also unverified. The default stays
+`gemini-3.8-flash-high`, the probed row.
+
+Limits are the public ones: 1,048,576 context, 65,536 synchronous output (the
+1M long-decode ceiling is a separate API feature). Carbon and Argon carry the
+standard $4/$20 (cache $0.20), not the introductory $2/$10 that ends
+2026-11-30, by the same rule as the 3.8/3.7/3.6 Flash rows; Neon ($3/$15/$0.15)
+and Hydrogen ($1.50/$7.50/$0.075) have one rate. These models cache implicitly
+only, so there is no storage price to omit.
 
 ### Images are accepted on their bytes, not their declared type
 
@@ -539,8 +627,8 @@ change which caused it was itself verified against.
 
 - The `cloudcode-pa` and sandbox hosts as inference *failover*. One runtime host,
   and note that the obvious fallback is the host that refuses this tier.
-- The `cli` (`agy`) client profile. One identity, `ide`, hardcoded; the two differ
-  only in User-Agent and post-exchange headers against the same client id.
+- The `cli` (`agy`) inference profile. The gateway uses the App Hub identity;
+  OAuth/bootstrap keeps the historical IDE identity.
 - Claude and GPT model rows, and with them their quota family.
 - `retrieveUserQuota`'s per-model 5h detail. The summary RPC covers the window.
 - omniroute's background `onboardUser` polling loop.

@@ -1,0 +1,33 @@
+[package]
+name = "omni-control"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+omni-providers = { path = "../omni-providers" }
+tokio = { workspace = true, features = ["sync", "rt"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+omni-ir = { path = "../omni-ir" }
+omni-router = { path = "../omni-router" }
+omni-crypto = { path = "../omni-crypto" }
+omni-coord = { path = "../omni-coord" }
+omni-store = { path = "../omni-store" }
+omni-ratelimit = { path = "../omni-ratelimit" }
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+url = "2.5"
+rusqlite = { version = "0.43", default-features = false, features = ["bundled"] }
+icu_collator = "2.4"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+rustix = { version = "1.1.6", features = ["fs"] }
+
+[dev-dependencies]
+tempfile = "3"

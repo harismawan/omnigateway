@@ -1,0 +1,298 @@
+# Public-declaration superset; LIMIT entries are unresolved, not certified safe.
+# OWNER omni-providers/src/oauth.rs FlowResult.provider_data: arbitrary public Map; manual deep Clone/Drop; moves use mem::take; flow_result_depth exercises 40000 levels on 2MiB. Function/reexport lexical scan cannot discover new struct fields or prove ownership.
+omni-providers/src/openai/decode.rs :: fn new(native_reasoning: bool) -> Self	boolean-only constructor; parsed payload scoped/Owned; emitted native map uses iterative StreamEvent ownership
+omni-providers/src/openai/mod.rs :: fn initialize()	startup environment capture; strings only, no JSON ownership
+omni-providers/src/openai/mod.rs :: fn build_api_key_request(input: CodecInput<'_>) -> Result<CodecRequest<bool>, GatewayError>	borrowed IR; deep scope owns arbitrary JSON temporaries, only strings/headers/boolean escape
+omni-dialects/src/egress/anthropic.rs :: fn error_body(code: ErrorCode, message: &Text) -> JsValue	lossless error text and stack-safe JsValue ownership
+omni-dialects/src/egress/anthropic.rs :: fn error_type(code: ErrorCode) -> &'static str	borrowed IR; stack-safe cloning/writing; Owned output / iterative stream state Drop; existing payload scope
+omni-dialects/src/egress/anthropic.rs :: fn new(request_id: &str) -> AnthropicStream	borrowed IR; stack-safe cloning/writing; Owned output / iterative stream state Drop; existing payload scope
+omni-dialects/src/egress/anthropic.rs :: fn push(&mut self, event: &StreamEvent, out: &mut String)	borrowed IR; stack-safe cloning/writing; Owned output / iterative stream state Drop; existing payload scope
+omni-dialects/src/egress/anthropic.rs :: fn rate_limit_headers(headroom: &HeadroomByDimension) -> Vec<(String, String)>	borrowed IR; stack-safe cloning/writing; Owned output / iterative stream state Drop; existing payload scope
+omni-dialects/src/egress/anthropic.rs :: fn response(collected: &CollectedResponse, request_id: &str) -> JsValue	lossless JsValue output; stack-safe cloning and release
+omni-dialects/src/egress/mod.rs :: fn error_body(self, code: ErrorCode, message: impl Into<Text>) -> JsValue	lossless error text and stack-safe JsValue ownership
+omni-dialects/src/egress/mod.rs :: fn finish(&mut self, out: &mut String)	borrowed IR; stack-safe cloning/writing; Owned output / iterative stream state Drop; existing payload scope
+omni-dialects/src/egress/mod.rs :: fn push(&mut self, event: &StreamEvent, out: &mut String)	borrowed IR; stack-safe cloning/writing; Owned output / iterative stream state Drop; existing payload scope
+omni-dialects/src/egress/mod.rs :: fn push_owned(&mut self, event: StreamEvent, out: &mut String)	borrowed IR; stack-safe cloning/writing; Owned output / iterative stream state Drop; existing payload scope
+omni-dialects/src/egress/mod.rs :: fn rate_limit_headers( self, headroom: &HeadroomByDimension, now: f64, ) -> Vec<(String, String)>	borrowed IR; stack-safe cloning/writing; Owned output / iterative stream state Drop; existing payload scope
+omni-dialects/src/egress/mod.rs :: fn retry_after(error: &GatewayError) -> Option<String>	borrowed IR; stack-safe cloning/writing; Owned output / iterative stream state Drop; existing payload scope
+omni-dialects/src/egress/openai.rs :: fn error_body(code: ErrorCode, message: &Text) -> JsValue	lossless error text and stack-safe JsValue ownership
+omni-dialects/src/egress/openai.rs :: fn error_type(code: ErrorCode) -> (&'static str, &'static str)	borrowed IR; stack-safe cloning/writing; Owned output / iterative stream state Drop; existing payload scope
+omni-dialects/src/egress/openai.rs :: fn finish(&mut self, out: &mut String)	borrowed IR; stack-safe cloning/writing; Owned output / iterative stream state Drop; existing payload scope
+omni-dialects/src/egress/openai.rs :: fn new(request_id: &str, created: i64) -> OpenAiStream	borrowed IR; stack-safe cloning/writing; Owned output / iterative stream state Drop; existing payload scope
+omni-dialects/src/egress/openai.rs :: fn push(&mut self, event: &StreamEvent, out: &mut String)	borrowed IR; stack-safe cloning/writing; Owned output / iterative stream state Drop; existing payload scope
+omni-dialects/src/egress/openai.rs :: fn rate_limit_headers(headroom: &HeadroomByDimension, now: f64) -> Vec<(String, String)>	borrowed IR; stack-safe cloning/writing; Owned output / iterative stream state Drop; existing payload scope
+omni-dialects/src/egress/openai.rs :: fn response(collected: &CollectedResponse, request_id: &str, created: i64) -> JsValue	lossless JsValue output; stack-safe cloning and release
+omni-dialects/src/egress/responses.rs :: fn error_body(code: ErrorCode, message: &Text) -> JsValue	lossless error text and stack-safe JsValue ownership
+omni-dialects/src/egress/responses.rs :: fn finish(&mut self, out: &mut String)	borrowed IR; stack-safe cloning/writing; Owned output / iterative stream state Drop; existing payload scope
+omni-dialects/src/egress/responses.rs :: fn new(render: ResponsesRender) -> ResponsesStream	borrowed IR; stack-safe cloning/writing; Owned output / iterative stream state Drop; existing payload scope
+omni-dialects/src/egress/responses.rs :: fn open_native(&self) -> Option<&JsValue>	borrows retained native JsValue; push_owned moves merge payload
+omni-dialects/src/egress/responses.rs :: fn push(&mut self, event: &StreamEvent, out: &mut String)	borrowed IR; stack-safe cloning/writing; Owned output / iterative stream state Drop; existing payload scope
+omni-dialects/src/egress/responses.rs :: fn push_owned(&mut self, event: StreamEvent, out: &mut String)	borrowed IR; stack-safe cloning/writing; Owned output / iterative stream state Drop; existing payload scope
+omni-dialects/src/egress/responses.rs :: fn response(collected: &CollectedResponse, render: &ResponsesRender) -> JsValue	lossless JsValue output; stack-safe writing and reparse
+omni-dialects/src/ingress/anthropic.rs :: fn parse( body: &Value, headers: &Headers, opts: &mut IngressOptions<'_>, ) -> Result<ChatRequest, GatewayError>	internal: caller must be inside a deep scope; production entry points are the codec and ingest
+omni-dialects/src/ingress/mod.rs :: fn append(&mut self, name: &str, value: &str)	borrow-only inspection or ingress textual depth-bound scope; owned IR has iterative Drop
+omni-dialects/src/ingress/mod.rs :: fn check_model_allowed(model: &str, allowed: bool) -> Result<(), GatewayError>	borrow-only inspection or ingress textual depth-bound scope; owned IR has iterative Drop
+omni-dialects/src/ingress/mod.rs :: fn check_model_allowlist( model: &str, allowlist: Option<&[String]>, ) -> Result<(), GatewayError>	borrow-only inspection or ingress textual depth-bound scope; owned IR has iterative Drop
+omni-dialects/src/ingress/mod.rs :: fn custom_tool_names(body: &Value) -> HashSet<String>	borrow-only inspection or ingress textual depth-bound scope; owned IR has iterative Drop
+omni-dialects/src/ingress/mod.rs :: fn get(&self, name: &str) -> Option<&str>	borrow-only inspection or ingress textual depth-bound scope; owned IR has iterative Drop
+omni-dialects/src/ingress/mod.rs :: fn ingest( surface: Surface, body: &str, headers: &Headers, opts: &mut IngressOptions<'_>, ) -> Result<Ingested, GatewayError>	borrow-only inspection or ingress textual depth-bound scope; owned IR has iterative Drop
+omni-dialects/src/ingress/mod.rs :: fn lone_surrogate_model_error() -> GatewayError	borrow-only inspection or ingress textual depth-bound scope; owned IR has iterative Drop
+omni-dialects/src/ingress/mod.rs :: fn new() -> Headers	borrow-only inspection or ingress textual depth-bound scope; owned IR has iterative Drop
+omni-dialects/src/ingress/mod.rs :: fn normalize_client_model(raw: &str, betas: &[String]) -> (String, Vec<String>)	borrow-only inspection or ingress textual depth-bound scope; owned IR has iterative Drop
+omni-dialects/src/ingress/mod.rs :: fn parse_body(text: &str) -> Option<Owned>	borrow-only inspection or ingress textual depth-bound scope; owned IR has iterative Drop
+omni-dialects/src/ingress/mod.rs :: fn parse_body_checked(text: &str) -> Result<Owned, GatewayError>	borrow-only inspection or ingress textual depth-bound scope; owned IR has iterative Drop
+omni-dialects/src/ingress/mod.rs :: fn random_tool_use_id() -> String	borrow-only inspection or ingress textual depth-bound scope; owned IR has iterative Drop
+omni-dialects/src/ingress/mod.rs :: fn sorted(&self) -> Vec<(&str, &str)>	borrow-only inspection or ingress textual depth-bound scope; owned IR has iterative Drop
+omni-dialects/src/ingress/openai.rs :: fn parse( body: &Value, headers: &Headers, opts: &mut IngressOptions<'_>, ) -> Result<ChatRequest, GatewayError>	internal: caller must be inside a deep scope; production entry points are the codec and ingest
+omni-dialects/src/ingress/responses.rs :: fn parse( body: &Value, headers: &Headers, opts: &mut IngressOptions<'_>, ) -> Result<ChatRequest, GatewayError>	internal: caller must be inside a deep scope; production entry points are the codec and ingest
+omni-dialects/src/ingress/zod.rs :: fn arr(elem: Z) -> Z	private module: not externally reachable; ingress owns scope
+omni-dialects/src/ingress/zod.rs :: fn arr_min(elem: Z, min: usize) -> Z	private module: not externally reachable; ingress owns scope
+omni-dialects/src/ingress/zod.rs :: fn as_string(&self) -> String	private module: not externally reachable; ingress owns scope
+omni-dialects/src/ingress/zod.rs :: fn cache_control() -> Z	private module: not externally reachable; ingress owns scope
+omni-dialects/src/ingress/zod.rs :: fn check(z: &Z, value: Option<&Value>) -> Vec<Issue>	private module: not externally reachable; ingress owns scope
+omni-dialects/src/ingress/zod.rs :: fn int() -> Z	private module: not externally reachable; ingress owns scope
+omni-dialects/src/ingress/zod.rs :: fn message(&self) -> String	private module: not externally reachable; ingress owns scope
+omni-dialects/src/ingress/zod.rs :: fn nullable(z: Z) -> Z	private module: not externally reachable; ingress owns scope
+omni-dialects/src/ingress/zod.rs :: fn nullish(z: Z) -> Z	private module: not externally reachable; ingress owns scope
+omni-dialects/src/ingress/zod.rs :: fn num() -> Z	private module: not externally reachable; ingress owns scope
+omni-dialects/src/ingress/zod.rs :: fn obj(shape: Vec<(&'static str, Z)>) -> Z	private module: not externally reachable; ingress owns scope
+omni-dialects/src/ingress/zod.rs :: fn one_of(values: &'static [&'static str]) -> Z	private module: not externally reachable; ingress owns scope
+omni-dialects/src/ingress/zod.rs :: fn opt(z: Z) -> Z	private module: not externally reachable; ingress owns scope
+omni-dialects/src/ingress/zod.rs :: fn parse(z: &Z, value: &Value) -> Result<Owned, Issue>	private module: not externally reachable; ingress owns scope
+omni-dialects/src/ingress/zod.rs :: fn parse_map(z: &Z, map: &Map<String, Value>) -> Result<Owned, Issue>	private module: not externally reachable; ingress owns scope
+omni-dialects/src/ingress/zod.rs :: fn parsed_type(value: Option<&Value>) -> &'static str	private module: not externally reachable; ingress owns scope
+omni-dialects/src/ingress/zod.rs :: fn pos_int() -> Z	private module: not externally reachable; ingress owns scope
+omni-dialects/src/ingress/zod.rs :: fn rebuild(z: &Z, value: Option<&Value>) -> Option<Value>	private module: not externally reachable; ingress owns scope
+omni-dialects/src/ingress/zod.rs :: fn rec() -> Z	private module: not externally reachable; ingress owns scope
+omni-dialects/src/ingress/zod.rs :: fn str() -> Z	private module: not externally reachable; ingress owns scope
+omni-dialects/src/ingress/zod.rs :: fn str_between(min: usize, max: usize) -> Z	private module: not externally reachable; ingress owns scope
+omni-dialects/src/ingress/zod.rs :: fn str_max(max: usize) -> Z	private module: not externally reachable; ingress owns scope
+omni-dialects/src/ingress/zod.rs :: fn str_min(min: usize) -> Z	private module: not externally reachable; ingress owns scope
+omni-dialects/src/ingress/zod.rs :: fn strict(shape: Vec<(&'static str, Z)>) -> Z	private module: not externally reachable; ingress owns scope
+omni-ir/src/deep.rs :: fn clone(value: &Value) -> Value	stack-growing traversal / iterative release / ownership transfer; raw Value returns require deep::Owned or deep::drop
+omni-ir/src/deep.rs :: fn clone_map(map: &Map<String, Value>) -> Map<String, Value>	stack-growing traversal / iterative release / ownership transfer; raw Value returns require deep::Owned or deep::drop
+omni-ir/src/deep.rs :: fn depth_bound(text: &str) -> usize	stack-growing traversal / iterative release / ownership transfer; raw Value returns require deep::Owned or deep::drop
+omni-ir/src/deep.rs :: fn depth_of(text: &str) -> usize	stack-growing traversal / iterative release / ownership transfer; raw Value returns require deep::Owned or deep::drop
+omni-ir/src/deep.rs :: fn drop(value: Value)	stack-growing traversal / iterative release / ownership transfer; raw Value returns require deep::Owned or deep::drop
+omni-ir/src/deep.rs :: fn drop_in_place(slot: &mut Value)	stack-growing traversal / iterative release / ownership transfer; raw Value returns require deep::Owned or deep::drop
+omni-ir/src/deep.rs :: fn drop_map(map: Map<String, Value>)	stack-growing traversal / iterative release / ownership transfer; raw Value returns require deep::Owned or deep::drop
+omni-ir/src/deep.rs :: fn drop_map_in_place(slot: &mut Map<String, Value>)	stack-growing traversal / iterative release / ownership transfer; raw Value returns require deep::Owned or deep::drop
+omni-ir/src/deep.rs :: fn grow<R>(f: impl FnOnce() -> R) -> R	stack-growing traversal / iterative release / ownership transfer; raw Value returns require deep::Owned or deep::drop
+omni-ir/src/deep.rs :: fn grows() -> usize	stack-growing traversal / iterative release / ownership transfer; raw Value returns require deep::Owned or deep::drop
+omni-ir/src/deep.rs :: fn insert(map: &mut Map<String, Value>, key: String, value: Value)	stack-growing traversal / iterative release / ownership transfer; raw Value returns require deep::Owned or deep::drop
+omni-ir/src/deep.rs :: fn into_inner(mut self) -> Value	stack-growing traversal / iterative release / ownership transfer; raw Value returns require deep::Owned or deep::drop
+omni-ir/src/deep.rs :: fn opt<T: Serialize, S: Serializer>(v: &Option<T>, s: S) -> Result<S::Ok, S::Error>	stack-growing traversal / iterative release / ownership transfer; raw Value returns require deep::Owned or deep::drop
+omni-ir/src/deep.rs :: fn parse(text: &str) -> Result<Value, ParseError>	stack-growing traversal / iterative release / ownership transfer; raw Value returns require deep::Owned or deep::drop
+omni-ir/src/deep.rs :: fn parse_bounded(text: &str, bound: usize) -> Result<Value, ParseError>	stack-growing traversal / iterative release / ownership transfer; raw Value returns require deep::Owned or deep::drop
+omni-ir/src/deep.rs :: fn replace(slot: &mut Value, value: Value)	stack-growing traversal / iterative release / ownership transfer; raw Value returns require deep::Owned or deep::drop
+omni-ir/src/deep.rs :: fn scope<R>(f: impl FnOnce() -> R) -> R	stack-growing traversal / iterative release / ownership transfer; raw Value returns require deep::Owned or deep::drop
+omni-ir/src/deep.rs :: fn scope_for<R>(text: &str, f: impl FnOnce() -> R) -> R	stack-growing traversal / iterative release / ownership transfer; raw Value returns require deep::Owned or deep::drop
+omni-ir/src/deep.rs :: fn scope_for_bound<R>(bound: usize, f: impl FnOnce(usize) -> R) -> R	stack-growing traversal / iterative release / ownership transfer; raw Value returns require deep::Owned or deep::drop
+omni-ir/src/deep.rs :: fn value<T: Serialize, S: Serializer>(v: &T, s: S) -> Result<S::Ok, S::Error>	stack-growing traversal / iterative release / ownership transfer; raw Value returns require deep::Owned or deep::drop
+omni-ir/src/error.rs :: fn as_str(self) -> &'static str	scalar/string API; no arbitrary JSON ownership
+omni-ir/src/error.rs :: fn gateway_authored(mut self) -> Self	scalar/string API; no arbitrary JSON ownership
+omni-ir/src/error.rs :: fn http_status(self) -> u16	scalar/string API; no arbitrary JSON ownership
+omni-ir/src/error.rs :: fn new(code: ErrorCode, message: impl Into<String>) -> Self	scalar/string API; no arbitrary JSON ownership
+omni-ir/src/error.rs :: fn parse(s: &str) -> Option<ErrorCode>	scalar/string API; no arbitrary JSON ownership
+omni-ir/src/error.rs :: fn retryable(self) -> bool	scalar/string API; no arbitrary JSON ownership
+omni-ir/src/error.rs :: fn with_degradations(mut self, degradations: Vec<String>) -> Self	scalar/string API; no arbitrary JSON ownership
+omni-ir/src/error.rs :: fn with_provider(mut self, provider: impl Into<String>) -> Self	scalar/string API; no arbitrary JSON ownership
+omni-ir/src/error.rs :: fn with_retry_after_ms(mut self, ms: Option<f64>) -> Self	scalar/string API; no arbitrary JSON ownership
+omni-ir/src/error.rs :: fn with_status(mut self, status: u16) -> Self	scalar/string API; no arbitrary JSON ownership
+omni-ir/src/js.rs :: fn is_js_whitespace(c: char) -> bool	borrow-only scalar inspection or iterative object_assign; returned raw JSON requires deep release
+omni-ir/src/js.rs :: fn math_max(a: f64, b: f64) -> f64	borrow-only scalar inspection or iterative object_assign; returned raw JSON requires deep release
+omni-ir/src/js.rs :: fn math_min(a: f64, b: f64) -> f64	borrow-only scalar inspection or iterative object_assign; returned raw JSON requires deep release
+omni-ir/src/js.rs :: fn math_round(x: f64) -> f64	borrow-only scalar inspection or iterative object_assign; returned raw JSON requires deep release
+omni-ir/src/js.rs :: fn max0(x: f64) -> f64	borrow-only scalar inspection or iterative object_assign; returned raw JSON requires deep release
+omni-ir/src/js.rs :: fn nullish_or<'a>(a: Option<&'a Value>, b: Option<&'a Value>) -> Option<&'a Value>	borrow-only scalar inspection or iterative object_assign; returned raw JSON requires deep release
+omni-ir/src/js.rs :: fn number_value(n: &serde_json::Number) -> f64	borrow-only scalar inspection or iterative object_assign; returned raw JSON requires deep release
+omni-ir/src/js.rs :: fn object_assign(target: &mut serde_json::Map<String, Value>, source: Option<&Value>)	borrow-only scalar inspection or iterative object_assign; returned raw JSON requires deep release
+omni-ir/src/js.rs :: fn parse_json(text: &str) -> Option<Value>	borrow-only scalar inspection or iterative object_assign; returned raw JSON requires deep release
+omni-ir/src/js.rs :: fn prop<'a>(value: Option<&'a Value>, key: &str) -> Option<&'a Value>	borrow-only scalar inspection or iterative object_assign; returned raw JSON requires deep release
+omni-ir/src/js.rs :: fn replace_lone_surrogates(text: &str) -> Option<String>	borrow-only scalar inspection or iterative object_assign; returned raw JSON requires deep release
+omni-ir/src/js.rs :: fn safe_token(value: &str) -> &str	borrow-only scalar inspection or iterative object_assign; returned raw JSON requires deep release
+omni-ir/src/js.rs :: fn string_to_number(s: &str) -> f64	borrow-only scalar inspection or iterative object_assign; returned raw JSON requires deep release
+omni-ir/src/js.rs :: fn to_number(value: Option<&Value>) -> f64	array recursion guarded by deep::grow; scalar/string branches unchanged, borrowed JSON is not released
+omni-ir/src/js.rs :: fn to_string(value: Option<&Value>) -> String	array recursion guarded by deep::grow; scalar/string branches unchanged, borrowed JSON is not released
+omni-ir/src/js.rs :: fn trim(s: &str) -> &str	borrow-only scalar inspection or iterative object_assign; returned raw JSON requires deep release
+omni-ir/src/js.rs :: fn truthy(value: Option<&Value>) -> bool	borrow-only scalar inspection or iterative object_assign; returned raw JSON requires deep release
+omni-ir/src/js.rs :: fn utf16_len(s: &str) -> usize	borrow-only scalar inspection or iterative object_assign; returned raw JSON requires deep release
+omni-ir/src/js.rs :: fn utf16_prefix(s: &str, units: usize) -> std::borrow::Cow<'_, str>	borrow-only scalar inspection or iterative object_assign; returned raw JSON requires deep release
+omni-ir/src/jsc_json.rs :: fn parse_error(text: &str) -> Option<String>	scalar/string API; no arbitrary JSON ownership
+omni-ir/src/jsjson.rs :: fn array_index(key: &str) -> Option<u32>	stack-growing writer/parser; JsValue has iterative Drop; borrowed map entries do not release JSON
+omni-ir/src/jsjson.rs :: fn key_order_builds() -> usize	stack-growing writer/parser; JsValue has iterative Drop; borrowed map entries do not release JSON
+omni-ir/src/jsjson.rs :: fn own_entries( map: &serde_json::Map<String, serde_json::Value>, ) -> Vec<(&String, &serde_json::Value)>	stack-growing writer/parser; JsValue has iterative Drop; borrowed map entries do not release JSON
+omni-ir/src/jsjson.rs :: fn parse_js(text: &str) -> Result<JsValue, String>	stack-growing writer/parser; JsValue has iterative Drop; borrowed map entries do not release JSON
+omni-ir/src/jsjson.rs :: fn stringify(value: &JsValue) -> Option<String>	stack-growing writer/parser; JsValue has iterative Drop; borrowed map entries do not release JSON
+omni-ir/src/jsjson.rs :: fn stringify_pretty(value: &JsValue) -> Option<String>	stack-growing writer/parser; JsValue has iterative Drop; borrowed map entries do not release JSON
+omni-ir/src/jsjson.rs :: fn to_string<T: JsonOutput>(value: &T) -> String	borrows either JSON carrier and invokes its stack-growing writer
+omni-ir/src/jsjson.rs :: fn to_string_pretty(value: &serde_json::Value) -> String	stack-growing writer/parser; JsValue has iterative Drop; borrowed map entries do not release JSON
+omni-ir/src/jsjson.rs :: fn write_map(map: &serde_json::Map<String, serde_json::Value>, out: &mut String)	stack-growing writer/parser; JsValue has iterative Drop; borrowed map entries do not release JSON
+omni-ir/src/jsjson.rs :: fn write_number(value: f64, out: &mut String)	stack-growing writer/parser; JsValue has iterative Drop; borrowed map entries do not release JSON
+omni-ir/src/jsjson.rs :: fn write_spread( map: &serde_json::Map<String, serde_json::Value>, key: &str, value: &str, spread: Spread, out: &mut String, )	stack-growing writer/parser; JsValue has iterative Drop; borrowed map entries do not release JSON
+omni-ir/src/jsjson.rs :: fn write_str(s: &str, out: &mut String)	stack-growing writer/parser; JsValue has iterative Drop; borrowed map entries do not release JSON
+omni-ir/src/jsjson.rs :: fn write_utf16(units: &[u16], out: &mut String)	stack-growing writer/parser; JsValue has iterative Drop; borrowed map entries do not release JSON
+omni-ir/src/jsjson.rs :: fn write_value(value: &serde_json::Value, out: &mut String)	stack-growing writer/parser; JsValue has iterative Drop; borrowed map entries do not release JSON
+omni-ir/src/jsjson.rs :: fn write_value_pretty(value: &serde_json::Value, out: &mut String)	stack-growing writer/parser; JsValue has iterative Drop; borrowed map entries do not release JSON
+omni-ir/src/request.rs :: fn as_str(self) -> &'static str	borrowed IR inspection; serialization helpers use deep::ser; IR owners have iterative field Drop
+omni-ir/src/request.rs :: fn cache_control(&self) -> Option<&CacheControl>	borrowed IR inspection; serialization helpers use deep::ser; IR owners have iterative field Drop
+omni-ir/src/request.rs :: fn files<S: Serializer>( v: &Option<Vec<super::FileBlock>>, s: S, ) -> Result<S::Ok, S::Error>	borrowed IR inspection; serialization helpers use deep::ser; IR owners have iterative field Drop
+omni-ir/src/request.rs :: fn images<S: Serializer>( v: &Option<Vec<super::ImageBlock>>, s: S, ) -> Result<S::Ok, S::Error>	borrowed IR inspection; serialization helpers use deep::ser; IR owners have iterative field Drop
+omni-ir/src/request.rs :: fn native<S: Serializer>( v: &Option<Vec<super::ProviderNativeBlock>>, s: S, ) -> Result<S::Ok, S::Error>	borrowed IR inspection; serialization helpers use deep::ser; IR owners have iterative field Drop
+omni-ir/src/request.rs :: fn type_name(&self) -> &'static str	borrowed IR inspection; serialization helpers use deep::ser; IR owners have iterative field Drop
+omni-ir/src/request.rs :: fn vendor_bag(&self, name: &str) -> Option<&Map<String, Value>>	borrowed IR inspection; serialization helpers use deep::ser; IR owners have iterative field Drop
+omni-ir/src/request.rs :: fn vendor_value(&self, name: &str) -> Option<&Value>	borrowed IR inspection; serialization helpers use deep::ser; IR owners have iterative field Drop
+omni-ir/src/stream.rs :: fn as_str(self) -> &'static str	iterative collector / safe clone and insert; StreamEvent and CollectedResponse release fields iteratively; raw Value return transfers drop obligation
+omni-ir/src/stream.rs :: fn collect(events: impl IntoIterator<Item = StreamEvent>) -> CollectedResponse	iterative collector / safe clone and insert; StreamEvent and CollectedResponse release fields iteratively; raw Value return transfers drop obligation
+omni-ir/src/stream.rs :: fn has_json_payload(&self) -> bool	iterative collector / safe clone and insert; StreamEvent and CollectedResponse release fields iteratively; raw Value return transfers drop obligation
+omni-ir/src/stream.rs :: fn number(v: f64) -> Value	iterative collector / safe clone and insert; StreamEvent and CollectedResponse release fields iteratively; raw Value return transfers drop obligation
+omni-ir/src/stream.rs :: fn prompt_tokens(usage: &Usage) -> f64	iterative collector / safe clone and insert; StreamEvent and CollectedResponse release fields iteratively; raw Value return transfers drop obligation
+omni-ir/src/stream.rs :: fn to_json(&self) -> String	iterative collector / safe clone and insert; StreamEvent and CollectedResponse release fields iteratively; raw Value return transfers drop obligation
+omni-ir/src/stream.rs :: fn to_value(&self) -> JsValue	lossless canonical event; stack-safe clones and iterative JsValue release
+omni-ir/src/stream.rs :: fn try_collect( events: impl IntoIterator<Item = StreamEvent>, ) -> Result<CollectedResponse, crate::error::GatewayError>	iterative collector / safe clone and insert; StreamEvent and CollectedResponse release fields iteratively; raw Value return transfers drop obligation
+omni-ir/src/stream.rs :: fn usage_from_prompt_total( prompt_tokens: f64, output_tokens: f64, cache_read_tokens: f64, cache_write_tokens: f64, ) -> Usage	iterative collector / safe clone and insert; StreamEvent and CollectedResponse release fields iteratively; raw Value return transfers drop obligation
+omni-ir/src/stream.rs :: fn usage_value(u: &Usage) -> JsValue	raw counts cloned with stack-safe JsValue ownership
+omni-ir/src/text.rs :: fn from_utf16(units: Vec<u16>) -> Self	scalar/string API; no arbitrary JSON ownership
+omni-ir/src/text.rs :: fn push(&mut self, other: &Self)	scalar/string API; no arbitrary JSON ownership
+omni-ir/src/text.rs :: fn write_json(&self, out: &mut String)	scalar/string API; no arbitrary JSON ownership
+omni-ir/src/tokens.rs :: fn estimate_cached_input_tokens(request: &ChatRequest) -> f64	borrow-only token counting; JSON serialization uses stack-safe writer
+omni-ir/src/tokens.rs :: fn estimate_input_and_cached_tokens(request: &ChatRequest) -> (f64, f64)	borrow-only token counting; JSON serialization uses stack-safe writer
+omni-ir/src/tokens.rs :: fn estimate_input_tokens(request: &ChatRequest) -> f64	borrow-only token counting; JSON serialization uses stack-safe writer
+omni-providers/src/adapter.rs :: async fn next(&mut self) -> Option<Result<StreamEvent, GatewayError>>	borrows request/credentials; provider codec scopes assembly; returned events own iterative Drop
+omni-providers/src/adapter.rs :: async fn send<C: ProviderCodec>( codec: &C, id: &str, req: AdapterRequest<'_>, http: &dyn HttpClient, ) -> Result<AdapterResult, SendError>	borrows request/credentials; provider codec scopes assembly; returned events own iterative Drop
+omni-providers/src/adapter.rs :: fn bounded_degradations(entries: &[String]) -> Vec<String>	borrows request/credentials; provider codec scopes assembly; returned events own iterative Drop
+omni-providers/src/adapter.rs :: fn code(&self) -> ErrorCode	borrows request/credentials; provider codec scopes assembly; returned events own iterative Drop
+omni-providers/src/adapter.rs :: fn is_sendable_url(value: &str) -> bool	borrows request/credentials; provider codec scopes assembly; returned events own iterative Drop
+omni-providers/src/adapter.rs :: fn new(request: &'a ChatRequest, model: &'a str, credentials: &'a Credentials) -> Self	borrows request/credentials; provider codec scopes assembly; returned events own iterative Drop
+omni-providers/src/anthropic/body.rs :: fn apply_system(system: &[Value], first_user_text: &str) -> Vec<Value>	internal: caller must be inside a deep scope; production entry points are the codec and ingest
+omni-providers/src/anthropic/cloak.rs :: fn build(request: &ChatRequest) -> Self	borrows IR names only; produces string maps, never clones/releases nested JSON
+omni-providers/src/antigravity/cloak.rs :: fn build(request: &ChatRequest) -> Self	borrows IR names only; produces string maps, never clones/releases nested JSON
+omni-providers/src/antigravity/cloak.rs :: fn name<'a>(&'a self, name: &'a str) -> &'a str	scalar/string API; no arbitrary JSON ownership
+omni-providers/src/antigravity/cloak.rs :: fn original<'a>(&'a self, name: &'a str) -> &'a str	scalar/string API; no arbitrary JSON ownership
+omni-providers/src/antigravity/profile.rs :: fn headers(extra: Vec<(String, String)>) -> Vec<(String, String)>	scalar/string API; no arbitrary JSON ownership
+omni-providers/src/antigravity/profile.rs :: fn initialize()	scalar/string API; no arbitrary JSON ownership
+omni-providers/src/antigravity/wire.rs :: fn to_wire( req: &ChatRequest, model: &str, project: &str, request_id: &str, cloak: &ToolCloak, ) -> Result<(Value, Vec<String>), crate::codec::BuildError>	Value is JsValue here; takes borrowed IR, uses iterative release on both success and failures
+omni-providers/src/antigravity/codec.rs :: fn build_request( &self, input: &CodecInput<'_>, ) -> Result<CodecRequest<DecodeState>, GatewayError>	borrows IR; jsjson serialization and deep disposal of assembled envelope; 39990-level build/serialize/drop pinned on 2 MiB threads; Rust serializes beyond frozen engine threshold
+omni-providers/src/anthropic/cloak.rs :: fn name<'a>(&'a self, name: &'a str) -> &'a str	borrows IR names only; produces string maps, never clones/releases nested JSON
+omni-providers/src/anthropic/decode.rs :: fn is_fingerprint_message(message: &str) -> bool	scalar/string API; no arbitrary JSON ownership
+omni-providers/src/antigravity/oauth.rs :: fn refresh_request(token: &str) -> AuthRequest	request contains only strings and header pairs
+omni-providers/src/antigravity/oauth.rs :: fn start(verifier: &str, challenge: &str, state: &str) -> AuthorizeStart	owned strings only
+omni-providers/src/antigravity/oauth.rs :: fn exchange_request(code: &str, pending: &PendingFlow) -> Result<AuthRequest, GatewayError>	request contains only strings and header pairs
+omni-providers/src/antigravity/oauth.rs :: fn email_request(access: &str) -> AuthRequest	request contains only strings and header pairs
+omni-providers/src/antigravity/oauth.rs :: fn email_result(status: u16, text: &str) -> Option<JsValue>	iteratively dropped JsValue parse; result is scalar string only
+omni-providers/src/antigravity/oauth.rs :: fn project_result(status: u16, text: &str) -> (String, String)	iteratively dropped JsValue parse; result contains owned strings only
+omni-providers/src/antigravity/oauth.rs :: fn load_request(access: &str) -> AuthRequest	request contains only strings and header pairs
+omni-providers/src/antigravity/oauth.rs :: fn onboard_request(access: &str, tier: &str) -> AuthRequest	request contains only strings and header pairs
+omni-providers/src/antigravity/oauth.rs :: fn onboard_result(status: u16, text: &str) -> String	iteratively dropped JsValue parse; result is owned string only
+omni-providers/src/antigravity/oauth.rs :: fn token_result( status: u16, text: &str, fallback: Option<&str>, now: f64, provider_data: &Value, ) -> Result<FlowResult, GatewayError>	borrowed provider data cloned iteratively; FlowResult owns deep-safe Clone/Drop
+omni-providers/src/anthropic/oauth.rs :: fn exchange_request(code: &str, pending: &PendingFlow) -> Result<AuthRequest, GatewayError>	borrow-only JSON field extraction; output tokens/errors contain strings/numbers
+omni-providers/src/anthropic/oauth.rs :: fn refresh_request(token: &str) -> AuthRequest	borrow-only JSON field extraction; output tokens/errors contain strings/numbers
+omni-providers/src/anthropic/oauth.rs :: fn start(verifier: &str, challenge: &str, state: &str) -> AuthorizeStart	borrow-only JSON field extraction; output tokens/errors contain strings/numbers
+omni-providers/src/anthropic/oauth.rs :: fn token_result( status: u16, text: &str, fallback: Option<&str>, now: f64, ) -> Result<FlowResult, GatewayError>	borrow-only JSON field extraction; output tokens/errors contain strings/numbers
+omni-providers/src/anthropic/profile.rs :: fn env(name: &str, fallback: &str) -> String	scalar/string API; no arbitrary JSON ownership
+omni-providers/src/anthropic/profile.rs :: fn headers(extra: Vec<(String, String)>) -> Vec<(String, String)>	scalar/string API; no arbitrary JSON ownership
+omni-providers/src/anthropic/profile.rs :: fn initialize()	scalar/string API; no arbitrary JSON ownership
+omni-providers/src/anthropic/wire.rs :: fn encode_block(block: &ContentBlock, cloak: &ToolCloak) -> Result<Value, GatewayError>	internal: caller must be inside a deep scope; production entry points are the codec and ingest
+omni-providers/src/anthropic/wire.rs :: fn to_wire( req: &omni_ir::request::ChatRequest, model: &str, oauth: bool, cloak: &ToolCloak, saved_max: Option<f64>, ) -> Result<(Value, Vec<String>), GatewayError>	internal: caller must be inside a deep scope; production entry points are the codec and ingest
+omni-providers/src/anthropic/wire.rs :: fn to_wire_with_options( req: &omni_ir::request::ChatRequest, model: &str, oauth: bool, cloak: &ToolCloak, saved_max: Option<f64>, preserve_system: bool, auto_cache: bool, ) -> Result<(Value, Vec<String>), GatewayError>	internal: caller must be inside a deep scope; production entry points are the codec and ingest
+omni-providers/src/custom/codec.rs :: fn endpoint_url(origin: &str, base_path: &str, protocol: Protocol) -> String	endpoint URL string only (re-exported); no JSON
+omni-providers/src/custom/decode/chat.rs :: fn new() -> Self	constructor creates empty decoder; queued StreamEvent owns iterative Drop
+omni-providers/src/custom/decode/responses.rs :: fn new() -> Self	constructor creates empty decoder; queued StreamEvent owns iterative Drop
+omni-providers/src/custom/wire.rs :: fn to_custom_chat_wire(req: &ChatRequest, model: &str) -> Encoded	internal: caller must be inside a deep scope; production entry points are the codec and ingest
+omni-providers/src/http/body.rs :: async fn next_chunk(&mut self) -> Option<Result<Bytes, HttpError>>	bytes/strings or HTTP state; no parsed arbitrary JSON ownership
+omni-providers/src/http/body.rs :: async fn text(mut self) -> Result<String, HttpError>	bytes/strings or HTTP state; no parsed arbitrary JSON ownership
+omni-providers/src/http/body.rs :: fn append_received(&mut self, name: &str, value: &str)	bytes/strings or HTTP state; no parsed arbitrary JSON ownership
+omni-providers/src/http/body.rs :: fn finish_if_ready(mut self)	bytes/strings or HTTP state; no parsed arbitrary JSON ownership
+omni-providers/src/http/body.rs :: fn from_bytes(bytes: impl Into<Bytes>) -> Self	bytes/strings or HTTP state; no parsed arbitrary JSON ownership
+omni-providers/src/http/body.rs :: fn from_chunks(chunks: Vec<Bytes>) -> Self	bytes/strings or HTTP state; no parsed arbitrary JSON ownership
+omni-providers/src/http/body.rs :: fn get(&self, name: &str) -> Option<String>	bytes/strings or HTTP state; no parsed arbitrary JSON ownership
+omni-providers/src/http/body.rs :: fn iter(&self) -> impl Iterator<Item = (&str, &str)>	bytes/strings or HTTP state; no parsed arbitrary JSON ownership
+omni-providers/src/http/body.rs :: fn new() -> Self	bytes/strings or HTTP state; no parsed arbitrary JSON ownership
+omni-providers/src/http/mod.rs :: async fn send(&self, req: HttpRequest) -> Result<HttpResponse, HttpError>	bytes/strings or HTTP state; no parsed arbitrary JSON ownership
+omni-providers/src/http/mod.rs :: fn idle_connections(&self) -> usize	bytes/strings or HTTP state; no parsed arbitrary JSON ownership
+omni-providers/src/http/mod.rs :: fn is_network(&self) -> bool	bytes/strings or HTTP state; no parsed arbitrary JSON ownership
+omni-providers/src/http/mod.rs :: fn new() -> Self	bytes/strings or HTTP state; no parsed arbitrary JSON ownership
+omni-providers/src/http/mod.rs :: fn with_config(roots: Option<rustls::RootCertStore>, limits: PoolLimits) -> Self	bytes/strings or HTTP state; no parsed arbitrary JSON ownership
+omni-providers/src/http/mod.rs :: fn with_on_response_head(mut self, hook: OnResponseHead) -> Self	bytes/strings or HTTP state; no parsed arbitrary JSON ownership
+omni-providers/src/http/mod.rs :: fn with_roots(roots: rustls::RootCertStore) -> Self	bytes/strings or HTTP state; no parsed arbitrary JSON ownership
+omni-providers/src/http/pool.rs :: async fn connect(&self, target: &Target) -> Result<Conn, HttpError>	bytes/strings or HTTP state; no parsed arbitrary JSON ownership
+omni-providers/src/http/pool.rs :: fn checkin(&self, key: Key, conn: Conn)	bytes/strings or HTTP state; no parsed arbitrary JSON ownership
+omni-providers/src/http/pool.rs :: fn checkin_owned(pool: &Arc<Pool>, key: Key, conn: Conn)	bytes/strings or HTTP state; no parsed arbitrary JSON ownership
+omni-providers/src/http/pool.rs :: fn checkout(&self, key: &Key) -> Option<Conn>	bytes/strings or HTTP state; no parsed arbitrary JSON ownership
+omni-providers/src/http/pool.rs :: fn idle_count(&self) -> usize	bytes/strings or HTTP state; no parsed arbitrary JSON ownership
+omni-providers/src/http/pool.rs :: fn new(roots: Option<rustls::RootCertStore>, limits: PoolLimits) -> Pool	bytes/strings or HTTP state; no parsed arbitrary JSON ownership
+omni-providers/src/http/pool.rs :: fn of(target: &Target) -> Key	bytes/strings or HTTP state; no parsed arbitrary JSON ownership
+omni-providers/src/http_error.rs :: fn http_error( status: u16, headers: &Headers, text: &str, provider: &str, now_ms: f64, ) -> GatewayError	bytes/strings or HTTP state; no parsed arbitrary JSON ownership
+omni-providers/src/http_error.rs :: fn now_ms() -> f64	bytes/strings or HTTP state; no parsed arbitrary JSON ownership
+omni-providers/src/http_error.rs :: fn parse_retry_after(header: Option<&str>, now_ms: f64) -> Option<f64>	bytes/strings or HTTP state; no parsed arbitrary JSON ownership
+omni-providers/src/oauth.rs :: fn pkce() -> (String, String)	borrow-only JSON field extraction; output tokens/errors contain strings/numbers
+omni-providers/src/oauth.rs :: fn pkce_challenge(verifier: &str) -> String	borrow-only JSON field extraction; output tokens/errors contain strings/numbers
+omni-providers/src/oauth.rs :: fn random_state() -> String	borrow-only JSON field extraction; output tokens/errors contain strings/numbers
+omni-providers/src/oauth.rs :: fn token_error(status: u16, body: &Value) -> GatewayError	borrow-only JSON field extraction; output tokens/errors contain strings/numbers
+omni-providers/src/sse.rs :: fn finish(self) -> Option<SseMessage>	bytes/strings or HTTP state; no parsed arbitrary JSON ownership
+omni-providers/src/sse.rs :: fn new() -> Self	bytes/strings or HTTP state; no parsed arbitrary JSON ownership
+omni-providers/src/sse.rs :: fn push(&mut self, chunk: &[u8], out: &mut Vec<SseMessage>) -> Result<(), GatewayError>	bytes/strings or HTTP state; no parsed arbitrary JSON ownership
+omni-providers/src/system.rs :: fn system_text( system: Option<&[ContentBlock]>, provider: &str, note: &mut impl FnMut(String), ) -> Option<String>	borrows content block text; returns string, no JSON release
+omni-providers/src/tool_result_files.rs :: fn file_name(file: &FileBlock) -> String	typed file strings produce shallow JSON only; no arbitrary nested input
+omni-providers/src/tool_result_files.rs :: fn file_text(file: &FileBlock) -> String	typed file strings produce shallow JSON only; no arbitrary nested input
+omni-providers/src/tool_result_files.rs :: fn is_textual(media_type: &str) -> bool	typed file strings produce shallow JSON only; no arbitrary nested input
+omni-providers/src/tool_result_files.rs :: fn node_base64_decode(s: &str) -> Vec<u8>	typed file strings produce shallow JSON only; no arbitrary nested input
+omni-providers/src/tool_result_files.rs :: fn responses_files(files: &[FileBlock]) -> ResponsesFiles	typed file strings produce shallow JSON only; no arbitrary nested input
+omni-providers/src/tool_result_files.rs :: fn split_files<'a>(files: &'a [FileBlock], carries: impl Fn(&str) -> bool) -> SplitFiles<'a>	typed file strings produce shallow JSON only; no arbitrary nested input
+omni-providers/src/tool_result_files.rs :: fn with_file_text(content: &str, text: &[String]) -> String	typed file strings produce shallow JSON only; no arbitrary nested input
+omni-ir/src/jsjson.rs :: fn scan_steps() -> u64	thread-local step counter for complexity tests; no JSON taken, returned or released
+omni-ir/src/jsjson.rs :: fn top_level_string(text: &str, key: &str) -> Option<Vec<u16>>	one linear pass over borrowed text, nesting skipped by a depth counter; builds no JSON value, returns UTF-16 units
+omni-ir/src/js.rs :: fn try_to_number(value: Option<&Value>) -> Result<f64, Throws>	Borrowed JSON inspected with stack growth; scalar result owns no JSON.
+omni-ir/src/js.rs :: fn try_to_string(value: Option<&Value>) -> Result<String, Throws>	Borrowed JSON inspected with stack growth; shared writer returns owned string.
+omni-providers/src/openai/oauth_lifecycle.rs :: fn exchange_request(code: &str, pending: &PendingFlow) -> Result<AuthRequest, GatewayError>	string-only exchange request, no retained client JSON
+omni-providers/src/openai/oauth_lifecycle.rs :: fn refresh_request(token: &str) -> AuthRequest	string-only refresh request
+omni-providers/src/openai/oauth_lifecycle.rs :: fn token_result( status: u16, text: &str, fallback: Option<&str>, now: f64, prior: &Value, ) -> Result<FlowResult, GatewayError>	borrows prior; retains validated identity strings and scalar claims only; parsed claims owned with iterative drop
+omni-providers/src/antigravity/decode.rs :: fn new(cloak: ToolCloak) -> Self	string maps only; upstream parse/serialization scoped by depth bound with Owned disposal
+omni-providers/src/antigravity/schema.rs :: fn try_prune(node: &Value) -> Result<(Value, Vec<String>), crate::codec::BuildError>	borrows input; null root returns Throw; recursion bounded to 24 schema hops; deep clone/insert for opaque JSON; caller deep-disposes returned Value
+omni-providers/src/openai/oauth_start.rs :: fn start(redirect: &str, verifier: &str, challenge: &str, state: &str) -> AuthorizeStart	string-only authorization URL construction; no client JSON crosses this function
+omni-providers/src/http/body.rs :: fn observe(&mut self, observer: Arc<dyn BodyObserver>)	Opt-in raw-byte observer; no JSON assembly crosses this seam.
+omni-providers/src/http/body.rs :: fn start_stream(&mut self)	Select streaming view and start independent capture drain; no JSON assembly.
+omni-providers/src/quota.rs :: fn request( provider: &str, operation: &str, token: &str, data: &Value, body: Value, ) -> Option<QuotaRequest>	Operator quota request builder; borrows credential metadata, consumes host-authored body; returns serialized transport strings, no retained JSON.
+omni-providers/src/quota.rs :: fn usage(provider: &str, v: &Value, now: f64) -> Vec<Value>	Borrows provider quota reply; returns newly assembled fixed-shape scalar window observations, not arbitrary reply subtrees.
+omni-providers/src/quota.rs :: fn credits(provider: &str, v: &Value) -> Option<Value>	Borrows provider quota reply; returns normalized fixed-shape credit scalars, no arbitrary reply subtree retention.
+omni-providers/src/quota.rs :: fn redeemed(provider: &str, result: &Value) -> Result<Option<f64>, String>	Borrows provider redemption reply; returns scalar reset count or error string, retains no JSON.
+omni-ir/src/error.rs :: fn client_message(&self) -> crate::text::Text	preserves upstream code units; no nested ownership
+omni-ir/src/error.rs :: fn from_text(code: ErrorCode, message: crate::text::Text) -> Self	keeps original Text alongside UTF-8 diagnostics when needed
+omni-ir/src/jsjson.rs :: fn add(left: &JsValue, right: &JsValue) -> Result<JsValue, crate::js::Throws>	JS addition; text coercion stack grows for arrays
+omni-ir/src/jsjson.rs :: fn as_array(&self) -> Option<&[Self]>	borrowed children
+omni-ir/src/jsjson.rs :: fn as_f64(&self) -> Option<f64>	scalar accessor
+omni-ir/src/jsjson.rs :: fn as_object(&self) -> Option<&[(Vec<u16>, Self)]>	borrowed members
+omni-ir/src/jsjson.rs :: fn as_text(&self) -> Option<crate::text::Text>	string only; no nested ownership
+omni-ir/src/jsjson.rs :: fn assign_entries(&mut self, source: &Self)	Object.assign; stack-safe clone and release
+omni-ir/src/jsjson.rs :: fn coerce_number(value: Option<&JsValue>) -> Result<f64, crate::js::Throws>	JS Number coercion; stack grows on nested arrays
+omni-ir/src/jsjson.rs :: fn coerce_text(value: Option<&JsValue>) -> Result<crate::text::Text, crate::js::Throws>	JS String coercion; stack grows on nested arrays
+omni-ir/src/jsjson.rs :: fn extend_object(&mut self, source: Self)	moves JSON children; iterative release of displaced entries
+omni-ir/src/jsjson.rs :: fn get(&self, key: &str) -> Option<&Self>	borrowed member
+omni-ir/src/jsjson.rs :: fn into_object(mut self) -> Vec<(Vec<u16>, Self)>	moves children; each JsValue releases iteratively
+omni-ir/src/jsjson.rs :: fn is_array(&self) -> bool	type predicate only
+omni-ir/src/jsjson.rs :: fn is_null(&self) -> bool	type predicate only
+omni-ir/src/jsjson.rs :: fn is_object(&self) -> bool	type predicate only
+omni-ir/src/jsjson.rs :: fn is_string(&self) -> bool	type predicate only
+omni-ir/src/jsjson.rs :: fn object(entries: impl IntoIterator<Item = (&'static str, Self)>) -> Self	moves children into an iteratively released object
+omni-ir/src/jsjson.rs :: fn object_from_serde(map: &serde_json::Map<String, serde_json::Value>) -> JsValue	stack-growing conversion from borrowed map
+omni-ir/src/jsjson.rs :: fn parse_bounded(text: &str, depth: usize) -> Result<JsValue, crate::deep::ParseError>	caller supplies outer-depth scan; iterative parse and release
+omni-ir/src/jsjson.rs :: fn put(&mut self, key: Vec<u16>, value: Self)	iterative release of replaced JsValue
+omni-ir/src/jsjson.rs :: fn render(value: &JsValue) -> String	stack-growing JavaScript JSON writer
+omni-ir/src/jsjson.rs :: fn string_eq(&self, text: &str) -> bool	borrowed string comparison
+omni-ir/src/jsjson.rs :: fn to_serde_lossy(value: &JsValue) -> serde_json::Value	stack-growing explicit projection; caller owns iterative disposal of resulting serde JSON
+omni-ir/src/jsjson.rs :: fn write_js_spread(data: &JsValue, key: &str, value: &str, spread: Spread, out: &mut String)	borrows payloads and writes them using stack growth
+omni-ir/src/jsjson.rs :: fn write_js_value(value: &JsValue, out: &mut String)	borrows opaque JSON; stack-growing writer
+omni-ir/src/request.rs :: fn from_source(source: crate::jsjson::JsValue) -> Result<Self, String>	stack-safe conversion and scoped Deserialize; retains original JsValue
+omni-ir/src/request.rs :: fn parse(text: &str) -> Result<Self, String>	bounded lossless parse and validated projection
+omni-ir/src/stream.rs :: fn client_cache_read(&self) -> JsValue	clones losslessly with stack growth; iterative release
+omni-ir/src/stream.rs :: fn client_output(&self) -> JsValue	clones losslessly with stack growth; iterative release
+omni-ir/src/stream.rs :: fn client_prompt(&self) -> JsValue	JS addition before serialization; array coercion uses stack growth
+omni-ir/src/stream.rs :: fn client_total(&self, prompt: &JsValue) -> JsValue	JS addition before serialization; array coercion uses stack growth
+omni-ir/src/text.rs :: fn as_utf8(&self) -> Option<&str>	borrows UTF-8 representation only
+omni-ir/src/text.rs :: fn is_empty(&self) -> bool	string length only
+omni-ir/src/text.rs :: fn len(&self) -> usize	conservative retained string byte count
+omni-ir/src/text.rs :: fn surrounded(&self, prefix: &str, suffix: &str) -> Self	code-unit concatenation; no nested ownership
+omni-ir/src/text.rs :: fn to_utf16(&self) -> Vec<u16>	scalar text only
+omni-ir/src/text.rs :: fn to_utf8_lossy(&self) -> std::borrow::Cow<'_, str>	explicit UTF-8-only diagnostic and hashing boundary
+omni-ir/src/text.rs :: fn with_json_source<R>(&self, f: impl FnOnce(&str) -> R) -> R	borrows UTF-8 JSON source or escapes lone units only in JSON string positions
+omni-providers/src/antigravity/codec.rs :: fn build_canonical( &self, request: &CanonicalRequest, model: &str, access_token: &str, project: &Text, request_id: Option<&Text>, ) -> Result<CodecRequest<DecodeState>, BuildError>	borrows canonical request and uses JsValue iteration and stack-growing serialization

@@ -1,0 +1,1049 @@
+//! Browser OAuth with expiring coordinator pending state.
+use crate::{
+    api::{ApiError, json_ok, read_json, require_admin},
+    server::{App, Body},
+};
+use hyper::{Request, Response, body::Incoming};
+use omni_control::settings_value::{get, trim_units};
+use omni_coord::{Coord, MemoryCoord};
+use omni_ir::{
+    error::{ErrorCode, GatewayError},
+    jsjson::{JsValue, parse_js, stringify},
+};
+use omni_providers::oauth::{AuthorizeStart, PendingFlow};
+use std::sync::Arc;
+
+type Result<T> = std::result::Result<T, GatewayError>;
+const PROVIDERS: &[(&str, &str)] = &[
+    ("anthropic", ""),
+    ("openai", "http://localhost:1455/auth/callback"),
+    ("antigravity", "https://antigravity.google/oauth-callback"),
+];
+fn bad(s: &str) -> GatewayError {
+    GatewayError::new(ErrorCode::BadRequest, s)
+}
+fn internal() -> GatewayError {
+    GatewayError::new(ErrorCode::Internal, "internal error")
+}
+fn text(v: Option<&JsValue>) -> Option<String> {
+    match v {
+        Some(JsValue::String(s)) => Some(String::from_utf16_lossy(s)),
+        _ => None,
+    }
+}
+fn string(s: &str) -> JsValue {
+    JsValue::String(s.encode_utf16().collect())
+}
+fn object(fields: Vec<(&str, JsValue)>) -> JsValue {
+    JsValue::Object(
+        fields
+            .into_iter()
+            .map(|(k, v)| (k.encode_utf16().collect(), v))
+            .collect(),
+    )
+}
+
+type Flight = tokio::sync::watch::Sender<Option<Result<String>>>;
+pub struct ConnectFlows {
+    coord: Arc<dyn Coord>,
+    flights: std::sync::Mutex<std::collections::HashMap<String, Flight>>,
+}
+impl Default for ConnectFlows {
+    fn default() -> Self {
+        Self::new(Arc::new(MemoryCoord::new(omni_coord::system_clock())))
+    }
+}
+impl ConnectFlows {
+    pub fn new(coord: Arc<dyn Coord>) -> Self {
+        Self {
+            coord,
+            flights: std::sync::Mutex::default(),
+        }
+    }
+    async fn poll(
+        self: &Arc<Self>,
+        host: Arc<crate::refresh::Refresher>,
+        holder: Arc<omni_gateway_core::snapshot::SnapshotHolder>,
+        id: String,
+    ) -> Result<String> {
+        let mut rx = {
+            let mut flights = self
+                .flights
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(tx) = flights.get(&id) {
+                tx.subscribe()
+            } else {
+                let (tx, rx) = tokio::sync::watch::channel(None);
+                flights.insert(id.clone(), tx.clone());
+                let owner = self.clone();
+                let key = id.clone();
+                tokio::spawn(async move {
+                    let result = match owner.pending(&key, true).await {
+                        Ok(flow) => complete(host, holder, flow, "").await,
+                        Err(e) => Err(e),
+                    };
+                    owner
+                        .flights
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .remove(&key);
+                    tx.send_replace(Some(result));
+                });
+                rx
+            }
+        };
+        loop {
+            if let Some(result) = rx.borrow().clone() {
+                break result;
+            }
+            rx.changed().await.map_err(|_| internal())?;
+        }
+    }
+    async fn finish(&self, app: &App, id: &str, code: &str) -> Result<String> {
+        let flow = self.pending(id, true).await?;
+        let provider = text(get(&flow, "provider")).ok_or_else(internal)?;
+        let pending = pending_value(&flow)?;
+        let code = normalize(&provider, &pending, code)?;
+        finish_exchange(
+            app.deps.refresher.clone(),
+            app.deps.holder.clone(),
+            flow,
+            code,
+        )
+        .await
+    }
+    async fn pending(&self, id: &str, take: bool) -> Result<JsValue> {
+        let key = format!("oauth:pending:{id}");
+        if take {
+            return omni_coord::with_lock(
+                self.coord.as_ref(),
+                &key,
+                10_000,
+                std::time::Duration::from_secs(1),
+                || self.read_pending(&key, true),
+            )
+            .await
+            .map_err(|_| internal())?;
+        }
+        self.read_pending(&key, false).await
+    }
+
+    async fn read_pending(&self, key: &str, take: bool) -> Result<JsValue> {
+        let raw = self
+            .coord
+            .kv_get(key)
+            .await
+            .map_err(|_| internal())?
+            .ok_or_else(|| bad("unknown or expired authorization"))?;
+        if take {
+            self.coord.kv_del(key).await.map_err(|_| internal())?;
+        }
+        parse_js(&raw).map_err(|_| internal())
+    }
+    async fn start(&self, app: &App, body: &JsValue) -> Result<String> {
+        let provider = text(get(body, "provider"));
+        let (provider, redirect) = PROVIDERS
+            .iter()
+            .find(|(p, _)| Some(*p) == provider.as_deref())
+            .ok_or_else(|| {
+                bad(&format!(
+                    "provider must be one of {}",
+                    PROVIDERS
+                        .iter()
+                        .map(|(p, _)| *p)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            })?;
+        let credential = if let Some(v) = get(body, "credentialId") {
+            let id = text(Some(v)).ok_or_else(|| bad("invalid credential for reconnect"))?;
+            let id = omni_ir::js::trim(&id).to_owned();
+            if id.is_empty() {
+                return Err(bad("invalid credential for reconnect"));
+            }
+            let row = app
+                .deps
+                .refresher
+                .store
+                .credential(&app.credential_key, &id)
+                .await
+                .map_err(|_| internal())?;
+            if !row.is_some_and(|r| {
+                r.provider == *provider && r.auth_type == omni_store::AuthType::OAuth
+            }) {
+                return Err(bad("invalid credential for reconnect"));
+            }
+            Some(id)
+        } else {
+            None
+        };
+        let label = match get(body, "label") {
+            Some(JsValue::String(s)) if !trim_units(s).is_empty() => {
+                JsValue::String(trim_units(s).to_vec())
+            }
+            _ => string(provider),
+        };
+        let (verifier, challenge) = omni_providers::oauth::pkce();
+        let state = omni_providers::oauth::random_state();
+        let AuthorizeStart {
+            authorize_url,
+            pending,
+        } = if *provider == "openai" {
+            omni_providers::openai::oauth::start(redirect, &verifier, &challenge, &state)
+        } else if *provider == "antigravity" {
+            omni_providers::antigravity::oauth::start(&verifier, &challenge, &state)
+        } else {
+            omni_providers::anthropic::oauth::start(&verifier, &challenge, &state)
+        };
+        let mut fields = vec![
+            ("provider", string(provider)),
+            ("label", label),
+            (
+                "pending",
+                object(vec![
+                    ("verifier", string(&pending.verifier)),
+                    ("challenge", string(&pending.challenge)),
+                    ("state", string(&pending.state)),
+                    ("redirectUri", string(&pending.redirect_uri)),
+                ]),
+            ),
+        ];
+        if let Some(id) = credential {
+            fields.push(("credentialId", string(&id)));
+        }
+        let id = omni_providers::oauth::random_state();
+        self.coord
+            .kv_set(
+                &format!("oauth:pending:{id}"),
+                &stringify(&object(fields)).ok_or_else(internal)?,
+                600_000,
+            )
+            .await
+            .map_err(|_| internal())?;
+        stringify(&object(vec![
+            ("flowId", string(&id)),
+            ("authorizeUrl", string(&authorize_url)),
+            ("userCode", JsValue::Null),
+            ("kind", string("pkce")),
+            ("supportsManualPaste", JsValue::Bool(true)),
+            ("pollIntervalMs", JsValue::Number(5000.0)),
+        ]))
+        .ok_or_else(internal)
+    }
+}
+pub async fn serve(
+    app: &App,
+    req: Request<Incoming>,
+    route: &str,
+) -> std::result::Result<Response<Body>, ApiError> {
+    require_admin(req.headers(), &app.admin).await?;
+    let body = read_json(req, app.idle_timeout).await?;
+    let result = match route {
+        "start" => app.connect.start(app, &body).await,
+        "finish" if text(get(&body, "flowId")).is_none() || text(get(&body, "code")).is_none() => {
+            Err(bad("flowId and code are required"))
+        }
+        "poll" if text(get(&body, "flowId")).is_none() => Err(bad("flowId is required")),
+        "finish" => app
+            .connect
+            .finish(
+                app,
+                &text(get(&body, "flowId")).unwrap_or_default(),
+                &text(get(&body, "code")).unwrap_or_default(),
+            )
+            .await
+            .map(|id| serde_json::json!({"id":id}).to_string()),
+        _ => app
+            .connect
+            .poll(
+                app.deps.refresher.clone(),
+                app.deps.holder.clone(),
+                text(get(&body, "flowId")).unwrap_or_default(),
+            )
+            .await
+            .map(|id| serde_json::json!({"status":"complete","id":id}).to_string()),
+    };
+    result.map(json_ok).map_err(ApiError::Gateway)
+}
+
+fn pending_value(flow: &JsValue) -> Result<PendingFlow> {
+    let p = get(flow, "pending").ok_or_else(internal)?;
+    Ok(PendingFlow {
+        verifier: text(get(p, "verifier")).ok_or_else(internal)?,
+        challenge: text(get(p, "challenge")).ok_or_else(internal)?,
+        state: text(get(p, "state")).ok_or_else(internal)?,
+        redirect_uri: text(get(p, "redirectUri")).ok_or_else(internal)?,
+    })
+}
+fn normalize(provider: &str, pending: &PendingFlow, code: &str) -> Result<String> {
+    let callback = PROVIDERS
+        .iter()
+        .find(|(p, _)| *p == provider)
+        .map_or("", |(_, c)| *c);
+    if callback.is_empty() {
+        return Ok(code.into());
+    }
+    let Ok(url) = url::Url::parse(code) else {
+        return Ok(code.into());
+    };
+    let expected = url::Url::parse(callback).map_err(|_| internal())?;
+    let label = if provider == "antigravity" {
+        "Antigravity"
+    } else {
+        "OpenAI"
+    };
+    if url.origin() != expected.origin() || url.path() != expected.path() {
+        return Err(bad(&format!("invalid {label} callback URL")));
+    }
+    let field = |name| {
+        url.query_pairs()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| omni_ir::js::trim(&v).to_owned())
+            .unwrap_or_default()
+    };
+    let code = field("code");
+    let state = field("state");
+    if code.is_empty() || state.is_empty() {
+        return Err(bad(&format!(
+            "{label} callback URL must contain code and state"
+        )));
+    }
+    if state != pending.state {
+        return Err(GatewayError::new(
+            ErrorCode::Auth,
+            "authorization state mismatch",
+        ));
+    }
+    Ok(format!("{code}#{state}"))
+}
+fn exchange_failure(provider: &str) -> GatewayError {
+    // Frozen step runner raises transport failures into the exchange generator.
+    // Neither built-in catches them, so rethrow classifies them as UPSTREAM.
+    GatewayError::new(
+        ErrorCode::Upstream,
+        format!("{provider} oauth exchange threw"),
+    )
+}
+async fn finish_exchange(
+    host: Arc<crate::refresh::Refresher>,
+    holder: Arc<omni_gateway_core::snapshot::SnapshotHolder>,
+    flow: JsValue,
+    code: String,
+) -> Result<String> {
+    // Dropping an admin connection must not cancel an already consumed flow.
+    tokio::spawn(async move { complete(host, holder, flow, &code).await })
+        .await
+        .map_err(|_| internal())?
+}
+async fn complete(
+    host: Arc<crate::refresh::Refresher>,
+    holder: Arc<omni_gateway_core::snapshot::SnapshotHolder>,
+    flow: JsValue,
+    code: &str,
+) -> Result<String> {
+    use omni_providers::http::HttpRequest;
+    let provider = text(get(&flow, "provider")).ok_or_else(internal)?;
+    let reconnect = text(get(&flow, "credentialId"));
+    let prior = if let Some(id) = &reconnect {
+        Some(
+            host.store
+                .credential(&host.key, id)
+                .await
+                .map_err(|_| internal())?
+                .ok_or_else(|| bad("credential not found"))?,
+        )
+    } else {
+        None
+    };
+    let data = prior
+        .as_ref()
+        .filter(|c| c.provider == provider)
+        .map_or(&serde_json::Value::Null, |c| &c.provider_data);
+    let pending = pending_value(&flow)?;
+    let result = if provider == "antigravity" {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(150),
+            antigravity_exchange(&host, code, &pending),
+        )
+        .await
+        .map_err(|_| {
+            GatewayError::new(
+                ErrorCode::Upstream,
+                "antigravity oauth exchange did not finish within 150000ms",
+            )
+        })??
+    } else {
+        let request = if provider == "openai" {
+            omni_providers::openai::oauth::exchange_request(code, &pending)?
+        } else {
+            omni_providers::anthropic::oauth::exchange_request(code, &pending)?
+        };
+        let response = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let response = host
+                .http
+                .send(HttpRequest {
+                    provider: provider.clone(),
+                    url: request.url,
+                    method: request.method,
+                    headers: request.headers,
+                    body: request.body,
+                    body_encoding: None,
+                    request_id: None,
+                })
+                .await?;
+            Ok::<_, omni_providers::http::HttpError>((response.status, response.body.text().await?))
+        })
+        .await
+        .map_err(|_| exchange_failure(&provider))?
+        .map_err(|_| exchange_failure(&provider))?;
+        #[allow(clippy::cast_precision_loss)]
+        let now = (host.now)() as f64;
+        if provider == "openai" {
+            omni_providers::openai::oauth::token_result(response.0, &response.1, None, now, data)?
+        } else {
+            omni_providers::anthropic::oauth::token_result(response.0, &response.1, None, now)?
+        }
+    };
+    // The frozen connect host validates flow secrets before persistence.
+    if result
+        .refresh_token
+        .as_ref()
+        .is_some_and(|v| !matches!(v, JsValue::String(_)))
+    {
+        return Err(GatewayError::new(
+            ErrorCode::Upstream,
+            format!("{provider} oauth exchange returned something the host cannot use"),
+        ));
+    }
+    let tokens = omni_store::credentials::TokenUpdate {
+        access_token: Some(String::from_utf16_lossy(&result.access_token)),
+        refresh_token: result.refresh_token.as_ref().map(crate::refresh::js_text),
+        api_key: None,
+        id_token: result
+            .id_token
+            .as_ref()
+            .map(|s| String::from_utf16_lossy(s)),
+        expires_at: result.expires_at,
+        updated_at: (host.now)(),
+    };
+    let email = result
+        .account_email
+        .as_ref()
+        .map(|v| crate::refresh::email_text(v, host.store.engine()))
+        .transpose()
+        .map_err(|_| internal())?;
+    let id = reconnect.clone().unwrap_or_else(|| {
+        omni_crypto::codex::uuid_v4_from(&omni_providers::oauth::random_state())
+    });
+    let label = text(get(&flow, "label")).ok_or_else(internal)?;
+    host.store
+        .save_oauth(
+            &host.key,
+            &omni_store::credentials::OAuthCredential {
+                id: &id,
+                provider: &provider,
+                label: &label,
+                provider_data: &omni_ir::jsjson::to_string(&serde_json::Value::Object(
+                    omni_ir::deep::clone_map(&result.provider_data),
+                )),
+                account_email: email.as_deref(),
+                tokens: &tokens,
+                reconnect: reconnect.is_some(),
+            },
+        )
+        .await
+        .map_err(|_| internal())?;
+    host.routing_committed(crate::routing::RoutingChange::Credential { id: id.clone() });
+    if holder.rebuild_from(host.store.clone()).await.is_err() {
+        tracing::warn!(credentialId = %id, "credential snapshot publication failed; retaining previous snapshot");
+    }
+    if reconnect.is_some() {
+        tracing::info!(provider, credentialId = id, "oauth reconnect completed");
+    } else {
+        tracing::info!(provider, credentialId = id, "oauth connect completed");
+    }
+    Ok(id)
+}
+
+/// Frozen exchange runner limits, applied before transport. The other two providers
+/// retain their existing single-request path, including its byte ordering.
+struct AntigravityExchange<'a> {
+    host: &'a crate::refresh::Refresher,
+    sent: usize,
+}
+impl AntigravityExchange<'_> {
+    async fn send(
+        &mut self,
+        request: omni_providers::oauth::AuthRequest,
+        seconds: u64,
+    ) -> Result<(u16, String)> {
+        self.sent += 1;
+        if self.sent > 4 {
+            return Err(GatewayError::new(
+                ErrorCode::Upstream,
+                "antigravity oauth exchange asked for more than 4 requests",
+            ));
+        }
+        let url = url::Url::parse(&request.url).map_err(|_| exchange_failure("antigravity"))?;
+        if ![
+            "https://oauth2.googleapis.com",
+            "https://www.googleapis.com",
+            "https://cloudcode-pa.googleapis.com",
+            "https://accounts.google.com",
+            "https://daily-cloudcode-pa.googleapis.com",
+        ]
+        .contains(&url.origin().ascii_serialization().as_str())
+        {
+            return Err(GatewayError::new(
+                ErrorCode::Upstream,
+                "antigravity oauth exchange described a request to an origin its manifest does not declare",
+            ));
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(seconds.min(30)), async {
+            let response = self
+                .host
+                .http
+                .send(omni_providers::http::HttpRequest {
+                    provider: "antigravity".into(),
+                    url: request.url,
+                    method: request.method,
+                    headers: request.headers,
+                    body: request.body,
+                    body_encoding: None,
+                    request_id: None,
+                })
+                .await?;
+            Ok::<_, omni_providers::http::HttpError>((response.status, response.body.text().await?))
+        })
+        .await
+        .map_err(|_| exchange_failure("antigravity"))?
+        .map_err(|_| exchange_failure("antigravity"))
+    }
+}
+async fn antigravity_exchange(
+    host: &crate::refresh::Refresher,
+    code: &str,
+    pending: &PendingFlow,
+) -> Result<omni_providers::oauth::FlowResult> {
+    use omni_providers::antigravity::oauth as ag;
+    let mut runner = AntigravityExchange { host, sent: 0 };
+    let token = runner
+        .send(ag::exchange_request(code, pending)?, 30)
+        .await?;
+    // Frozen computes expiry only after all bootstrap calls have completed.
+    let mut result = ag::token_result(token.0, &token.1, None, 0.0, &serde_json::Value::Null)?;
+    let access = String::from_utf16_lossy(&result.access_token);
+    let email = runner.send(ag::email_request(&access), 15).await?;
+    result.account_email = ag::email_result(email.0, &email.1);
+    let loaded = runner.send(ag::load_request(&access), 30).await?;
+    let (mut project, tier) = ag::project_result(loaded.0, &loaded.1);
+    if project.is_empty() {
+        let onboarded = runner.send(ag::onboard_request(&access, &tier), 30).await?;
+        project = ag::onboard_result(onboarded.0, &onboarded.1);
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let now = (host.now)() as f64;
+    result.expires_at = result.expires_at.map(|expiry| expiry + now);
+    result.provider_data = serde_json::json!({"projectId": project, "tier": tier})
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct ExpiryEndpoint(&'static str);
+
+    impl ExpiryEndpoint {
+        fn response(&self) -> omni_providers::http::HttpResponse {
+            use omni_providers::http::{Headers, HttpResponse, ResponseBody};
+            HttpResponse {
+                status: 200,
+                headers: Headers::new(),
+                body: ResponseBody::from_bytes(format!(
+                    r#"{{"access_token":"fixture","refresh_token":"refresh","expires_in":{}}}"#,
+                    self.0
+                )),
+            }
+        }
+    }
+
+    impl omni_providers::http::HttpClient for ExpiryEndpoint {
+        fn send(
+            &self,
+            _: omni_providers::http::HttpRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = std::result::Result<
+                            omni_providers::http::HttpResponse,
+                            omni_providers::http::HttpError,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(async { Ok(self.response()) })
+        }
+    }
+
+    struct ExpiryCase {
+        seconds: &'static str,
+        now: fn() -> i64,
+        expiry: f64,
+        expired_at_one: bool,
+    }
+
+    async fn check_sqlite_expiry(case: ExpiryCase) {
+        use omni_gateway_core::snapshot::SnapshotHolder;
+        use omni_store::{Store, StoreConfig};
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("db");
+        let key = omni_crypto::field::derive_key("test-key");
+        let store = Arc::new(
+            Store::open(StoreConfig::Sqlite { path: path.clone() }, 0)
+                .await
+                .expect("store"),
+        );
+        let host = Arc::new(crate::refresh::Refresher::new(
+            store.clone(),
+            key.clone(),
+            Arc::new(ExpiryEndpoint(case.seconds)),
+            case.now,
+        ));
+        let holder = Arc::new(
+            SnapshotHolder::build_from(store.clone(), key.clone(), 1.0)
+                .await
+                .expect("snapshot"),
+        );
+        let flow = parse_js(r#"{"provider":"anthropic","label":"fixture","pending":{"verifier":"v","challenge":"c","state":"s","redirectUri":""}}"#).expect("flow");
+        let id = complete(host.clone(), holder.clone(), flow, "code#s")
+            .await
+            .expect("connect");
+        let connected = &holder.load().routing.credentials[0];
+        assert_eq!(connected.id, id);
+        assert_eq!(connected.token_version, 0);
+        assert_eq!(connected.expires_at, Some(case.expiry));
+
+        host.refresh(connected).await.expect("rotate");
+        holder
+            .refresh_credential(store.clone(), id.clone())
+            .await
+            .expect("publish rotation");
+        let rotated = &holder.load().routing.credentials[0];
+        assert_eq!(rotated.token_version, 1);
+        assert_eq!(rotated.expires_at, Some(case.expiry));
+
+        let db = omni_store::SqliteStore::open(&path, 0).expect("sqlite");
+        let cell: (String, f64) = db
+            .connection()
+            .query_row(
+                "SELECT typeof(expires_at), expires_at FROM credentials WHERE id=?",
+                [&id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("read raw expiry");
+        assert_eq!(cell, ("real".into(), case.expiry));
+        db.connection()
+            .execute(
+                "UPDATE credentials SET refresh_token=NULL WHERE id=?",
+                [&id],
+            )
+            .expect("remove refresh token");
+        holder
+            .refresh_credential(store.clone(), id.clone())
+            .await
+            .expect("publish unrefreshable credential");
+        let snapshot = holder.load();
+        assert_eq!(snapshot.routing.credentials.len(), 1);
+        let model = omni_store::VirtualModel {
+            id: "fixture".into(), strategy: omni_store::Strategy::Priority, is_alias: false,
+            targets: vec![serde_json::from_str(r#"{"provider":"anthropic","model":"claude","tier":1,"weight":1,"costPerMTok":{"input":0,"output":0},"capabilities":{"tools":true,"images":true,"reasoning":true}}"#).expect("target")],
+        };
+        let request = serde_json::from_str(r#"{"model":"fixture","messages":[],"stream":false}"#)
+            .expect("request");
+        let ranked = omni_router::eligible(&omni_router::RankInput {
+            request: &request,
+            model: &model,
+            snapshot: &snapshot.routing,
+            now: 1.0,
+            rand: 0.0,
+            load: None,
+            recent: None,
+            providers: None,
+        });
+        assert_eq!(ranked.pairs.len(), usize::from(!case.expired_at_one));
+        if case.expired_at_one {
+            assert_eq!(ranked.excluded[0].reason, "expired");
+        }
+        let sweeper = Arc::new(crate::refresh::Refresher::new(
+            store,
+            key,
+            Arc::new(ExpiryEndpoint(case.seconds)),
+            || 1,
+        ));
+        let sweep = sweeper.sweep(Some(&holder)).await.expect("sweep");
+        assert_eq!(sweep.refreshed, 0);
+        assert_eq!(sweep.touched, usize::from(case.expired_at_one));
+        assert_eq!(
+            holder.load().routing.credentials[0].enabled,
+            !case.expired_at_one
+        );
+    }
+
+    #[tokio::test]
+    async fn expiry_fraction_survives_connect_refresh_and_routing() {
+        check_sqlite_expiry(ExpiryCase {
+            seconds: "0.0015",
+            now: || 0,
+            expiry: 1.5,
+            expired_at_one: false,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn expiry_infinities_survive_connect_refresh_and_routing() {
+        check_sqlite_expiry(ExpiryCase {
+            seconds: "1e309",
+            now: || 0,
+            expiry: f64::INFINITY,
+            expired_at_one: false,
+        })
+        .await;
+        check_sqlite_expiry(ExpiryCase {
+            seconds: "-1e309",
+            now: || 0,
+            expiry: f64::NEG_INFINITY,
+            expired_at_one: true,
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn expiry_a15_survives_connect_refresh_and_routing() {
+        check_sqlite_expiry(ExpiryCase {
+            seconds: "1e21",
+            now: || 1_794_700_000_000,
+            expiry: 1.000_000_000_001_794_7e24,
+            expired_at_one: false,
+        })
+        .await;
+    }
+    #[test]
+    fn connect_callback_matches_generated_catalog() {
+        let catalog: serde_json::Value =
+            serde_json::from_str(omni_control::catalog::DATA).expect("catalog");
+        assert_eq!(
+            catalog["openai"]["callback"]["uri"].as_str(),
+            Some(PROVIDERS[1].1)
+        );
+        assert!(catalog["anthropic"].get("callback").is_none());
+        assert_eq!(
+            catalog["antigravity"]["callback"]["uri"].as_str(),
+            Some(PROVIDERS[2].1)
+        );
+    }
+    #[test]
+    fn connect_callback_parser() {
+        let p = PendingFlow {
+            verifier: String::new(),
+            challenge: String::new(),
+            state: "state".into(),
+            redirect_uri: PROVIDERS[1].1.into(),
+        };
+        assert_eq!(
+            normalize("openai", &p, "raw#state").expect("raw"),
+            "raw#state"
+        );
+        assert!(normalize("openai", &p, "abc:def").is_err());
+        assert_eq!(
+            normalize("anthropic", &p, "abc:def").expect("raw"),
+            "abc:def"
+        );
+        assert_eq!(
+            normalize(
+                "openai",
+                &p,
+                "http://localhost:1455/auth/callback?code=%20first%20&code=second&state=state"
+            )
+            .expect("callback"),
+            "first#state"
+        );
+        assert!(
+            normalize(
+                "openai",
+                &p,
+                "http://localhost:1455/auth/callback?code=a&state=wrong"
+            )
+            .is_err()
+        );
+        assert!(normalize("openai", &p, "http://localhost:1455/auth/callback?code=a").is_err());
+    }
+    #[test]
+    fn antigravity_callback_parser() {
+        let p = PendingFlow {
+            verifier: String::new(),
+            challenge: String::new(),
+            state: "s".into(),
+            redirect_uri: PROVIDERS[2].1.into(),
+        };
+        assert_eq!(
+            normalize(
+                "antigravity",
+                &p,
+                "https://antigravity.google/oauth-callback?code=%20x%20&state=s"
+            )
+            .expect("callback"),
+            "x#s"
+        );
+        assert_eq!(normalize("antigravity", &p, "x#s").expect("bare"), "x#s");
+        assert_eq!(
+            normalize("antigravity", &p, "https://wrong.test/")
+                .expect_err("origin")
+                .message,
+            "invalid Antigravity callback URL"
+        );
+        assert_eq!(
+            normalize(
+                "antigravity",
+                &p,
+                "https://antigravity.google/oauth-callback?code=x"
+            )
+            .expect_err("state")
+            .message,
+            "Antigravity callback URL must contain code and state"
+        );
+        assert_eq!(
+            normalize(
+                "antigravity",
+                &p,
+                "https://antigravity.google/oauth-callback?code=x&state=wrong"
+            )
+            .expect_err("state")
+            .message,
+            "authorization state mismatch"
+        );
+    }
+    #[tokio::test]
+    async fn connect_pending_ttl_take_peek_and_lossless_label() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let now = Arc::new(AtomicU64::new(0));
+        let clock = now.clone();
+        #[allow(clippy::cast_precision_loss)]
+        let coord = Arc::new(MemoryCoord::new(Arc::new(move || {
+            clock.load(Ordering::SeqCst) as f64
+        })));
+        let flows = ConnectFlows {
+            coord: coord.clone(),
+            flights: std::sync::Mutex::default(),
+        };
+        let raw = r#"{"label":"\ud800"}"#;
+        coord
+            .kv_set("oauth:pending:a", raw, 600_000)
+            .await
+            .expect("put");
+        assert_eq!(
+            stringify(&flows.pending("a", false).await.expect("peek")).expect("json"),
+            raw
+        );
+        assert!(flows.pending("a", true).await.is_ok());
+        assert!(flows.pending("a", false).await.is_err());
+        coord
+            .kv_set("oauth:pending:a", raw, 600_000)
+            .await
+            .expect("put");
+        now.store(600_000, Ordering::SeqCst);
+        assert!(flows.pending("a", false).await.is_err());
+    }
+    struct Counting(std::sync::atomic::AtomicUsize);
+    impl omni_providers::http::HttpClient for Counting {
+        fn send(
+            &self,
+            _: omni_providers::http::HttpRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = std::result::Result<
+                            omni_providers::http::HttpResponse,
+                            omni_providers::http::HttpError,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(async {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::task::yield_now().await;
+                Ok(omni_providers::http::HttpResponse {
+                    status: 400,
+                    headers: omni_providers::http::Headers::new(),
+                    body: omni_providers::http::ResponseBody::from_bytes("{}"),
+                })
+            })
+        }
+    }
+    #[tokio::test]
+    async fn connect_finish_survives_waiter_cancellation() {
+        survives_waiter_cancellation(false).await;
+    }
+    #[tokio::test]
+    async fn connect_poll_survives_waiter_cancellation_and_consumes() {
+        survives_waiter_cancellation(true).await;
+    }
+    async fn survives_waiter_cancellation(poll: bool) {
+        struct Delayed {
+            entered: tokio::sync::Notify,
+            release: tokio::sync::Notify,
+        }
+        impl omni_providers::http::HttpClient for Delayed {
+            fn send(
+                &self,
+                _: omni_providers::http::HttpRequest,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = std::result::Result<
+                                omni_providers::http::HttpResponse,
+                                omni_providers::http::HttpError,
+                            >,
+                        > + Send
+                        + '_,
+                >,
+            > {
+                Box::pin(async {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                    Ok(omni_providers::http::HttpResponse {
+                        status: 200,
+                        headers: omni_providers::http::Headers::new(),
+                        body: omni_providers::http::ResponseBody::from_bytes(
+                            r#"{"access_token":"survived","refresh_token":"r","expires_in":3600}"#,
+                        ),
+                    })
+                })
+            }
+        }
+        let dir = tempfile::tempdir().expect("dir");
+        let store = Arc::new(
+            omni_store::Store::open(
+                omni_store::StoreConfig::Sqlite {
+                    path: dir.path().join("db"),
+                },
+                0,
+            )
+            .await
+            .expect("store"),
+        );
+        let key = omni_crypto::field::derive_key("test-key");
+        let http = Arc::new(Delayed {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let host = Arc::new(crate::refresh::Refresher::new(
+            store.clone(),
+            key.clone(),
+            http.clone(),
+            crate::clock::now_ms,
+        ));
+        let flow = parse_js(r#"{"provider":"anthropic","label":"survivor","pending":{"verifier":"v","challenge":"c","state":"s","redirectUri":""}}"#).expect("flow");
+        let flows = Arc::new(ConnectFlows::default());
+        flows
+            .coord
+            .kv_set(
+                "oauth:pending:cancelled",
+                &stringify(&flow).expect("json"),
+                600_000,
+            )
+            .await
+            .expect("put");
+        let owner = flows.clone();
+        let holder = Arc::new(
+            omni_gateway_core::snapshot::SnapshotHolder::build(
+                &omni_store::SqliteStore::open(dir.path().join("db"), 0).expect("sqlite"),
+                key.clone(),
+                0.0,
+            )
+            .expect("snapshot"),
+        );
+        let waiter = tokio::spawn(async move {
+            if poll {
+                owner.poll(host, holder, "cancelled".into()).await
+            } else {
+                finish_exchange(host, holder, flow, "code#s".into()).await
+            }
+        });
+        http.entered.notified().await;
+        waiter.abort();
+        assert!(waiter.await.expect_err("cancelled").is_cancelled());
+        http.release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let rows = store.list_credentials(&key).await.expect("credentials");
+                if let Some(row) = rows.first() {
+                    if poll
+                        && flows
+                            .coord
+                            .kv_get("oauth:pending:cancelled")
+                            .await
+                            .expect("peek")
+                            .is_some()
+                    {
+                        tokio::task::yield_now().await;
+                        continue;
+                    }
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(row.label, "survivor");
+                    assert_eq!(row.secrets.access_token.as_deref(), Some("survived"));
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached finish persisted");
+    }
+    #[tokio::test]
+    async fn connect_concurrent_poll_shares_exchange_and_consumes_failure() {
+        let dir = tempfile::tempdir().expect("dir");
+        let store = omni_store::Store::open(
+            omni_store::StoreConfig::Sqlite {
+                path: dir.path().join("db"),
+            },
+            0,
+        )
+        .await
+        .expect("store");
+        let http = Arc::new(Counting(std::sync::atomic::AtomicUsize::new(0)));
+        let holder = Arc::new(
+            omni_gateway_core::snapshot::SnapshotHolder::build(
+                &omni_store::SqliteStore::open(dir.path().join("db"), 0).expect("sqlite"),
+                omni_crypto::field::derive_key("test-key"),
+                0.0,
+            )
+            .expect("snapshot"),
+        );
+        let host = Arc::new(crate::refresh::Refresher::new(
+            Arc::new(store),
+            omni_crypto::field::derive_key("test-key"),
+            http.clone(),
+            crate::clock::now_ms,
+        ));
+        let flows = Arc::new(ConnectFlows::default());
+        flows.coord.kv_set("oauth:pending:test",r#"{"provider":"openai","label":"test","pending":{"verifier":"v","challenge":"c","state":"s","redirectUri":"http://localhost:1455/auth/callback"}}"#,600_000).await.expect("put");
+        let (a, b) = tokio::join!(
+            flows.poll(host.clone(), holder.clone(), "test".into()),
+            flows.poll(host, holder, "test".into())
+        );
+        assert_eq!(
+            a.expect_err("refused").message,
+            b.expect_err("refused").message
+        );
+        assert_eq!(http.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(flows.pending("test", false).await.is_err());
+    }
+}

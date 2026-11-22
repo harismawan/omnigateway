@@ -1,0 +1,118 @@
+diff --git a/crates/omni-control/src/admin_password.rs b/crates/omni-control/src/admin_password.rs
+index 3186cc3b..6c170716 100644
+--- a/crates/omni-control/src/admin_password.rs
++++ b/crates/omni-control/src/admin_password.rs
+@@ -119,9 +119,9 @@ pub fn client_key_usable(store: &SqliteStore, id: &str, now: i64) -> Result<bool
+     use rusqlite::types::ValueRef;
+     let row = store
+         .connection()
+         .prepare_cached(
+-            "SELECT revoked_at, expires_at, model_allowlist FROM api_keys WHERE id = ?",
++            "SELECT revoked_at, expires_at, model_allowlist, limits FROM api_keys WHERE id = ?",
+         )?
+         .query_row([id], |r| {
+             let num = |v: ValueRef<'_>| -> Option<f64> {
+                 match v {
+@@ -136,12 +136,16 @@ pub fn client_key_usable(store: &SqliteStore, id: &str, now: i64) -> Result<bool
+             let allowlist = match r.get_ref(2)? {
+                 ValueRef::Text(t) => Some(String::from_utf8_lossy(t).into_owned()),
+                 _ => None,
+             };
+-            Ok((num(r.get_ref(0)?), num(r.get_ref(1)?), allowlist))
++            let limits = match r.get_ref(3)? {
++                ValueRef::Text(t) => Some(String::from_utf8_lossy(t).into_owned()),
++                _ => None,
++            };
++            Ok((num(r.get_ref(0)?), num(r.get_ref(1)?), allowlist, limits))
+         })
+         .optional()?;
+-    let Some((revoked_at, expires_at, allowlist)) = row else {
++    let Some((revoked_at, expires_at, allowlist, limits)) = row else {
+         return Ok(false);
+     };
+     if let Some(raw) = allowlist
+         && let Some(error) = omni_ir::jsc_json::parse_error(&raw)
+@@ -152,8 +156,16 @@ pub fn client_key_usable(store: &SqliteStore, id: &str, now: i64) -> Result<bool
+             row_id: id.to_owned(),
+             detail: error.into(),
+         });
+     }
++    if limits.as_deref().is_none_or(|raw| {
++        matches!(
++            crate::api::stored_limits(raw),
++            omni_ir::jsjson::JsValue::Null
++        )
++    }) {
++        tracing::error!(apiKeyId = %id, "api key limits unreadable");
++    }
+     #[allow(clippy::cast_precision_loss)]
+     let now = now as f64;
+     Ok(revoked_at.is_none() && expires_at.is_none_or(|at| at > now))
+ }
+diff --git a/crates/omni-control/src/api.rs b/crates/omni-control/src/api.rs
+index dc2e8484..cb92ffe2 100644
+--- a/crates/omni-control/src/api.rs
++++ b/crates/omni-control/src/api.rs
+@@ -123,9 +123,9 @@ fn parse_allowlist(raw: &str, id: &str) -> Result<JsValue> {
+ }
+ 
+ /// `parseLimits`: the stored matrix through `parseLimitConfig` (strict,
+ /// `__proto__` refused at any depth), or null when it does not parse.
+-fn stored_limits(raw: &str) -> JsValue {
++pub(crate) fn stored_limits(raw: &str) -> JsValue {
+     let Ok(value) = crate::operator_json::parse(raw) else {
+         return JsValue::Null;
+     };
+     if names_proto(&value) {
+@@ -379,9 +379,15 @@ pub fn client_summary(store: &SqliteStore, id: &str, now: i64, offset: i64) -> R
+         {
+             Some(v) => parse_allowlist(&v, id)?,
+             None => JsValue::Null,
+         },
+-        limits: stored_limits(&row.get::<_, String>("limits").map_err(Failure::internal)?),
++        limits: {
++            let limits = stored_limits(&row.get::<_, String>("limits").map_err(Failure::internal)?);
++            if matches!(limits, JsValue::Null) {
++                tracing::error!(apiKeyId = %id, "api key limits unreadable");
++            }
++            limits
++        },
+         body_logging_opt_out: matches!(
+             row.get_ref("body_logging_opt_out")
+                 .map_err(Failure::internal)?,
+             rusqlite::types::ValueRef::Integer(1)
+diff --git a/crates/omni-control/src/client_quota.rs b/crates/omni-control/src/client_quota.rs
+index fb69cb8f..c48d6924 100644
+--- a/crates/omni-control/src/client_quota.rs
++++ b/crates/omni-control/src/client_quota.rs
+@@ -79,10 +79,10 @@ fn compare_numbers(a: f64, b: f64) -> std::cmp::Ordering {
+         (false, false) => a.partial_cmp(&b).expect("non-NaN numbers are ordered"),
+     }
+ }
+ 
+-// Disjoint numeric/string classes avoid JS relational coercion cycles.
+-// Each class is totally ordered; strings use UTF-16 lexicographic order.
++// Numeric cells first, then strings in UTF-16 order; frozen mixed-type order
++// is not reproduced (reachable only with hand-altered column affinity).
+ fn compare_cells(a: &Value, b: &Value) -> std::cmp::Ordering {
+     match (primitive(a), primitive(b)) {
+         (Some(a), Some(b)) => a.encode_utf16().cmp(b.encode_utf16()),
+         (None, None) => compare_numbers(number(a), number(b)),
+diff --git a/crates/omni-gateway/src/admin_auth.rs b/crates/omni-gateway/src/admin_auth.rs
+index 1aafce88..753a8033 100644
+--- a/crates/omni-gateway/src/admin_auth.rs
++++ b/crates/omni-gateway/src/admin_auth.rs
+@@ -483,8 +483,13 @@ impl AdminAuth {
+         let now = (self.now)();
+         let id = self
+             .with_store(move |s| {
+                 Ok(omni_store::keys::find_by_hash(s.connection(), &hash)?
++                    .inspect(|k| {
++                        if k.limits.is_none() {
++                            tracing::error!(apiKeyId = %k.id, "api key limits unreadable");
++                        }
++                    })
+                     .filter(|k| k.usable(now))
+                     .map(|k| k.id))
+             })
+             .await?;

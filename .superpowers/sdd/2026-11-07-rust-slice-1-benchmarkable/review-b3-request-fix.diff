@@ -1,0 +1,220 @@
+diff --git a/crates/omni-providers/src/http/mod.rs b/crates/omni-providers/src/http/mod.rs
+index d6308ed1..2cb0f9fb 100644
+--- a/crates/omni-providers/src/http/mod.rs
++++ b/crates/omni-providers/src/http/mod.rs
+@@ -262,7 +262,7 @@ impl Client {
+                 .iter()
+                 .any(|(n, _)| n.eq_ignore_ascii_case("content-length"))
+                 || encodings.len() != 1
+-                || !encodings[0].1.trim().eq_ignore_ascii_case("zstd")
++                || !omni_ir::js::trim(&encodings[0].1).eq_ignore_ascii_case("zstd")
+             {
+                 return Err(HttpError::InvalidEncodedRequest(req.provider.clone()));
+             }
+diff --git a/crates/omni-providers/src/openai/lite.rs b/crates/omni-providers/src/openai/lite.rs
+index 0d9b76f5..78ff8e42 100644
+--- a/crates/omni-providers/src/openai/lite.rs
++++ b/crates/omni-providers/src/openai/lite.rs
+@@ -158,7 +158,9 @@ pub(crate) fn to_lite(
+                     }
+                     put(&mut v, "id", json!(fresh("msg")));
+                     put(&mut v, "role", json!(role));
+-                    put(&mut v, "content", content);
++                    if item.get("content").is_some() {
++                        put(&mut v, "content", content);
++                    }
+                     put(&mut v, META, meta);
+                     v
+                 }
+@@ -166,7 +168,9 @@ pub(crate) fn to_lite(
+                     let mut v =
+                         json!({"type":"function_call","status":"completed","id":fresh("fc")});
+                     for key in ["name", "arguments", "call_id"] {
+-                        put(&mut v, key, deep::clone(&item[key]));
++                        if let Some(value) = item.get(key) {
++                            put(&mut v, key, deep::clone(value));
++                        }
+                     }
+                     put(&mut v, META, json!({"turn_id":tid}));
+                     v
+@@ -174,7 +178,9 @@ pub(crate) fn to_lite(
+                 Some("function_call_output") => {
+                     let mut v = json!({"type":"function_call_output","id":fresh("fco")});
+                     for key in ["call_id", "output"] {
+-                        put(&mut v, key, deep::clone(&item[key]));
++                        if let Some(value) = item.get(key) {
++                            put(&mut v, key, deep::clone(value));
++                        }
+                     }
+                     put(&mut v, META, json!({"turn_id":tid,"create_time":time}));
+                     v
+diff --git a/crates/omni-providers/src/openai/mod.rs b/crates/omni-providers/src/openai/mod.rs
+index 586ccf7c..8b6247e4 100644
+--- a/crates/omni-providers/src/openai/mod.rs
++++ b/crates/omni-providers/src/openai/mod.rs
+@@ -68,12 +68,11 @@ fn build_mode(input: CodecInput<'_>, oauth: bool) -> Result<CodecRequest<bool>,
+     .as_ref()
+     .ok_or_else(|| GatewayError::new(ErrorCode::Auth, "openai credential has no token"))?;
+     Ok(deep::scope(|| {
+-        let (mut body, degradations, key, mut protocol) =
++        let (mut body, degradations, key, mut protocol, prototype) =
+             wire::encode_mode(input.request, input.model, oauth.then_some(&input));
+         if oauth && !input.model.is_empty() && input.model.bytes().all(|b| (33..=126).contains(&b))
+         {
+-            let tier = body
+-                .get("service_tier")
++            let tier = crate::response_format::prototype_get(&body, &prototype.0, "service_tier")
+                 .and_then(serde_json::Value::as_str)
+                 .filter(|s| {
+                     !s.is_empty() && s.bytes().all(|b| (33..=126).contains(&b)) && !s.contains(';')
+diff --git a/crates/omni-providers/src/openai/wire.rs b/crates/omni-providers/src/openai/wire.rs
+index fc782285..a5188d87 100644
+--- a/crates/omni-providers/src/openai/wire.rs
++++ b/crates/omni-providers/src/openai/wire.rs
+@@ -41,7 +41,7 @@ fn thread(seed: &str) -> String {
+ }
+ #[cfg(test)]
+ pub(crate) fn encode(req: &ChatRequest, model: &str) -> (Map<String, Value>, Vec<String>, String) {
+-    let (body, notes, key, _) = encode_mode(req, model, None);
++    let (body, notes, key, _, _) = encode_mode(req, model, None);
+     (body, notes, key)
+ }
+ type Encoded = (
+@@ -49,6 +49,7 @@ type Encoded = (
+     Vec<String>,
+     String,
+     Vec<(String, String)>,
++    deep::Owned,
+ );
+ pub(crate) fn encode_mode(
+     req: &ChatRequest,
+@@ -195,6 +196,9 @@ pub(crate) fn encode_mode(
+     let catalog = super::oauth::catalog(model);
+     let mut lite_tools = None;
+     let mut body = Map::new();
++    // Own properties and [[Prototype]] are separate. Retain arbitrary client
++    // JSON with iterative clone/drop, including prototypes never serialized.
++    let mut prototype = deep::Owned(Value::Null);
+     deep::insert(&mut body, "model".into(), json!(model));
+     deep::insert(
+         &mut body,
+@@ -320,19 +324,28 @@ pub(crate) fn encode_mode(
+         );
+         if let Some(vendor) = req.vendor_bag("openai") {
+             for (k, v) in vendor {
++                if k == "__proto__" {
++                    if v.is_object() || v.is_array() || v.is_null() {
++                        prototype = deep::Owned(deep::clone(v));
++                    }
++                    continue;
++                }
+                 if k == "client_metadata" {
+                     note(&mut notes, "openai:client-metadata-replaced");
+                     continue;
+                 }
+                 if (k == "text" || k == "reasoning")
+                     && let (Some(ours), Some(theirs)) = (
+-                        body.get_mut(k).and_then(Value::as_object_mut),
++                        crate::response_format::prototype_get(&body, &prototype.0, k)
++                            .and_then(Value::as_object),
+                         v.as_object(),
+                     )
+                 {
++                    let mut ours = deep::clone_map(ours);
+                     for (name, value) in theirs {
+-                        deep::insert(ours, name.clone(), deep::clone(value));
++                        deep::insert(&mut ours, name.clone(), deep::clone(value));
+                     }
++                    deep::insert(&mut body, k.clone(), Value::Object(ours));
+                 } else {
+                     deep::insert(&mut body, k.clone(), deep::clone(v));
+                 }
+@@ -365,16 +378,27 @@ pub(crate) fn encode_mode(
+             }
+             _ => {}
+         }
++        if let Some(v) = req
++            .vendor_bag("openai")
++            .and_then(|bag| bag.get("__proto__"))
++            && (v.is_object() || v.is_array() || v.is_null())
++        {
++            prototype = deep::Owned(deep::clone(v));
++        }
+         omni_ir::js::object_assign(&mut body, req.vendor_value("openai"));
+     }
+-    if let Some(n) = crate::response_format::move_to_responses_text(req, &mut body, "openai") {
++    if let Some(n) = crate::response_format::move_to_responses_text_with_prototype(
++        req,
++        &mut body,
++        "openai",
++        &prototype.0,
++    ) {
+         note(&mut notes, n);
+     }
+     deep::insert(&mut body, "prompt_cache_key".into(), json!(key));
+     let mut headers = Vec::new();
+     if let Some(opts) = oauth {
+-        let effort = body
+-            .get("reasoning")
++        let effort = crate::response_format::prototype_get(&body, &prototype.0, "reasoning")
+             .and_then(|v| v.get("effort"))
+             .and_then(Value::as_str)
+             .filter(|e| super::oauth::is_effort(e))
+@@ -406,7 +430,7 @@ pub(crate) fn encode_mode(
+             deep::drop(item);
+         }
+     }
+-    (body, notes, key, headers)
++    (body, notes, key, headers, prototype)
+ }
+ #[cfg(test)]
+ mod tests {
+diff --git a/crates/omni-providers/src/response_format.rs b/crates/omni-providers/src/response_format.rs
+index 8a0f5183..5c79dad0 100644
+--- a/crates/omni-providers/src/response_format.rs
++++ b/crates/omni-providers/src/response_format.rs
+@@ -182,19 +182,40 @@ pub(crate) fn move_to_responses_text(
+     req: &ChatRequest,
+     body: &mut Map<String, Value>,
+     provider: &str,
++) -> Option<String> {
++    move_to_responses_text_with_prototype(req, body, provider, &Value::Null)
++}
++
++/// Plain reads of the merged OpenAI body see its JSON prototype; spreads and
++/// serialization still use only the own map. JSON arrays have no named fields
++/// used here (neither indices nor `length` are read). Default Object.prototype
++/// and a null prototype likewise have none of the fields read by these callers.
++pub(crate) fn prototype_get<'a>(
++    body: &'a Map<String, Value>,
++    prototype: &'a Value,
++    key: &str,
++) -> Option<&'a Value> {
++    body.get(key).or_else(|| prototype.as_object()?.get(key))
++}
++
++pub(crate) fn move_to_responses_text_with_prototype(
++    req: &ChatRequest,
++    body: &mut Map<String, Value>,
++    provider: &str,
++    prototype: &Value,
+ ) -> Option<String> {
+     // Internal helper: CustomCodec scopes deep request assembly. Keeping this
+     // private avoids repeating its carrier scan on every ordinary request.
+-    let raw = body.shift_remove("response_format");
++    let raw = prototype_get(body, prototype, "response_format").map(omni_ir::deep::clone);
++    body.shift_remove("response_format");
+ 
+-    let malformed_text = body.get("text").is_some_and(|t| !t.is_object());
++    let malformed_text = prototype_get(body, prototype, "text").is_some_and(|t| !t.is_object());
+     if malformed_text {
+         body.shift_remove("text");
+     }
+ 
+     let read = read_response_format(req);
+-    let client_text = body
+-        .get("text")
++    let client_text = prototype_get(body, prototype, "text")
+         .and_then(Value::as_object)
+         .map(omni_ir::deep::clone_map);
+     let client_format = client_text.as_ref().and_then(|t| t.get("format"));

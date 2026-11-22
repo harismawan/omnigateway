@@ -25,8 +25,9 @@ const SECRET = "test-secret-value-for-unit-tests";
 /**
  * Registers `define` once per backend. The SQLite suite always runs; the
  * Postgres one runs when `OMNI_TEST_DATABASE_URL` names a server and is
- * skipped — visibly, one line per file — when it does not. Every store a test
- * opens is closed after it, and every SQLite file removed after the file.
+ * skipped — visibly, one line per file — when it does not, unless
+ * `OMNI_TEST_REQUIRE_PG=1`. Every store a test opens is closed after it, and
+ * every SQLite file removed after the file.
  */
 export function forEachStore(define: (backend: Backend) => void): void {
   const opened: Store[] = [];
@@ -70,6 +71,8 @@ export function forEachStore(define: (backend: Backend) => void): void {
 
   const url = process.env.OMNI_TEST_DATABASE_URL;
   if (url === undefined || url === "") {
+    if (process.env.OMNI_TEST_REQUIRE_PG === "1")
+      throw Error("OMNI_TEST_REQUIRE_PG=1 requires OMNI_TEST_DATABASE_URL");
     test.skip("postgres: OMNI_TEST_DATABASE_URL unset, Postgres contract suite not run", () => {});
     return;
   }

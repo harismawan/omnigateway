@@ -1,0 +1,46 @@
+[package]
+name = "omni-store"
+description = "SQLite and Postgres stores: migrations shared with the TS build, and the snapshot reads the gateway serves from."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+pg-queue-probe = []
+
+[dependencies]
+omni-crypto = { path = "../omni-crypto" }
+omni-ir = { path = "../omni-ir" }
+omni-ratelimit = { path = "../omni-ratelimit" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+rusqlite = { version = "0.43", default-features = false, features = ["bundled", "cache", "limits"] }
+indexmap = "2"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+tracing.workspace = true
+# Postgres: tokio-postgres for typed array binds (`unnest`), deadpool for a
+# bounded pool with wait/create timeouts. TLS uses the existing rustls stack.
+tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }
+deadpool-postgres = { version = "0.14", default-features = false, features = ["rt_tokio_1"] }
+futures-util = { version = "0.3", default-features = false }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+# Body-artifact envelope (shared with omni-crypto's field key).
+aes-gcm = "0.11"
+sha2 = "0.11"
+rand = "0.10"
+flate2 = "1"
+
+[dev-dependencies]
+rusqlite = { version = "0.43", default-features = false, features = ["bundled", "cache", "limits", "trace"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
+tempfile = "3"
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }

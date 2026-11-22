@@ -1,58 +1,40 @@
 #!/usr/bin/env bun
 /**
- * Assembles the publishable `omnigateway` package.
+ * Assembles the publishable npm packages for the Rust gateway.
  *
- * The workspace is private and its packages depend on each other through
- * `workspace:*`, which means nothing here can be published as-is: npm cannot
- * resolve a workspace protocol. Bundling is what turns six private packages
- * into one installable thing — the CLI and the server each become a single
- * file with their `@omni/*` imports inlined.
+ * Nothing is compiled here. The `rust-binaries` release job already built and
+ * verified one archive per target; this unpacks each into its platform package
+ * (`@omnigateway/<os>-<cpu>`) so npm ships the same bytes as the GitHub release,
+ * and writes the main `omnigateway` package: a Node launcher and the
+ * postinstall that links straight to the binary.
  *
- * Bun's own built-ins (`bun:sqlite`, `Bun.password`) are provided by the runtime.
- * That is why the published package needs Bun rather than Node: the store, the
- * hasher, the spawner, and the file APIs are all Bun's.
+ * Design: docs/superpowers/specs/2026-11-21-rust-npm-distribution-design.md.
  */
-import { readFileSync } from "node:fs";
-import { cp, mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 const root = join(import.meta.dir, "..");
-const outDir = join(root, "dist", "npm");
 
-// All dependencies are bundled or provided by the Bun runtime (bun:sqlite, Bun.password, etc.)
-const EXTERNAL: string[] = [];
-
-/**
- * The versions the gateway itself depends on, not a second list of them.
- *
- * This was a literal, and it drifted: the published package pinned argon2
- * `2.0.2` for a workspace that had moved to `2.2.0`, so every npm install got a
- * password hasher no test in this repository had ever run. Nothing failed,
- * because the copy that would have caught it was the wrong one. Reading the
- * gateway's manifest deletes the second copy rather than correcting it.
- */
-export function runtimeDependencies(
-  manifest: { dependencies?: Record<string, string> },
-  external: readonly string[] = EXTERNAL,
-): Record<string, string> {
-  return Object.fromEntries(
-    external.map((name) => {
-      const range = manifest.dependencies?.[name];
-      // A native module that is external but absent from the manifest would be
-      // published with no version at all, which npm resolves to `latest`.
-      if (range === undefined) {
-        throw new Error(`${name} is bundled as external but is not a gateway dependency`);
-      }
-      return [name, range];
-    }),
-  );
-}
-
-export const RUNTIME_DEPENDENCIES: Readonly<Record<string, string>> = runtimeDependencies(
-  JSON.parse(readFileSync(join(root, "apps", "gateway", "package.json"), "utf8")) as {
-    dependencies?: Record<string, string>;
+/** One release archive target, and the npm package it becomes. */
+export const PLATFORMS = [
+  { target: "x86_64-unknown-linux-musl", npm: "@omnigateway/linux-x64", os: "linux", cpu: "x64" },
+  {
+    target: "aarch64-unknown-linux-musl",
+    npm: "@omnigateway/linux-arm64",
+    os: "linux",
+    cpu: "arm64",
   },
-);
+  { target: "x86_64-apple-darwin", npm: "@omnigateway/darwin-x64", os: "darwin", cpu: "x64" },
+  { target: "aarch64-apple-darwin", npm: "@omnigateway/darwin-arm64", os: "darwin", cpu: "arm64" },
+] as const;
+
+const COMMON = {
+  license: "MIT",
+  author: "Harismawan <mail@harismawan.com>",
+  repository: { type: "git", url: "git+https://github.com/harismawan/omnigateway.git" },
+  homepage: "https://github.com/harismawan/omnigateway#readme",
+  bugs: "https://github.com/harismawan/omnigateway/issues",
+};
 
 /**
  * Reads the release version from the tag that triggered the build.
@@ -69,89 +51,129 @@ export function releaseVersion(raw: string): string {
   return version;
 }
 
-export async function bundle(entry: string, outfile: string, version: string): Promise<void> {
-  // No `outdir`: the artifact is written by hand so the two bundles can land
-  // at the exact paths the CLI expects to find each other at.
-  const result = await Bun.build({
-    root,
-    entrypoints: [join(root, entry)],
-    target: "bun",
-    format: "esm",
-    minify: true,
-    external: EXTERNAL,
-    // The one moment the source and the tag are both known.
-    //
-    // `omni --version` answered `0.0.0` in every published build: the version
-    // reached the generated `package.json` and nothing else, so npm and the
-    // binary it installed disagreed permanently. Substituting here rather than
-    // reading a file at startup keeps `--version` answering on a broken
-    // installation, which is half of why it is handled before anything opens.
-    define: { OMNI_CLI_VERSION: JSON.stringify(version) },
-  });
+async function json(path: string, value: unknown): Promise<void> {
+  await writeFile(path, `${JSON.stringify(value, null, 2)}\n`);
+}
 
-  if (!result.success) {
-    for (const log of result.logs) console.error(log);
-    throw new Error(`could not bundle ${entry}`);
+async function unpack(archive: string, dir: string): Promise<void> {
+  await mkdir(dir, { recursive: true });
+  const tar = Bun.spawnSync(["tar", "-xzf", archive, "-C", dir], { stderr: "pipe" });
+  if (tar.exitCode !== 0) throw new Error(`could not unpack ${archive}: ${tar.stderr}`);
+  // npm drops symlinks from tarballs; the main package's bin links `omni`.
+  await rm(join(dir, "omni"), { force: true });
+}
+
+/**
+ * Writes `<out>/<os>-<cpu>/` for every platform and `<out>/omnigateway/`.
+ * Every archive must exist for this exact tag: a partial set would publish a
+ * main package whose optional dependency for some host never arrives.
+ */
+export async function buildPackages(options: {
+  version: string;
+  assets: string;
+  out: string;
+}): Promise<string[]> {
+  const { version, assets, out } = options;
+  const tag = `v${version}`;
+  const present = new Set(await readdir(assets));
+  const missing = PLATFORMS.map(({ target }) => `omnigateway-${tag}-${target}.tar.gz`).filter(
+    (name) => !present.has(name),
+  );
+  if (missing.length > 0) {
+    throw new Error(`release archives missing for ${tag}: ${missing.join(", ")}`);
+  }
+  await rm(out, { recursive: true, force: true });
+  const dirs: string[] = [];
+  for (const { target, npm, os, cpu } of PLATFORMS) {
+    const dir = join(out, npm.replace("@omnigateway/", ""));
+    await unpack(join(assets, `omnigateway-${tag}-${target}.tar.gz`), dir);
+    await chmod(join(dir, "omnigateway"), 0o755);
+    await json(join(dir, "package.json"), {
+      name: npm,
+      version,
+      description: `The OmniGateway ${os}-${cpu} binary, installed by the omnigateway package`,
+      ...COMMON,
+      os: [os],
+      cpu: [cpu],
+      files: ["omnigateway", "public", "LICENSE"],
+      preferUnplugged: true,
+    });
+    dirs.push(dir);
   }
 
-  const artifact = result.outputs[0];
-  if (artifact === undefined) throw new Error(`bundling ${entry} produced nothing`);
-  await Bun.write(outfile, await artifact.text());
+  const main = join(out, "omnigateway");
+  await cp(join(root, "packaging", "npm"), main, { recursive: true });
+  for (const bin of ["omni", "omnigateway"]) await chmod(join(main, "bin", bin), 0o755);
+  await cp(join(root, "README.md"), join(main, "README.md"));
+  await cp(join(root, "LICENSE"), join(main, "LICENSE"));
+  await json(join(main, "package.json"), {
+    name: "omnigateway",
+    version,
+    description:
+      "Self-hosted AI gateway with Anthropic- and OpenAI-compatible APIs, an admin console, and a CLI",
+    ...COMMON,
+    type: "commonjs",
+    bin: { omni: "bin/omni", omnigateway: "bin/omnigateway" },
+    files: ["bin", "lib", "postinstall.js", "README.md", "LICENSE"],
+    scripts: { postinstall: "node postinstall.js" },
+    // Hosts with no native build refuse the install (EBADPLATFORM).
+    os: ["linux", "darwin"],
+    cpu: ["x64", "arm64"],
+    engines: { node: ">=18" },
+    optionalDependencies: Object.fromEntries(PLATFORMS.map(({ npm }) => [npm, version])),
+    keywords: ["ai", "gateway", "proxy", "anthropic", "openai", "llm", "oauth"],
+  });
+  dirs.push(main);
+  return dirs;
 }
 
-export async function buildPackage(version: string): Promise<string> {
-  await rm(outDir, { recursive: true, force: true });
-  await mkdir(join(outDir, "bin"), { recursive: true });
-
-  // The CLI's bin, and the server it starts. They are siblings by contract:
-  // `gatewayEntrypoint` looks for `../gateway.js` relative to the bin.
-  await bundle("apps/cli/src/index.ts", join(outDir, "bin", "omni.js"), version);
-  await bundle("apps/gateway/src/index.ts", join(outDir, "gateway.js"), version);
-
-  // The console, served by that same server from `./public`.
-  await cp(join(root, "apps", "dashboard", "dist"), join(outDir, "public"), { recursive: true });
-
-  await writeFile(
-    join(outDir, "package.json"),
-    `${JSON.stringify(
-      {
-        name: "omnigateway",
-        version,
-        description:
-          "Self-hosted AI gateway with Anthropic- and OpenAI-compatible APIs, an admin console, and a CLI",
-        license: "MIT",
-        author: "Harismawan <mail@harismawan.com>",
-        type: "module",
-        bin: { omni: "./bin/omni.js" },
-        files: ["bin", "gateway.js", "public", "README.md", "LICENSE"],
-        dependencies: RUNTIME_DEPENDENCIES,
-        // Bun is the runtime, not just the bundler: bun:sqlite, Bun.spawn and
-        // Bun.file are all load-bearing. Saying so here turns a confusing
-        // `env: bun: not found` into an install-time complaint.
-        //
-        // The floor is the oldest Bun the package actually needs, not the one
-        // this repository happens to be developed on: 1.4 is unreleased, so
-        // claiming it would fail the engine check for every user on stable.
-        engines: { bun: ">=1.3.0" },
-        repository: { type: "git", url: "git+https://github.com/harismawan/omnigateway.git" },
-        homepage: "https://github.com/harismawan/omnigateway#readme",
-        bugs: "https://github.com/harismawan/omnigateway/issues",
-        keywords: ["ai", "gateway", "proxy", "anthropic", "openai", "llm", "oauth"],
-      },
-      null,
-      2,
-    )}\n`,
-  );
-
-  await cp(join(root, "README.md"), join(outDir, "README.md"));
-  await cp(join(root, "LICENSE"), join(outDir, "LICENSE"));
-  await Bun.$`chmod +x ${join(outDir, "bin", "omni.js")}`.quiet();
-
-  return outDir;
+async function sha256(bytes: Uint8Array): Promise<string> {
+  return new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
 }
 
-if (import.meta.main) {
+async function binaryOf(archive: string, member: string): Promise<Uint8Array> {
+  const out = Bun.spawnSync(["tar", "-xzOf", archive, member], { stderr: "pipe" });
+  if (out.exitCode !== 0) throw new Error(`no ${member} in ${archive}: ${out.stderr}`);
+  return out.stdout;
+}
+
+/**
+ * Before anything irreversible: every packed platform tarball must hold the
+ * release archive's `omnigateway` byte for byte. Returns how many it checked;
+ * all four must be present.
+ */
+export async function verifyPacked(options: {
+  version: string;
+  assets: string;
+  tarballs: string[];
+}): Promise<number> {
+  const { version, assets, tarballs } = options;
+  let checked = 0;
+  for (const { target, npm } of PLATFORMS) {
+    const short = npm.replace("@omnigateway/", "");
+    const tarball = tarballs.find((t) => t.includes(`omnigateway-${short}-${version}.tgz`));
+    if (tarball === undefined) throw new Error(`no packed tarball for ${npm}@${version}`);
+    const expected = await sha256(
+      await binaryOf(join(assets, `omnigateway-v${version}-${target}.tar.gz`), "./omnigateway"),
+    );
+    const actual = await sha256(await binaryOf(tarball, "package/omnigateway"));
+    if (actual !== expected) {
+      throw new Error(`${short}: packed binary ${actual} is not the release archive's ${expected}`);
+    }
+    checked++;
+  }
+  return checked;
+}
+
+if (import.meta.main && process.argv[2] === "--verify-packed") {
+  const [, , , rawVersion, assets, ...tarballs] = process.argv;
+  const version = releaseVersion(rawVersion ?? "");
+  const checked = await verifyPacked({ version, assets: assets ?? "", tarballs });
+  console.log(`verified ${checked} platform tarballs against the release archives`);
+} else if (import.meta.main) {
   const version = releaseVersion(process.argv[2] ?? process.env.OMNI_RELEASE_VERSION ?? "");
-  const dir = await buildPackage(version);
-  console.log(`built omnigateway@${version} in ${dir}`);
+  const assets = process.argv[3] ?? join(root, "release-assets");
+  const out = join(root, "dist", "npm");
+  // Platforms first: publish order is the order printed.
+  for (const dir of await buildPackages({ version, assets, out })) console.log(dir);
 }

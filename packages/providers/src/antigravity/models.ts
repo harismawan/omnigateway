@@ -54,9 +54,9 @@ import type { ProviderModelCatalogEntry } from "../catalog-types.ts";
  *   through 2026-12-31 and $1.50/$7.50 from 1 January 2027. The standard figure
  *   is the one stored, deliberately: a table holding the promotional rate would
  *   be correct today and silently wrong on a date nobody is watching for, and
- *   these numbers are a reference for spend rather than an invoice. Every other
- *   family below is already on its standard rate, so this is the only row group
- *   where the two differ.
+ *   these numbers are a reference for spend rather than an invoice. Gemini 4
+ *   Carbon and Argon follow the same rule (their introductory rate ends
+ *   2026-11-30); every other family is on its only rate.
  * - Pro and 2.5 Pro price in two bands by prompt size. The **≤200K** band is
  *   carried, because `ProviderModelPricing` holds one number and the smaller
  *   band is the common case; a long-context request is under-costed here.
@@ -102,6 +102,8 @@ const NO_CACHE_WRITE = { cacheWrite5m: 0, cacheWrite1h: 0 };
 const FREE = { input: 0, output: 0, cacheRead: 0, ...NO_CACHE_WRITE };
 const FLASH_LIMITS = { contextWindow: 1_048_576, maxOutputTokens: MAX_OUTPUT_TOKENS };
 const PRO_LIMITS = { contextWindow: 1_048_576, maxOutputTokens: PRO_MAX_OUTPUT_TOKENS };
+/** Gemini 4's public limits: 1M context, 65,536 synchronous output. */
+const GEMINI_4_LIMITS = { contextWindow: 1_048_576, maxOutputTokens: MAX_OUTPUT_TOKENS };
 
 export const ANTIGRAVITY_MODELS: ProviderModelCatalogEntry = {
   // The newest family's High tier, matching what the live catalog marks
@@ -111,6 +113,47 @@ export const ANTIGRAVITY_MODELS: ProviderModelCatalogEntry = {
   // the IDE's, and it authenticates with a Google account.
   authTypes: ["oauth"],
   models: [
+    // **The four Gemini 4 rows are read from Google's public docs, not from a
+    // probe** — the one source the note above warns against, carried at the
+    // operator's request until a `fetchAvailableModels` probe confirms them.
+    // Ids, limits and rates read 2026-11-22 from `ai.google.dev/gemini-api/
+    // docs/models` and `/pricing`. The public API names one id per model with
+    // its thinking level as a request parameter, so these rows carry no tier
+    // suffix. In `adaptive` mode `wire.ts` sends no budget; `budget`, `off`
+    // and `betweenTools` still send `thinkingBudget`, which Google documents
+    // for these models as levels rather than a budget. So a 400 is either an
+    // id `v1internal` spells differently (as it does `gemini-pro-agent`) or a
+    // budget it refuses for this family — unknown until a probe.
+    //
+    // Carbon and Argon carry their **standard** rate ($4/$20), not the
+    // introductory $2/$10 that ends 2026-11-30, for the reason the 3.8 Flash
+    // rows below do. Neon and Hydrogen have one rate. The public API caches
+    // these implicitly only, so `cacheRead` is the cached-input rate and there
+    // is no storage price to leave out.
+    {
+      id: "gemini-4-carbon",
+      label: "Gemini 4 Carbon",
+      pricing: { input: 4, output: 20, cacheRead: 0.2, ...NO_CACHE_WRITE },
+      limits: GEMINI_4_LIMITS,
+    },
+    {
+      id: "gemini-4-argon",
+      label: "Gemini 4 Argon",
+      pricing: { input: 4, output: 20, cacheRead: 0.2, ...NO_CACHE_WRITE },
+      limits: GEMINI_4_LIMITS,
+    },
+    {
+      id: "gemini-4-neon",
+      label: "Gemini 4 Neon",
+      pricing: { input: 3, output: 15, cacheRead: 0.15, ...NO_CACHE_WRITE },
+      limits: GEMINI_4_LIMITS,
+    },
+    {
+      id: "gemini-4-hydrogen",
+      label: "Gemini 4 Hydrogen",
+      pricing: { input: 1.5, output: 7.5, cacheRead: 0.075, ...NO_CACHE_WRITE },
+      limits: GEMINI_4_LIMITS,
+    },
     {
       id: "gemini-3.8-flash-high",
       label: "Gemini 3.8 Flash (High)",

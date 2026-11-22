@@ -1,5 +1,22 @@
 # Architecture
 
+Rust quota runtime ownership, supported provider boundary and public APIs are
+documented in [Rust quota runtime](docs/rust-quota-runtime.md).
+
+Rust CLI process supervision and metadata-only doctor diagnostics are described
+in [Rust CLI service boundary](docs/rust-cli-service.md); service launches use the
+canonical `omnigateway` executable, not the `omni` dispatch identity.
+
+Rust database replacement registers the gateway's persistent SQLite owners in
+`omni_store::lifecycle`: writer/checkpointer, routing refresher/miss resolver,
+auth/control and OAuth. The swap takes the transient-access barrier and owner
+locks, closes every old connection, runs the shared control restore/import
+protocol, then reopens owners before rebuilding routing and publishing `res:*`.
+Export pages and maintenance operations hold transient-access leases; export
+connections do not survive a page. `/v1/*` admission is response-owned and drains
+before replacement; `/health` does not need a database connection. A typed swap
+failure keeps client admission closed until a successful recovery restore.
+
 How OmniGateway put together, for contributors and design auditors. [How it is built](#how-it-is-built) below has package map and layering rules; rest of this doc detail behind them.
 
 Conventions governing changes — architectural boundaries, testing expectations, traps — see [CLAUDE.md](CLAUDE.md). Approved designs live in `docs/superpowers/specs/`.
@@ -335,7 +352,7 @@ Eight providers, each a directory of roughly same files — `descriptor.ts`, `co
 
 Three wire dialects, not two. Five of the seven speak an Anthropic- or OpenAI-shaped body; `antigravity` speaks Google's Cloud Code Assist — `v1internal:streamGenerateContent`, which nests a Gemini request inside an envelope carrying the account's own Cloud Code project id. That id is minted during OAuth rather than at request time, because a codec cannot make a network call; it lives on `credential.providerData` and the codec refuses a request that would send it blank. The endpoint is the streaming one even for a non-streaming client, since plain `generateContent` answers 400 on several models.
 
-**Two hosts, and which is which is entitlement rather than failover.** Inference goes to `daily-cloudcode-pa.googleapis.com`; the bootstrap and quota RPCs go to `cloudcode-pa.googleapis.com`. Measured against a live account with a byte-identical request: the first answered 200, the second `429 RESOURCE_EXHAUSTED` — while that account's own quota RPC reported 0% of both windows used and its IDE was generating normally. Collapsing the two into one host is the shape of mistake that fails every request and blames the account, because the upstream's chosen error names quota rather than the URL.
+**Inference must use `daily-cloudcode-pa.googleapis.com`; the difference is entitlement rather than failover.** Measured against a live account with a byte-identical inference request: `daily-cloudcode-pa` answered 200, plain `cloudcode-pa` `429 RESOURCE_EXHAUSTED` — while that account's own quota RPC reported 0% of both windows used and its IDE was generating normally. Pointing inference at the wrong host fails every request and blames the account, because the upstream's chosen error names quota rather than the URL. The bootstrap (`loadCodeAssist`, `onboardUser`) and quota RPCs were verified live on `cloudcode-pa` at that time; they now follow the 2026-11-21 App 2.34 / CLI 1.5.13 capture onto `daily-cloudcode-pa` too, which is not yet measured live (see the provider design).
 
 `codec.ts` is the provider; `index.ts` is four lines joining it to its descriptor through `codecAdapter`. A `ProviderCodec` describes a request and reads a stream back, and the host performs it — one `http()` call, the status check, the deadline, the empty-body refusal — once for every provider rather than once per provider. That split exists because boundary rule 15 says a plugin never holds the `HttpClient`, and a provider whose whole job is talking upstream cannot be handed nothing; **all eight built-ins are on it**, so `codecAdapter` is the only implementation of `ProviderAdapter` this repository ships and a plugin-supplied provider takes exactly the shape a built-in does. `ProviderAdapter` survives as the injection point dispatch and its tests construct — a seam, not a second shape.
 
@@ -431,6 +448,8 @@ Writing rollup in *same transaction* as log row is what lets year of usage histo
 `quota_samples` written in same transaction as snapshot it describes, only when reading actually changed — idle account re-read every poll interval, moves nothing. `quota_windows` therefore answers "what is true now" and carries liveness in `observed_at`; `quota_samples` answers "how did it get here". Burn estimate needs only former, so works on install with no accumulated history.
 
 Encryption is boundary, not pass. Only four 🔒 fields sealed, AES-256-GCM under key derived from `OMNI_ENCRYPTION_KEY`, decryption lazy and purpose-scoped — credential opens *for inference*, *for refresh*, or *for usage*, so ranking ten candidates costs zero decryptions. Gateway API keys not stored at all, only hashes.
+
+OAuth expiry in the Rust store and routing snapshot is a nullable JS number (`Option<f64>`), not an integer timestamp. SQLite preserves fractional and infinite REALs and binds NaN as NULL. PostgreSQL keeps its BIGINT column: it rounds the bound double on write or rejects it when non-finite or out of range. The expiry and sealed tokens still rotate in one versioned write; a failed PostgreSQL conversion leaves the previous expiry and token version unchanged.
 
 **Reading `request_logs` back is one query, keyset-paged, and every consumer shares it.** `UsageRepo.page` in `@omni/store/types` takes one required `RequestLogQuery` object — one object rather than parameters because sqlite swap forwarder hand-writes arrow per method and lower-arity arrow silently drops argument, which is how scoped `recent` once returned every key's rows. Order always `(at DESC, id DESC)`; tie-break total, because two rows in same millisecond ordered only by id and ambiguous sort makes cursor ambiguous. Cursor exclusive, `since`/`until` inclusive. Predicate itself lives once, in `packages/store/src/logPage.ts`, parameterised only by placeholder syntax — two backends cannot disagree on boundary. Both repos map rows through `toLog` **before** cutting cursor, so it carries normalized numeric `at` rather than Postgres BIGINT string, which compares lexically on next read. Fetch is `limit + 1`, so full final page reports no cursor rather than handing caller cursor whose only page is empty.
 
@@ -966,6 +985,37 @@ design spec's History section.
 **Tests.** The contract suite runs against real Redis when `OMNI_TEST_REDIS_URL` is set (CI sets
 it, through a `valkey` service), and `test/cluster/sharedCoord.test.ts` runs the two-replica suite
 over two **separate** Redis coordinators — which is what two pods actually hold.
+
+**Rust gateway.** `crates/omni-gateway` selects one bounded Postgres primary pool
+per replica in cluster mode; there is no SQLite shadow. A warm request uses its
+in-memory routing snapshot. Committed key, credential, quota, and health changes
+publish row identities (never keys or secrets) on `routing`; the receiving
+worker reads current primary state and patches its snapshot. A 500 ms version
+poll repairs missed publications. Health mutations serialize against the stored
+row, while fleet load is published and read in the background every 100 ms.
+PG inference reserves bounded terminal queue capacity before admission. The waiter cap
+is one per default-sized batch of queue credits (32 by default), and its 4 s
+deadline also covers revalidation of the key and screening settings against
+the primary. The same settings determine reservation size and screening;
+the warm path still reads only the replica snapshot. A full wait queue,
+deadline, or closed writer returns the surface's overload response without
+dispatch or a completion row. Hyper need not notice a disconnect before
+reading the body, so the deadline bounds retention in that case. At half or
+less free queue credit, Rust sheds only optional `Begin`/`Route` events,
+counting them separately in `/metrics`. This intentionally differs from the
+TypeScript gateway, which awaits those writes; an overloaded Rust replica's
+console may miss a pending row or failover update. Every admitted request can
+enqueue its reserved `Finish` without waiting, including on cancellation.
+The writer commits completed logs and usage rollups
+atomically before handing off a debit with that transaction's top-level xid8.
+A failed write still hands off a debit, without an xid. PG retains a batch when
+the commit consumer is full; shutdown drains writer, consumer, limiter, then
+coordinator, in that order. See the
+[offline bucket sweep](docs/rust-cluster-cutover.md) for a lineage change.
+
+Console reads address a process in both Rust modes. `node=all` merges the
+store's live nodes (only the local node in SQLite), tags lines, and shares one
+deadline across remote publication and replies, including queued fanout.
 
 **The store.** `OMNI_CLUSTER_MODE=true` selects `packages/store/src/postgres/` at
 `OMNI_DATABASE_URL`, a second implementation of the same `Store` interface over `Bun.SQL`.

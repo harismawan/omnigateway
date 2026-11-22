@@ -1,0 +1,74 @@
+[package]
+name = "omni-gateway"
+description = "The omnigateway binary: HTTP server, auth, dispatch, streaming egress, cancellation and shutdown."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+pg-queue-probe = ["omni-store/pg-queue-probe"]
+
+[[bin]]
+name = "omnigateway"
+path = "src/main.rs"
+
+[dependencies]
+omni-coord = { path = "../omni-coord" }
+omni-cluster-limit = { path = "../omni-cluster-limit" }
+async-trait = "0.1"
+omni-cli = { path = "../omni-cli" }
+omni-control = { path = "../omni-control" }
+omni-crypto = { path = "../omni-crypto" }
+omni-dialects = { path = "../omni-dialects" }
+omni-gateway-core = { path = "../omni-gateway-core" }
+omni-ir = { path = "../omni-ir" }
+omni-providers = { path = "../omni-providers" }
+omni-ratelimit = { path = "../omni-ratelimit" }
+omni-router = { path = "../omni-router" }
+omni-store = { path = "../omni-store" }
+arc-swap = "1"
+serde_json.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+url = "2.5"
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "sync", "time", "macros", "signal", "io-util", "fs"] }
+# 1.11.1: fixes the 1.10 regression that stranded a chunked body's terminator
+# in the write buffer (hyperium/hyper#4143; `tests/http1_flush.rs`).
+hyper = { version = "1.11.1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "server-graceful", "http1"] }
+http-body = "1"
+http-body-util = "0.1"
+bytes = "1"
+base64 = "0.22.1"
+sha1 = "0.11"
+async-stream = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+futures-core = "0.3"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "registry"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+rand = "0.10"
+rusqlite = { version = "0.43", default-features = false, features = ["bundled"] }
+# The global allocator: glibc malloc's arena locks showed up as ~7% of a
+# streaming request (`__lll_lock_*`), and malloc/free as a third of it.
+# `v2`: on held-streams its peak RSS measured 74-82 MiB against v3's 78-88,
+# with chat-stream and agent-100k CPU equal or better (interleaved runs).
+mimalloc = { version = "0.1", default-features = false, features = ["v2"] }
+
+# `prctl(PR_SET_THP_DISABLE)` at start: on a host with THP `always`, mimalloc's
+# arenas fault in 2 MiB pages, which took idle RSS from 7 to 17.5 MiB. Linux
+# only: `nix::sys::prctl` does not exist elsewhere, and neither does THP.
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.32", default-features = false, features = ["process", "inotify"] }
+
+[dev-dependencies]
+nix = { version = "0.32", default-features = false, features = ["fs"] }
+# The `profile_gateway` example: a SIGPROF sampler, no perf events needed.
+pprof = { version = "0.15", default-features = false, features = ["cpp"] }
+tempfile = "3"
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "sync", "time", "macros", "test-util", "io-util"] }

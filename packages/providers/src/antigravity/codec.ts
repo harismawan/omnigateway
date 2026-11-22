@@ -4,7 +4,7 @@ import { parseSse } from "../sse.ts";
 import type { HeaderPair } from "../types.ts";
 import { buildToolCloak, type ToolCloak } from "./cloak.ts";
 import { decodeAntigravityStream } from "./decode.ts";
-import { antigravityProfile } from "./profile.ts";
+import { antigravityHost, antigravityInferenceProfile } from "./profile.ts";
 import { toAntigravityWire } from "./wire.ts";
 
 /**
@@ -23,9 +23,9 @@ import { toAntigravityWire } from "./wire.ts";
  * others "failover omniroute rotates through". That was wrong in the way that
  * costs the most: every request failed, and the error the upstream chose to
  * return pointed at the account rather than at the URL. The bootstrap and quota
- * RPCs in `oauth.ts` genuinely do live on `cloudcode-pa` — they were verified
- * working there in the same session — so the split is real and each side is
- * pinned by its own test.
+ * RPCs in `oauth.ts` were verified working on `cloudcode-pa` in that session;
+ * since the 2026-11-21 App/CLI capture they use `daily-cloudcode-pa` as well
+ * (not yet measured live). Each side is pinned by its own test.
  *
  * The streaming endpoint is used even for a non-streaming client request: plain
  * `v1internal:generateContent` answers 400 on several models because Cloud Code
@@ -37,7 +37,7 @@ import { toAntigravityWire } from "./wire.ts";
  * `cloudcode-pa` and a sandbox host; add that if `daily-` is ever measured
  * unavailable, but note the fallback host is the one that refuses this tier.
  */
-const URL = "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse";
+const URL = `https://${antigravityHost}/v1internal:streamGenerateContent?alt=sse`;
 
 /** Domain separator, so this hash can never collide with another use of a request id. */
 const REQUEST_NAMESPACE = "omni-antigravity-req";
@@ -123,14 +123,15 @@ export const antigravityCodec: ProviderCodec = {
 
     const { body, degradations } = toAntigravityWire(input.request, input.model, {
       project,
-      requestId,
+      // Keep our ID after the captured prefix; the App's extra segments are not understood.
+      requestId: `agent/${requestId}`,
       cloak,
     });
 
     const protocol: HeaderPair[] = [["Authorization", `Bearer ${accessToken}`]];
     const headers = orderHeaders(
-      mergeHeaders(antigravityProfile.headers, protocol),
-      antigravityProfile.order,
+      mergeHeaders(antigravityInferenceProfile.headers, protocol),
+      antigravityInferenceProfile.order,
     );
 
     return {

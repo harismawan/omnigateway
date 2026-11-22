@@ -1,0 +1,746 @@
+//! Deep JSON: bodies and embedded tool arguments nested up to
+//! `omni_ir::deep::MAX_DEPTH` are accepted and carried, one level more is
+//! refused deterministically, and every step runs on a 2 MiB stack (tokio's
+//! default worker stack).
+
+use omni_dialects::ingress::{self, Headers, IngressOptions};
+use omni_ir::deep::{self, MAX_DEPTH};
+use omni_ir::error::GatewayError;
+use omni_ir::request::{ChatRequest, ContentBlock};
+use serde_json::Value;
+
+const STACK: usize = 2 * 1024 * 1024;
+const D: usize = MAX_DEPTH;
+
+/// A JSON array `levels` containers deep around `0`.
+fn nest(levels: usize) -> String {
+    format!("{}0{}", "[".repeat(levels), "]".repeat(levels))
+}
+
+fn on_small_stack<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
+    std::thread::Builder::new()
+        .stack_size(STACK)
+        .spawn(f)
+        .expect("spawn")
+        .join()
+        .expect("no stack overflow")
+}
+
+type Parse = fn(&Value, &Headers, &mut IngressOptions<'_>) -> Result<ChatRequest, GatewayError>;
+
+/// Parses `body` as the route would and runs the request through clone,
+/// serialization, the token estimate and drop.
+fn route(body: String, parse: Parse) -> Result<ChatRequest, GatewayError> {
+    let value = ingress::parse_body_checked(&body)?;
+    let mut ids = ingress::random_tool_use_id;
+    let mut opts = IngressOptions {
+        new_tool_use_id: &mut ids,
+    };
+    let result = parse(&value, &Headers::new(), &mut opts);
+    // `value` is a `deep::Owned`: it drops iteratively.
+    drop(value);
+    let req = result?;
+    let copy = req.clone();
+    let mut wire = String::new();
+    for v in copy.vendor.iter().flat_map(|m| m.values()) {
+        omni_ir::jsjson::write_value(v, &mut wire);
+    }
+    for b in copy.messages.iter().flat_map(|m| &m.content) {
+        if let ContentBlock::ToolUse(t) = b {
+            omni_ir::jsjson::write_value(&t.input, &mut wire);
+        }
+    }
+    let _ = omni_ir::tokens::estimate_input_tokens(&copy);
+    drop(copy);
+    Ok(req)
+}
+
+/// The first `toolUse` input in the request.
+fn tool_input(req: &ChatRequest) -> Option<&Value> {
+    req.messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .find_map(|b| match b {
+            ContentBlock::ToolUse(t) => Some(&t.input),
+            _ => None,
+        })
+}
+
+fn depth(v: &Value) -> usize {
+    let mut d = 0;
+    let mut cur = v;
+    while let Some(next) = cur.as_array().and_then(|a| a.first()) {
+        d += 1;
+        cur = next;
+    }
+    d
+}
+
+fn too_deep(e: &GatewayError) -> bool {
+    e.code.as_str() == "BAD_REQUEST" && e.message == ingress::TOO_DEEP
+}
+
+/// Chat: a vendor field nested `levels` deep. The body adds one level.
+fn chat_vendor(levels: usize) -> String {
+    format!(
+        r#"{{"model":"m","messages":[{{"role":"user","content":"hi"}}],"x":{}}}"#,
+        nest(levels)
+    )
+}
+
+fn chat_args(levels: usize) -> String {
+    serde_json::json!({
+        "model": "m",
+        "messages": [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "tool_calls": [{"id": "c", "type": "function", "function": {"name": "f", "arguments": nest(levels)}}]},
+        ]
+    })
+    .to_string()
+}
+
+fn responses_args(levels: usize) -> String {
+    serde_json::json!({
+        "model": "m",
+        "input": [
+            {"role": "user", "content": "q"},
+            {"type": "function_call", "call_id": "c", "name": "f", "arguments": nest(levels)},
+        ]
+    })
+    .to_string()
+}
+
+fn anthropic_vendor(levels: usize) -> String {
+    format!(
+        r#"{{"model":"m","messages":[{{"role":"user","content":"hi"}}],"x":{}}}"#,
+        nest(levels)
+    )
+}
+
+#[test]
+fn an_outer_body_at_the_bound_is_carried_and_one_deeper_is_refused() {
+    on_small_stack(|| {
+        // The body object is one level; `x` adds the rest.
+        for (parse, name) in [
+            (ingress::openai::parse as Parse, "chat"),
+            (ingress::anthropic::parse as Parse, "anthropic"),
+        ] {
+            let ok = route(chat_vendor(D - 2), parse).expect("D-1");
+            assert!(ok.vendor.is_some(), "{name}");
+            route(anthropic_vendor(D - 1), parse).unwrap_or_else(|e| panic!("{name} D: {e}"));
+            let err = route(chat_vendor(D), parse).expect_err("D+1");
+            assert!(too_deep(&err), "{name}: {err}");
+        }
+    });
+}
+
+#[test]
+fn chat_tool_arguments_at_the_bound_are_kept_and_never_replaced_by_an_empty_object() {
+    on_small_stack(|| {
+        for levels in [D - 1, D] {
+            let req = route(chat_args(levels), ingress::openai::parse).expect("accepted");
+            assert_eq!(depth(tool_input(&req).expect("tool use")), levels);
+        }
+        let err = route(chat_args(D + 1), ingress::openai::parse).expect_err("D+1");
+        assert!(too_deep(&err), "{err}");
+    });
+}
+
+#[test]
+fn responses_tool_arguments_at_the_bound_are_kept() {
+    on_small_stack(|| {
+        for levels in [D - 1, D] {
+            let req = route(responses_args(levels), ingress::responses::parse).expect("accepted");
+            assert_eq!(depth(tool_input(&req).expect("tool use")), levels);
+        }
+        let err = route(responses_args(D + 1), ingress::responses::parse).expect_err("D+1");
+        assert!(too_deep(&err), "{err}");
+    });
+}
+
+#[test]
+fn an_anthropic_tool_input_at_the_bound_survives_the_zod_port() {
+    on_small_stack(|| {
+        let body = |levels: usize| {
+            format!(
+                r#"{{"model":"m","messages":[{{"role":"user","content":"q"}},{{"role":"assistant","content":[{{"type":"tool_use","id":"t","name":"f","input":{{"a":{}}}}}]}}]}}"#,
+                nest(levels)
+            )
+        };
+        // body, messages, message, content, block, input = 6 levels around `a`.
+        let req = route(body(D - 6), ingress::anthropic::parse).expect("D");
+        let input = tool_input(&req).expect("tool use");
+        assert_eq!(depth(&input["a"]), D - 6);
+        let err = route(body(D - 5), ingress::anthropic::parse).expect_err("D+1");
+        assert!(too_deep(&err), "{err}");
+    });
+}
+
+#[test]
+fn deep_values_clone_serialize_and_drop_on_a_small_stack() {
+    on_small_stack(|| {
+        let v = deep::parse(&nest(D)).expect("parse");
+        let c = deep::clone(&v);
+        let s = omni_ir::jsjson::to_string(&c);
+        assert_eq!(s.len(), 2 * D + 1);
+        deep::drop(c);
+        let owned = deep::Owned(v);
+        drop(owned);
+        assert_eq!(deep::parse(&nest(D + 1)), Err(deep::ParseError::TooDeep));
+    });
+}
+
+// ------------------------------------------------------------------ ingest()
+//
+// Through the public entry point, with no help from the test: the body text
+// goes in and the IR comes back, on a 2 MiB thread. Each payload puts a value
+// that is `MAX_DEPTH` containers deep *counted from the body root* at one
+// client-JSON position. Accepted results are cloned, serialized with
+// `jsjson` and the IR's `Serialize`, then dropped, all on the same thread.
+
+use ingress::{Ingested, Surface};
+
+/// A body `D` deep whose deepest value sits at `{path}` (`levels` above it).
+fn at(levels_above: usize, template: &str) -> String {
+    template.replace("@", &nest(D - levels_above))
+}
+
+fn ingest(surface: Surface, body: &str) -> Result<Ingested, GatewayError> {
+    let mut ids = ingress::random_tool_use_id;
+    let mut opts = IngressOptions {
+        new_tool_use_id: &mut ids,
+    };
+    ingress::ingest(surface, body, &Headers::new(), &mut opts)
+}
+
+fn exercise(i: Ingested) {
+    let copy = i.request.clone();
+    // The IR's own `Serialize` (recursive), then every jsjson carrier.
+    let ir = serde_json::to_value(&copy).expect("serialize");
+    let mut wire = String::new();
+    omni_ir::jsjson::write_value(&ir, &mut wire);
+    assert!(wire.len() > 2 * (D / 2), "the deep value is in the IR");
+    deep::drop(ir);
+    let _ = omni_ir::tokens::estimate_input_tokens(&copy);
+    drop(copy);
+    drop(i);
+}
+
+/// `(name, surface, levels above the deep value, template, accepted?)`.
+fn positions() -> Vec<(&'static str, Surface, usize, &'static str, bool)> {
+    vec![
+        // outer body, every dialect
+        (
+            "anthropic body",
+            Surface::Anthropic,
+            1,
+            r#"{"model":"m","messages":[{"role":"user","content":"hi"}],"x":@}"#,
+            true,
+        ),
+        (
+            "chat body",
+            Surface::OpenAi,
+            1,
+            r#"{"model":"m","messages":[{"role":"user","content":"hi"}],"x":@}"#,
+            true,
+        ),
+        (
+            "responses body",
+            Surface::Responses,
+            1,
+            r#"{"model":"m","input":"hi","x":@}"#,
+            true,
+        ),
+        // custom tool input_schema: accepted, and refused on a later field
+        (
+            "anthropic input_schema",
+            Surface::Anthropic,
+            4,
+            r#"{"model":"m","messages":[{"role":"user","content":"q"}],"tools":[{"name":"f","input_schema":{"a":@}}]}"#,
+            true,
+        ),
+        (
+            "anthropic input_schema, refused",
+            Surface::Anthropic,
+            4,
+            r#"{"model":"m","messages":[{"role":"user","content":"q"}],"tools":[{"name":"f","strict":5,"input_schema":{"a":@}}]}"#,
+            false,
+        ),
+        (
+            "anthropic input_schema, refused by zod",
+            Surface::Anthropic,
+            4,
+            r#"{"model":"m","messages":[{"role":"user","content":"q"}],"tools":[{"name":"","input_schema":{"a":@}}]}"#,
+            false,
+        ),
+        (
+            "chat parameters",
+            Surface::OpenAi,
+            5,
+            r#"{"model":"m","messages":[{"role":"user","content":"q"}],"tools":[{"type":"function","function":{"name":"f","parameters":{"a":@}}}]}"#,
+            true,
+        ),
+        (
+            "responses parameters",
+            Surface::Responses,
+            4,
+            r#"{"model":"m","input":"q","tools":[{"type":"function","name":"f","parameters":{"a":@}}]}"#,
+            true,
+        ),
+        (
+            "responses hosted tool",
+            Surface::Responses,
+            3,
+            r#"{"model":"m","input":"q","tools":[{"type":"web_search","x":@}]}"#,
+            true,
+        ),
+        // Responses function_call_output, object form
+        (
+            "responses output object",
+            Surface::Responses,
+            4,
+            r#"{"model":"m","input":[{"role":"user","content":"q"},{"type":"function_call","call_id":"c","name":"f","arguments":"{}"},{"type":"function_call_output","call_id":"c","output":{"a":@}}]}"#,
+            true,
+        ),
+        (
+            "responses output array",
+            Surface::Responses,
+            4,
+            r#"{"model":"m","input":[{"role":"user","content":"q"},{"type":"function_call","call_id":"c","name":"f","arguments":"{}"},{"type":"function_call_output","call_id":"c","output":[@]}]}"#,
+            true,
+        ),
+        // raw.type, refused
+        (
+            "responses raw.type",
+            Surface::Responses,
+            3,
+            r#"{"model":"m","input":[{"type":@}]}"#,
+            false,
+        ),
+        (
+            "responses part type",
+            Surface::Responses,
+            5,
+            r#"{"model":"m","input":[{"role":"user","content":[{"type":@}]}]}"#,
+            false,
+        ),
+        // native and vendor carriers
+        (
+            "responses reasoning item",
+            Surface::Responses,
+            3,
+            r#"{"model":"m","input":[{"role":"user","content":"q"},{"type":"reasoning","x":@}]}"#,
+            true,
+        ),
+        (
+            "anthropic native block",
+            Surface::Anthropic,
+            5,
+            r#"{"model":"m","messages":[{"role":"user","content":"q"},{"role":"assistant","content":[{"type":"server_tool_use","id":"s","name":"web_search","input":@}]}]}"#,
+            true,
+        ),
+        (
+            "anthropic native block, refused",
+            Surface::Anthropic,
+            5,
+            r#"{"model":"m","messages":[{"role":"user","content":"q"},{"role":"assistant","content":[{"type":"server_tool_use","id":"s","name":"nope","input":@}]}]}"#,
+            false,
+        ),
+        (
+            "anthropic tool_use input",
+            Surface::Anthropic,
+            6,
+            r#"{"model":"m","messages":[{"role":"user","content":"q"},{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"f","input":{"a":@}}]}]}"#,
+            true,
+        ),
+        (
+            "anthropic block refused after deep sibling",
+            Surface::Anthropic,
+            5,
+            r#"{"model":"m","messages":[{"role":"user","content":[{"type":"bogus","x":@}]}]}"#,
+            false,
+        ),
+        (
+            "anthropic safeguards system",
+            Surface::Anthropic,
+            3,
+            r#"{"model":"m","messages":[{"role":"user","content":"q"}],"safeguards":[1],"system":[{"type":"text","text":"s","x":@}]}"#,
+            true,
+        ),
+        (
+            "chat message refused after deep field",
+            Surface::OpenAi,
+            3,
+            r#"{"model":"m","messages":[{"role":"tool","x":@,"content":"r"}]}"#,
+            false,
+        ),
+    ]
+}
+
+#[test]
+fn ingest_is_stack_safe_at_every_client_json_position() {
+    on_small_stack(|| {
+        let only = std::env::var("ONLY").ok();
+        for (name, surface, above, template, accepted) in positions() {
+            if only.as_deref().is_some_and(|o| o != name) {
+                continue;
+            }
+            let body = at(above, template);
+            assert_eq!(
+                omni_ir::deep::depth_of(&body),
+                D,
+                "{name}: payload is not D deep"
+            );
+            match ingest(surface, &body) {
+                Ok(i) => {
+                    assert!(accepted, "{name}: accepted");
+                    exercise(i);
+                }
+                Err(e) => {
+                    assert!(!accepted, "{name}: refused: {e}");
+                    assert_eq!(e.code.as_str(), "BAD_REQUEST", "{name}");
+                    assert_ne!(e.message, ingress::TOO_DEEP, "{name}: at the bound");
+                }
+            }
+            // One level deeper is refused, whatever the position.
+            let deeper = template.replace("@", &nest(D - above + 1));
+            let e = ingest(surface, &deeper).expect_err(name);
+            assert_eq!(e.message, ingress::TOO_DEEP, "{name}");
+        }
+    });
+}
+
+#[test]
+fn ingest_keeps_deep_argument_strings_in_every_dialect() {
+    on_small_stack(|| {
+        for levels in [D - 1, D] {
+            let chat = ingest(Surface::OpenAi, &chat_args(levels)).expect("chat");
+            assert_eq!(depth(tool_input(&chat.request).expect("tool")), levels);
+            exercise(chat);
+            let resp = ingest(Surface::Responses, &responses_args(levels)).expect("responses");
+            assert_eq!(depth(tool_input(&resp.request).expect("tool")), levels);
+            exercise(resp);
+        }
+        for (surface, body) in [
+            (Surface::OpenAi, chat_args(D + 1)),
+            (Surface::Responses, responses_args(D + 1)),
+        ] {
+            let e = ingest(surface, &body).expect_err("too deep");
+            assert_eq!(e.message, ingress::TOO_DEEP);
+        }
+    });
+}
+
+#[test]
+fn a_deep_js_value_converts_clones_and_drops_on_a_small_stack() {
+    on_small_stack(|| {
+        let v = deep::Owned(deep::parse(&nest(D)).expect("parse"));
+        let js = omni_ir::jsjson::JsValue::from(&*v);
+        let copy = js.clone();
+        assert_eq!(
+            omni_ir::jsjson::stringify(&copy).map(|s| s.len()),
+            Some(2 * D + 1)
+        );
+        drop(copy);
+        drop(js);
+    });
+}
+
+#[test]
+fn a_shallow_request_never_grows_the_stack_and_a_deep_one_does() {
+    on_small_stack(|| {
+        let shallow = [
+            (
+                Surface::Anthropic,
+                r#"{"model":"m","max_tokens":5,"system":"s","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"f","input":{"a":[1,{"b":2}]}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"r"}]}],"tools":[{"name":"f","input_schema":{"type":"object","properties":{"a":{"type":"array"}}}}],"thinking":{"type":"adaptive"}}"#.to_string(),
+            ),
+            (
+                Surface::OpenAi,
+                serde_json::json!({"model":"m","stream":true,"messages":[{"role":"system","content":"s"},{"role":"user","content":"q"},{"role":"assistant","tool_calls":[{"id":"c","type":"function","function":{"name":"f","arguments":"{\"a\":[[1]]}"}}]},{"role":"tool","tool_call_id":"c","content":"r"}],"tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object"}}}]}).to_string(),
+            ),
+            (
+                Surface::Responses,
+                serde_json::json!({"model":"m","instructions":"i","input":[{"role":"user","content":"q"},{"type":"function_call","call_id":"c","name":"f","arguments":"{\"a\":[[1]]}"},{"type":"function_call_output","call_id":"c","output":{"ok":[1]}}],"tools":[{"type":"function","name":"f","parameters":{"type":"object"}},{"type":"web_search"}]}).to_string(),
+            ),
+        ];
+        for (surface, body) in &shallow {
+            let before = deep::grows();
+            let i = ingest(*surface, body).expect("accepted");
+            let copy = i.request.clone();
+            let mut w = String::new();
+            omni_ir::jsjson::write_value(&serde_json::to_value(&copy).expect("ir"), &mut w);
+            drop(copy);
+            drop(i);
+            assert_eq!(
+                deep::grows(),
+                before,
+                "{surface:?}: a shallow request grew the stack"
+            );
+            // A refusal is shallow too.
+            let before = deep::grows();
+            let _ = ingest(*surface, r#"{"model":"","messages":[]}"#).expect_err("refused");
+            assert_eq!(
+                deep::grows(),
+                before,
+                "{surface:?}: a shallow refusal grew the stack"
+            );
+        }
+        for (surface, body) in [
+            (Surface::Anthropic, anthropic_vendor(D - 1)),
+            (Surface::OpenAi, chat_args(D)),
+            (Surface::Responses, responses_args(D)),
+        ] {
+            let before = deep::grows();
+            let i = ingest(surface, &body).expect("accepted");
+            drop(i);
+            assert!(
+                deep::grows() > before,
+                "{surface:?}: a D-deep request did not grow"
+            );
+        }
+    });
+}
+
+#[test]
+fn deep_json_hidden_in_escaped_strings_still_takes_the_grown_path() {
+    on_small_stack(|| {
+        // `arguments` with every bracket written as `\u005b` / `\u005d`.
+        let escaped = format!(
+            r#"{{"model":"m","messages":[{{"role":"user","content":"q"}},{{"role":"assistant","tool_calls":[{{"id":"c","type":"function","function":{{"name":"f","arguments":"{}0{}"}}}}]}}]}}"#,
+            "\\u005b".repeat(D),
+            "\\u005d".repeat(D)
+        );
+        let before = deep::grows();
+        let i = ingest(Surface::OpenAi, &escaped).expect("accepted");
+        assert_eq!(depth(tool_input(&i.request).expect("tool")), D);
+        drop(i);
+        assert!(
+            deep::grows() > before,
+            "escaped deep arguments ran unguarded"
+        );
+    });
+}
+
+// ------------------------------------------------- the pre-scan's soundness
+//
+// `depth_bound` must never under-count, or a deep body runs unguarded and
+// overflows the 2 MiB stack.
+
+/// Argument JSON `levels` deep in which every level holds a string with
+/// closing brackets: `{"x":"]}","y":` repeated, then `0` and the closers.
+fn closers_in_strings(levels: usize, piece: &str) -> String {
+    format!("{}0{}", piece.repeat(levels), "}".repeat(levels))
+}
+
+/// True container depth of a value, by an explicit-stack walk.
+fn true_depth(v: &Value) -> usize {
+    let mut max = 0;
+    let mut pending = vec![(v, 0usize)];
+    while let Some((v, d)) = pending.pop() {
+        match v {
+            Value::Array(a) => pending.extend(a.iter().map(|c| (c, d + 1))),
+            Value::Object(m) => pending.extend(m.values().map(|c| (c, d + 1))),
+            _ => {
+                max = max.max(d);
+                continue;
+            }
+        }
+        max = max.max(d + 1);
+    }
+    max
+}
+
+fn chat_args_text(args: &str) -> String {
+    serde_json::json!({
+        "model": "m",
+        "messages": [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "tool_calls": [{"id": "c", "type": "function", "function": {"name": "f", "arguments": args}}]},
+        ]
+    })
+    .to_string()
+}
+
+fn responses_args_text(args: &str) -> String {
+    serde_json::json!({
+        "model": "m",
+        "input": [
+            {"role": "user", "content": "q"},
+            {"type": "function_call", "call_id": "c", "name": "f", "arguments": args},
+        ]
+    })
+    .to_string()
+}
+
+#[test]
+fn closers_inside_argument_strings_do_not_hide_deep_arguments() {
+    on_small_stack(|| {
+        for piece in [
+            r#"{"x":"]","y":"#,
+            r#"{"x":"]}]}","y":"#,
+            r#"{"x":"\"]}","y":"#,
+            r#"{"x":"\\","z":"]}","y":"#,
+            r#"{"x":"\\\"]}","y":"#,
+        ] {
+            let args = closers_in_strings(D, piece);
+            for (surface, body) in [
+                (Surface::OpenAi, chat_args_text(&args)),
+                (Surface::Responses, responses_args_text(&args)),
+            ] {
+                assert!(deep::depth_bound(&body) > deep::SHALLOW_DEPTH);
+                let before = deep::grows();
+                let i = ingest(surface, &body).expect("accepted");
+                assert_eq!(
+                    true_depth(tool_input(&i.request).expect("tool")),
+                    D,
+                    "{surface:?} {piece}"
+                );
+                drop(i);
+                assert!(
+                    deep::grows() > before,
+                    "{surface:?} {piece}: deep arguments ran unguarded"
+                );
+            }
+        }
+    });
+}
+
+// ------------------------------------------------------ the threshold guard
+//
+// At exactly `depth_bound(body) == SHALLOW_DEPTH`, the deepest body the
+// unguarded path takes, every client-JSON position must ingest on a 2 MiB
+// thread without one grow. Meaningful in a debug build, where frames are
+// largest: if per-level stack use rises past the margin, a `grow` fires (the
+// count moves) or a site without one overflows (the thread dies).
+
+/// `make(levels)` at the largest `levels` whose body bounds to exactly
+/// `SHALLOW_DEPTH`.
+fn at_threshold(name: &str, make: impl Fn(usize) -> String) -> String {
+    let mut levels = deep::SHALLOW_DEPTH;
+    loop {
+        let body = make(levels);
+        let bound = deep::depth_bound(&body);
+        if bound <= deep::SHALLOW_DEPTH {
+            assert_eq!(bound, deep::SHALLOW_DEPTH, "{name}: no body at the bound");
+            return body;
+        }
+        levels -= bound - deep::SHALLOW_DEPTH;
+    }
+}
+
+fn exercise_shallow(i: Ingested) {
+    let copy = i.request.clone();
+    let ir = serde_json::to_value(&copy).expect("serialize");
+    let mut wire = String::new();
+    omni_ir::jsjson::write_value(&ir, &mut wire);
+    deep::drop(ir);
+    let _ = omni_ir::tokens::estimate_input_tokens(&copy);
+    drop(copy);
+    drop(i);
+}
+
+#[test]
+fn every_position_at_the_shallow_threshold_runs_without_growing() {
+    let mut cases: Vec<(String, Surface, String, bool)> = positions()
+        .into_iter()
+        .map(|(name, surface, _, template, accepted)| {
+            let body = at_threshold(name, |l| template.replace("@", &nest(l)));
+            (name.to_string(), surface, body, accepted)
+        })
+        .collect();
+    let closers = r#"{"x":"\"]}","y":"#;
+    for (name, make, accepted) in [
+        ("chat arguments", chat_args as fn(usize) -> String, true),
+        ("responses arguments", responses_args, true),
+    ] {
+        cases.push((
+            name.into(),
+            if name.starts_with("chat") {
+                Surface::OpenAi
+            } else {
+                Surface::Responses
+            },
+            at_threshold(name, make),
+            accepted,
+        ));
+    }
+    for (name, surface, wrap) in [
+        (
+            "chat arguments with closers in strings",
+            Surface::OpenAi,
+            chat_args_text as fn(&str) -> String,
+        ),
+        (
+            "responses arguments with closers in strings",
+            Surface::Responses,
+            responses_args_text,
+        ),
+    ] {
+        let body = at_threshold(name, |l| wrap(&closers_in_strings(l, closers)));
+        cases.push((name.into(), surface, body, true));
+    }
+    // Refusals carrying argument strings at the threshold.
+    let chat_refused = at_threshold("chat arguments, refused", |l| {
+        serde_json::json!({
+            "model": "m",
+            "messages": [
+                {"role": "assistant", "tool_calls": [{"id": "c", "type": "function", "function": {"name": "f", "arguments": nest(l)}}]},
+                {"role": "bogus", "content": "r"},
+            ]
+        })
+        .to_string()
+    });
+    cases.push((
+        "chat arguments, refused".into(),
+        Surface::OpenAi,
+        chat_refused,
+        false,
+    ));
+    let responses_refused = at_threshold("responses arguments, refused", |l| {
+        serde_json::json!({
+            "model": "m",
+            "input": [
+                {"type": "function_call", "call_id": "c", "name": "f", "arguments": nest(l)},
+                5,
+            ]
+        })
+        .to_string()
+    });
+    cases.push((
+        "responses arguments, refused".into(),
+        Surface::Responses,
+        responses_refused,
+        false,
+    ));
+    let responses_bad_args = at_threshold("responses arguments, not JSON", |l| {
+        responses_args_text(&format!("{}0", "[".repeat(l)))
+    });
+    cases.push((
+        "responses arguments, not JSON".into(),
+        Surface::Responses,
+        responses_bad_args,
+        false,
+    ));
+
+    on_small_stack(move || {
+        for (name, surface, body, accepted) in cases {
+            let before = deep::grows();
+            match ingest(surface, &body) {
+                Ok(i) => {
+                    assert!(accepted, "{name}: accepted");
+                    exercise_shallow(i);
+                }
+                Err(e) => {
+                    assert!(!accepted, "{name}: refused: {e}");
+                    assert_eq!(e.code.as_str(), "BAD_REQUEST", "{name}");
+                    assert_ne!(e.message, ingress::TOO_DEEP, "{name}");
+                }
+            }
+            assert_eq!(
+                deep::grows(),
+                before,
+                "{name}: grew at depth_bound == SHALLOW_DEPTH"
+            );
+        }
+    });
+}

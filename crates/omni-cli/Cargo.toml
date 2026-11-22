@@ -1,0 +1,28 @@
+[package]
+name = "omni-cli"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "omni"
+path = "src/main.rs"
+
+[dependencies]
+omni-providers = { path = "../omni-providers" }
+tokio = { version = "1", features = ["rt", "time", "net"] }
+url = "2.5"
+omni-crypto = { path = "../omni-crypto" }
+rustix = { version = "1.1.6", features = ["termios", "fs", "process"] }
+omni-control = { path = "../omni-control" }
+omni-ir = { path = "../omni-ir" }
+omni-store = { path = "../omni-store" }
+omni-router = { path = "../omni-router" }
+serde_json.workspace = true
+rusqlite = { version = "0.43", default-features = false, features = ["bundled"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }

@@ -1,0 +1,703 @@
+diff --git a/crates/omni-control/src/client_quota.rs b/crates/omni-control/src/client_quota.rs
+index c48d6924..cb1f7eea 100644
+--- a/crates/omni-control/src/client_quota.rs
++++ b/crates/omni-control/src/client_quota.rs
+@@ -91,7 +91,7 @@ fn compare_cells(a: &Value, b: &Value) -> std::cmp::Ordering {
+     }
+ }
+ 
+-#[derive(Clone)]
++#[derive(Clone, PartialEq, Eq, Hash)]
+ struct SortKey {
+     text: Vec<u16>,
+     string: bool,
+@@ -173,34 +173,99 @@ pub fn history(store: &omni_store::SqliteStore, query: &str, now: f64) -> Result
+     };
+     let since = optional("since", oldest).max(oldest);
+     let until = optional("until", now).min(now);
+-    let mut samples =
+-        omni_store::quota::list_quota_samples(store.connection(), since, until, MAX_SAMPLES + 1)?;
++    let compact = omni_store::quota::list_compact_quota_samples(
++        store.connection(),
++        since,
++        until,
++        MAX_SAMPLES + 1,
++    )?;
++    let mut cell_order = (0..compact.cells.len()).collect::<Vec<_>>();
++    cell_order.sort_by(|a, b| history_compare_cells(&compact.cells[*a], &compact.cells[*b]));
++    let mut ranks = vec![0; compact.cells.len()];
++    let mut rank = 0;
++    for (i, id) in cell_order.iter().enumerate() {
++        if i > 0
++            && !history_compare_cells(&compact.cells[cell_order[i - 1]], &compact.cells[*id])
++                .is_eq()
++        {
++            rank += 1;
++        }
++        ranks[*id] = rank;
++    }
++    let mut sample_order = history_sample_order(&compact, &ranks);
++    let truncated = sample_order.len() > MAX_SAMPLES;
++    sample_order.truncate(MAX_SAMPLES);
++    let samples = sample_order
++        .into_iter()
++        .map(|i| {
++            let (s, v) = (&compact.series[i], &compact.values[i]);
++            [
++                &compact.cells[s[0]],
++                &compact.cells[s[1]],
++                &v[0],
++                &v[1],
++                &v[2],
++                &v[3],
++                &v[4],
++            ]
++        })
++        .collect::<Vec<_>>();
+     crate::credentials::validate_client_metadata(store)?;
+     let accounts = omni_store::credentials::client_quota_accounts(store.connection())?;
+-    // Lexicographic composition of total preorders is total, even for corrupt cells.
+-    samples.sort_by(|a, b| {
+-        compare_cells(&a[0], &b[0])
+-            .then_with(|| compare_cells(&a[1], &b[1]))
+-            .then_with(|| compare_numbers(number(&a[5]), number(&b[5])))
+-    });
+-    let truncated = samples.len() > MAX_SAMPLES;
+-    samples.truncate(MAX_SAMPLES);
+     let mut rows = Vec::new();
++    let mut distinct = std::collections::HashMap::new();
++    let mut keys = Vec::new();
++    let mut counts = Vec::new();
++    let mut previous = None;
+     for (i, s) in samples.iter().enumerate() {
+-        let Some(c) = accounts.iter().rposition(|c| same_id(&c[0], &s[0])) else {
++        let Some(c) = accounts.iter().rposition(|c| same_id(&c[0], s[0])) else {
+             continue;
+         };
+-        if s[3] == Value::Null || number(&s[3]) <= 0.0 {
++        if *s[3] == Value::Null || number(s[3]) <= 0.0 {
+             continue;
+         }
+-        let keys = sort_keys([&accounts[c][2], &accounts[c][1], &s[1]]);
+-        rows.push((i, c, keys));
++        if let Some((last_c, window, k)) = previous
++            && last_c == c
++            && window == &s[1]
++        {
++            counts[k] += 1;
++            rows.push((i, c, k));
++            continue;
++        }
++        let key = sort_keys([&accounts[c][2], &accounts[c][1], s[1]]);
++        let next = keys.len();
++        let k = *distinct.entry(key.clone()).or_insert_with(|| {
++            keys.push(key);
++            counts.push(0usize);
++            next
++        });
++        counts[k] += 1;
++        previous = Some((c, &s[1], k));
++        rows.push((i, c, k));
++    }
++    // Two representatives preserve the ordered-distinct-row validation rule
++    // even when every row has the same (possibly non-string) key.
++    validate_sort(
++        keys.iter()
++            .zip(&counts)
++            .flat_map(|(k, n)| std::iter::repeat_n(k, (*n).min(2)))
++            .collect(),
++    )?;
++    let mut order = (0..keys.len()).collect::<Vec<_>>();
++    order.sort_by(|a, b| compare_keys(&keys[*a], &keys[*b]));
++    let mut ranks = vec![0usize; keys.len()];
++    let mut rank = 0;
++    for (i, k) in order.iter().enumerate() {
++        if i > 0 && !compare_keys(&keys[order[i - 1]], &keys[*k]).is_eq() {
++            rank += 1;
++        }
++        ranks[*k] = rank;
+     }
+-    validate_sort(rows.iter().map(|r| &r.2).collect())?;
+     // Three collation keys followed by numeric/NaN classes form a total preorder.
+     rows.sort_by(|a, b| {
+-        compare_keys(&a.2, &b.2)
+-            .then_with(|| compare_numbers(number(&samples[a.0][5]), number(&samples[b.0][5])))
++        ranks[a.2]
++            .cmp(&ranks[b.2])
++            .then_with(|| compare_numbers(number(samples[a.0][5]), number(samples[b.0][5])))
+     });
+     let mut out = String::from("{\"samples\":[");
+     for (n, (i, c, _)) in rows.iter().enumerate() {
+@@ -209,33 +274,31 @@ pub fn history(store: &omni_store::SqliteStore, query: &str, now: f64) -> Result
+         }
+         let s = &samples[*i];
+         let c = &accounts[*c];
+-        let ratio = nan_max(number(&s[2]) / number(&s[3]), 0.0);
+-        let fields = [
+-            ("credentialId", json(&c[0])),
+-            ("label", json(&c[1])),
+-            ("provider", json(&c[2])),
+-            ("windowType", json(&s[1])),
+-            ("observedAt", json(&s[5])),
+-            (
+-                "usedRatio",
+-                JsValue::Number(if ratio.is_nan() {
+-                    ratio
+-                } else {
+-                    ratio.min(1.0)
+-                }),
+-            ),
+-            ("resetsAt", json(&s[4])),
+-            ("windowMs", json(&s[6])),
+-        ];
+-        out.push_str(
+-            &omni_ir::jsjson::stringify(&JsValue::Object(
+-                fields
+-                    .into_iter()
+-                    .map(|(k, v)| (k.encode_utf16().collect(), v))
+-                    .collect(),
+-            ))
+-            .unwrap_or_default(),
++        let ratio = nan_max(number(s[2]) / number(s[3]), 0.0);
++        for (prefix, value) in [
++            ("{\"credentialId\":", &c[0]),
++            (",\"label\":", &c[1]),
++            (",\"provider\":", &c[2]),
++            (",\"windowType\":", s[1]),
++            (",\"observedAt\":", s[5]),
++        ] {
++            out.push_str(prefix);
++            write_history_cell(value, &mut out);
++        }
++        out.push_str(",\"usedRatio\":");
++        omni_ir::jsjson::write_number(
++            if ratio.is_nan() {
++                ratio
++            } else {
++                ratio.min(1.0)
++            },
++            &mut out,
+         );
++        out.push_str(",\"resetsAt\":");
++        write_history_cell(s[4], &mut out);
++        out.push_str(",\"windowMs\":");
++        write_history_cell(s[6], &mut out);
++        out.push('}');
+     }
+     out.push_str(if truncated {
+         "],\"truncated\":true}"
+@@ -244,6 +307,176 @@ pub fn history(store: &omni_store::SqliteStore, query: &str, now: f64) -> Result
+     });
+     Ok(out)
+ }
++fn write_history_cell(value: &Value, out: &mut String) {
++    match value {
++        Value::Null => out.push_str("null"),
++        Value::Text(s) => omni_ir::jsjson::write_str(s, out),
++        Value::Integer(_) | Value::Real(_) => omni_ir::jsjson::write_number(number(value), out),
++        Value::Blob(_) => {
++            out.push_str(&omni_ir::jsjson::stringify(&json(value)).unwrap_or_default())
++        }
++    }
++}
++
++fn history_sample_order(
++    compact: &omni_store::quota::CompactSamples,
++    ranks: &[usize],
++) -> Vec<usize> {
++    let width = ranks.iter().copied().max().unwrap_or(0) + 1;
++    if width <= 64 {
++        // Stable counting scatter groups equal ranked series in linear time.
++        // Each group retains the original numeric comparator and tie order.
++        let mut offsets = vec![0; width * width + 1];
++        let group = |s: &[usize; 2]| ranks[s[0]] * width + ranks[s[1]];
++        for s in &compact.series {
++            offsets[group(s) + 1] += 1;
++        }
++        for i in 1..offsets.len() {
++            offsets[i] += offsets[i - 1];
++        }
++        let mut next = offsets.clone();
++        let mut order = vec![0; compact.series.len()];
++        let observed = compact
++            .values
++            .iter()
++            .map(|v| number(&v[3]))
++            .collect::<Vec<_>>();
++        for (i, s) in compact.series.iter().enumerate() {
++            let g = group(s);
++            order[next[g]] = i;
++            next[g] += 1;
++        }
++        for bounds in offsets.windows(2) {
++            order[bounds[0]..bounds[1]].sort_by(|&a, &b| compare_numbers(observed[a], observed[b]));
++        }
++        return order;
++    }
++    // Coercion is pure; caching it preserves the comparator even for odd cells
++    // and NaNs. Stable sorting retains SQLite order for all equal keys.
++    let mut keys = compact
++        .series
++        .iter()
++        .enumerate()
++        .map(|(i, s)| (ranks[s[0]], ranks[s[1]], number(&compact.values[i][3]), i))
++        .collect::<Vec<_>>();
++    keys.sort_by(|a, b| {
++        a.0.cmp(&b.0)
++            .then_with(|| a.1.cmp(&b.1))
++            .then_with(|| compare_numbers(a.2, b.2))
++    });
++    keys.into_iter().map(|k| k.3).collect()
++}
++
++// Borrow normal TEXT cells; retain the corrupt-cell coercion rules above.
++fn history_compare_cells(a: &Value, b: &Value) -> std::cmp::Ordering {
++    match (a, b) {
++        (Value::Text(a), Value::Text(b)) if a == b => std::cmp::Ordering::Equal,
++        (Value::Text(a), Value::Text(b)) if a.is_ascii() && b.is_ascii() => a.cmp(b),
++        (Value::Text(a), Value::Text(b)) => a.encode_utf16().cmp(b.encode_utf16()),
++        _ => compare_cells(a, b),
++    }
++}
++
++#[cfg(test)]
++#[allow(clippy::unwrap_used)]
++mod compact_tests {
++    use super::*;
++
++    #[test]
++    fn flat_order_matches_original() {
++        let observed = [
++            Value::Integer(1),
++            Value::Real(1.0),
++            Value::Real(f64::NAN),
++            Value::Null,
++            Value::Text("2".into()),
++            Value::Blob(vec![3]),
++            Value::Real(-0.0),
++            Value::Real(0.0),
++            Value::Real(f64::INFINITY),
++        ];
++        for reverse in [false, true] {
++            for interleave in [false, true] {
++                let mut compact = omni_store::quota::CompactSamples {
++                    cells: vec![],
++                    series: vec![],
++                    values: vec![],
++                };
++                for j in 0..300 {
++                    let i = if reverse { 299 - j } else { j };
++                    compact
++                        .series
++                        .push([if interleave { i % 3 } else { i / 100 }, i % 2]);
++                    compact.values.push([
++                        Value::Null,
++                        Value::Null,
++                        Value::Null,
++                        observed[i % observed.len()].clone(),
++                        Value::Null,
++                    ]);
++                }
++                let ranks = [0, 0, 1];
++                let mut expected = (0..compact.series.len()).collect::<Vec<_>>();
++                expected.sort_by(|&a, &b| {
++                    let (a_s, b_s) = (compact.series[a], compact.series[b]);
++                    ranks[a_s[0]]
++                        .cmp(&ranks[b_s[0]])
++                        .then_with(|| ranks[a_s[1]].cmp(&ranks[b_s[1]]))
++                        .then_with(|| {
++                            compare_numbers(
++                                number(&compact.values[a][3]),
++                                number(&compact.values[b][3]),
++                            )
++                        })
++                });
++                assert_eq!(history_sample_order(&compact, &ranks), expected);
++            }
++        }
++    }
++
++    #[test]
++    fn mixed_series_interning() {
++        let db = rusqlite::Connection::open_in_memory().unwrap();
++        db.execute_batch("CREATE TABLE quota_samples(credential_id,window_type,used,limit_value,resets_at,observed_at,window_ms);").unwrap();
++        let mut cells = vec![
++            Value::Null,
++            Value::Integer(1),
++            Value::Real(1.0),
++            Value::Text("1".into()),
++            Value::Blob(b"1".to_vec()),
++            Value::Real(-0.0),
++            Value::Real(0.0),
++        ];
++        for i in 2..3000 {
++            cells.extend([
++                Value::Integer(i),
++                Value::Real(i as f64),
++                Value::Text(i.to_string()),
++                Value::Blob(i.to_le_bytes().to_vec()),
++            ]);
++        }
++        for cell in &cells {
++            for _ in 0..2 {
++                db.execute(
++                    "INSERT INTO quota_samples VALUES(?1,?1,0,1,NULL,1,NULL)",
++                    [cell],
++                )
++                .unwrap();
++            }
++        }
++        let result = omni_store::quota::list_compact_quota_samples(&db, 0.0, 2.0, 50001).unwrap();
++        assert_eq!(result.cells.len(), cells.len());
++        for (i, pair) in result.series.as_chunks::<2>().0.iter().enumerate() {
++            assert_eq!(pair, &[[i, i], [i, i]]);
++        }
++        // Invalid text byte sequences must remain distinct despite lossy ownership.
++        db.execute_batch("DELETE FROM quota_samples; INSERT INTO quota_samples VALUES(CAST(x'ff' AS TEXT),NULL,0,1,NULL,1,NULL),(CAST(x'fe' AS TEXT),NULL,0,1,NULL,1,NULL),(CAST(x'ff' AS TEXT),NULL,0,1,NULL,1,NULL);").unwrap();
++        let result = omni_store::quota::list_compact_quota_samples(&db, 0.0, 2.0, 10).unwrap();
++        assert_ne!(result.series[0][0], result.series[1][0]);
++        assert_eq!(result.series[0][0], result.series[2][0]);
++    }
++}
++
+ pub fn accounts(store: &omni_store::SqliteStore, now: f64) -> Result<String, Failure> {
+     crate::credentials::validate_client_metadata(store)?;
+     let accounts = omni_store::credentials::client_quota_accounts(store.connection())?;
+@@ -357,6 +590,243 @@ pub fn accounts(store: &omni_store::SqliteStore, now: f64) -> Result<String, Fai
+     .unwrap_or_default())
+ }
+ 
++#[cfg(test)]
++mod speed_tests {
++    use super::*;
++
++    #[test]
++    #[ignore = "release benchmark and byte snapshots; A8_CAPTURE=1 records baseline"]
++    fn history_speed() {
++        let root = std::path::Path::new("/tmp/opencode/a8/speed");
++        let dir = root.join(format!("r4-bench-{}", std::process::id()));
++        std::fs::create_dir_all(&dir).expect("scratch directory");
++        let path = dir.join("store.db");
++        let migrated = omni_store::SqliteStore::open(&path, 0).expect("real migrations");
++        let db = rusqlite::Connection::open(&path).expect("driver connection");
++        db.execute_batch(
++            "PRAGMA foreign_keys=OFF; DELETE FROM quota_samples; DELETE FROM credentials;",
++        )
++        .expect("clear");
++        for (i, label) in ["custom", "E", "e", "Z", "ä", "A", "a", "Å", "中"]
++            .iter()
++            .enumerate()
++        {
++            db.execute("INSERT INTO credentials(id,label,provider,auth_type,tier,weight,enabled,created_at,updated_at) VALUES(?1,?2,'custom','api_key',1,1,1,1,1)", rusqlite::params![format!("history-{i}"), label]).expect("credential");
++        }
++        let store = omni_store::SqliteStore::open_reader(&path, 0).expect("gateway reader");
++        let reader = store.connection();
++        if let Ok(cache) = std::env::var("A8_CACHE_KIB") {
++            reader
++                .pragma_update(None, "cache_size", -cache.parse::<i64>().expect("KiB"))
++                .expect("cache");
++        }
++        let sql = "SELECT credential_id,window_type,used,limit_value,resets_at,observed_at,window_ms FROM quota_samples WHERE observed_at >= ? AND observed_at <= ? ORDER BY observed_at DESC LIMIT ?";
++        let mut plan = reader
++            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
++            .expect("plan");
++        let details = plan
++            .query_map(
++                rusqlite::params![1793232000000.0, 1794614400000.0, 50001],
++                |r| r.get::<_, String>(3),
++            )
++            .expect("plan rows")
++            .collect::<Result<Vec<_>, _>>()
++            .expect("details");
++        eprintln!(
++            "PLAN {details:?} cache_size {}",
++            reader
++                .pragma_query_value(None, "cache_size", |r| r.get::<_, i64>(0))
++                .expect("reader cache size")
++        );
++        drop(plan);
++        for count in [1000, 10000, 50002] {
++            db.execute_batch(&format!("DELETE FROM quota_samples; WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<{count}) INSERT INTO quota_samples(credential_id,window_type,used,limit_value,observed_at) SELECT CASE WHEN x%2=0 THEN 'history-0' ELSE 'history-1' END,'daily',x,60000,1794613400000+x FROM n;")).expect("overflow fixture");
++            let output = history(&store, "", 1794614400000.0).expect("history");
++            if count == 50002 {
++                assert_eq!(output.len(), 8_550_404);
++            }
++            let snapshot = root.join(format!("r4-production-{count}.json"));
++            if std::env::var_os("A8_CAPTURE").is_some() {
++                std::fs::write(snapshot, &output).expect("capture once");
++            } else {
++                assert_eq!(
++                    std::fs::read(snapshot).expect("baseline"),
++                    output.as_bytes()
++                );
++            }
++            for mode in 0..4 {
++                let mut times = Vec::new();
++                for _ in 0..9 {
++                    let start = std::time::Instant::now();
++                    match mode {
++                        0 | 1 => {
++                            let mut stmt = reader.prepare_cached(sql).expect("statement");
++                            let mut rows = stmt
++                                .query(rusqlite::params![1793232000000.0, 1794614400000.0, 50001])
++                                .expect("query");
++                            while let Some(row) = rows.next().expect("step") {
++                                if mode == 1 {
++                                    for i in 0..7 {
++                                        std::hint::black_box(row.get_ref(i).expect("cell"));
++                                    }
++                                }
++                            }
++                        }
++                        2 => {
++                            std::hint::black_box(
++                                omni_store::quota::list_compact_quota_samples(
++                                    reader,
++                                    1793232000000.0,
++                                    1794614400000.0,
++                                    50001,
++                                )
++                                .expect("compact"),
++                            );
++                        }
++                        _ => {
++                            std::hint::black_box(
++                                history(&store, "", 1794614400000.0).expect("history"),
++                            );
++                        }
++                    }
++                    times.push(start.elapsed().as_secs_f64() * 1000.0);
++                }
++                times.sort_by(f64::total_cmp);
++                eprintln!(
++                    "BENCH count={count} mode={mode} median={:.3} bytes={} all={times:?}",
++                    times[4],
++                    output.len()
++                );
++            }
++        }
++        drop(store);
++        drop(db);
++        drop(migrated);
++        std::fs::remove_dir_all(dir).expect("cleanup database");
++    }
++
++    #[test]
++    #[ignore = "legacy altered-schema byte snapshots; not a production benchmark"]
++    fn history_legacy_snapshots() {
++        let dir = std::path::Path::new("/tmp/opencode/a8/speed");
++        std::fs::create_dir_all(dir).expect("scratch directory");
++        let store = omni_store::SqliteStore::open(":memory:", 0).expect("store");
++        let db = store.connection();
++        db.execute_batch("PRAGMA foreign_keys=OFF; DROP TABLE credentials; CREATE TABLE credentials(id,label,provider,tier,provider_data); INSERT INTO credentials VALUES('history-0','custom','custom',1,NULL),('history-1','custom','custom',1,NULL); DROP TABLE quota_samples; CREATE TABLE quota_samples(credential_id,window_type,used,limit_value,resets_at,observed_at,window_ms);").expect("fixture");
++        let capture = std::env::var_os("A8_CAPTURE").is_some();
++        let check = |name: &str| {
++            let output = match history(&store, "", 1794614400000.0) {
++                Ok(s) => s,
++                Err(e) => format!("ERROR {:?}:{}", e.code, e.message),
++            };
++            let path = dir.join(format!("baseline-{name}.json"));
++            if capture {
++                std::fs::write(path, output.as_bytes()).expect("capture");
++            } else {
++                assert!(
++                    std::fs::read(path).expect("baseline") == output.as_bytes(),
++                    "bytes: {name}"
++                );
++            }
++            output.len()
++        };
++        for count in [1000, 10000, 50002] {
++            db.execute_batch(&format!("DELETE FROM quota_samples; WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<{count}) INSERT INTO quota_samples SELECT CASE WHEN x%2=0 THEN 'history-0' ELSE 'history-1' END,'daily',x,60000,NULL,1794613400000+x,NULL FROM n;")).expect("samples");
++            let bytes = check(&count.to_string());
++            db.execute_batch("UPDATE credentials SET label='E' WHERE id='history-1'; CREATE INDEX IF NOT EXISTS speed_observed ON quota_samples(observed_at);").expect("driver metadata/index");
++            let driver_bytes = check(&format!("r2-driver-{count}"));
++            let sql = "SELECT credential_id,window_type,used,limit_value,resets_at,observed_at,window_ms FROM quota_samples WHERE observed_at >= ? AND observed_at <= ? ORDER BY observed_at DESC LIMIT ?";
++            let mut plan = db
++                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
++                .expect("plan");
++            let details = plan
++                .query_map(
++                    rusqlite::params![1793232000000.0, 1794614400000.0, 50001],
++                    |r| r.get::<_, String>(3),
++                )
++                .expect("plan rows")
++                .collect::<Result<Vec<_>, _>>()
++                .expect("details");
++            let mut stepping = Vec::new();
++            for _ in 0..9 {
++                let start = std::time::Instant::now();
++                let mut stmt = db.prepare(sql).expect("statement");
++                let mut rows = stmt
++                    .query(rusqlite::params![1793232000000.0, 1794614400000.0, 50001])
++                    .expect("query");
++                let mut n = 0;
++                while rows.next().expect("step").is_some() {
++                    n += 1;
++                }
++                std::hint::black_box(n);
++                stepping.push(start.elapsed().as_secs_f64() * 1000.0);
++            }
++            stepping.sort_by(f64::total_cmp);
++            eprintln!(
++                "STEP {count} median {} plan {details:?} driver_bytes {driver_bytes}",
++                stepping[4]
++            );
++            let mut times = Vec::new();
++            for _ in 0..9 {
++                let start = std::time::Instant::now();
++                std::hint::black_box(history(&store, "", 1794614400000.0).expect("history"));
++                times.push(start.elapsed().as_secs_f64() * 1000.0);
++            }
++            times.sort_by(f64::total_cmp);
++            eprintln!(
++                "BENCH {count}: median {:.3} ms bytes {driver_bytes} legacy_bytes {bytes} all {times:?}",
++                times[4]
++            );
++            db.execute_batch("UPDATE credentials SET label='custom' WHERE id='history-1'")
++                .expect("restore");
++        }
++        db.execute_batch("UPDATE quota_samples SET observed_at=1794613400000;")
++            .expect("ties");
++        check("r2-ties");
++        db.execute_batch("DELETE FROM quota_samples; INSERT INTO credentials VALUES(1,'numeric','custom',1,NULL); INSERT INTO quota_samples VALUES(1,'1',1,10,NULL,1794613400000,NULL),(1.0,'1',2,10,NULL,1794613400000,NULL),('1',1,3,10,NULL,1794613400000,NULL),(x'31',1.0,4,10,NULL,1794613400000,NULL),(0,x'31',5,10,NULL,1794613400000,NULL),(-0.0,NULL,6,10,NULL,1794613400000,NULL);").expect("mixed cells");
++        check("r2-mixed-cells");
++        db.execute_batch("DELETE FROM credentials; DELETE FROM quota_samples;")
++            .expect("clear");
++        for (i, label) in ["é", "E", "e", "Z", "ä", "A", "a", "Å", "中", "e\u{301}"]
++            .iter()
++            .enumerate()
++        {
++            db.execute(
++                "INSERT INTO credentials VALUES(?1,?2,'custom',1,NULL)",
++                rusqlite::params![i as i64, label],
++            )
++            .expect("label");
++            db.execute(
++                "INSERT INTO quota_samples VALUES(?1,'daily',1,10,NULL,1794613400000,NULL)",
++                [i as i64],
++            )
++            .expect("sample");
++        }
++        check("collation");
++        db.execute_batch("INSERT INTO credentials VALUES(2,'duplicate','custom',1,NULL),('1','text','custom',1,NULL); INSERT INTO quota_samples VALUES('1','daily',1,10,NULL,1794613400000,NULL),(999,'daily',1,10,NULL,1794613400000,NULL),(2,'daily',1,0,NULL,1794613400000,NULL),(2,'daily',1,NULL,NULL,1794613400000,NULL);").expect("mixed");
++        check("mixed-duplicate-orphan-limits");
++        for column in ["label", "provider"] {
++            for (name, value) in [
++                ("null", "NULL"),
++                ("blob", "x'ff'"),
++                ("invalid", "CAST(x'ff' AS TEXT)"),
++            ] {
++                db.execute_batch(&format!(
++                    "UPDATE credentials SET {column}={value} WHERE id=2"
++                ))
++                .expect("corrupt");
++                check(&format!("{column}-{name}"));
++            }
++            db.execute_batch(&format!(
++                "UPDATE credentials SET {column}='custom' WHERE id=2"
++            ))
++            .expect("restore");
++        }
++        db.execute_batch("DELETE FROM quota_samples; DROP TABLE quota_samples; CREATE TABLE quota_samples(credential_id,window_type,used,limit_value,resets_at,observed_at TEXT,window_ms); INSERT INTO quota_samples VALUES(2,'daily',1,10,NULL,'1794613400000x',NULL),(2,'daily',1,10,NULL,'1794613400000',NULL);").expect("text timestamp");
++        check("nonnumeric");
++    }
++}
++
+ #[cfg(test)]
+ mod sort_tests {
+     use super::*;
+diff --git a/crates/omni-store/src/quota.rs b/crates/omni-store/src/quota.rs
+index 0a4167b8..c2b510a4 100644
+--- a/crates/omni-store/src/quota.rs
++++ b/crates/omni-store/src/quota.rs
+@@ -98,6 +98,89 @@ pub fn list_quota_samples(
+     Ok(rows.collect::<Result<_, _>>()?)
+ }
+ 
++/// Lossless cells for the client projection; coercion belongs to control.
++pub struct CompactSamples {
++    pub cells: Vec<rusqlite::types::Value>,
++    pub series: Vec<[usize; 2]>,
++    pub values: Vec<[rusqlite::types::Value; 5]>,
++}
++
++/// Same SQL order as list_quota_samples, with exact typed series-cell interning.
++pub fn list_compact_quota_samples(
++    conn: &Connection,
++    since: f64,
++    until: f64,
++    limit: usize,
++) -> Result<CompactSamples, StoreError> {
++    use rusqlite::types::ValueRef;
++    #[derive(Hash, PartialEq, Eq)]
++    enum Key<'a> {
++        Null,
++        Integer(i64),
++        Real(u64),
++        Text(&'a [u8]),
++        Blob(&'a [u8]),
++    }
++    fn key(v: ValueRef<'_>) -> Key<'_> {
++        match v {
++            ValueRef::Null => Key::Null,
++            ValueRef::Integer(n) => Key::Integer(n),
++            ValueRef::Real(n) => Key::Real(n.to_bits()),
++            ValueRef::Text(s) => Key::Text(s),
++            ValueRef::Blob(s) => Key::Blob(s),
++        }
++    }
++    // Hash buckets borrow SQLite bytes for lookup; equality checks preserve
++    // SQLite types and bit patterns, including signed zero and blob identity.
++    use std::hash::{Hash, Hasher};
++    let mut buckets: std::collections::HashMap<u64, Vec<usize>> = std::collections::HashMap::new();
++    let mut raw = Vec::<(u8, Vec<u8>)>::new();
++    let mut out = CompactSamples {
++        cells: Vec::new(),
++        series: Vec::with_capacity(limit.min(50_001)),
++        values: Vec::with_capacity(limit.min(50_001)),
++    };
++    let mut stmt = conn.prepare_cached("SELECT credential_id,window_type,used,limit_value,resets_at,observed_at,window_ms FROM quota_samples WHERE observed_at >= ? AND observed_at <= ? ORDER BY observed_at DESC LIMIT ?")?;
++    let mut rows = stmt.query(rusqlite::params![since, until, limit as i64])?;
++    while let Some(r) = rows.next()? {
++        let mut series = [0; 2];
++        for (i, slot) in series.iter_mut().enumerate() {
++            let v = r.get_ref(i)?;
++            let mut hash = std::collections::hash_map::DefaultHasher::new();
++            key(v).hash(&mut hash);
++            let bucket = buckets.entry(hash.finish()).or_default();
++            let (tag, bytes): (u8, std::borrow::Cow<'_, [u8]>) = match v {
++                ValueRef::Null => (0, (&[][..]).into()),
++                ValueRef::Integer(n) => (1, n.to_le_bytes().to_vec().into()),
++                ValueRef::Real(n) => (2, n.to_bits().to_le_bytes().to_vec().into()),
++                ValueRef::Text(s) => (3, s.into()),
++                ValueRef::Blob(s) => (4, s.into()),
++            };
++            *slot = if let Some(id) = bucket
++                .iter()
++                .find(|id| raw[**id].0 == tag && raw[**id].1 == *bytes)
++            {
++                *id
++            } else {
++                let id = out.cells.len();
++                out.cells.push(crate::js::own_cell(v));
++                raw.push((tag, bytes.into_owned()));
++                bucket.push(id);
++                id
++            };
++        }
++        out.series.push(series);
++        out.values.push([
++            crate::js::own_cell(r.get_ref(2)?),
++            crate::js::own_cell(r.get_ref(3)?),
++            crate::js::own_cell(r.get_ref(4)?),
++            crate::js::own_cell(r.get_ref(5)?),
++            crate::js::own_cell(r.get_ref(6)?),
++        ]);
++    }
++    Ok(out)
++}
++
+ /// Lossless cells for the client projection; coercion belongs to control.
+ pub fn client_windows(conn: &Connection) -> Result<Vec<Vec<rusqlite::types::Value>>, StoreError> {
+     let mut stmt = conn.prepare("SELECT credential_id,window_type,used,limit_value,resets_at,observed_at,window_ms FROM quota_windows")?;

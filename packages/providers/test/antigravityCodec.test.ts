@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { GatewayError } from "@omni/ir";
 import { antigravityCodec } from "../src/antigravity/codec.ts";
 import type { CodecInput } from "../src/codec.ts";
+import capture from "./fixtures/antigravity-2.34.0.json";
 
 const fail: CodecInput["fail"] = (code, message, opts) =>
   new GatewayError(code, message, opts as never);
@@ -21,17 +22,13 @@ function input(overrides: Partial<CodecInput> = {}): CodecInput {
   };
 }
 
-function headerOf(headers: readonly (readonly [string, string])[], name: string) {
-  return headers.find(([n]) => n.toLowerCase() === name.toLowerCase())?.[1];
-}
-
 describe("the request", () => {
   test("always asks the streaming endpoint, on the runtime host", () => {
     const built = antigravityCodec.buildRequest(input());
     // **`daily-` is load-bearing, not a canary.** Measured against a live
     // account: this host served the request, plain `cloudcode-pa` answered 429
     // for the same bytes while that account's quota read 0% used and its IDE
-    // was generating. Only the bootstrap and quota RPCs belong on `cloudcode-pa`.
+    // was generating. (Bootstrap and quota follow the App capture to `daily-` too.)
     expect(built.request.url).toBe(
       "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
     );
@@ -55,11 +52,25 @@ describe("the request", () => {
     expect(built.request.url).toContain("streamGenerateContent");
   });
 
-  test("carries the bearer token and the client identity", () => {
-    const built = antigravityCodec.buildRequest(input());
-    expect(headerOf(built.request.headers, "authorization")).toBe("Bearer at-1");
-    expect(headerOf(built.request.headers, "user-agent")).toContain("antigravity/ide/");
-    expect(headerOf(built.request.headers, "accept")).toBe("text/event-stream");
+  test("uses the recorded App agent header spelling, values and order", () => {
+    const { request } = antigravityCodec.buildRequest(input());
+    // The gateway transport does not negotiate compressed responses here.
+    expect(request.headers).toEqual(
+      capture.headers
+        .filter(([name]) => name !== "Accept-Encoding")
+        .map(([name, value]) => {
+          if (name === undefined || value === undefined) throw Error("malformed capture header");
+          return [name, name === "Authorization" ? "Bearer at-1" : value];
+        }),
+    );
+  });
+
+  test("serializes the agent envelope in the recorded App order", () => {
+    const { request } = antigravityCodec.buildRequest(input());
+    const body = JSON.parse(request.body);
+    expect(Object.keys(body)).toEqual(Object.keys(capture.envelope));
+    expect(body.userAgent).toBe(capture.envelope.userAgent);
+    expect(body.requestType).toBe(capture.envelope.requestType);
   });
 });
 
@@ -108,9 +119,9 @@ describe("the project id", () => {
 });
 
 describe("the request id", () => {
-  test("reuses the gateway's own when there is one", () => {
+  test("keeps the gateway id with the captured agent prefix, not the full App id", () => {
     const built = antigravityCodec.buildRequest(input());
-    expect(JSON.parse(built.request.body).requestId).toBe("req-1");
+    expect(JSON.parse(built.request.body).requestId).toBe("agent/req-1");
   });
 
   test("is derived, not random, when the caller has none", () => {

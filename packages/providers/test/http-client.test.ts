@@ -102,6 +102,31 @@ test("sends the body verbatim", async () => {
   s.stop();
 });
 
+test.each([
+  ["antigravity", false],
+  ["custom", true],
+] as const)(
+  "keeps the provider-specific framing for %s with explicit chunking",
+  async (provider, length) => {
+    const s = rawServer();
+    try {
+      await nodeHttpClient()({
+        provider,
+        url: s.url,
+        method: "POST",
+        headers: [["Transfer-Encoding", "chunked"]],
+        body: '{"a":1}',
+        signal: AbortSignal.timeout(5000),
+      });
+      const head = (await s.head()).split("\r\n\r\n", 1)[0];
+      expect(head).toContain("\r\nTransfer-Encoding: chunked");
+      expect(/\r\ncontent-length: 7\r?$/im.test(head ?? "")).toBe(length);
+    } finally {
+      s.stop();
+    }
+  },
+);
+
 test("reports response-head timing without changing outbound headers", async () => {
   const s = rawServer();
   const heads: unknown[] = [];
@@ -471,4 +496,111 @@ test("an unmarked request goes out as the bytes it was given", async () => {
   expect(sent.toString("utf8")).toBe(body);
   expect(contentLength(head)).toBe(Buffer.byteLength(body));
   s.stop();
+});
+
+/**
+ * Antigravity's bootstrap RPCs as they reach the socket — not the header list
+ * handed to the transport — in the order App 2.34 sent them for bootstrap:
+ * `Host, User-Agent, Content-Length, Authorization, Content-Type` (its
+ * `Accept-Encoding: gzip` is not adopted), then the transport's `Connection`.
+ * The quota RPC reuses this captured bootstrap order (seen only from the CLI).
+ */
+test("antigravity bootstrap reaches the wire in the captured order", async () => {
+  const s = rawServer();
+  const { antigravityBootstrapRequest } = await import("../src/antigravity/oauth.ts");
+  const built = antigravityBootstrapRequest("onboardUser", "test-token-1", '{"tierId":"t"}');
+  await nodeHttpClient()({
+    provider: "antigravity",
+    url: s.url,
+    method: built.method,
+    headers: built.headers,
+    body: built.body ?? "",
+    signal: new AbortController().signal,
+  });
+  const head = (await s.head()).split("\r\n\r\n")[0] ?? "";
+  s.stop();
+  const names = head
+    .split("\r\n")
+    .slice(1)
+    .map((l) => l.split(": ")[0]);
+  expect(names).toEqual([
+    "Host",
+    "User-Agent",
+    "Content-Length",
+    "Authorization",
+    "Content-Type",
+    "Connection",
+  ]);
+  expect(head).toContain("\r\nHost: daily-cloudcode-pa.googleapis.com\r\n");
+  expect(head).toContain(`\r\nContent-Length: ${Buffer.byteLength('{"tierId":"t"}')}\r\n`);
+});
+
+/**
+ * A non-ASCII body: `Content-Length` counts UTF-8 bytes, not JS code units,
+ * and the body reaches the socket byte for byte.
+ */
+test("antigravity bootstrap frames a non-ASCII body by its UTF-8 bytes", async () => {
+  const { antigravityBootstrapRequest } = await import("../src/antigravity/oauth.ts");
+  const body = '{"tierId":"tier-é水😀"}';
+  const built = antigravityBootstrapRequest("onboardUser", "test-token-1", body);
+  const bytes = Buffer.from(body, "utf8");
+  expect(bytes.length).not.toBe(body.length);
+  let received = Buffer.alloc(0);
+  // Answer once the fixture's own byte count has arrived after the head (not
+  // the declared Content-Length), so a request split across reads still
+  // passes, and a wrong declared length fails the assertions below rather than
+  // leaving this test waiting for bytes that never come.
+  const server = Bun.listen({
+    hostname: "127.0.0.1",
+    port: 0,
+    socket: {
+      data(socket, data) {
+        received = Buffer.concat([received, Buffer.from(data)]);
+        const end = received.indexOf("\r\n\r\n");
+        if (end !== -1 && received.length >= end + 4 + bytes.length) {
+          socket.write("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+          socket.end();
+        }
+      },
+    },
+  });
+  try {
+    await nodeHttpClient()({
+      provider: "antigravity",
+      url: `http://127.0.0.1:${server.port}/v1internal:onboardUser`,
+      method: built.method,
+      headers: built.headers,
+      body: built.body ?? "",
+      signal: AbortSignal.timeout(5_000),
+    });
+  } finally {
+    server.stop(true);
+  }
+  const split = received.indexOf("\r\n\r\n");
+  expect(received.subarray(0, split).toString("latin1")).toContain(
+    `\r\nContent-Length: ${bytes.length}\r\n`,
+  );
+  expect(received.subarray(split + 4).equals(bytes)).toBe(true);
+});
+
+/**
+ * A partial OMNI_ORDER_ANTIGRAVITY: the named header moves first and the
+ * rest keep the builder's pre-sort order, the same order Rust uses. The order
+ * is read once at import, so this runs in a fresh process.
+ */
+test("a partial antigravity order override leaves the rest in captured order", () => {
+  const script = `const { antigravityBootstrapRequest } = await import(${JSON.stringify(
+    `${import.meta.dir}/../src/antigravity/oauth.ts`,
+  )}); console.log(JSON.stringify(antigravityBootstrapRequest("loadCodeAssist","t","{}").headers.map(([n]) => n)));`;
+  const run = Bun.spawnSync(["bun", "--no-env-file", "-e", script], {
+    env: { PATH: process.env.PATH ?? "", OMNI_ORDER_ANTIGRAVITY: "Authorization" },
+  });
+  expect(run.exitCode).toBe(0);
+  expect(JSON.parse(run.stdout.toString())).toEqual([
+    "Authorization",
+    "Host",
+    "User-Agent",
+    "Content-Length",
+    "Content-Type",
+  ]);
 });

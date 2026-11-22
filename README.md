@@ -1,10 +1,16 @@
 # OmniGateway
 
+For an offline Rust cluster cutover or Postgres lineage replacement, see
+[the bucket sweep procedure](docs/rust-cluster-cutover.md) before starting any replica.
+
+Rust local service commands and diagnostic migration limits are documented in
+[Rust CLI service boundary](docs/rust-cli-service.md).
+
 One endpoint in front of the AI accounts you already pay for.
 
 OmniGateway is a self-hosted gateway that speaks the Anthropic and OpenAI APIs
-and answers them using your own Anthropic, OpenAI, Kimi Coding, Kilo, and xAI
-subscriptions. Point any compatible client at it, ask for a model you defined,
+and answers them using your own Anthropic, OpenAI (including Codex), and
+Google Antigravity subscriptions, plus any OpenAI-compatible endpoint you add. Point any compatible client at it, ask for a model you defined,
 and the gateway picks an account that can serve it — falling back to another
 when one is rate-limited, expired, or out of quota.
 
@@ -13,7 +19,7 @@ Postgres and Redis when you need a fleet, and never logs the contents of your
 prompts or replies.
 
 ```bash
-bun install -g omnigateway
+npm i -g omnigateway
 omni start
 ```
 
@@ -23,6 +29,7 @@ omni start
 
 - [docs/client-api.md](docs/client-api.md) — endpoints, authentication, rate-limit headers, and how tools decide where a request can go
 - [docs/operations.md](docs/operations.md) — key limits, logs, recording bodies, snapshots and restore
+- [docs/rust-quota-runtime.md](docs/rust-quota-runtime.md) — Rust single-node quota support and limits
 - [docs/deploying.md](docs/deploying.md) — systemd, reverse proxies, cluster mode, Docker and Kubernetes
 - [docs/plugins.md](docs/plugins.md) — installing, verifying and removing plugins
 - [ARCHITECTURE.md](ARCHITECTURE.md) — how it is built
@@ -81,19 +88,54 @@ boundary, and the background loops.
 
 ## Requirements
 
-- [Bun](https://bun.sh/) 1.4.4 or later. Bun is the runtime, not just the
-  installer, so a Node-only machine cannot run OmniGateway.
+- Linux (x86_64 or aarch64) or macOS (Intel or Apple silicon). The gateway is
+  a native binary; npm (Node 18 or later) only installs it. There is no Windows
+  build (npm refuses the install there).
 - A directory that persists, for the SQLite database.
-- At least one Anthropic, OpenAI, Kimi Coding, Kilo, or xAI account to connect.
+- At least one Anthropic, OpenAI, or Antigravity account to connect, or a custom
+  OpenAI-compatible endpoint.
 
 ## Install
 
 ```bash
-bun install -g omnigateway     # or: npm i -g omnigateway
+npm i -g omnigateway
 ```
 
 One package carries the `omni` CLI, the gateway server, and the admin console
-the server hosts.
+the server hosts. npm picks the matching native build
+(`@omnigateway/<os>-<cpu>`); the same binaries are attached to each
+[GitHub release](https://github.com/harismawan/omnigateway/releases).
+
+npm 12 blocks install scripts by default. Allowing this package's lets it
+replace the `omni` and `omnigateway` launchers with symlinks to the binary:
+
+```bash
+npm i -g omnigateway --allow-scripts=omnigateway
+# or once: npm config set allow-scripts=omnigateway --location=user
+```
+
+Without it everything still works, through a small Node launcher. The
+postinstall only creates those links; it never touches a service or a
+database.
+
+### Coming from 0.x
+
+`1.0.0` is a fresh install of the Rust gateway; nothing is converted for you.
+It reads an existing 0.x SQLite database as it is (same schema), so to keep
+your data point it at the old installation and replace the service yourself:
+
+```bash
+omni stop                                  # or: systemctl --user stop omnigateway
+npm i -g omnigateway
+omni db backup --root <old root>           # optional: a snapshot first
+omni service install --force --root <old root>
+systemctl --user restart omnigateway
+```
+
+Use the same `.env` and `OMNI_ENCRYPTION_KEY`, or the stored accounts cannot be
+decrypted. Plugins (their data stays) and accounts for Grok, Kimi, Kilo, Muse
+and Qoder are not served by 1.x; `omni doctor` lists what it found. Cluster
+installations follow the [cutover runbook](docs/rust-cutover-runbook.md).
 
 ## Getting started
 
@@ -120,11 +162,8 @@ omni start                 # serves the API and the console on 127.0.0.1:9000
 Connect an account. The CLI prints a URL to open, and waits:
 
 ```bash
-omni connect anthropic     # or: openai, kimi, kilo, grok
+omni connect anthropic     # or: openai, antigravity
 ```
-
-An installed [plugin](#plugins) that supplies its own provider is connected the
-same way, under its plugin id.
 
 Every provider also takes a plain API key, if that is what you hold rather than
 a subscription:
@@ -363,6 +402,7 @@ Use `--db <path>` to point one command somewhere else.
 | | |
 | --- | --- |
 | `omni status` | the gateway, its accounts, and their quota, on one screen |
+| `omni health` | probe the gateway's `/health` endpoint |
 | `omni start` / `stop` / `restart` | run the gateway; `--foreground` attaches it to your terminal |
 | `omni doctor` | which installation it resolved, and whether it can act on it |
 | `omni logs` | recent requests as the gateway recorded them; filter and page with `--failed`, `--key`, `--since`, `--cursor` |
@@ -404,6 +444,29 @@ set `OMNI_BASE_URL` and pass WebSocket upgrades and unbuffered SSE through.
 Several replicas behind a load balancer are **cluster mode** on Postgres and
 Redis. All of it, with the nginx block and the Kubernetes base, is in
 [docs/deploying.md](docs/deploying.md).
+
+In Rust cluster mode, the database panel reports Postgres size and table stats
+with credentials redacted. Clearing captured bodies leaves request logs intact.
+The snapshot list is empty; use Postgres backup tooling rather than SQLite
+snapshot, import, restore, or vacuum actions. Authenticated `/metrics` exposes
+process-local `omni_request_log_writer_*_total` counters for optional and
+terminal queue drops, persistence failures, and completion delivery loss.
+Unlike the TypeScript gateway, Rust cluster inference returns HTTP 503 before admission if the request-log writer is closed or its bounded wait queue is full or expires (4 seconds).
+On the authenticated Rust `/metrics` endpoint, `omni_request_log_writer_reservation_refused_total`
+counts these refusals by `reason` (`closed`, `cap`, `deadline`). `revalidation` separately counts
+503s caused by a failed primary key or settings read after waiting. The response does not expose the cause.
+The cluster-only `omni_request_log_writer_queued` and `omni_request_log_writer_credits_in_use`
+gauges distinguish queued entries from the total budget in use, which also includes reservations.
+The gauges are sampled independently and exclude batches already dequeued for persistence.
+
+When incoming log events outpace the Postgres writer and half or less of its
+queue credit is free, Rust cluster mode may skip `Begin` and `Route` log events
+instead of waiting as the TypeScript gateway does. Authenticated `/metrics`
+reports these skips in `omni_request_log_writer_optional_dropped_total`;
+`omni_request_log_writer_terminal_dropped_total` tracks terminal queue loss
+separately. This policy never sheds `Finish` events and does not change completed
+rows, usage rollups, or rate-limit debits. The console may miss a request's
+in-flight row or a routing update under overload.
 
 ## Configuration
 
@@ -586,6 +649,11 @@ built: [docs/roadmap.md](docs/roadmap.md).
 
 ## Plugins
 
+**Not supported by the Rust gateway (1.x).** Installed plugins are listed by
+`omni doctor` and their data stays in the database, but nothing loads them and
+the `omni plugin` commands refuse. What follows describes the 0.x TypeScript
+gateway (`omnigateway@0.15.5`).
+
 A plugin adds routes, storage, a provider, and a screen in the console to one
 installation,
 without being part of OmniGateway. Most installations run none.
@@ -662,6 +730,7 @@ Releases are published to npm from a `v*` tag, with provenance attesting which
 commit produced them.
 # Qoder provider
 
+Not served by the Rust gateway (1.x); this describes `omnigateway@0.15.5`.
 Experimental Qoder global account login, server-derived models and native streaming
 are available without installing its CLI. See [Qoder setup and limitations](docs/qoder.md).
 Live account compatibility is not yet verified; unknown prices are not free usage.

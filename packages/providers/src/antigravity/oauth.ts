@@ -1,6 +1,8 @@
 import type { WindowType } from "@omni/store/types";
+import { orderHeaders } from "../headers.ts";
 import {
   type AuthHelpers,
+  type AuthRequest,
   type AuthStep,
   type FlowResult,
   type PkcePluginFlow,
@@ -16,7 +18,12 @@ import {
   SHORT_TIMEOUT_MS,
 } from "../oauthRequests.ts";
 import { numberOf, recordOf, reportFrom, resetAtOf, usageReadable } from "../oauthUsage.ts";
-import { antigravityProfile } from "./profile.ts";
+import {
+  antigravityBootstrapOrder,
+  antigravityBootstrapUserAgent,
+  antigravityHost,
+  antigravityProfile,
+} from "./profile.ts";
 
 /**
  * Antigravity's OAuth, against Google.
@@ -104,10 +111,8 @@ const AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const USERINFO_URL = "https://www.googleapis.com/oauth2/v1/userinfo?alt=json";
 
-const CODE_ASSIST = "https://cloudcode-pa.googleapis.com/v1internal";
-const LOAD_CODE_ASSIST_URL = `${CODE_ASSIST}:loadCodeAssist`;
-const ONBOARD_USER_URL = `${CODE_ASSIST}:onboardUser`;
-const QUOTA_SUMMARY_URL = `${CODE_ASSIST}:retrieveUserQuotaSummary`;
+/** Bootstrap and quota share inference's host in the App/CLI capture. */
+const CODE_ASSIST = `https://${antigravityHost}/v1internal`;
 
 /** What Antigravity's own client asks for. `cclog` and `experimentsandconfigs` are its telemetry scopes. */
 const SCOPES = [
@@ -190,12 +195,37 @@ function tierFrom(value: unknown): string {
   return typeof current?.id === "string" ? current.id : DEFAULT_TIER;
 }
 
-function codeAssistRequest(url: string, accessToken: string, body: Record<string, unknown>) {
-  return postJsonRequest(url, antigravityProfile, {
-    contentType: "application/json",
-    body: JSON.stringify(body),
-    extraHeaders: [["Authorization", `Bearer ${accessToken}`]],
-  });
+/**
+ * One Cloud Code RPC (`loadCodeAssist`, `onboardUser`,
+ * `retrieveUserQuotaSummary`) in the captured App shape: no `Accept`, which
+ * `postJsonRequest` would add for every other flow, and `Host` and
+ * `Content-Length` supplied here — the transport would append a missing one
+ * after the ordered list, which is not the captured order. Same as Rust's
+ * `oauth::code_assist_request`.
+ */
+export function antigravityBootstrapRequest(
+  operation: string,
+  accessToken: string,
+  body: string,
+): AuthRequest {
+  return {
+    url: `${CODE_ASSIST}:${operation}`,
+    method: "POST",
+    // Listed in the captured order before sorting, as Rust's builder does, so
+    // a partial OMNI_ORDER_ANTIGRAVITY leaves the unlisted ones identical on
+    // both runtimes.
+    headers: orderHeaders(
+      [
+        ["Host", antigravityHost],
+        ["User-Agent", antigravityBootstrapUserAgent],
+        ["Content-Length", String(Buffer.byteLength(body, "utf8"))],
+        ["Authorization", `Bearer ${accessToken}`],
+        ["Content-Type", "application/json"],
+      ],
+      antigravityBootstrapOrder,
+    ),
+    body,
+  };
 }
 
 /**
@@ -224,9 +254,11 @@ function codeAssistRequest(url: string, accessToken: string, body: Record<string
 async function* bootstrapProject(
   accessToken: string,
 ): AuthStep<{ projectId: string; tier: string }> {
-  const loaded = yield codeAssistRequest(LOAD_CODE_ASSIST_URL, accessToken, {
-    metadata: IDE_METADATA,
-  });
+  const loaded = yield antigravityBootstrapRequest(
+    "loadCodeAssist",
+    accessToken,
+    JSON.stringify({ metadata: IDE_METADATA }),
+  );
 
   // A failure here is not fatal to the connect: see the docblock. The parse of a
   // non-2xx body yields no project, which is the same state as a slow one.
@@ -235,10 +267,12 @@ async function* bootstrapProject(
   const existing = projectFrom(body);
   if (existing.length > 0) return { projectId: existing, tier };
 
-  const onboarded = yield codeAssistRequest(ONBOARD_USER_URL, accessToken, {
-    tier_id: tier,
-    metadata: IDE_METADATA,
-  });
+  // `tierId`, the captured App spelling; the old `tier_id` came from omniroute.
+  const onboarded = yield antigravityBootstrapRequest(
+    "onboardUser",
+    accessToken,
+    JSON.stringify({ tierId: tier, metadata: IDE_METADATA }),
+  );
   if (onboarded.status < 200 || onboarded.status >= 300) return { projectId: "", tier };
 
   const operation = recordOf(parseBody(onboarded.body));
@@ -448,11 +482,12 @@ export const antigravityOAuthFlow: PkcePluginFlow = {
     if (project.trim().length === 0) return null;
 
     const res = yield {
-      ...postJsonRequest(QUOTA_SUMMARY_URL, antigravityProfile, {
-        contentType: "application/json",
-        body: JSON.stringify({ project }),
-        extraHeaders: [["Authorization", `Bearer ${secrets.accessToken}`]],
-      }),
+      ...antigravityBootstrapRequest(
+        "retrieveUserQuotaSummary",
+        // `null` as before: the same `Bearer null` the Rust host sends.
+        String(secrets.accessToken),
+        JSON.stringify({ project }),
+      ),
       // Shorter than the host's ceiling on purpose: nothing on the request path
       // waits for a usage probe, so a slow one is worth abandoning.
       timeoutMs: SHORT_TIMEOUT_MS,

@@ -13,8 +13,8 @@ version changes. The gateway retains its Windows UA and credential-salted ids.
 Captured reasoning replay also includes `content: null`; the fixture omits that
 optional member under the existing native-replay exception, not a new translation.
 
-Added GPT-6.2 Sol and Astra to the TypeScript catalog and fingerprint; the Rust
-port is deferred. Official short-context prices per million tokens:
+Both the TypeScript and Rust catalogs and fingerprints support GPT-6.2 Sol and
+Astra. Official short-context prices per million tokens:
 
 | Model | Input | Output | Cache read | Standard write | API input cap | Codex default input cap |
 |---|---:|---:|---:|---:|---:|---:|

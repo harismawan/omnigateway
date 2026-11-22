@@ -1,0 +1,240 @@
+//! JSON.parse values for operator inspection, separate from gateway admission.
+//! Explicit parse/coercion stacks and JsValue's iterative Drop preserve deep
+//! stored values and infinities without passing through serde's number model.
+use omni_ir::jsjson::JsValue;
+
+/// `JSON.parse` to a lossless JS value (shared with the gateway readers).
+pub use omni_ir::jsjson::parse_js as parse;
+
+/// String(value), sharing Array.join's iterative coercion for JSON values.
+pub fn string(value: &JsValue) -> Result<String, String> {
+    if matches!(value, JsValue::Null) {
+        Ok("null".into())
+    } else {
+        join(value)
+    }
+}
+
+/// Lossless String(value) for identity, with iterative Array.join coercion.
+/// Human-output UTF8 replacement must never participate in equality decisions.
+pub fn coerce_units(value: &JsValue) -> Result<Vec<u16>, String> {
+    let mut out = Vec::new();
+    let mut pending = vec![Some((value, true))];
+    while let Some(next) = pending.pop() {
+        let Some((v, root)) = next else {
+            out.push(44);
+            continue;
+        };
+        match v {
+            JsValue::String(s) => out.extend_from_slice(s),
+            JsValue::Array(a) => {
+                for (i, v) in a.iter().enumerate().rev() {
+                    pending.push(Some((v, false)));
+                    if i > 0 {
+                        pending.push(None);
+                    }
+                }
+            }
+            JsValue::Null | JsValue::Undefined if !root => {}
+            JsValue::Undefined => out.extend("undefined".encode_utf16()),
+            JsValue::Null => out.extend("null".encode_utf16()),
+            JsValue::Bool(b) => out.extend(if *b { "true" } else { "false" }.encode_utf16()),
+            JsValue::Number(n) => {
+                let mut text = String::new();
+                if n.is_infinite() {
+                    text.push_str(if n.is_sign_negative() {
+                        "-Infinity"
+                    } else {
+                        "Infinity"
+                    });
+                } else {
+                    omni_ir::jsjson::write_number(*n, &mut text);
+                }
+                out.extend(text.encode_utf16());
+            }
+            JsValue::Object(fields) => {
+                if fields
+                    .iter()
+                    .any(|(k, _)| k.iter().copied().eq("toString".encode_utf16()))
+                {
+                    return Err("No default value".into());
+                }
+                out.extend("[object Object]".encode_utf16());
+            }
+            JsValue::Function => out.extend("[object Object]".encode_utf16()),
+        }
+    }
+    Ok(out)
+}
+
+/// Array.join's recursive ToString, traversed without the native stack.
+fn join(value: &JsValue) -> Result<String, String> {
+    let mut out = String::new();
+    let mut pending = vec![Some(value)];
+    while let Some(next) = pending.pop() {
+        let Some(v) = next else {
+            out.push(',');
+            continue;
+        };
+        match v {
+            JsValue::Array(a) => {
+                for (i, v) in a.iter().enumerate().rev() {
+                    pending.push(Some(v));
+                    if i > 0 {
+                        pending.push(None);
+                    }
+                }
+            }
+            JsValue::Null | JsValue::Undefined => {}
+            JsValue::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+            JsValue::Number(n) if n.is_infinite() => out.push_str(if n.is_sign_negative() {
+                "-Infinity"
+            } else {
+                "Infinity"
+            }),
+            JsValue::Number(n) => omni_ir::jsjson::write_number(*n, &mut out),
+            JsValue::String(s) => out.push_str(&String::from_utf16_lossy(s)),
+            JsValue::Object(fields) => {
+                // OrdinaryToPrimitive with a string hint tries toString first.
+                // JSON cannot contain callable own methods: any own toString
+                // shadows Object.prototype.toString without replacing it with
+                // a callable. Own valueOf is likewise noncallable; inherited
+                // valueOf returns the object, never a primitive. __proto__ in
+                // JSON.parse is only a data property, not a prototype change.
+                if fields
+                    .iter()
+                    .any(|(key, _)| key.iter().copied().eq("toString".encode_utf16()))
+                {
+                    return Err("No default value".into());
+                }
+                out.push_str("[object Object]");
+            }
+            _ => out.push_str("[object Object]"),
+        }
+    }
+    Ok(out)
+}
+
+pub fn models(value: &JsValue) -> Result<String, String> {
+    match value {
+        JsValue::Null => return Ok("all".into()),
+        JsValue::Array(a) => {
+            return if a.is_empty() {
+                Ok("none".into())
+            } else {
+                join(value)
+            };
+        }
+        JsValue::String(s) if s.is_empty() => return Ok("none".into()),
+        _ => {}
+    }
+    let prop = |name: &str| {
+        if let JsValue::Object(o) = value {
+            o.iter()
+                .find(|(k, _)| k.iter().copied().eq(name.encode_utf16()))
+                .map(|(_, v)| v)
+        } else {
+            None
+        }
+    };
+    if matches!(prop("length"),Some(JsValue::Number(n)) if *n == 0.0) {
+        return Ok("none".into());
+    }
+    let description = match prop("join") {
+        None => "undefined".into(),
+        Some(JsValue::Object(_)) => "an instance of Object".into(),
+        Some(JsValue::Array(_)) => "an instance of Array".into(),
+        Some(JsValue::Number(n)) if n.is_infinite() => join(&JsValue::Number(*n))?,
+        Some(v) => omni_ir::jsjson::stringify(v).unwrap_or_default(),
+    };
+    Err(format!(
+        "key.modelAllowlist.join is not a function. (In 'key.modelAllowlist.join(\",\")', 'key.modelAllowlist.join' is {description})"
+    ))
+}
+
+/// The models command uses a spaced separator at the outer level only;
+/// nested arrays still use Array.toString's comma separator.
+pub fn models_detail(value: &JsValue) -> Result<String, String> {
+    match value {
+        JsValue::Null => Ok("every model".into()),
+        JsValue::Array(a) if a.is_empty() => {
+            Ok("no models; every request this key makes is refused".into())
+        }
+        JsValue::String(s) if s.is_empty() => {
+            Ok("no models; every request this key makes is refused".into())
+        }
+        JsValue::Array(a) => a
+            .iter()
+            .map(join)
+            .collect::<Result<Vec<_>, _>>()
+            .map(|v| v.join(", ")),
+        _ => models(value)
+            .map(|v| {
+                if v == "none" {
+                    "no models; every request this key makes is refused".into()
+                } else {
+                    v
+                }
+            })
+            .map_err(|e| e.replace("join(\",\")", "join(\", \")")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn utf16_values_keys_pairs_and_duplicates_are_lossless() {
+        let value = parse(r#"{"\ud800":"\udc00","�":1,"\ud801":2,"\ud800":3,"pair":"\ud83d\ude00","literal":"😀","escapes":"\b\f\n\r\t\\\"\/"}"#).expect("parse");
+        assert_eq!(
+            omni_ir::jsjson::stringify(&value).expect("json"),
+            "{\"\\ud800\":3,\"�\":1,\"\\ud801\":2,\"pair\":\"😀\",\"literal\":\"😀\",\"escapes\":\"\\b\\f\\n\\r\\t\\\\\\\"/\"}"
+        );
+        let value = parse(r#"["\ud800","\udc00","�","\ud83d\ude00"]"#).expect("parse");
+        assert_eq!(
+            omni_ir::jsjson::stringify(&value).expect("json"),
+            "[\"\\ud800\",\"\\udc00\",\"�\",\"😀\"]"
+        );
+    }
+    #[test]
+    fn deep_coercion_error_and_pretty_listing_drop_on_small_stack() {
+        std::thread::Builder::new().stack_size(256 * 1024).spawn(|| {
+            // A duplicate property discards a deep object before coercion;
+            // another deep value survives until the later error unwinds.
+            let deep = format!("{}0{}", "{\"x\":".repeat(20_000), "}".repeat(20_000));
+            let value = parse(&format!("[{deep},{{\"toString\":{deep},\"toString\":null}}]")).expect("parse");
+            assert_eq!(models(&value), Err("No default value".into()));
+            let earlier = parse(&format!("{}0{}", "[".repeat(512), "]".repeat(512))).expect("deep array");
+            let later = parse("[{\"toString\":null}]").expect("error array");
+            let listing = crate::keys::KeyListing {
+                cells: vec![JsValue::Object(vec![]), JsValue::Object(vec![])],
+                data: serde_json::json!({"keys":[{"modelAllowlist":null},{"modelAllowlist":null}]}),
+                allowlists: vec![earlier, later],
+                limits_js: vec![JsValue::Null, JsValue::Null],
+                usage_js: vec![JsValue::Array(vec![]), JsValue::Array(vec![])],
+            };
+            assert_eq!(models(&listing.allowlists[0]).expect("earlier"), "0");
+            assert_eq!(models(&listing.allowlists[1]), Err("No default value".into()));
+            assert!(listing.json().contains("\"toString\": null"));
+        }).expect("thread").join().expect("no overflow");
+    }
+    #[test]
+    fn deep_parse_clone_join_and_drop_on_small_stack() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(|| {
+                let input = format!("{}-1e400{}", "[".repeat(20_000), "]".repeat(20_000));
+                let value = parse(&input).expect("parse");
+                let cloned = value.clone();
+                assert_eq!(models(&cloned).expect("join"), "-Infinity");
+                assert!(
+                    omni_ir::jsjson::stringify(&value)
+                        .expect("json")
+                        .contains("null")
+                );
+            })
+            .expect("thread")
+            .join()
+            .expect("no overflow");
+    }
+}

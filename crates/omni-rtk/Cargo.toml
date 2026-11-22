@@ -1,0 +1,24 @@
+[package]
+name = "omni-rtk"
+description = "Pure tool-result filters (RTK), mirroring packages/rtk."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+omni-ir = { path = "../omni-ir" }
+regex = "1"
+serde_json.workspace = true
+
+[dev-dependencies]
+flate2 = "1"
+regex = "1"
+
+[[test]]
+name = "suite"
+path = "tests/suite/main.rs"

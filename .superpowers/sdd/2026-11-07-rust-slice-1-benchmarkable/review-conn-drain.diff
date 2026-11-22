@@ -1,0 +1,750 @@
+diff --git a/crates/omni-gateway/tests/connection_reuse.rs b/crates/omni-gateway/tests/connection_reuse.rs
+index 8a66801e..1c9f6948 100644
+--- a/crates/omni-gateway/tests/connection_reuse.rs
++++ b/crates/omni-gateway/tests/connection_reuse.rs
+@@ -147,10 +147,13 @@ async fn run(anthropic: bool, streaming: bool, mode: Mode) {
+     let origin = format!("http://{}", listener.local_addr().expect("addr"));
+     let count = Arc::new(AtomicUsize::new(0));
+     let accepted = count.clone();
++    let finish = Arc::new(tokio::sync::Semaphore::new(0));
++    let finish_upstream = finish.clone();
+     let upstream = tokio::spawn(async move {
+         let mut tasks = tokio::task::JoinSet::new();
+         while let Ok((mut socket, _)) = listener.accept().await {
+             let first = accepted.fetch_add(1, Ordering::SeqCst) == 0;
++            let finish = finish_upstream.clone();
+             tasks.spawn(async move {
+                 let prefix = if anthropic {
+                     "event: message_start\ndata: {\"message\":{\"id\":\"m\",\"model\":\"claude-opus-5-5\"}}\n\nevent: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n"
+@@ -186,7 +189,7 @@ async fn run(anthropic: bool, streaming: bool, mode: Mode) {
+                         return;
+                     }
+                     if mode == Mode::Delayed {
+-                        tokio::time::sleep(Duration::from_millis(20)).await;
++                        finish.acquire().await.expect("finish signal").forget();
+                         if socket.write_all(b"0\r\n\r\n").await.is_err() { return; }
+                     }
+                 }
+@@ -214,10 +217,11 @@ async fn run(anthropic: bool, streaming: bool, mode: Mode) {
+             .expect("provider");
+     }
+     let mut h = common::harness(&f, vec![]);
+-    Arc::get_mut(&mut h.deps).expect("unique").http = Arc::new(Local {
++    let local = Arc::new(Local {
+         client: Client::new(),
+         origin,
+     });
++    Arc::get_mut(&mut h.deps).expect("unique").http = local.clone();
+     let n = if matches!(mode, Mode::Cancel | Mode::Truncated) {
+         2
+     } else {
+@@ -233,6 +237,16 @@ async fn run(anthropic: bool, streaming: bool, mode: Mode) {
+             i > 0 || matches!(mode, Mode::Complete | Mode::Delayed),
+         )
+         .await;
++        if mode == Mode::Delayed {
++            finish.add_permits(1);
++            tokio::time::timeout(Duration::from_secs(5), async {
++                while local.client.idle_connections() == 0 {
++                    tokio::task::yield_now().await;
++                }
++            })
++            .await
++            .expect("completed framing must return to pool");
++        }
+     }
+     let observed = count.load(Ordering::SeqCst);
+     eprintln!("anthropic={anthropic} streaming={streaming}: {observed} sockets / {n} requests");
+@@ -280,7 +294,168 @@ async fn client_disconnects_are_not_reused() {
+     }
+ }
+ #[tokio::test]
+-#[ignore = "finish_if_ready never waits for a delayed chunked terminator; bounded completion drain needed"]
+ async fn delayed_chunked_terminator_reuses() {
+     run(true, true, Mode::Delayed).await;
+ }
++
++mod responses_probe {
++    use super::*;
++    use omni_ir::{
++        request::ChatRequest,
++        stream::{Delta, StreamEvent},
++    };
++    use omni_providers::{
++        adapter::{AdapterRequest, send},
++        codec::Credentials,
++        custom::CustomCodec,
++    };
++    use serde_json::json;
++    use tokio::net::TcpStream;
++
++    async fn read_request(s: &mut TcpStream) -> bool {
++        let mut b = Vec::new();
++        loop {
++            let mut x = [0; 8192];
++            let Ok(n) = s.read(&mut x).await else {
++                return false;
++            };
++            if n == 0 {
++                return false;
++            }
++            b.extend_from_slice(&x[..n]);
++            if let Some(e) = b.windows(4).position(|v| v == b"\r\n\r\n") {
++                let h = String::from_utf8_lossy(&b[..e]).to_lowercase();
++                let l: usize = h
++                    .lines()
++                    .find_map(|l| l.strip_prefix("content-length:"))
++                    .expect("length")
++                    .trim()
++                    .parse()
++                    .expect("number");
++                if b.len() >= e + 4 + l {
++                    return true;
++                }
++            }
++        }
++    }
++    async fn one(client: &Client, creds: &Credentials) -> String {
++        let req: ChatRequest =
++            serde_json::from_value(json!({"model":"m","messages":[],"stream":true}))
++                .expect("request");
++        let mut r = send(
++            &CustomCodec,
++            "custom",
++            AdapterRequest::new(&req, "m", creds),
++            client,
++        )
++        .await
++        .expect("send");
++        let mut text = String::new();
++        while let Some(e) = r.events.next().await {
++            match &e.expect("event") {
++                StreamEvent::BlockDelta {
++                    delta: Delta::Text { text: t },
++                    ..
++                } => text.push_str(t),
++                StreamEvent::End { .. } => return text,
++                _ => {}
++            }
++        }
++        panic!("no End")
++    }
++    async fn run(waves: usize, width: usize) {
++        tokio::time::timeout(Duration::from_secs(30), async {
++            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
++            let addr = listener.local_addr().expect("addr");
++            let count = Arc::new(AtomicUsize::new(0));
++            let accepted = count.clone();
++            let requests = Arc::new(AtomicUsize::new(0));
++            let barrier = Arc::new(tokio::sync::Barrier::new(width));
++            let upstream = tokio::spawn(async move {
++                let mut tasks = tokio::task::JoinSet::new();
++                while let Ok((mut s, _)) = listener.accept().await {
++                    accepted.fetch_add(1, Ordering::SeqCst);
++                    let requests = requests.clone(); let barrier = barrier.clone();
++                    tasks.spawn(async move {
++                        while read_request(&mut s).await {
++                            let i = requests.fetch_add(1, Ordering::SeqCst);
++                            barrier.wait().await;
++                            let body = format!("event: response.output_text.delta\ndata: {{\"output_index\":0,\"delta\":\"own{i}\"}}\n\nevent: response.completed\ndata: {{\"response\":{{\"status\":\"completed\"}}}}\n\n");
++                            if s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",body.len()).as_bytes()).await.is_err() { return; }
++                        }
++                    });
++                }
++            });
++            let cr = Credentials { access_token: None, api_key: Some("key-one".into()), provider_data: json!({"origin":format!("http://{addr}"),"protocol":"responses"}).as_object().expect("credentials").clone() };
++            let c = Arc::new(Client::new());
++            for wave in 0..waves {
++                let mut tasks = tokio::task::JoinSet::new();
++                for _ in 0..width {
++                    let c = c.clone(); let cr = cr.clone();
++                    tasks.spawn(async move { one(&c,&cr).await });
++                }
++                let mut texts = std::collections::HashSet::new();
++                while let Some(r) = tasks.join_next().await { texts.insert(r.expect("task")); }
++                for i in wave*width..(wave+1)*width { assert!(texts.contains(&format!("own{i}"))); }
++                assert_eq!(count.load(Ordering::SeqCst),width);
++            }
++            upstream.abort();
++        }).await.expect("deadline");
++    }
++    #[tokio::test]
++    async fn responses_reuse() {
++        run(20, 1).await;
++    }
++    #[tokio::test]
++    async fn concurrent_reuse() {
++        run(5, 32).await;
++    }
++
++    #[tokio::test]
++    async fn drain_forged_response_isolation() {
++        isolation("forged").await;
++    }
++    #[tokio::test]
++    async fn never_terminator_next_request_isolated() {
++        isolation("never").await;
++    }
++    #[tokio::test]
++    async fn drain_eof_completed_client_unaffected() {
++        isolation("eof").await;
++    }
++    async fn isolation(mode: &'static str) {
++        tokio::time::timeout(Duration::from_secs(5), async {
++            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
++            let addr = listener.local_addr().expect("addr");
++            let (finish, release) = tokio::sync::oneshot::channel();
++            let (closed, observe_closed) = tokio::sync::oneshot::channel();
++            let upstream = tokio::spawn(async move {
++                let (mut first, _) = listener.accept().await.expect("first");
++                assert!(read_request(&mut first).await);
++                let body = |text: &str| format!("event: response.output_text.delta\ndata: {{\"output_index\":0,\"delta\":\"{text}\"}}\n\nevent: response.completed\ndata: {{\"response\":{{\"status\":\"completed\"}}}}\n\n");
++                let own = body("own0");
++                first.write_all(format!("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{own}\r\n",own.len()).as_bytes()).await.expect("first body");
++                release.await.expect("client completed");
++                if mode == "forged" {
++                    first.write_all(b"0\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nPOISON").await.expect("forged response");
++                }
++                if mode == "eof" { first.shutdown().await.expect("upstream EOF"); }
++                let mut byte = [0];
++                assert_eq!(first.read(&mut byte).await.unwrap_or(0),0);
++                closed.send(()).expect("closed signal");
++                let (mut second, _) = listener.accept().await.expect("second");
++                assert!(read_request(&mut second).await);
++                let own = body("own1");
++                second.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{own}",own.len()).as_bytes()).await.expect("own response");
++            });
++            let mut cr = Credentials { access_token: None, api_key: Some("key-one".into()), provider_data: json!({"origin":format!("http://{addr}"),"protocol":"responses"}).as_object().expect("credentials").clone() };
++            let c = Client::new();
++            assert_eq!(one(&c,&cr).await,"own0");
++            finish.send(()).expect("finish");
++            observe_closed.await.expect("first closed");
++            cr.api_key = Some("key-two".into());
++            assert_eq!(one(&c,&cr).await,"own1");
++            upstream.await.expect("upstream");
++        }).await.expect("deadline");
++    }
++}
+diff --git a/crates/omni-providers/src/http/body.rs b/crates/omni-providers/src/http/body.rs
+index 6a9b4354..2ca99004 100644
+--- a/crates/omni-providers/src/http/body.rs
++++ b/crates/omni-providers/src/http/body.rs
+@@ -129,6 +129,21 @@ impl std::fmt::Debug for ResponseBody {
+ }
+ 
+ impl ResponseBody {
++    #[cfg(test)]
++    pub(super) fn drain_test_body(
++        socket: tokio::net::TcpStream,
++        pool: Arc<Pool>,
++        key: Key,
++    ) -> Self {
++        Self {
++            conn: Some(Conn::Plain(socket)),
++            given: Default::default(),
++            buf: BytesMut::new(),
++            framing: Framing::ChunkSize,
++            reusable: true,
++            pool: Some((pool, key)),
++        }
++    }
+     /// A body that is already complete, for tests and fakes.
+     pub fn from_bytes(bytes: impl Into<Bytes>) -> Self {
+         let bytes: Bytes = bytes.into();
+@@ -149,11 +164,15 @@ impl ResponseBody {
+ 
+     /// Stops reading. If the rest of the body is already in hand — the
+     /// terminating chunk of a stream the decoder ended at `[DONE]`, say — the
+-    /// connection still goes back to the pool; otherwise it is closed. Never
+-    /// waits for the network.
++    /// connection still goes back to the pool; otherwise the pool may finish
++    /// its framing in a bounded task. Never waits for the network.
+     pub fn finish_if_ready(mut self) {
+-        /// More than this unread, and the connection is not worth saving.
++        // Bound wire bytes (including framing) spent saving one connection.
+         const DRAIN_LIMIT: usize = 64 * 1024;
++        let Some(remaining) = DRAIN_LIMIT.checked_sub(self.buf.len()) else {
++            return;
++        };
++        self.conn = self.conn.take().map(|conn| conn.finishing(remaining));
+         let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+         let mut drained = 0;
+         loop {
+@@ -168,13 +187,31 @@ impl ResponseBody {
+                         return;
+                     }
+                 }
+-                // Ended cleanly (and was released by `next_chunk`), failed, or
+-                // would wait: in the last two cases dropping `self` closes it.
++                std::task::Poll::Pending => {
++                    if self.reusable
++                        && let Some((pool, key)) = self.pool.take()
++                    {
++                        Pool::adopt(&pool, key, self);
++                    }
++                    return;
++                }
+                 _ => return,
+             }
+         }
+     }
+ 
++    pub(super) async fn drain(mut self, pool: std::sync::Weak<Pool>, key: Key) {
++        while let Ok(chunk) = self.read_next().await {
++            if chunk.is_none() {
++                if let Some(pool) = pool.upgrade() {
++                    self.pool = Some((pool, key));
++                    self.release();
++                }
++                return;
++            }
++        }
++    }
++
+     /// The next piece of the body; `None` at its end.
+     pub async fn next_chunk(&mut self) -> Option<Result<Bytes, HttpError>> {
+         match self.read_next().await {
+@@ -213,7 +250,7 @@ impl ResponseBody {
+     /// Back to the pool only when the framing ended cleanly with nothing
+     /// unread behind it; otherwise the connection is dropped, which closes it.
+     fn release(&mut self) {
+-        let conn = self.conn.take();
++        let conn = self.conn.take().map(Conn::finished);
+         if let (Some(conn), Some((pool, key))) = (conn, self.pool.take())
+             && self.reusable
+             && self.buf.is_empty()
+diff --git a/crates/omni-providers/src/http/drain_tests.rs b/crates/omni-providers/src/http/drain_tests.rs
+new file mode 100644
+index 00000000..634a6635
+--- /dev/null
++++ b/crates/omni-providers/src/http/drain_tests.rs
+@@ -0,0 +1,145 @@
++use super::{pool::*, *};
++use std::{sync::Arc, time::Duration};
++use tokio::{
++    io::{AsyncReadExt, AsyncWriteExt},
++    net::{TcpListener, TcpStream},
++};
++
++async fn pair(pool: &Arc<Pool>) -> (ResponseBody, TcpStream) {
++    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
++    let addr = listener.local_addr().expect("addr");
++    let client = TcpStream::connect(addr).await.expect("connect");
++    let (server, _) = listener.accept().await.expect("accept");
++    let key = Key::of(&Target {
++        scheme: Scheme::Http,
++        host: "127.0.0.1".into(),
++        port: addr.port(),
++        host_header: "localhost".into(),
++        path: "/".into(),
++    });
++    (
++        ResponseBody::drain_test_body(client, pool.clone(), key),
++        server,
++    )
++}
++async fn closed(socket: &mut TcpStream) {
++    tokio::time::timeout(Duration::from_secs(5), async {
++        let mut b = [0; 1024];
++        loop {
++            match socket.read(&mut b).await {
++                Ok(0) | Err(_) => break,
++                Ok(_) => {}
++            }
++        }
++    })
++    .await
++    .expect("socket closed");
++}
++fn pool() -> Arc<Pool> {
++    Arc::new(Pool::new(None, PoolLimits::default()))
++}
++
++#[tokio::test]
++async fn drain_never_terminates() {
++    let p = pool();
++    let (b, mut s) = pair(&p).await;
++    b.finish_if_ready();
++    closed(&mut s).await;
++    assert_eq!(p.idle_count(), 0);
++}
++
++#[tokio::test]
++async fn drain_invalid_and_excess_wire() {
++    for tail in [
++        b"nope\r\n".to_vec(),
++        b"0\r\n\r\nHTTP/1.1 200 POISON\r\n\r\n".to_vec(),
++        format!("10001\r\n{}\r\n0\r\n\r\n", "x".repeat(65537)).into_bytes(),
++        "1\r\nx\r\n".repeat(12000).into_bytes(),
++    ] {
++        let p = pool();
++        let (b, mut s) = pair(&p).await;
++        b.finish_if_ready();
++        let _write_result = s.write_all(&tail).await;
++        closed(&mut s).await;
++        assert_eq!(p.idle_count(), 0);
++    }
++}
++
++#[tokio::test]
++async fn drain_eof() {
++    let p = pool();
++    let (b, mut s) = pair(&p).await;
++    b.finish_if_ready();
++    s.shutdown().await.expect("shutdown");
++    closed(&mut s).await;
++    assert_eq!(p.idle_count(), 0);
++}
++
++#[tokio::test]
++async fn drain_survives_body_handoff() {
++    let p = pool();
++    let (b, mut s) = pair(&p).await;
++    b.finish_if_ready();
++    s.write_all(b"0\r\n\r\n").await.expect("terminator");
++    tokio::time::timeout(Duration::from_secs(5), async {
++        while p.idle_count() == 0 {
++            tokio::task::yield_now().await;
++        }
++    })
++    .await
++    .expect("returned");
++}
++
++#[tokio::test]
++async fn drain_capacity_and_pool_shutdown() {
++    let p = pool();
++    let mut peers = Vec::new();
++    let mut bodies = Vec::new();
++    for _ in 0..40 {
++        let (b, s) = pair(&p).await;
++        bodies.push(b);
++        peers.push(s);
++    }
++    // No awaits during handoff: all slots are occupied before tasks can run.
++    for b in bodies {
++        b.finish_if_ready();
++    }
++    assert_eq!(p.drain_test_count(), 32);
++    for s in &mut peers[32..] {
++        closed(s).await;
++    }
++    let weak = Arc::downgrade(&p);
++    drop(p);
++    assert!(weak.upgrade().is_none());
++    for s in &mut peers[..32] {
++        closed(s).await;
++    }
++}
++
++#[tokio::test]
++async fn pool_shutdown_tasks_joined() {
++    let client = Client::new();
++    let count = client.pool.active_drains.clone();
++    let (body, mut peer) = pair(&client.pool).await;
++    body.finish_if_ready();
++    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
++    drop(client);
++    tokio::time::timeout(Duration::from_secs(5), async {
++        while count.load(std::sync::atomic::Ordering::SeqCst) != 0 {
++            tokio::task::yield_now().await;
++        }
++    })
++    .await
++    .expect("task future destroyed");
++    closed(&mut peer).await;
++}
++
++#[test]
++fn finish_without_runtime_closes() {
++    let runtime = tokio::runtime::Runtime::new().expect("runtime");
++    let p = pool();
++    let (body, mut peer) = runtime.block_on(pair(&p));
++    body.finish_if_ready();
++    assert_eq!(p.drain_test_count(), 0);
++    runtime.block_on(closed(&mut peer));
++}
+diff --git a/crates/omni-providers/src/http/mod.rs b/crates/omni-providers/src/http/mod.rs
+index e68e7f00..d7c14ac2 100644
+--- a/crates/omni-providers/src/http/mod.rs
++++ b/crates/omni-providers/src/http/mod.rs
+@@ -180,6 +180,9 @@ pub(crate) struct Target {
+     pub path: String,
+ }
+ 
++#[cfg(test)]
++mod drain_tests;
++
+ /// `onResponseHead`: called once per request when the response head or a
+ /// transport failure arrives, with the provider and the elapsed whole ms.
+ pub type OnResponseHead = Arc<dyn Fn(&str, u64) + Send + Sync>;
+diff --git a/crates/omni-providers/src/http/pool.rs b/crates/omni-providers/src/http/pool.rs
+index 828294fd..4a7bd7e1 100644
+--- a/crates/omni-providers/src/http/pool.rs
++++ b/crates/omni-providers/src/http/pool.rs
+@@ -50,6 +50,13 @@ impl Default for PoolLimits {
+ pub(crate) enum Conn {
+     Plain(TcpStream),
+     Tls(Box<TlsStream<TcpStream>>),
++    Finishing(Box<CompletionConn>),
++}
++
++#[derive(Debug)]
++pub(crate) struct CompletionConn {
++    conn: Conn,
++    remaining: usize,
+ }
+ 
+ impl AsyncRead for Conn {
+@@ -61,6 +68,19 @@ impl AsyncRead for Conn {
+         match self.get_mut() {
+             Conn::Plain(s) => Pin::new(s).poll_read(cx, buf),
+             Conn::Tls(s) => Pin::new(s.as_mut()).poll_read(cx, buf),
++            Conn::Finishing(s) => {
++                if s.remaining == 0 {
++                    return Poll::Ready(Err(io::Error::other("completion drain limit")));
++                }
++                let mut scratch = [0; 16 * 1024];
++                let len = scratch.len().min(s.remaining).min(buf.remaining());
++                let mut limited = ReadBuf::new(&mut scratch[..len]);
++                let result = Pin::new(&mut s.conn).poll_read(cx, &mut limited);
++                let n = limited.filled().len();
++                s.remaining -= n;
++                buf.put_slice(limited.filled());
++                result
++            }
+         }
+     }
+ }
+@@ -74,6 +94,7 @@ impl AsyncWrite for Conn {
+         match self.get_mut() {
+             Conn::Plain(s) => Pin::new(s).poll_write(cx, buf),
+             Conn::Tls(s) => Pin::new(s.as_mut()).poll_write(cx, buf),
++            Conn::Finishing(s) => Pin::new(&mut s.conn).poll_write(cx, buf),
+         }
+     }
+ 
+@@ -81,6 +102,7 @@ impl AsyncWrite for Conn {
+         match self.get_mut() {
+             Conn::Plain(s) => Pin::new(s).poll_flush(cx),
+             Conn::Tls(s) => Pin::new(s.as_mut()).poll_flush(cx),
++            Conn::Finishing(s) => Pin::new(&mut s.conn).poll_flush(cx),
+         }
+     }
+ 
+@@ -88,11 +110,25 @@ impl AsyncWrite for Conn {
+         match self.get_mut() {
+             Conn::Plain(s) => Pin::new(s).poll_shutdown(cx),
+             Conn::Tls(s) => Pin::new(s.as_mut()).poll_shutdown(cx),
++            Conn::Finishing(s) => Pin::new(&mut s.conn).poll_shutdown(cx),
+         }
+     }
+ }
+ 
+ impl Conn {
++    pub(super) fn finishing(self, remaining: usize) -> Self {
++        Self::Finishing(Box::new(CompletionConn {
++            conn: self,
++            remaining,
++        }))
++    }
++
++    pub(super) fn finished(self) -> Self {
++        match self {
++            Self::Finishing(s) => s.conn,
++            conn => conn,
++        }
++    }
+     /// Whether an idle connection can carry another request: the peer has not
+     /// closed it and has sent nothing unsolicited. Never blocks.
+     fn still_idle(&mut self) -> bool {
+@@ -131,6 +167,9 @@ pub(crate) struct Pool {
+     /// Built on first TLS use; the platform root store is read once.
+     tls: OnceLock<TlsConnector>,
+     roots: Option<rustls::RootCertStore>,
++    drains: Mutex<tokio::task::JoinSet<()>>,
++    #[cfg(test)]
++    pub(super) active_drains: Arc<std::sync::atomic::AtomicUsize>,
+ }
+ 
+ impl std::fmt::Debug for Pool {
+@@ -153,6 +192,10 @@ impl Drop for Pool {
+ }
+ 
+ impl Pool {
++    #[cfg(test)]
++    pub(super) fn drain_test_count(&self) -> usize {
++        self.drains.lock().expect("drains").len()
++    }
+     pub fn new(roots: Option<rustls::RootCertStore>, limits: PoolLimits) -> Pool {
+         Pool {
+             idle: Mutex::new(HashMap::new()),
+@@ -160,9 +203,43 @@ impl Pool {
+             reaper: Mutex::new(None),
+             tls: OnceLock::new(),
+             roots,
++            drains: Mutex::new(tokio::task::JoinSet::new()),
++            #[cfg(test)]
++            active_drains: Arc::default(),
+         }
+     }
+ 
++    /// Own incomplete responses independently of the request; JoinSet's drop
++    /// aborts all tasks, and each task holds only a weak pool reference.
++    pub(super) fn adopt(pool: &Arc<Self>, key: Key, body: super::body::ResponseBody) {
++        // Bound outstanding sockets/tasks without a waiting queue.
++        const MAX_DRAINS: usize = 32;
++        // Late framing is worth a short wait, never an indefinite socket lease.
++        const DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
++        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
++            return;
++        };
++        let Ok(mut drains) = pool.drains.lock() else {
++            return;
++        };
++        while drains.try_join_next().is_some() {}
++        if drains.len() >= MAX_DRAINS {
++            return;
++        }
++        let weak = Arc::downgrade(pool);
++        let deadline = Instant::now() + DRAIN_TIMEOUT;
++        #[cfg(test)]
++        let guard = DrainGuard::new(pool.active_drains.clone());
++        drains.spawn_on(
++            async move {
++                #[cfg(test)]
++                let _guard = guard;
++                let _completion = tokio::time::timeout_at(deadline, body.drain(weak, key)).await;
++            },
++            &runtime,
++        );
++    }
++
+     pub fn idle_count(&self) -> usize {
+         self.idle
+             .lock()
+@@ -301,6 +378,22 @@ impl Pool {
+     }
+ }
+ 
++#[cfg(test)]
++struct DrainGuard(Arc<std::sync::atomic::AtomicUsize>);
++#[cfg(test)]
++impl DrainGuard {
++    fn new(count: Arc<std::sync::atomic::AtomicUsize>) -> Self {
++        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
++        Self(count)
++    }
++}
++#[cfg(test)]
++impl Drop for DrainGuard {
++    fn drop(&mut self) {
++        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
++    }
++}
++
+ fn tls_connector(roots: Option<rustls::RootCertStore>) -> TlsConnector {
+     let roots = roots.unwrap_or_else(|| {
+         let mut store = rustls::RootCertStore::empty();
+diff --git a/crates/omni-providers/tests/body_allocations.rs b/crates/omni-providers/tests/body_allocations.rs
+new file mode 100644
+index 00000000..b4d11dc7
+--- /dev/null
++++ b/crates/omni-providers/tests/body_allocations.rs
+@@ -0,0 +1,60 @@
++//! Run with the malloc-count preload documented in the drain report. The
++//! external probe avoids weakening the workspace's Rust unsafe-code ban.
++use omni_providers::http::{Client, HttpRequest};
++use std::io::{Read, Write};
++
++#[tokio::test]
++async fn streaming_body_allocation_count() {
++    let n: usize = std::env::var("BODY_CHUNKS")
++        .unwrap_or("1000".into())
++        .parse()
++        .expect("chunks");
++    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
++    let addr = listener.local_addr().expect("addr");
++    let (go, wait) = std::sync::mpsc::channel();
++    let server = std::thread::spawn(move || {
++        let (mut s, _) = listener.accept().expect("accept");
++        let mut req = [0; 8192];
++        assert!(s.read(&mut req).expect("request") > 0);
++        // One backing allocation, held alive by the body throughout measurement.
++        let payload = "1\r\nx\r\n".repeat(n + 1);
++        s.write_all(
++            format!("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{payload}").as_bytes(),
++        )
++        .expect("write");
++        wait.recv().expect("done");
++    });
++    let c = Client::new();
++    let mut r = c
++        .send(HttpRequest {
++            provider: "test".into(),
++            url: format!("http://{addr}/"),
++            method: "GET".into(),
++            headers: vec![],
++            body: String::new(),
++            body_encoding: None,
++            request_id: None,
++        })
++        .await
++        .expect("send");
++    // Warm BytesMut's shared storage; retain the first chunk so splits share it.
++    let first = r.body.next_chunk().await.expect("chunk").expect("body");
++    // Probe toggles counting when this thread opens these sentinel paths.
++    drop(std::fs::File::open("/tmp/opencode/diag/drain/alloc-start"));
++    for _ in 0..n {
++        assert_eq!(
++            r.body
++                .next_chunk()
++                .await
++                .expect("chunk")
++                .expect("body")
++                .as_ref(),
++            b"x"
++        );
++    }
++    drop(std::fs::File::open("/tmp/opencode/diag/drain/alloc-stop"));
++    drop(first);
++    drop(r);
++    go.send(()).expect("signal");
++    server.join().expect("server");
++}
+diff --git a/crates/omni-providers/tests/support/body_allocations.c b/crates/omni-providers/tests/support/body_allocations.c
+new file mode 100644
+index 00000000..0147535b
+--- /dev/null
++++ b/crates/omni-providers/tests/support/body_allocations.c
+@@ -0,0 +1,30 @@
++/* Linux/glibc test-only preload. Keeps unsafe code out of Rust crates.
++ * cc -shared -fPIC -o /tmp/opencode/diag/drain/fix3-alloc.so this-file.c -ldl
++ * LD_PRELOAD=... ASSERT_ALLOC_CONSTANT=1 cargo test --offline -p omni-providers
++ *   --test body_allocations -- --nocapture
++ * Counts only the measured reader thread, after shared-buffer warmup.
++ */
++#define _GNU_SOURCE
++#include <dlfcn.h>
++#include <fcntl.h>
++#include <stdarg.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++extern void *__libc_malloc(size_t);
++extern void *__libc_calloc(size_t,size_t);
++extern void *__libc_realloc(void*,size_t);
++static __thread int enabled;
++static __thread size_t count;
++void *malloc(size_t n) { if(enabled)count++; return __libc_malloc(n); }
++void *calloc(size_t a,size_t b) { if(enabled)count++; return __libc_calloc(a,b); }
++void *realloc(void *p,size_t n) { if(enabled)count++; return __libc_realloc(p,n); }
++int open64(const char *path,int flags,...) {
++ if(strstr(path,"/alloc-start")){count=0;enabled=1;return -1;}
++ if(strstr(path,"/alloc-stop")){enabled=0;fprintf(stderr,"BODY_ALLOCATIONS=%zu\n",count);if(getenv("ASSERT_ALLOC_CONSTANT") && count>8)_exit(99);return -1;}
++ static int (*real_open)(const char*,int,...);
++ if(!real_open)real_open=dlsym(RTLD_NEXT,"open64");
++ mode_t mode=0;if(flags&O_CREAT){va_list ap;va_start(ap,flags);mode=va_arg(ap,int);va_end(ap);}
++ return real_open(path,flags,mode);
++}
