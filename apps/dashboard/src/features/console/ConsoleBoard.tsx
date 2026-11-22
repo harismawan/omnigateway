@@ -167,13 +167,12 @@ const NOTHING_PUSHED: Pushed = { read: undefined, lines: NO_LINES };
  *
  * ## Push and poll must not be able to disagree
  *
- * The gateway publishes deltas through the same `parseConsoleLines` the REST
- * read uses, which settles parsing and selection. What it cannot settle is the
+ * The gateway publishes deltas through the same line parser the REST read
+ * uses, which settles parsing and selection. What it cannot settle is the
  * *level filter*, because a frame is written once for every subscriber and this
  * panel's filter is local state — so the gateway sends everything and the
- * filtering happens here, against the ordering imported from `@omni/ir`. See
- * `pushedLines.ts` for why that one comparison is restated rather than
- * imported from `@omni/control`, which this app may not reach.
+ * filtering happens here, against the console's `LEVELS`. See `pushedLines.ts`
+ * for why that one comparison is restated.
  */
 export function ConsoleBoard() {
   const { cadence } = useLive();
@@ -214,12 +213,11 @@ export function ConsoleBoard() {
 
   const onMessage = (message: TopicMessage): void => {
     // `open` and `refused` are transport status, delivered by topic to every
-    // reader — they exist for plugin channels, which can be refused, and this
-    // board is not one. Ignored explicitly rather than by falling through: the
-    // arm below treats anything that is not a readable frame as a hole and
-    // drops the accumulated tail, so an unhandled status arm would clear the
-    // terminal on every reconnect and on every ack. `closed` is how a held
-    // topic reports a gap, so it is read as one.
+    // reader, and carry no lines. Ignored explicitly rather than by falling
+    // through: the arm below treats anything that is not a readable frame as a
+    // hole and drops the accumulated tail, so an unhandled status arm would
+    // clear the terminal on every reconnect and on every ack. `closed` is how a
+    // held topic reports a gap, so it is read as one.
     if (message.kind !== "frame" && message.kind !== "gap" && message.kind !== "closed") return;
     const incoming = message.kind === "frame" ? readConsoleFrame(message.payload) : null;
     if (incoming === null) {

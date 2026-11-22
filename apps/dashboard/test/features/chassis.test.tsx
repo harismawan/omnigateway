@@ -1,9 +1,8 @@
 import { beforeEach, expect, test } from "bun:test";
-import type { LiveConnection } from "@omnigateway/dashboard-sdk";
 import { act, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ChassisBar } from "../../src/components/ChassisBar.tsx";
-import { LiveProvider } from "../../src/session/live.tsx";
+import { type LiveConnection, LiveProvider } from "../../src/session/live.tsx";
 import { createFetchStub } from "../helpers/fetchStub.ts";
 import { renderWithRouter } from "../helpers/render.tsx";
 import { createStubTimer, installSocketStub } from "../helpers/socketStub.ts";
@@ -11,7 +10,6 @@ import { createStubTimer, installSocketStub } from "../helpers/socketStub.ts";
 beforeEach(() => {
   createFetchStub({
     "GET /api/logs": () => ({ logs: [] }),
-    "GET /api/plugins": () => ({ plugins: [] }),
   });
 });
 

@@ -1,6 +1,6 @@
 import { afterAll, expect, test } from "bun:test";
-import { keyUsable } from "@omni/store/types";
 import { fromLocalInput, keyState, toLocalInput } from "../../../src/features/keys/expiry.ts";
+import { keyUsable } from "../../../src/lib/domain.ts";
 import { apiKey } from "../../helpers/fixtures.ts";
 
 /**

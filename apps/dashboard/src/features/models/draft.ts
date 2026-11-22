@@ -2,7 +2,7 @@
 // reimplemented for the same reason `vitals.ts` imports `sameWindow`: a second
 // copy of "which account can serve this target" is what put the picker and the
 // router out of step in the first place.
-import { servesTarget } from "@omni/store/types";
+
 import { findProvider } from "../../api/queries.ts";
 import type {
   AuthType,
@@ -14,6 +14,7 @@ import type {
   Target,
   VirtualModel,
 } from "../../api/types.ts";
+import { servesTarget } from "../../lib/domain.ts";
 
 /**
  * The loaded provider catalog, as every helper below takes it.
@@ -216,8 +217,8 @@ export function heldAuths(credentials: readonly Credential[]): HeldAuths {
   // would have rescued it is skipped too. Either way the models board
   // white-screens instead of degrading.
   //
-  // Same rule as the provider tables in `@omni/providers`, restated because the
-  // console cannot import them — see boundary rule 12.
+  // Same rule as the gateway's provider-keyed tables: a stored provider id
+  // must never resolve to an `Object.prototype` member.
   const held: Record<string, AuthType[]> = Object.create(null);
   for (const credential of credentials) {
     const ways = held[credential.provider] ?? [];

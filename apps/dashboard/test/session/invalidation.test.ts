@@ -32,7 +32,7 @@ function seeded(): QueryClient {
   client.setQueryData(queryKeys.keys, []);
   client.setQueryData(queryKeys.settings, {});
   client.setQueryData(queryKeys.models, []);
-  client.setQueryData(queryKeys.plugins, []);
+  client.setQueryData(queryKeys.lifecycle, {});
   client.setQueryData(USAGE, []);
   client.setQueryData(QUOTA, []);
   client.setQueryData(["console", 200, ""], { lines: [] });
@@ -184,12 +184,12 @@ test("the global topic invalidates everything, captured bodies included", () => 
   invalidateTopic(client, GLOBAL_INVALIDATE);
 
   expect(stale(client, BODY)).toBe(true);
-  expect(stale(client, queryKeys.plugins)).toBe(true);
+  expect(stale(client, queryKeys.lifecycle)).toBe(true);
 });
 
 test("a reconnect invalidates every topic without touching a captured body", () => {
   // A reconnect says the console missed announcements; it says nothing about an
-  // immutable artifact or about which plugins are installed, neither of which
+  // immutable artifact or about what supervises the process, neither of which
   // any topic can change.
   const client = seeded();
 
@@ -199,7 +199,7 @@ test("a reconnect invalidates every topic without touching a captured body", () 
   expect(stale(client, USAGE)).toBe(true);
   expect(stale(client, queryKeys.credentialHealth)).toBe(true);
   expect(stale(client, BODY)).toBe(false);
-  expect(stale(client, queryKeys.plugins)).toBe(false);
+  expect(stale(client, queryKeys.lifecycle)).toBe(false);
 });
 
 test("an unknown topic changes nothing", () => {

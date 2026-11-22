@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { SAME_WINDOW_TOLERANCE_MS } from "@omni/store/types";
 import type { QuotaSample, QuotaWindow } from "../../src/api/types.ts";
+import { SAME_WINDOW_TOLERANCE_MS } from "../../src/lib/domain.ts";
 import { formatRelative } from "../../src/lib/format.ts";
 import {
   bucketLogs,
@@ -759,7 +759,7 @@ describe("projectedPace", () => {
     const resetsAt = NOW + 3 * HOUR;
     const ratePerHour = 240;
     const window = quota({ used: 620, limit: 1_000, observedAt, resetsAt });
-    // As `@omni/control` defines it: the remaining allowance at that rate.
+    // As the gateway defines it: the remaining allowance at that rate.
     const exhaustsAt = observedAt + ((1_000 - 620) / ratePerHour) * HOUR;
 
     const pace = projectedPace(

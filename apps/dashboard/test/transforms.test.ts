@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { cp, mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { dashboardRoot } from "../tooling/build.ts";
@@ -88,7 +88,6 @@ export const Route = createFileRoute('/')({
 
   test("fails production generation nonzero even with a stale route tree", async () => {
     const root = await fixture();
-    await cp(join(dashboardRoot, "shared"), join(root, "shared"), { recursive: true });
     await Bun.write(join(root, "public/favicon.svg"), '<svg xmlns="http://www.w3.org/2000/svg"/>');
     // Deliberately do not import the routes: a missing generator guard must not
     // be masked by the bundler discovering the invalid route independently.
@@ -99,7 +98,7 @@ export const Route = createFileRoute('/')({
     );
     const valid = build(root);
     expect(valid.exitCode).toBe(0);
-    expect(await Bun.file(join(root, "dist/shared/react.js")).exists()).toBe(true);
+    expect(await Bun.file(join(root, "dist/index.html")).exists()).toBe(true);
     const staleTree = await Bun.file(join(root, "src/routeTree.gen.ts")).text();
     expect(staleTree).toContain("index");
     await Bun.write(

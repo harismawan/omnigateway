@@ -26,12 +26,12 @@ export type PaletteProvider = {
  * all. The provider then paints colourless in that one mode, which is the same
  * outcome as before and reached without the sheet carrying a lie.
  *
- * Nothing here validates the *content* of a hue. `packages/control/src/catalog.ts`
- * does that, and it is the only place that should: this template concatenates,
+ * Nothing here validates the *content* of a hue. `safe_colour` in
+ * `crates/omni-control/src/api.rs` does that, and it is the only place that should: this template concatenates,
  * and a second check on this side of the wire would be a guard against a server
  * that also serves the script running it.
  *
- * The reasoning behind each hue lives in that provider's `descriptor.ts`,
+ * The reasoning behind each hue lives with the catalog entry that carries it,
  * beside the value it explains — generated CSS cannot carry a comment, and a
  * comment kept away from its value is one that goes stale unnoticed.
  */
@@ -40,7 +40,7 @@ function providerPalette(providers: readonly PaletteProvider[], mode: "light" | 
     .flatMap(({ id, colour }) => {
       const value = colour?.[mode];
       // Only "is there a string here", not "is it a good one". An empty one is
-      // refused by `packages/control/src/catalog.ts` and, if it ever got past,
+      // refused by `crates/omni-control/src/api.rs` and, if it ever got past,
       // is stripped by the minifier on the way into the sheet — a check for it
       // here would be a branch no test could tell from its absence.
       return typeof value === "string" ? [`--p-${id}: ${value};`] : [];

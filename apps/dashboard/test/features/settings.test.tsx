@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { DEFAULT_SMART_ROUTER_POLICY } from "@omni/store/types";
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { SettingsBoard } from "../../src/features/settings/SettingsBoard.tsx";
+import { DEFAULT_SMART_ROUTER_POLICY } from "../../src/lib/domain.ts";
 import { createFetchStub } from "../helpers/fetchStub.ts";
 import { model, settings } from "../helpers/fixtures.ts";
 import { renderWithProviders } from "../helpers/render.tsx";

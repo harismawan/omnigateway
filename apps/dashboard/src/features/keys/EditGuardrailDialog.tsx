@@ -1,8 +1,8 @@
-import { GUARDRAIL_POLICY_MAX_CHARS } from "@omni/store/types";
 import { useState } from "react";
 import styled from "styled-components";
 import { useSetKeyGuardrail, useSettings } from "../../api/queries.ts";
 import type { ApiKeySummary } from "../../api/types.ts";
+import { GUARDRAIL_POLICY_MAX_CHARS } from "../../lib/domain.ts";
 import { Button } from "../../ui/Button.tsx";
 import { Field, Textarea } from "../../ui/Field.tsx";
 import { Modal } from "../../ui/Modal.tsx";

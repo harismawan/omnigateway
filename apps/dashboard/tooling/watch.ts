@@ -31,7 +31,7 @@ export function watchDashboard(root: string, changed: () => void): () => void {
   const notify = (name: string | undefined) => {
     if (!name || /(?:^|\/)routeTree\.gen\.ts$/.test(name)) return;
     if (
-      !/^(?:src\/|public\/|shared\/|tooling\/|index\.html$|package\.json$|tsr\.config\.json$|tsconfig\.json$)/.test(
+      !/^(?:src\/|public\/|tooling\/|index\.html$|package\.json$|tsr\.config\.json$|tsconfig\.json$)/.test(
         name,
       )
     )
@@ -41,7 +41,7 @@ export function watchDashboard(root: string, changed: () => void): () => void {
   };
   const watchers = [watch(root, (_event, filename) => notify(filename?.toString()))];
   // Never recursively watch node_modules, dist or test trees.
-  for (const name of ["src", "public", "shared", "tooling"]) {
+  for (const name of ["src", "public", "tooling"]) {
     if (existsSync(join(root, name)))
       watchers.push(
         watch(join(root, name), { recursive: true }, (_event, filename) =>

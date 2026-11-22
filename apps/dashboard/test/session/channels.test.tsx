@@ -1,38 +1,35 @@
 import { expect, test } from "bun:test";
 import { act, screen } from "@testing-library/react";
-import { type ReactNode, useEffect, useState, useSyncExternalStore } from "react";
+import { type ReactNode, useState, useSyncExternalStore } from "react";
 import { useLive } from "../../src/session/live.tsx";
+import { useHeldStreamTopic } from "../../src/session/stream.tsx";
 import { makeQueryClient, renderWithProviders } from "../helpers/render.tsx";
 import { createStubTimer, installSocketStub, type StubFrame } from "../helpers/socketStub.ts";
 
 /**
- * The console half of plugin channels, driven through the seam a panel reaches.
+ * Held topics, driven through the seam a board reaches.
  *
- * A plugin's topic is not known at build time, so it cannot be in the
+ * A per-process console topic is minted from a node id, so it cannot be in the
  * compile-time table `RES_TOPICS` and `STREAM_TOPICS` come from — the client
  * has to hold it on request and give it up again. `hold` itself is private to
- * `createStreamClient`, so these drive `useLive().channels`, which is the
- * narrowest boundary that is also stable: it is exactly what
- * `usePluginChannel` is built on and what a panel's frames arrive through.
+ * `createStreamClient`, so these drive `useHeldStreamTopic`, which is the
+ * narrowest boundary that is also stable: it is exactly what `ConsoleBoard`
+ * holds a chosen process's topic through.
  */
 
-const TOPIC = "plugin:pokemon:companion";
-const OTHER = "plugin:pokemon:notes";
+const TOPIC = "stream:console:node-a";
+const OTHER = "stream:console:node-b";
 
 /** Records everything one subscription was handed, as text a test can read. */
 function Reader({ topic, id }: { topic: string; id: string }) {
-  const { channels } = useLive();
   const [seen, setSeen] = useState<string[]>([]);
 
-  useEffect(() => {
-    if (channels === undefined) return undefined;
-    return channels.subscribe(topic, (message) => {
-      setSeen((previous) => [
-        ...previous,
-        message.kind === "frame" ? `frame:${JSON.stringify(message.payload)}` : message.kind,
-      ]);
-    });
-  }, [channels, topic]);
+  useHeldStreamTopic(topic, (message) => {
+    setSeen((previous) => [
+      ...previous,
+      message.kind === "frame" ? `frame:${JSON.stringify(message.payload)}` : message.kind,
+    ]);
+  });
 
   return <span data-testid={id}>{seen.join("|")}</span>;
 }
@@ -75,27 +72,12 @@ function mountGate(initial: boolean) {
  * What a topic's cadence would tell react-query, rendered as text.
  *
  * A separate component from `Reader` on purpose: the interesting case is the
- * one where the panel holding the channel and the query naming the topic are
- * not the same component — which is exactly the arrangement `PluginChannel`
- * exposing its composed `topic` is there to enable.
+ * one where the component holding the topic and the query naming it are not
+ * the same component.
  */
 function CadenceProbe({ topic }: { topic: string }) {
   const { cadence } = useLive();
   return <span data-testid="cadence">{String(cadence(10_000, topic))}</span>;
-}
-
-function Sender({ topic }: { topic: string }) {
-  const { channels } = useLive();
-  const [result, setResult] = useState("untried");
-  return (
-    <button
-      type="button"
-      data-testid="send"
-      onClick={() => setResult(String(channels?.send(topic, { hi: true })))}
-    >
-      {result}
-    </button>
-  );
 }
 
 const read = (id: string): string => screen.getByTestId(id).textContent ?? "";
@@ -273,9 +255,8 @@ test("the last holder leaving unsubscribes on the wire", () => {
 
 test("a reconnect resubscribes held topics, and asks for no replay", () => {
   // Held topics are not in the compile-time table, so nothing else would put
-  // them back. `sinceSeq` is the other half: plugin frames carry no `seq`,
-  // there is no ring behind them, and asking to resume from one would invite a
-  // `gap` for a class that cannot produce one.
+  // them back. `sinceSeq` is the other half: a held topic is resumed by the
+  // board's REST re-read, which the reconnect already triggers.
   const { stub, timer, client } = connected();
   renderWithProviders(<Reader topic={TOPIC} id="a" />, {
     client,
@@ -305,9 +286,8 @@ test("a reconnect resubscribes held topics, and asks for no replay", () => {
 });
 
 test("a refused topic says so, and says it to that topic alone", () => {
-  // What a viewer gets: `authorised` refuses every plugin topic to anything but
-  // an admin. Silence would be indistinguishable from a channel that is merely
-  // quiet, which is the whole reason this carries a status.
+  // Silence would be indistinguishable from a topic that is merely quiet,
+  // which is the whole reason this carries a status.
   const { stub, timer, client } = connected();
   renderWithProviders(
     <>
@@ -355,7 +335,7 @@ test("a dropped socket tells every holder, and the topic reopens on reconnect", 
 
 test("a holder that mounts after the ack is told the topic is open", () => {
   // The ordinary case rather than the exotic one: the socket opens with the
-  // shell and a panel mounts on navigation, so the ack has almost always
+  // shell and a board mounts on navigation, so the ack has almost always
   // already been and gone. A status that only ever arrived as an event would
   // leave that panel reading `idle` forever.
   const { stub, timer, client } = connected();
@@ -379,57 +359,4 @@ test("a holder that mounts after the ack is told the topic is open", () => {
   });
 
   expect(read("b")).toBe("open");
-});
-
-test("a send on a held topic reaches the wire and reports that it did", () => {
-  const { stub, timer, client } = connected();
-  renderWithProviders(
-    <>
-      <Reader topic={TOPIC} id="a" />
-      <Sender topic={TOPIC} />
-    </>,
-    { client, stream: { enabled: true, timer: timer.schedule } },
-  );
-
-  act(() => {
-    stub.last().open();
-    stub.last().emit({ type: "ack", topic: TOPIC });
-  });
-  act(() => {
-    screen.getByTestId("send").click();
-  });
-
-  expect(read("send")).toBe("true");
-  const sent = stub
-    .last()
-    .frames()
-    .filter((frame) => frame.type === "send");
-  expect(sent).toEqual([{ type: "send", topic: TOPIC, payload: { hi: true } }]);
-});
-
-test("a send on a topic that is not open writes nothing and says so", () => {
-  // The gateway answers a send-before-subscribe with an `error` on that topic,
-  // which this client reads as `refused`. A client that ignored its own status
-  // would turn one mistimed send into a topic-wide refusal the panel then
-  // reports as missing permission.
-  const { stub, timer, client } = connected();
-  renderWithProviders(<Sender topic={TOPIC} />, {
-    client,
-    stream: { enabled: true, timer: timer.schedule },
-  });
-
-  act(() => {
-    stub.last().open();
-  });
-  act(() => {
-    screen.getByTestId("send").click();
-  });
-
-  expect(read("send")).toBe("false");
-  expect(
-    stub
-      .last()
-      .frames()
-      .filter((frame) => frame.type === "send"),
-  ).toEqual([]);
 });

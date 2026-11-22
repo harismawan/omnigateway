@@ -39,7 +39,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { sourceFiles } from "../../../../scripts/lib/imports.ts";
+import { sourceFiles } from "../helpers/sourceFiles.ts";
 
 const SRC = resolve(import.meta.dir, "../../src");
 const TOKENS = resolve(SRC, "theme/tokens.ts");
@@ -86,7 +86,7 @@ describe("references to a provider custom property", () => {
     // Pins the decision the docstring argues for. `GlobalStyle.ts` is the file
     // that made it necessary: it names the property in a comment and writes the
     // *declaration* — `--p-${id}` — which is a different string and guarded on
-    // the server, by `packages/control/src/catalog.ts`.
+    // the server, by `safe_colour` in `crates/omni-control/src/api.rs`.
     const globalStyle = resolve(SRC, "theme/GlobalStyle.ts");
     expect(readFileSync(globalStyle, "utf8")).toContain("var(--p-");
     expect(withoutComments(globalStyle)).not.toContain("var(--p-");
