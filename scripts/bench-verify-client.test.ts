@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runVerifier } from "./bench-verify-client";
 
@@ -19,7 +20,7 @@ test("repeated stop signals drain a real pending request exactly once", async ()
       });
     },
   });
-  const dir = mkdtempSync("/tmp/opencode/verifier-test-");
+  const dir = mkdtempSync(join(tmpdir(), "verifier-test-"));
   try {
     const file = join(dir, "config.json");
     await Bun.write(

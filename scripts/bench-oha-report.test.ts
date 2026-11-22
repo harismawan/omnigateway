@@ -1,9 +1,11 @@
 import { expect, test } from "bun:test";
 import { rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { readOhaReport } from "./bench-oha-report";
 
 test("complete report file sampled before process exit", async () => {
-  const path = `/tmp/opencode/oha-report-${crypto.randomUUID()}.json`;
+  const path = join(tmpdir(), `oha-report-${crypto.randomUUID()}.json`);
   let exit: (n: number) => void = () => {};
   const exited = new Promise<number>((r) => {
     exit = r;

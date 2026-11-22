@@ -1,8 +1,10 @@
 import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 test("load deadline includes a full second across a wall-clock boundary", async () => {
-  const dir = mkdtempSync("/tmp/opencode/load-boundary-");
+  const dir = mkdtempSync(join(tmpdir(), "load-boundary-"));
   try {
     const p = Bun.spawn(
       [
@@ -37,7 +39,7 @@ test("load deadline includes a full second across a wall-clock boundary", async 
 });
 
 test("load guard waits for falling load, times out, or bypasses", async () => {
-  const dir = mkdtempSync("/tmp/opencode/load-wait-");
+  const dir = mkdtempSync(join(tmpdir(), "load-wait-"));
   const file = `${dir}/load`;
   const run = (busy = "0") =>
     Bun.spawn(

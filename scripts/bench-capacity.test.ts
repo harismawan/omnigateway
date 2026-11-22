@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 test("capacity gates single-client failures, missing and unknown probes", async () => {
-  const dir = mkdtempSync("/tmp/opencode/capacity-test-");
+  const dir = mkdtempSync(join(tmpdir(), "capacity-test-"));
   const gateway = join(dir, "../", `${dir.split("/").pop()}-gateway.json`);
   try {
     await Bun.write(
