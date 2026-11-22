@@ -1,4 +1,4 @@
-//! A tool result's files, per wire (`packages/providers/src/toolResultFiles.ts`).
+//! A tool result's files, per the wire contract.
 
 use omni_ir::request::FileBlock;
 use serde_json::{Value, json};
@@ -39,7 +39,7 @@ const RESPONSES_FILE_TYPES: [(&str, &str); 8] = [
     ),
 ];
 
-/// `isTextual`: text a model reads best as text.
+/// Text a model reads best as text.
 pub fn is_textual(media_type: &str) -> bool {
     let first = media_type.split(';').next().unwrap_or_default();
     let t = omni_ir::js::trim(first).to_lowercase();
@@ -49,14 +49,14 @@ pub fn is_textual(media_type: &str) -> bool {
         || TEXTUAL.contains(&t.as_str())
 }
 
-/// `fileText`: `Buffer.from(data, "base64").toString("utf8")`.
+/// `Buffer.from(data, "base64").toString("utf8")` semantics.
 pub fn file_text(file: &FileBlock) -> String {
     String::from_utf8_lossy(&node_base64_decode(&file.data)).into_owned()
 }
 
 /// node's lenient base64 decoder, as `Buffer.from(s, "base64")` runs it.
 ///
-/// Measured against bun 1.4.4, every rule below observable:
+/// Every rule below is observable decoding behavior:
 /// - each UTF-16 unit is truncated to its low byte first (`Ł`, U+0141, decodes
 ///   as `A`; a high surrogate U+D83D as `=`);
 /// - both alphabets decode (`+/` and `-_`);
@@ -175,7 +175,7 @@ mod tests {
 
     #[test]
     fn base64_matches_node_on_measured_inputs() {
-        // Every pair measured with `Buffer.from(s, "base64")` on bun 1.4.4.
+        // Every pair pins `Buffer.from(s, "base64")` decoding.
         let cases: [(&str, &[u8]); 30] = [
             ("aGk=", b"hi"),
             ("aGk", b"hi"),

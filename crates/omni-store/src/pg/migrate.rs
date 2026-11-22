@@ -1,16 +1,17 @@
 //! Postgres migrations.
 //!
 //! The SQL lives in `crates/omni-store/migrations/postgres/` (`include_str!`),
-//! byte-for-byte the files the TS store shipped, each run whole as one
-//! simple-protocol batch inside its own transaction, recorded in the same
-//! `migrations(id, applied_at)` ledger, under the same session advisory lock.
+//! a byte-stable storage format: installed databases depend on these exact
+//! bytes. Each file runs whole as one
+//! simple-protocol batch inside its own transaction, recorded in the
+//! `migrations(id, applied_at)` ledger, under the session advisory lock.
 //! Installed databases record applied ids, so a shipped file is frozen: never
 //! edit one, add the next.
 
 use crate::error::StoreError;
 use std::collections::HashSet;
 
-/// `MIGRATION_LOCK` in `db.ts`. Changing it would let two versions of the
+/// The migration advisory-lock id. Changing it would let two versions of the
 /// gateway migrate the same database at once.
 pub const MIGRATION_LOCK: i64 = 7_140_641;
 
@@ -34,7 +35,7 @@ const fn m(id: i32, sql: &'static str) -> Migration {
     Migration { id, sql }
 }
 
-/// `MIGRATIONS` in `db.ts`, in order.
+/// Every migration, in order.
 pub const MIGRATIONS: [Migration; 8] = [
     m(1, migration_sql!("001_init.sql")),
     m(2, migration_sql!("002_health_measurements.sql")),
@@ -49,7 +50,7 @@ pub const MIGRATIONS: [Migration; 8] = [
 /// The newest migration this build knows.
 pub const LATEST_MIGRATION: i32 = MIGRATIONS[MIGRATIONS.len() - 1].id;
 
-/// `openPg`'s walk, on one connection: take the session advisory lock, then
+/// The migration walk, on one connection: take the session advisory lock, then
 /// read the applied set (after the lock, so a migrator that queued behind
 /// another sees its rows), apply each missing migration in its own
 /// transaction, and let the lock go. Ids this build does not know are left

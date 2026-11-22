@@ -1,5 +1,5 @@
-//! Outage and fault behaviour, against a real server: `apps/gateway/test/
-//! coord/redis.test.ts`'s fail-open suite ported, plus dropped connections,
+//! Outage and fault behaviour, against a real server: the fail-open suite,
+//! plus dropped connections,
 //! a lost script cache, and (with a disposable container named in
 //! `OMNI_TEST_REDIS_DOCKER`) a stopped and a paused server.
 //!
@@ -108,7 +108,7 @@ where
     false
 }
 
-// --- the TS fail-open suite -----------------------------------------------
+// --- the fail-open suite ---------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unreachable_coordinator_serves_limits_from_memory_and_refuses_sessions() {

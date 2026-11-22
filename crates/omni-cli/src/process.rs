@@ -1,4 +1,4 @@
-/// Frozen processAlive treats every signal-zero error, including EPERM, as dead.
+/// Every signal-zero error, including EPERM, reads as dead.
 /// Callers parse pidfiles first, excluding zero, negative and fractional values.
 pub fn alive(pid: f64) -> bool {
     if !pid.is_finite() || pid <= 0.0 || pid > f64::from(i32::MAX) || pid.fract() != 0.0 {

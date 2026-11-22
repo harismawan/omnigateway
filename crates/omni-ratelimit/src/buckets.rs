@@ -1,6 +1,6 @@
 //! `Counts`: what one long-window bucket, or a whole window, holds. A value
 //! type only; the buckets themselves are state, and live with the limiter
-//! in `omni-gateway-core` (as TS keeps them behind `Coord`).
+//! in `omni-gateway-core`.
 
 /// `Counts`: what one bucket, or a whole window, holds.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]

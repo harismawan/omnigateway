@@ -328,7 +328,7 @@ fn level(s: &str) -> Option<usize> {
 
 fn parse_line(raw: &str) -> Value {
     let absent = || json!({"raw":raw,"at":null,"level":null,"msg":null});
-    // Only SGR escapes are stripped by the frozen parser.
+    // Only SGR escapes are stripped by the parser.
     let mut clean = String::new();
     let mut rest = raw;
     while let Some(i) = rest.find('\u{1b}') {

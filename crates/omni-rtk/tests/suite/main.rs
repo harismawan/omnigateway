@@ -1,4 +1,4 @@
-//! The ported `packages/rtk/test` suite, one module per TS file.
+//! The RTK regression suite, one module per concern.
 
 mod common;
 

@@ -76,7 +76,7 @@ pub fn exchange_request(code: &str, pending: &PendingFlow) -> Result<AuthRequest
     Ok(request)
 }
 
-/// The host must apply the frozen userinfo step's 15 second timeout.
+/// The host must apply the userinfo step's 15 second timeout.
 pub fn email_request(access: &str) -> AuthRequest {
     AuthRequest {
         url: "https://www.googleapis.com/oauth2/v1/userinfo?alt=json".into(),

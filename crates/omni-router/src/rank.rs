@@ -1,4 +1,4 @@
-//! `rank` (`packages/router/src/index.ts`): the router's entry point.
+//! `rank`: the router's entry point.
 
 use crate::filters::{Excluded, eligible};
 use crate::providers::Providers;
@@ -154,7 +154,7 @@ pub fn rank<'a>(input: &RankInput<'a>) -> RankResult<'a> {
             };
         }
         Strategy::Score => stable_sort(&mut scored, |a, b| b.score - a.score),
-        // A strategy name this build does not know matches no `case` in TS,
+        // A strategy name this build does not know matches no case,
         // which leaves the scored list in pair order.
         Strategy::Other(_) => {}
     }

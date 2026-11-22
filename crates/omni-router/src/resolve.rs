@@ -1,4 +1,4 @@
-//! Model resolution (`packages/router/src/resolve.ts`).
+//! Model resolution.
 
 use crate::providers::{Descriptor, Providers};
 use crate::snapshot::Snapshot;

@@ -31,7 +31,7 @@ async fn requests_5h(c: &omni_coord::RedisCoord, key: &str) -> f64 {
 
 /// R1: a long stream started 6 h before it completes (row `at` = T−6h,
 /// outside the 5h seed filter) in commit c. B reseeds after the commit (c
-/// visible, row not counted). A flushes: TS's BUCKETS_ADD adds one.
+/// visible, row not counted). A flushes: the applied debit adds one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn r1_visible_but_filtered_row_is_added() {
     let Some(base) = redis_base() else { return };
@@ -80,7 +80,7 @@ async fn r1_visible_but_filtered_row_is_added() {
 /// not take its lock must not read and install anyway. Another holder keeps
 /// the 5h lock past the seed's wait; then the lock disappears and a later
 /// row commits and is debited while the picture is incomplete with no lock
-/// (TS: ignored). On `c1ec4e81` the lock-less seed had taken its snapshot
+/// (ignored). On `c1ec4e81` the lock-less seed had taken its snapshot
 /// before that commit and then installed it with an empty token, so the
 /// row was lost for the life of the picture. Now the seed takes no
 /// snapshot without its lock: it fails, nothing is installed, and the next
@@ -124,7 +124,7 @@ async fn r1_tokenless_install_does_not_lose_a_later_row() {
         .await
         .expect("lock gone");
     // A later row: committed and debited while the picture is incomplete
-    // and no lock is held — ignored (TS's unseeded buckets).
+    // and no lock is held — ignored (unseeded buckets ignore adds).
     let commit = usage.row("k", "m", T0, 1.0, 0.0);
     l.debit("k", "m", 1.0, 0.0, T0, &commit);
     l.flush_debits().await;
@@ -344,7 +344,7 @@ async fn r1_one_commit_spanning_the_boundary_is_split_by_row() {
         .expect("sum")
         .expect("seeded");
     // Seed: the 1 h row (1 request, 3 tokens, 0.25). Debits: the 6 h row
-    // added at T0's bucket (TS BUCKETS_ADD); the 1 h row skipped.
+    // added at T0's bucket; the 1 h row skipped.
     assert_eq!((s5.requests, s5.tokens, s5.cost_usd), (2.0, 8.0, 0.75));
     // The 1w seed counted both rows; both debits are skipped there.
     let s1 = ca
@@ -401,7 +401,7 @@ async fn r2_a_cancelled_flush_puts_back_what_it_did_not_send() {
         0,
         "the put-back entries were delivered"
     );
-    // The uncertain one armed TS's lost-debit reseed: the next successful
+    // The uncertain one armed the lost-debit reseed: the next successful
     // call dropped every bucket hash; a reseed rereads all four rows. Each
     // key then counts its one row exactly once.
     let _synced = c.remote().query(redis::cmd("PING")).await.is_ok();

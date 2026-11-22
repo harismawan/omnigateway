@@ -1,5 +1,5 @@
-//! The few JavaScript semantics the TS store leans on: whitespace trimming,
-//! `Number` coercions of SQLite cells, and how `bun:sqlite` binds a number.
+//! The few JavaScript semantics the store implements: whitespace trimming,
+//! `Number` coercions of SQLite cells, and how a JS number binds.
 
 use rusqlite::types::{Value as SqlValue, ValueRef};
 
@@ -57,7 +57,7 @@ pub(crate) fn trim_start(s: &str) -> &str {
     s.trim_start_matches(is_js_whitespace)
 }
 
-/// A cell as the JS number `bun:sqlite` hands back, or `None` for anything
+/// A cell read as a JS number, or `None` for anything
 /// that would not arrive as a number (text, blob, null).
 pub(crate) fn number(cell: ValueRef<'_>) -> Option<f64> {
     match cell {
@@ -73,8 +73,8 @@ pub(crate) fn is_one(cell: ValueRef<'_>) -> bool {
     number(cell) == Some(1.0)
 }
 
-/// How `bun:sqlite` binds a JS number: a safe integer (other than `-0`) as an
-/// INTEGER, everything else as a REAL.
+/// How a JS number binds: a safe integer (other than `-0`) as an
+/// INTEGER, everything else as a REAL. Pinned by the tests below.
 pub(crate) fn bind_number(v: f64) -> SqlValue {
     const MAX_SAFE: f64 = 9_007_199_254_740_991.0;
     if v.fract() == 0.0 && v.abs() <= MAX_SAFE && !(v == 0.0 && v.is_sign_negative()) {

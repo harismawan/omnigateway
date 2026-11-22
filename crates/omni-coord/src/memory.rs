@@ -1,5 +1,5 @@
-//! `memoryCoord`: the single-process implementation — the maps one gateway
-//! held before it had an interface to put them behind.
+//! The single-process implementation — the maps one gateway holds
+//! in memory behind [`Coord`](crate::Coord).
 //!
 //! Every method mutates synchronously and its future completes on the first
 //! poll, which is what makes the visibility property hold without a lock
@@ -8,18 +8,17 @@
 //! Lock waits are the exception to "completes on the first poll": a
 //! contended `lock` waits (bounded by its `wait`).
 //!
-//! Windows are TS's `SlidingWindow`, comparison for comparison, for every
-//! `f64` including NaN and infinities: one stamp per claim in arrival order;
-//! aged out as a prefix while `!(stamp > now - window)` (TS's loop
-//! condition, so a NaN stamp or a NaN `now` ages out as in TS); `used` the
-//! count that survives; `resetAt` the oldest survivor plus the window;
-//! rollback removing one stamp equal to the one given, scanning from the
-//! newest and stopping at the first one `< at` (so a NaN `at` removes
-//! nothing). A backdated claim is a finite count and its rollback removes
-//! it. `tests/memory.rs` checks these against outputs recorded from the
-//! frozen TS in Bun.
+//! Windows are sliding rings, defined for every `f64` including NaN and
+//! infinities: one stamp per claim in arrival order; aged out as a prefix
+//! while `!(stamp > now - window)` (so a NaN stamp, or every stamp when
+//! `now` is NaN, ages out); `used` the count that survives; `reset_at` the
+//! oldest survivor plus the window; rollback removing one stamp equal to
+//! the one given, scanning from the newest and stopping at the first one
+//! `< at` (so a NaN `at` removes nothing). A backdated claim is a finite
+//! count and its rollback removes it. `tests/memory.rs` pins these
+//! sequences (I4, M2).
 //!
-//! The one bound TS does not have: a key holds at most
+//! The one memory bound: a key holds at most
 //! [`WINDOW_KEY_CAP`] live stamps. Past it a claim is still answered with
 //! the true count before it, but is not stored — the count then reads
 //! *lower* than the claims made, so the cap fails open (admits) rather than
@@ -42,7 +41,7 @@ use crate::{
     WindowClaim, WindowCounter, system_clock,
 };
 
-/// How often the drained-ring sweep may run (TS `SWEEP_INTERVAL_MS`).
+/// How often the drained-ring sweep may run.
 const SWEEP_INTERVAL_MS: f64 = 1_000.0;
 
 /// The most live stamps one window key holds (see the module comment): a
@@ -51,7 +50,7 @@ const SWEEP_INTERVAL_MS: f64 = 1_000.0;
 /// to here).
 pub const WINDOW_KEY_CAP: usize = 131_072;
 
-/// TS `SlidingWindow`: stamps in arrival order.
+/// A sliding window: stamps in arrival order.
 #[derive(Debug)]
 struct Ring {
     window_ms: f64,
@@ -67,11 +66,11 @@ impl Ring {
     }
 
     /// Drops the aged prefix — stopping at the first live stamp, so a live
-    /// stamp ahead of an aged backdated one keeps it, as in TS — and
+    /// stamp ahead of an aged backdated one keeps it — and
     /// reports what is left.
     fn count(&mut self, now: f64) -> usize {
         let cutoff = now - self.window_ms;
-        // TS: `for (stamp of stamps) { if (stamp > cutoff) break; aged++ }`.
+        // Stop at the first stamp `> cutoff`; a NaN stamp fails that and goes.
         while self
             .stamps
             .front()
@@ -94,7 +93,7 @@ impl Ring {
         true
     }
 
-    /// TS `forget`: from the newest, stop at the first stamp below `at`.
+    /// From the newest, stop at the first stamp below `at`.
     fn forget(&mut self, at: f64) {
         for index in (0..self.stamps.len()).rev() {
             let stamp = self.stamps[index];
@@ -148,7 +147,7 @@ struct State {
     locks: HashMap<String, (String, Arc<Notify>)>,
 }
 
-/// The in-process coordinator (TS `memoryCoord`).
+/// The in-process coordinator.
 pub struct MemoryCoord {
     now: Clock,
     state: Mutex<State>,
@@ -184,7 +183,7 @@ fn bucket_of(grain_ms: f64, at: f64) -> f64 {
 }
 
 impl MemoryCoord {
-    /// `memoryCoord({ now })`: `now` is what gauges, leases and `kv` expire
+    /// `now` is what gauges, leases and `kv` expire
     /// against.
     pub fn new(now: Clock) -> Self {
         Self::with_subscribers(now, Arc::new(Subscribers::default()))
@@ -384,8 +383,7 @@ impl Coord for MemoryCoord {
     }
 
     async fn lock(&self, key: &str, _ttl_ms: u64, wait: Duration) -> Result<LockToken, CoordError> {
-        // One deadline for the whole wait. Contenders race; no fairness (TS
-        // "ponytail" note).
+        // One deadline for the whole wait. Contenders race; no fairness.
         let deadline = tokio::time::Instant::now() + wait;
         let token = omni_crypto::codex::random_uuid_v4();
         loop {
@@ -481,7 +479,7 @@ impl Coord for MemoryCoord {
         let mut st = self.state();
         let mut held = BTreeMap::new();
         for (start, counts) in rows {
-            // TS `Map.set`: a later row for the same bucket replaces.
+            // A later row for the same bucket replaces.
             held.insert(Start(bucket_of(grain_ms, *start)), *counts);
         }
         st.buckets.insert(key.to_owned(), held);

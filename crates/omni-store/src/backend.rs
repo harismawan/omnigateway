@@ -30,7 +30,7 @@ pub enum StoreConfig {
     Postgres(PgConfig),
 }
 
-/// Which engine a store is (`Store.engine` in TS).
+/// Which engine a store is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Engine {
     Sqlite,
@@ -182,7 +182,7 @@ impl Store {
         }
     }
 
-    /// `databasePath`: the file, or the URL with its password redacted.
+    /// The file, or the URL with its password redacted.
     pub fn database_path(&self) -> String {
         match self {
             Self::Sqlite { path, .. } => path.display().to_string(),
@@ -425,7 +425,7 @@ impl Store {
         }
     }
 
-    /// `updateHealth(credentialId, model, apply)`: the shared atomic
+    /// The shared atomic
     /// read-modify-write a breaker failure or transition goes through (see
     /// [`crate::writer::HealthWriter`] for the immediate path that calls it).
     /// A panic in `apply` rolls the transaction back and is returned as
@@ -483,7 +483,7 @@ impl Store {
         }
     }
 
-    /// `heartbeat` then `sweepPending`'s read: the boot sweep's completions.
+    /// Heartbeat then the sweep's read: the boot sweep's completions.
     pub async fn sweep_pending(
         &self,
         node_id: &str,
@@ -502,7 +502,7 @@ impl Store {
         }
     }
 
-    /// `usage.sumSince`.
+    /// Exact sliding-window usage sum since `since`, per key.
     pub async fn sum_since(
         &self,
         api_key_id: &str,

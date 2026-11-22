@@ -1,4 +1,5 @@
-//! `packages/rtk/test/foundation.test.ts`.
+//! Regression suite: the classification foundation — catalog ids, command
+//! gates, anchor rules and copy-on-write identity.
 
 use super::common::*;
 use omni_rtk::command::classify_command;
@@ -65,9 +66,9 @@ fn extracts_only_primitive_or_own_plain_object_command_fields_in_precedence_orde
         extract_command(&json!({"command": 1, "cmd": "second"})),
         Some("second")
     );
-    // TS: `Object.create({ command: "inherited" })` has no own keys. A JSON
-    // value cannot carry a prototype, so the observable equivalent is an
-    // object with no own command field.
+    // Inherited properties are not own keys: a JSON value cannot carry a
+    // prototype, so the observable equivalent is an object with no own
+    // command field.
     assert_eq!(extract_command(&json!({})), None);
     assert_eq!(extract_command(&json!(["git status"])), None);
 }
@@ -142,8 +143,8 @@ fn honors_exact_size_boundaries_and_copy_on_write_identity() {
         .expect("message"),
     );
     let result = transform_request(&input, &ENABLED);
-    // TS asserts object identity of the untouched messages and tool input; a
-    // copied Rust request can only show they are unchanged in value.
+    // Untouched messages and tool input must be preserved; a copied request
+    // can only show they are unchanged in value.
     let Cow::Owned(output) = result.request else {
         panic!("expected a rewritten request");
     };

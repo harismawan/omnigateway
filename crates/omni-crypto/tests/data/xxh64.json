@@ -1,5 +1,5 @@
 {
-  "source": "Bun 1.4.4 Bun.hash.xxHash64",
+  "source": "xxHash64 reference vectors",
   "cases": [
     ["", "0", "17241709254077376921"],
     ["", "1", "15397730242686860875"],

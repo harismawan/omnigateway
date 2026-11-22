@@ -1,6 +1,6 @@
 [package]
 name = "omni-crypto"
-description = "Byte-exact crypto and hashing contracts shared with the TS build."
+description = "Byte-exact crypto and hashing contracts for wire and storage formats."
 edition.workspace = true
 version.workspace = true
 license.workspace = true
@@ -22,7 +22,7 @@ base64 = "0.22"
 rand = "0.10"
 aes = "0.9"
 cbc = { version = "0.2", features = ["alloc"] }
-# Console passwords: argon2id PHC strings, as `Bun.password` writes them.
+# Console passwords: argon2id PHC strings.
 argon2 = { version = "0.6", default-features = false, features = ["alloc", "password-hash"] }
 
 [dev-dependencies]

@@ -266,17 +266,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # The first Rust major carries its upgrade notice above the
-          # generated changelog; other releases get the changelog alone.
-          notes=()
-          if [ "${GITHUB_REF_NAME}" = "v1.0.0" ]; then
-            sed -n '/^```text$/,/^```$/p' docs/rust-npm-final-notice.md | sed '1d;$d' > release-notice.md
-            test -s release-notice.md
-            notes=(--notes "$(cat release-notice.md)")
-          fi
           gh release create "${GITHUB_REF_NAME}" \
             --title "${GITHUB_REF_NAME}" \
-            --generate-notes "${notes[@]}" \
+            --generate-notes \
             --verify-tag
 
   # The container image, tagged with the version the tag names. Built after the
@@ -372,7 +364,6 @@ jobs:
       - name: Point the kustomize base at the new image
         env:
           GH_TOKEN: ${{ github.token }}
-          FIRST_RUST_RELEASE: ${{ vars.FIRST_RUST_RELEASE }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           BRANCH="gitops/promote-${VERSION}"
@@ -390,9 +381,4 @@ jobs:
           gh pr create --base main --head "$BRANCH" \
             --title "chore(gitops): promote omnigateway image to ${VERSION}" \
             --body "Points \`k8s/kustomization.yaml\` at \`ghcr.io/harismawan/omnigateway:${VERSION}\`. Argo CD deploys on merge."
-          # FIRST_RUST_RELEASE=true (repository variable) leaves this PR open for
-          # a release that must not roll (docs/rust-cutover-runbook.md §5: stop
-          # the old fleet, sweep Redis, then merge). Unset: promotion is automatic.
-          if [ "$FIRST_RUST_RELEASE" != "true" ]; then
-            gh pr merge "$BRANCH" --squash --delete-branch
-          fi
+          gh pr merge "$BRANCH" --squash --delete-branch

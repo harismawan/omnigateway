@@ -1,4 +1,4 @@
-//! Frozen nodeFs read semantics: every stat/readdir error becomes absence.
+//! Filesystem read semantics: every stat/readdir error becomes absence.
 //! Mutations (mkdir, write, unlink, rename) are fallible and remain propagated
 //! by their callers; unlink alone tolerates a missing target, like rm(force).
 use std::{fs, path::Path};

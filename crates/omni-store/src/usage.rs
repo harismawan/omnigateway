@@ -1,4 +1,4 @@
-//! The rate limiter's seed reads, from `packages/store/src/sqlite/usage.ts`.
+//! The rate limiter's seed reads.
 //!
 //! Run by the limiter's background seeder, never on the request path.
 
@@ -48,9 +48,8 @@ fn counts(r: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, Counts)> {
     ))
 }
 
-/// `sumBuckets(apiKeyId, sinceMs, grainMs, requestedModel)`: one row per
-/// bucket start. Key-wide at the hour grain it reads `usage_rollup`; every
-/// other read groups `request_logs` (done rows only).
+/// One row per bucket start. Key-wide at the hour grain it reads
+/// `usage_rollup`; every other read groups `request_logs` (done rows only).
 pub fn sum_buckets(
     conn: &Connection,
     api_key_id: &str,
@@ -141,7 +140,7 @@ pub type SeedRead = (Vec<(i64, Counts)>, Vec<i64>);
 /// A long-window seed's two reads in one read transaction, so the bucket
 /// sums and the stamps describe one WAL snapshot. The writer runs it on its
 /// own connection between batches. The payload is O(buckets + `stamp_cap`):
-/// bucket sums are aggregated per grain in SQL (`sumBuckets`), and stamps
+/// bucket sums are aggregated per grain in SQL (`sum_buckets`), and stamps
 /// are limited in the query.
 pub fn seed_rows(
     conn: &Connection,
@@ -161,11 +160,11 @@ pub fn seed_rows(
 /// `NODE_GRACE_MS`.
 const NODE_GRACE_MS: i64 = 60_000;
 
-/// `heartbeat` then `sweepPending`'s read (`maintenance.ts`, `usage.ts`):
+/// Heartbeat then the pending sweep's read:
 /// this node's liveness row, day-old ones forgotten, and every pending row
 /// of this node or of a node with no live heartbeat, as the 499
 /// `interrupted` completions (zero duration) the boot sweep sends through
-/// the writer. The same statements `omni-gateway`'s boot runs today.
+/// the writer. The statements `omni-gateway`'s boot runs.
 pub fn sweep_pending(
     conn: &Connection,
     node_id: &str,

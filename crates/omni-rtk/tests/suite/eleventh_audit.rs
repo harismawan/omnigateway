@@ -1,4 +1,5 @@
-//! `packages/rtk/test/eleventh-audit.test.ts`.
+//! Audit regression suite: deep-subtree counts, exact grep context, long
+//! git-status sections and budget fail-open.
 
 use super::common::*;
 use omni_rtk::command::{GrepMode, classify_command};

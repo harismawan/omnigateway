@@ -1,6 +1,6 @@
 [package]
 name = "omni-coord"
-description = "Coordination between the gateway processes of one installation: the in-process coordinator and the Redis/Valkey one, on the key schema the TS gateway used."
+description = "Coordination between the gateway processes of one installation: the in-process coordinator and the Redis/Valkey one, on a byte-stable key schema."
 edition.workspace = true
 version.workspace = true
 license.workspace = true

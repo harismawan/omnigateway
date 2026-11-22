@@ -1,4 +1,5 @@
-//! `packages/rtk/test/eighth-audit.test.ts`.
+//! Audit regression suite: recursive-ls and grep grouping, exact omissions
+//! and near-limit budget rejection.
 
 use super::common::*;
 

@@ -1,5 +1,5 @@
-//! `packages/rtk/test/operations.test.ts`. Here the tool input is the bare
-//! command string, not `{ command }`.
+//! Regression suite: package and git-operation compression. Here the tool
+//! input is the bare command string, not `{ command }`.
 
 use super::common::*;
 use serde_json::json;

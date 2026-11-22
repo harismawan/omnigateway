@@ -1,4 +1,4 @@
-//! A custom OpenAI-compatible endpoint as a codec (`packages/providers/src/custom/codec.ts`).
+//! A custom OpenAI-compatible endpoint as a codec.
 
 use omni_ir::error::{ErrorCode, GatewayError};
 use omni_ir::jsjson;

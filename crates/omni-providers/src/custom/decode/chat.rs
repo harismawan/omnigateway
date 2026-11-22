@@ -280,7 +280,7 @@ impl ChatDecoder {
                 Some(&index) => index,
                 None => {
                     self.identity_budget.add(key.bytes())?;
-                    // Frozen yields the previous block's end before coercing
+                    // Yield the previous block's end before coercing
                     // the next tool's identity (which may throw).
                     if let Some((_, index)) = self.open.take() {
                         out.push_back(StreamEvent::BlockEnd { index });

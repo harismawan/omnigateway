@@ -80,10 +80,10 @@ fn descriptor(capabilities: Capabilities, prefixes: &[&str]) -> Descriptor {
 }
 
 impl Providers {
-    /// The built-in registry (`packages/providers/src/descriptors.ts`).
+    /// The built-in registry.
     ///
-    /// Anthropic, OpenAI and Antigravity use the generated frozen catalog; other providers retain
-    /// empty catalogs until their codecs are ported.
+    /// Anthropic, OpenAI and Antigravity use the generated catalog; other providers retain
+    /// empty catalogs until their codecs are implemented.
     pub fn builtin() -> Self {
         let all = caps(true, true, true);
         let mut p = Self::default();

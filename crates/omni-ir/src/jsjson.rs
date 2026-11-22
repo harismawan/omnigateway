@@ -1,8 +1,8 @@
 //! A JSON writer that reproduces JavaScript's `JSON.stringify` byte for byte.
 //!
 //! Bodies sent upstream are hashed (`cch=`), cached by key (`prompt_cache_key`)
-//! and fingerprinted, all over the exact bytes the TS build produced with
-//! `JSON.stringify`. `serde_json` differs from it in three observable ways:
+//! and fingerprinted, all over these exact bytes — changing them is a wire
+//! break. `serde_json` differs from `JSON.stringify` in three observable ways:
 //!
 //! - **Numbers.** JS prints the shortest round-trip digits using
 //!   `Number.prototype.toString` rules: `1e+21`, `1e-7`, `100` for `100.0`, and

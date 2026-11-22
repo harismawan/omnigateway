@@ -1,5 +1,4 @@
-//! The decision, from what the counters held before this request: TS
-//! `judge` / `counters` / `refuse` / `correct` / `exactReset`, with the
+//! The decision, from what the counters held before this request, with the
 //! arithmetic in `omni-ratelimit`.
 
 use omni_coord::Counts;
@@ -20,11 +19,11 @@ pub(crate) struct Observed {
     /// `None`: not asked for, or unseeded (read as nothing used).
     pub long: [Option<Counts>; 2],
     /// Per long window, the oldest in-window row's `at` the script could
-    /// recover from Redis (TS `oldestSince`), or `None`.
+    /// recover from Redis, or `None`.
     pub oldest: [Option<f64>; 2],
 }
 
-/// `counters`: the snapshot `evaluate` judges.
+/// The snapshot `evaluate` judges.
 pub(crate) fn snapshot(limits: &LimitScope, o: &Observed, now: f64) -> CounterSnapshot {
     let mut s = CounterSnapshot::default();
     s.requests.set(Window::M1, o.before_1m);
@@ -148,15 +147,15 @@ fn correct(scope: &Decision, o: &Observed) -> Decision {
     }
 }
 
-/// `exactReset`: the oldest in-window row's `at` plus the window. `None`
+/// The exact reset: the oldest in-window row's `at` plus the window. `None`
 /// keeps the overstated `now + window`: `1m` (already exact), or no row
-/// range known (TS: no row found).
+/// range known.
 ///
 /// Taken from Redis, not the store (ruling on D3: the request path never
 /// touches Postgres): exact when the oldest row's bucket lies wholly inside
 /// the window; when the window's cutoff falls inside that bucket, the
-/// bucket's newest row — later than TS by less than one bucket width (a
-/// minute of 5h, an hour of 1w), never earlier.
+/// bucket's newest row — later than the true oldest by less than one bucket
+/// width (a minute of 5h, an hour of 1w), never earlier.
 fn exact_reset(o: &Observed, window: Window) -> Option<f64> {
     let i = LONG.iter().position(|w| *w == window)?;
     o.oldest[i].map(|at| at + window.ms())

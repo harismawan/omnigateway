@@ -1,11 +1,11 @@
-//! The background seeder: TS `seed` off the request path, installed
+//! The background seeder: seeding off the request path, installed
 //! atomically with its watermark (ruling I1/I2).
 //!
 //! A long window the admission script found incomplete is queued here
 //! (once: a window queued, running, or failed within `seed_retry` is not
 //! queued again). A worker:
 //!
-//! 1. takes TS's `omni:lock:seed:<bucket>` mutex (`SEED_LOCK_MS` TTL)
+//! 1. takes the `omni:lock:seed:<bucket>` mutex (`SEED_LOCK_MS` TTL)
 //!    under its own token, retrying for up to `SEED_LOCK_MS` (ruling R1:
 //!    never a tokenless install — while no seed holds the lock, an
 //!    incomplete picture ignores debits, and a picture read before such a
@@ -173,7 +173,7 @@ async fn lock<'a>(inner: &'a Inner, name: String) -> Option<Lock<'a>> {
     }
 }
 
-/// TS `seed(subject, window, now)`, atomic and watermarked.
+/// One seed of `(subject, window, now)`, atomic and watermarked.
 pub(crate) async fn run(
     inner: &Inner,
     subject: &Subject,
@@ -271,10 +271,10 @@ async fn install(
     }
 }
 
-/// `SEED_INSTALL`'s arguments: TS's `BUCKETS_SEED` fields (`seeded 1`, then
+/// `SEED_INSTALL`'s arguments: the `BUCKETS_SEED` fields (`seeded 1`, then
 /// per in-window bucket `<b>:r`, `<b>:t`, `<b>:c`, in the rows' order,
-/// bucket starts floored and aged rows dropped exactly as TS's `seed`
-/// builds them), then the in-window row ranges.
+/// bucket starts floored and aged rows dropped), then the in-window row
+/// ranges.
 fn install_args(
     token: &str,
     length: f64,

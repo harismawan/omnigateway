@@ -1,8 +1,8 @@
-//! Which plugins the frozen CLI would import for providers, decided from the
-//! filesystem alone. Mirrors `listPlugins` + `readPluginProviders` up to the
-//! `import(...)` call: directory, id pattern, manifest read, `JSON.parse`,
-//! `safeParseManifest`, the `provider` capability, loadability and a server
-//! entry. Every plugin stopped before that point contributes no provider and is
+//! Which plugins the CLI would import for providers, decided from the
+//! filesystem alone: directory, id pattern, manifest read, `JSON.parse`,
+//! the manifest schema, the `provider` capability, loadability and a server
+//! entry — every check up to the `import(...)` call. Every plugin stopped
+//! before that point contributes no provider and is
 //! only a failure note, which catalog and put never print. Plugin code is never
 //! read or run here.
 use crate::settings_value::get;
@@ -187,8 +187,9 @@ fn resolve(home: &Path, entry: &str) -> PathBuf {
         .fold(home.to_path_buf(), |p, s| p.join(s))
 }
 
-/// Ids, in `listPlugins` order, of plugins frozen TS would import to read a
-/// provider. Empty for a missing, file-only or provider-free plugins directory.
+/// Ids, in UTF-16-sorted directory order, of plugins the CLI would import to
+/// read a provider. Empty for a missing, file-only or provider-free plugins
+/// directory.
 pub fn provider_plugins(root: &Path) -> Vec<String> {
     let dir = root.join("plugins");
     let Ok(entries) = std::fs::read_dir(&dir) else {

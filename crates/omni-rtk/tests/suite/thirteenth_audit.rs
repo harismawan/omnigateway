@@ -1,4 +1,5 @@
-//! `packages/rtk/test/thirteenth-audit.test.ts`.
+//! Audit regression suite: relative-path gates and near-budget fail-open for
+//! listing and git-status parsers.
 
 use super::common::*;
 use omni_rtk::filters::listings::compress_listing;

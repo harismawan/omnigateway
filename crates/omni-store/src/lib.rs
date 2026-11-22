@@ -1,9 +1,9 @@
-//! The SQLite and Postgres stores: migrations shared with the TS build, and
-//! the reads the gateway builds its in-memory snapshot from.
+//! The SQLite and Postgres stores: byte-stable migrations, and the reads the
+//! gateway builds its in-memory snapshot from.
 //!
-//! A database written by either build is opened by the other and continued
-//! from its migration id. Nothing here runs on the request path; the gateway
-//! reads a [`SnapshotData`] at boot and on change, and serves from memory.
+//! An installed database is opened and continued from its migration id.
+//! Nothing here runs on the request path; the gateway reads a [`SnapshotData`]
+//! at boot and on change, and serves from memory.
 
 mod backend;
 pub mod bodies;
@@ -16,8 +16,7 @@ pub mod lifecycle;
 pub mod logs;
 pub mod maintenance;
 pub mod operator_cell;
-/// `api_keys.limits`; lives with the arithmetic in `omni-ratelimit`, as TS's
-/// store imports `@omni/ratelimit/catalog`.
+/// `api_keys.limits`; lives with the arithmetic in `omni-ratelimit`.
 pub use omni_ratelimit::limits;
 pub mod migrate;
 pub mod models;
@@ -74,7 +73,7 @@ pub struct SqliteStore {
     day_offset_minutes: i64,
 }
 
-/// Opens `path` (creating it) with the TS connection pragmas, and nothing
+/// Opens `path` (creating it) with the store's connection pragmas, and nothing
 /// else. Per-connection pragmas must be set on every connection.
 pub fn open_connection(path: &Path) -> Result<Connection, StoreError> {
     let conn = Connection::open(path)?;
@@ -148,7 +147,7 @@ impl SqliteStore {
         })
     }
 
-    /// `openDb`: open or create, set the pragmas, apply what the ledger lacks.
+    /// Open or create, set the pragmas, apply what the ledger lacks.
     /// `day_offset_minutes` is the fixed offset every daily bucket uses.
     pub fn open(path: impl AsRef<Path>, day_offset_minutes: i64) -> Result<Self, StoreError> {
         let path = path.as_ref().to_path_buf();
@@ -176,7 +175,7 @@ impl SqliteStore {
     }
 
     /// `PRAGMA data_version`: changes when another connection commits to the
-    /// file. A cheap "did anything move" probe until the TS `config_version`
+    /// file. A cheap "did anything move" probe until the `config_version`
     /// counter is read.
     pub fn data_version(&self) -> Result<i64, StoreError> {
         Ok(self

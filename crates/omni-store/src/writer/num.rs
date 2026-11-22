@@ -1,5 +1,5 @@
 //! SQLite's numeric arithmetic, so a batch can fold a rollup row in memory and
-//! land on the very value the TS per-request `x = x + excluded.x` upserts reach.
+//! land on the very value per-request `x = x + excluded.x` upserts reach.
 //!
 //! Folding in memory and writing the result once is what keeps a hot key's row
 //! to one write per batch. Adding the batch's *sum* instead would not be the
@@ -56,7 +56,7 @@ impl Num {
         Self::Real(self.as_f64())
     }
 
-    /// A JS number bound by `bun:sqlite`.
+    /// A JS number bound by the number-bind rule (`js::bind_number`).
     pub(crate) fn bound(v: f64) -> Self {
         match js::bind_number(v) {
             SqlValue::Integer(i) => Self::Int(i),

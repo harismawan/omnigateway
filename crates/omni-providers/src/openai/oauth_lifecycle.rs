@@ -1,4 +1,4 @@
-//! Frozen exchange and refresh steps. The host owns transport and persistence.
+//! The exchange and refresh steps. The host owns transport and persistence.
 use crate::oauth::{AuthRequest, FlowResult, PendingFlow, token_error};
 use omni_ir::{
     error::{ErrorCode, GatewayError},

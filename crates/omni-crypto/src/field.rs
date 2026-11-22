@@ -1,4 +1,4 @@
-//! Credential field encryption (`packages/store/src/encryption.ts`).
+//! Credential field encryption.
 //!
 //! PBKDF2-HMAC-SHA256 over the raw `OMNI_ENCRYPTION_KEY`, salt
 //! `omnigateway-field-encryption-v1`, 210 000 iterations, 32 bytes; then
@@ -76,7 +76,7 @@ pub fn is_encrypted(value: &str) -> bool {
     value.starts_with("enc:v1:")
 }
 
-/// Lowercase hex only, even length — the TS reader's `isHex`.
+/// Lowercase hex only, even length.
 pub(crate) fn unhex(s: &str) -> Option<Vec<u8>> {
     if !s.len().is_multiple_of(2) {
         return None;
@@ -105,8 +105,8 @@ pub fn decrypt(key: &FieldKey, value: &str) -> Result<String, FieldError> {
     let iv = unhex(iv_hex).ok_or(FieldError::Malformed)?;
     let mut sealed = unhex(body_hex).ok_or(FieldError::Malformed)?;
     sealed.extend(unhex(tag_hex).ok_or(FieldError::Malformed)?);
-    // WebCrypto accepts any IV length; aes-gcm's `Aes256Gcm` is fixed at 12,
-    // which is the only length TS ever writes.
+    // aes-gcm's `Aes256Gcm` is fixed at a 12-byte IV, which is the only
+    // length ever written to storage.
     if iv.len() != IV_BYTES {
         return Err(FieldError::Malformed);
     }

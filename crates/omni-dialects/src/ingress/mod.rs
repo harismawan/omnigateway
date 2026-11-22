@@ -1,10 +1,10 @@
 //! Client body → IR, for the three dialects.
 //!
-//! Each parser takes the body as `request.json()` produced it, the request
+//! Each parser takes the body as `JSON.parse` produced it, the request
 //! headers, and the injected tool-use id minter, and returns the IR request or
-//! the `BAD_REQUEST` the TS parser throws — same message, byte for byte.
+//! a `BAD_REQUEST` whose message is byte-stable (clients match on it).
 //!
-//! # Known differences from TS
+//! # Known deviations from `JSON.parse` semantics
 //!
 //! - A body number outside the double range (`1e400`) is `Infinity` to
 //!   `JSON.parse` and a parse failure to [`parse_body`]; such a body is
@@ -74,7 +74,7 @@ impl Headers {
 
 /// What a parser needs besides the body and headers.
 pub struct IngressOptions<'a> {
-    /// `validateRequest`'s `newToolUseId`, reached only for a `toolUse` sent
+    /// The tool-use id minter, reached only for a `toolUse` sent
     /// with an empty id. Production passes [`random_tool_use_id`].
     pub new_tool_use_id: &'a mut dyn FnMut() -> String,
 }
@@ -110,7 +110,7 @@ pub enum Surface {
 #[derive(Debug)]
 pub struct Ingested {
     pub request: ChatRequest,
-    /// `customToolNames(body)`: the Responses egress needs it; empty elsewhere.
+    /// The freeform tool names; the Responses egress needs them, empty elsewhere.
     pub custom_tool_names: HashSet<String>,
     /// The request model as the exact UTF-16 JS holds it, where it holds a
     /// lone surrogate; `None` otherwise. `request.model` is then its lossy
@@ -120,7 +120,7 @@ pub struct Ingested {
 }
 
 /// A request model's identity for the key allowlist and per-model limits,
-/// which TS compares as exact UTF-16 strings.
+/// compared as exact UTF-16 strings.
 pub type ModelIdentity<'a> = (&'a str, Option<&'a [u16]>);
 
 /// **The ingress entry point 5b calls.** Body bytes in, IR out.
@@ -138,9 +138,9 @@ pub type ModelIdentity<'a> = (&'a str, Option<&'a [u16]>);
 /// JSON clone and drop iteratively, and the jsjson writer grows its stack.
 ///
 /// Errors: a syntax error is `BAD_REQUEST "request body must be valid JSON"`
-/// (TS answers 500 `INTERNAL`; 5b decides which to send), a body deeper than
+/// (5b decides which status to send), a body deeper than
 /// the bound is [`TOO_DEEP`], and everything else is the dialect's own
-/// `BAD_REQUEST`, as TS words it.
+/// `BAD_REQUEST`, with byte-stable wording.
 pub fn ingest(
     surface: Surface,
     body: &str,
@@ -180,10 +180,8 @@ pub fn ingest(
 
 /// The refusal for JSON nested deeper than `omni_ir::deep::MAX_DEPTH`.
 ///
-/// TS parses such a body (Bun's `JSON.parse` goes past a million levels) and
-/// fails later, when the encoder re-serializes it: a 503 "custom codec
-/// buildRequest threw" or an unrouted crash. Rust refuses up front instead,
-/// as a client error. A documented difference.
+/// Refused up front as a client error, rather than carried until an encoder
+/// re-serializes it and fails.
 pub const TOO_DEEP: &str = "request body is nested too deeply";
 
 /// `request.json()`: the body, or `None` where `JSON.parse` would throw or the
@@ -193,8 +191,8 @@ pub fn parse_body(text: &str) -> Option<Owned> {
 }
 
 /// [`parse_body`], telling the two refusals apart: a syntax error is
-/// `Err(BAD_REQUEST "request body must be valid JSON")` here (TS renders its
-/// SyntaxError as INTERNAL; 5b chooses), too deep is [`TOO_DEEP`].
+/// `Err(BAD_REQUEST "request body must be valid JSON")` here (5b chooses the
+/// status), too deep is [`TOO_DEEP`].
 pub fn parse_body_checked(text: &str) -> Result<Owned, GatewayError> {
     parse_body_bounded(text, usize::MAX)
 }
@@ -223,7 +221,7 @@ pub(crate) fn deep_json(text: &str, bound: usize) -> Result<Value, omni_ir::deep
 }
 
 /// The API-key model allowlist, checked against `ChatRequest.model` (after
-/// alias normalization), as `routes/proxy.ts` does on both routes that parse.
+/// alias normalization) on both routes that parse.
 pub fn check_model_allowlist(
     model: &str,
     allowlist: Option<&[String]>,
@@ -249,7 +247,7 @@ pub fn check_model_allowed(model: &str, allowed: bool) -> Result<(), GatewayErro
     ))
 }
 
-/// TS's `URIError` for a model holding a lone surrogate, thrown building
+/// The `URIError` for a model holding a lone surrogate, thrown building
 /// its rate-limit subject id (`encodeURIComponent`): at admission where an
 /// override names it, else whenever a completed row's debit is attempted.
 pub fn lone_surrogate_model_error() -> GatewayError {
@@ -302,8 +300,8 @@ fn normalize_model_units(raw: &[u16]) -> Vec<u16> {
     model.to_vec()
 }
 
-/// `normalizeClientModel` (`ingress/model.ts`): the trimmed name with a
-/// trailing `[1m]` folded into the 1M-context beta.
+/// The trimmed model name with a trailing `[1m]` folded into the
+/// 1M-context beta.
 pub fn normalize_client_model(raw: &str, betas: &[String]) -> (String, Vec<String>) {
     const SUFFIX: &str = "[1m]";
     let mut model = trim(raw).to_string();
@@ -325,9 +323,8 @@ pub fn normalize_client_model(raw: &str, betas: &[String]) -> (String, Vec<Strin
     (model, merged)
 }
 
-/// `customToolNames` (`ingress/responses.ts`): the tools a Responses client
-/// declared freeform, which the Responses egress renders as
-/// `custom_tool_call`.
+/// The tools a Responses client declared freeform, which the Responses
+/// egress renders as `custom_tool_call`.
 pub fn custom_tool_names(body: &Value) -> HashSet<String> {
     let mut names = HashSet::new();
     if let Some(tools) = body.get("tools").and_then(Value::as_array) {
@@ -389,7 +386,7 @@ pub(crate) fn extra_fields(
     (!extras.is_empty()).then_some(extras)
 }
 
-/// A zod `cacheControlSchema` output as the IR marker.
+/// A parsed `cache_control` object as the IR marker.
 pub(crate) fn ir_cache_control(v: Option<&Value>) -> Option<CacheControl> {
     let v = v?.as_object()?;
     if v.get("type")?.as_str()? != "ephemeral" {
@@ -407,7 +404,7 @@ pub(crate) fn ir_cache_control(v: Option<&Value>) -> Option<CacheControl> {
     })
 }
 
-/// `looseCacheControl`: the marker when the shape maps, else nothing.
+/// The marker when the shape maps, else nothing.
 pub(crate) fn loose_cache_control(v: Option<&Value>) -> Option<CacheControl> {
     zod::parse(&zod::cache_control(), v?).ok()?;
     ir_cache_control(v)
@@ -424,7 +421,7 @@ fn cache_control_slot(block: &mut ContentBlock) -> Option<&mut Option<CacheContr
     }
 }
 
-/// `applyMessageCacheControl`: a message-level marker lands on the last block.
+/// A message-level marker lands on the last block.
 pub(crate) fn apply_message_cache_control(blocks: &mut [ContentBlock], v: Option<&Value>) {
     let Some(control) = loose_cache_control(v) else {
         return;
@@ -457,7 +454,7 @@ pub(crate) fn parse_data_url(url: &str) -> Result<(String, String), GatewayError
         })
 }
 
-/// `MODEL_NAME_MAX` (`ingress/model.ts`).
+/// The longest accepted model name.
 pub const MODEL_NAME_MAX: usize = 200;
 
 const CONVERSATION_HEADERS: [&str; 4] = [
@@ -467,7 +464,7 @@ const CONVERSATION_HEADERS: [&str; 4] = [
     "session-id",
 ];
 
-/// `readConversationHeader`.
+/// The first conversation header present, trimmed, 1–512 UTF-16 units.
 pub(crate) fn read_conversation_header(headers: &Headers) -> Option<String> {
     for name in CONVERSATION_HEADERS {
         if let Some(raw) = headers.get(name) {
@@ -481,7 +478,7 @@ pub(crate) fn read_conversation_header(headers: &Headers) -> Option<String> {
     None
 }
 
-/// `parseOrThrow`: zod's first issue as `<path>: <detail>`.
+/// The first zod issue as `<path>: <detail>`.
 pub(crate) fn parse_or_throw(
     schema: &zod::Z,
     body: &Value,
@@ -501,7 +498,7 @@ pub(crate) fn parse_or_throw(
     })
 }
 
-/// `zodDetail`: the message, with an unknown key bounded.
+/// The issue message, with an unknown key bounded.
 pub(crate) fn zod_detail(issue: &zod::Issue) -> String {
     match &issue.kind {
         zod::Kind::UnrecognizedKeys(keys) => format!(
@@ -512,8 +509,8 @@ pub(crate) fn zod_detail(issue: &zod::Issue) -> String {
     }
 }
 
-/// The zod path joined with `.`, unbounded (the TS sites that build one by
-/// hand do not bound it).
+/// The zod path joined with `.`, unbounded (hand-built paths are not
+/// bounded either).
 pub(crate) fn raw_path(issue: &zod::Issue) -> String {
     issue
         .path
@@ -523,8 +520,8 @@ pub(crate) fn raw_path(issue: &zod::Issue) -> String {
         .join(".")
 }
 
-/// `validateRequest` (`packages/ir/src/validate.ts`): mint empty tool-use ids,
-/// drop orphaned tool results and empty messages, merge same-role neighbours.
+/// Mint empty tool-use ids, drop orphaned tool results and empty messages,
+/// merge same-role neighbours.
 pub(crate) fn validate_request(
     mut req: ChatRequest,
     new_tool_use_id: &mut dyn FnMut() -> String,

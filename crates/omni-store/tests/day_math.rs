@@ -1,4 +1,5 @@
-//! `startOfDay`, `hourOf` and `hostDayOffsetMinutes` against `rollup.ts`.
+//! Contract tests for the day/hour bucketing: `rollup::start_of_day`,
+//! `hour_of` and `host_day_offset_minutes`.
 
 mod common;
 

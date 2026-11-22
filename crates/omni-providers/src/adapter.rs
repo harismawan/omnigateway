@@ -1,4 +1,4 @@
-//! The host side of the codec contract (`packages/providers/src/codecAdapter.ts`):
+//! The host side of the codec contract:
 //! build → validate → send → classify a failure → decode.
 //!
 //! The returned [`EventStream`] owns the response body. It reads the body only
@@ -63,8 +63,8 @@ pub enum SendError {
     /// Classified: a codec refusal, an upstream status, a codec failure.
     #[error(transparent)]
     Gateway(#[from] GatewayError),
-    /// The transport failed before a response head (TS rejects with node's
-    /// own error and lets `classify()` decide).
+    /// The transport failed before a response head; `classify()` decides
+    /// the code from the transport error's hints.
     #[error(transparent)]
     Transport(HttpError),
 }
@@ -149,7 +149,7 @@ fn framing_agrees(
         .is_none_or(|e| omni_ir::js::trim(e).to_lowercase() == "identity")
 }
 
-/// `codecAdapter(id, …).send(req)`.
+/// Build, validate and send one codec request.
 pub async fn send<C: ProviderCodec>(
     codec: &C,
     id: &str,
@@ -226,14 +226,13 @@ pub async fn send<C: ProviderCodec>(
     })
 }
 
-/// The decoded event stream (`guardStream(id, codec.decode(...))`).
+/// The decoded event stream, guarded by the host.
 ///
 /// Yields events, then at most one error, then `None`. An unclassified decoder
 /// throw ([`DecodeError::Throw`]) and a body transport failure become
 /// `"<id> codec decode threw"`; a decoder's classified
 /// [`DecodeError::Gateway`] and an oversized SSE record (the parser's own
-/// `GatewayError`) pass through unchanged, as `guardStream` rethrows any
-/// `GatewayError`.
+/// `GatewayError`) pass through unchanged.
 pub struct EventStream {
     id: String,
     body: Option<ResponseBody>,
@@ -329,7 +328,7 @@ impl EventStream {
                     self.stop();
                     return true;
                 }
-                // `guardStream`: a `GatewayError` is rethrown as it is; only
+                // A `GatewayError` passes through as it is; only
                 // an unclassified throw is relabelled.
                 Err(DecodeError::Gateway(e)) => {
                     self.failure = Some(e);
@@ -342,7 +341,7 @@ impl EventStream {
             }
         }
         // Preserve decoder output from messages already parsed in this chunk
-        // (including post-End events), as the frozen adapter does.
+        // (including post-End events).
         terminal
     }
 

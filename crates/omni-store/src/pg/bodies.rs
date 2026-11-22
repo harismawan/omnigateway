@@ -1,8 +1,8 @@
-//! Body artifacts on Postgres (`packages/store/src/postgres/bodies.ts`): the
+//! Body artifacts on Postgres: the
 //! same encrypted envelope the SQLite store writes to a file, in a `bytea`
 //! column beside its row.
 //!
-//! The envelope (`artifact.ts`): `OGBA`, version 1, codec, the claimed
+//! The envelope: `OGBA`, version 1, codec, the claimed
 //! plaintext length (u32 BE) — ten bytes that are also the GCM additional
 //! data — then a 12-byte IV and the AES-256-GCM ciphertext with its 16-byte
 //! tag, under the credential field key. Codec 0 (raw) is written; codec 1
@@ -34,7 +34,7 @@ const CODEC_RAW: u8 = 0;
 const CODEC_GZIP: u8 = 1;
 const GZIP_FRAME_BYTES: usize = 18;
 
-/// `BodyDetailState`.
+/// The recorded state of a stored body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DetailState {
     None,
@@ -44,7 +44,7 @@ pub enum DetailState {
 }
 
 impl DetailState {
-    /// `toDetailState`: anything unrecognised reads as `none`.
+    /// Anything unrecognised reads as `none`.
     pub fn parse(s: &str) -> Self {
         match s {
             "ready" => Self::Ready,
@@ -64,7 +64,7 @@ impl DetailState {
     }
 }
 
-/// `BodyArtifactRow`.
+/// One stored body's metadata row.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BodyRow {
     pub request_id: String,
@@ -76,7 +76,7 @@ pub struct BodyRow {
     pub truncated: bool,
 }
 
-/// `BodyRead`: the row, and the artifact when it read back.
+/// The row, and the artifact when it read back.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BodyRead {
     pub row: BodyReadRow,
@@ -130,7 +130,7 @@ fn cipher(key: &FieldKey) -> Aes256Gcm {
     Aes256Gcm::new(key.bytes().into())
 }
 
-/// `sealArtifact`: the binary envelope, codec raw.
+/// The binary envelope, codec raw.
 pub fn seal(key: &FieldKey, json: &str) -> Result<Sealed, StoreError> {
     let plain = json.as_bytes();
     if plain.is_empty() || plain.len() > MAX_ARTIFACT_BYTES {
@@ -163,7 +163,7 @@ pub fn seal(key: &FieldKey, json: &str) -> Result<Sealed, StoreError> {
     Ok(Sealed { bytes, sha256 })
 }
 
-/// `relPathFor`: `YYYY/MM/DD/<requestId>.json.enc`, in UTC.
+/// `YYYY/MM/DD/<requestId>.json.enc`, in UTC.
 pub fn rel_path_for(request_id: &str, at: i64) -> String {
     let days = at.div_euclid(86_400_000);
     let (y, m, d) = civil_from_days(days);
@@ -184,7 +184,7 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-/// `isSafeRequestId`.
+/// 1..=128 bytes of ASCII alphanumerics, `_` or `-`.
 pub fn is_safe_request_id(id: &str) -> bool {
     (1..=128).contains(&id.len())
         && id
@@ -209,7 +209,7 @@ fn gunzip(payload: &[u8], claimed: usize) -> Option<Vec<u8>> {
     rest.is_empty().then_some(out)
 }
 
-/// `decodeArtifact`: format, bounds, digest, decryption, then the object
+/// Format, bounds, digest, decryption, then the object
 /// check. Every failure is `corrupt`.
 pub fn decode(
     key: &FieldKey,
@@ -280,7 +280,7 @@ pub fn decode_plaintext(
     Some(plain)
 }
 
-/// `isLegacyStructure`.
+/// Whether the text is the legacy `enc:` secret shape.
 fn legacy_shape(text: &str) -> bool {
     let parts: Vec<&str> = text.split(':').collect();
     let lower_hex = |s: &str| {
@@ -313,7 +313,7 @@ fn to_row(r: &tokio_postgres::Row) -> Result<BodyRow, StoreError> {
 }
 
 impl PgStore {
-    /// Full frozen put: preparation is shared with SQLite; bytes and row are
+    /// Full artifact put: preparation is shared with SQLite; bytes and row are
     /// committed together on PG rather than file-before-row.
     pub async fn put_body_artifact(
         &self,
@@ -323,7 +323,7 @@ impl PgStore {
         let (id, at, json, truncated) = crate::bodies::prepare_put(input)?;
         self.put_body(key, &id, at, &json, truncated).await
     }
-    /// `BodyRepo.put` for an artifact already prepared: seal `json`, and
+    /// Put for an artifact already prepared: seal `json`, and
     /// upsert its row and bytes in one statement.
     pub async fn put_body(
         &self,
@@ -381,7 +381,7 @@ impl PgStore {
         Ok(row)
     }
 
-    /// `BodyRepo.get`: bytes over the ceiling never leave the server; a
+    /// Bytes over the ceiling never leave the server; a
     /// state that changed on reading is recorded.
     pub async fn get_body(
         &self,

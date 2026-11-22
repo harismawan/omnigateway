@@ -1,6 +1,6 @@
-//! Canonical stream events and `collect()`, ported from `packages/ir/src/stream.ts`.
+//! Canonical stream events and `collect()`.
 //!
-//! [`StreamEvent::to_json`] renders the TS object shape with `JSON.stringify`
+//! [`StreamEvent::to_json`] renders the wire object shape with `JSON.stringify`
 //! rules, which is what the conformance vectors record and what tests compare.
 //!
 
@@ -104,7 +104,7 @@ impl Usage {
 #[derive(Debug, PartialEq)]
 pub enum ContentBlockStart {
     Text,
-    /// `signed: None` is TS's absent field.
+    /// `signed: None` is an absent field on the wire.
     Thinking {
         signed: Option<bool>,
     },
@@ -197,12 +197,12 @@ impl StreamEvent {
             }
         )
     }
-    /// The TS object, as `JSON.stringify` would write it.
+    /// The wire object, as `JSON.stringify` would write it.
     pub fn to_json(&self) -> String {
         jsjson::render(&self.to_value())
     }
 
-    /// The TS object as a JSON value, keys in TS insertion order.
+    /// The wire object as a JSON value, keys in wire insertion order.
     pub fn to_value(&self) -> JsValue {
         match self {
             StreamEvent::Start { id, model } => JsValue::object([
@@ -516,7 +516,7 @@ enum Accum {
     },
 }
 
-/// Folds a canonical event stream into one response (`collect` in TS).
+/// Folds a canonical event stream into one response.
 pub fn collect(events: impl IntoIterator<Item = StreamEvent>) -> CollectedResponse {
     try_collect(events).expect(
         "collect input must satisfy the JSON depth policy; use try_collect for upstream input",

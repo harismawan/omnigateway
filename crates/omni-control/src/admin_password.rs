@@ -1,6 +1,4 @@
-//! The console passwords' storage half of `createAdminAuth`
-//! (`packages/control/src/adminAuth.ts`) and the `ConfigRepo` rows it uses
-//! (`packages/store/src/sqlite/config.ts`): the length rule, hashing, and the
+//! The console passwords' storage half: the length rule, hashing, and the
 //! `settings` rows `adminPasswordHash` and `viewerPasswordHash`.
 //!
 //! Synchronous and runtime-free, so the gateway (off its async workers) and
@@ -25,7 +23,7 @@ pub enum Which {
     Viewer,
 }
 
-/// A refusal TS throws as a plain `Error`, whose message a route reports as
+/// A refusal whose message a route reports as
 /// `BAD_REQUEST` (`describeError(error, "invalid password")`).
 #[derive(Debug, thiserror::Error)]
 pub enum PasswordError {
@@ -45,7 +43,7 @@ pub fn check_length(which: Which, password: &str) -> Result<(), PasswordError> {
     Ok(())
 }
 
-/// The length rule, then a fresh hash (`Bun.password.hash(password, ARGON2)`).
+/// The length rule, then a fresh hash ([`omni_crypto::password::hash`]).
 pub fn hash_new(which: Which, password: &str) -> Result<String, PasswordError> {
     check_length(which, password)?;
     Ok(omni_crypto::password::hash(password)?)
@@ -112,9 +110,9 @@ pub fn set_viewer_hash(store: &SqliteStore, hash: Option<&str>) -> Result<(), St
     }
 }
 
-/// `keyStillValid(apiKeyId)`: `store.keys.get(id)` then `keyUsable(key, now)`.
-/// `toKey` throws on an unparseable `model_allowlist`, so does this (TS's
-/// verify then fails the request); a missing row is "no".
+/// Whether the stored API key is usable at `now`. An unparseable
+/// `model_allowlist` throws (the verify then fails the request); a missing
+/// row is "no".
 pub fn client_key_usable(store: &SqliteStore, id: &str, now: i64) -> Result<bool, StoreError> {
     use rusqlite::types::ValueRef;
     let row = store
@@ -199,7 +197,7 @@ mod tests {
             check_length(Which::Viewer, "").map_err(|e| e.to_string()),
             Err("viewer password must be at least 12 characters".to_owned())
         );
-        // Six astral characters are twelve UTF-16 units: long enough in TS.
+        // Six astral characters are twelve UTF-16 units: long enough.
         assert!(check_length(Which::Admin, "😀😀😀😀😀😀").is_ok());
         // Eleven two-byte characters are eleven units, though 22 bytes.
         assert!(check_length(Which::Admin, "ééééééééééé").is_err());

@@ -1,5 +1,5 @@
 #![allow(clippy::unwrap_used)]
-//! Captured literals: independent of the executable TS differential oracle.
+//! Captured literals: independent of the executable differential oracle.
 use omni_providers::codec::{CodecInput, CodecRequest, Credentials, ProviderCodec};
 use omni_providers::openai::OpenAiCodec;
 use serde_json::{Value, json};
@@ -94,7 +94,7 @@ fn uuid(value: &Value, version: u8) {
 
 #[test]
 fn captured_headers_and_metadata() {
-    // Frozen declarations 1, 2, 3, 5, 25.
+    // Pinned declarations 1, 2, 3, 5, 25.
     let b = build(request(), "gpt-6-astra");
     let f = fixture();
     let m = metadata(&b);
@@ -192,7 +192,7 @@ fn captured_headers_and_metadata() {
 
 #[test]
 fn captured_body_prefix_and_history() {
-    // Frozen 4, 6, 7 (prefix vectors), 8, 11, 36, 38, 44.
+    // Pinned 4, 6, 7 (prefix vectors), 8, 11, 36, 38, 44.
     let b = build(request(), "gpt-6-astra");
     let body = body(&b);
     let f = fixture();
@@ -243,7 +243,7 @@ fn captured_body_prefix_and_history() {
 
 #[test]
 fn catalog_and_non_lite_literals() {
-    // Frozen 28, 29, 30, 33, 34.
+    // Pinned 28, 29, 30, 33, 34.
     let lite = body(&build(request(), "gpt-6-astra"));
     assert_eq!(
         lite["input"][1][META]["content_item_metadata"],
@@ -354,7 +354,7 @@ fn catalog_and_non_lite_literals() {
 
 #[test]
 fn overrides_and_identity_literals() {
-    // Frozen 10/14 format portions; 20, 21, 22, 23, 32 OAuth portion, 35.
+    // Pinned 10/14 format portions; 20, 21, 22, 23, 32 OAuth portion, 35.
     let b = build(request(), "gpt-6-astra");
     let v = body(&b);
     uuid(&metadata(&b)["installation_id"], 4);
@@ -418,7 +418,7 @@ fn overrides_and_identity_literals() {
 
 #[test]
 fn media_and_system_provenance_literals() {
-    // Frozen 31, 37, 39.
+    // Pinned 31, 37, 39.
     let mut r = request();
     r["messages"][2]["content"][0]["images"] =
         json!([{"type":"image","mediaType":"image/png","data":"aGVsbG8="}]);
@@ -483,7 +483,7 @@ fn media_and_system_provenance_literals() {
 
 #[test]
 fn stored_and_derived_id_literals() {
-    // Frozen 15, 17 UUID literal/format portions; behavior in cache-pairs/identity.
+    // Pinned 15, 17 UUID literal/format portions; behavior in cache-pairs/identity.
     let installation = "3f1c2d4e-5a6b-4c7d-8e9f-0a1b2c3d4e5f";
     for key in [THREAD, "another-conversation"] {
         let mut r = request();

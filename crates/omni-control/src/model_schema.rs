@@ -1,4 +1,4 @@
-//! Write-only frozen model schema. Read-only operator values remain unvalidated.
+//! Write-only model schema. Read-only operator values remain unvalidated.
 use crate::settings_value::get;
 use omni_ir::jsjson::JsValue;
 

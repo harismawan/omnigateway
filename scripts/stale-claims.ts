@@ -30,8 +30,6 @@
  *   `crates/omni-control/data/provider-catalog.json`.
  * - A mention with a history marker near it ("was", "no longer", "replaced"…)
  *   is a deliberate record, which is the thing this repository asks for.
- * - Declarations under the trees deleted with the TypeScript gateway
- *   (`RETIRED`, the one listed exclusion; see its docblock).
  *
  * Run: `bun run check:claims`. Exits non-zero with the lines to fix.
  */
@@ -101,19 +99,6 @@ if (resolved.base === undefined) {
 const base = resolved.base;
 const changed = changedSources(ROOT, base);
 
-/**
- * Trees deleted whole when the TypeScript gateway was retired for the Rust one.
- *
- * Their declarations are not removed *concepts*: the Rust crates carry the same
- * rules under other names, and a comment naming the TS symbol records where a
- * rule came from (the TS reference lives on the `bun-checkpoint` branch).
- * Counting them made the check report the retirement itself — every console
- * comment naming a server function — which is the noise this script exists
- * not to produce. Once the retirement is on `main` these paths exist at no
- * base, and the exclusion is inert.
- */
-const RETIRED = ["apps/gateway/", "apps/cli/", "packages/"];
-
 // Declared at the base, gone in the working tree.
 //
 // **The working tree, not HEAD.** This read `${base}..HEAD` and `git show
@@ -124,7 +109,6 @@ const RETIRED = ["apps/gateway/", "apps/cli/", "packages/"];
 // differently about the same repository for two commits.
 const removed = new Set<string>();
 for (const file of changed) {
-  if (RETIRED.some((root) => file.startsWith(root))) continue;
   let before = "";
   try {
     before = git("show", `${base}:${file}`);

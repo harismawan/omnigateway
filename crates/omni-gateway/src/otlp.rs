@@ -1,4 +1,4 @@
-//! Frozen `telemetry/{spans,otlp}.ts`. Queue entries are whole encoded traces.
+//! Span collection and OTLP export. Queue entries are whole encoded traces.
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -156,7 +156,7 @@ impl Trace {
         n
     }
 
-    /// Frozen dispatch offsets are relative to dispatch's own startedAt,
+    /// Dispatch offsets are relative to dispatch's own startedAt,
     /// then encoded against the outer request trace, unlike HTTP wall time.
     fn dispatch_time(&self, at: i64, origin: i64) -> i64 {
         self.started_at + (at - origin)
@@ -308,7 +308,7 @@ impl Tracing {
                 let Some(t) = weak.upgrade() else {
                     break;
                 };
-                // TS setInterval does not wait for a previous flush.
+                // A tick does not wait for a previous flush.
                 tokio::spawn(async move {
                     t.flush().await;
                 });

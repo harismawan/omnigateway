@@ -1,5 +1,5 @@
-//! The one place a request's row is completed (`finishLog`'s two call sites
-//! in `routes/proxy.ts`: the success path and the terminal catch).
+//! The one place a request's row is completed: the success path and the
+//! terminal error path.
 //!
 //! A [`Finisher`] is created when the request arrives and sends exactly one
 //! [`LogEvent::Finish`]. If it is dropped without having sent one — the client
@@ -19,8 +19,7 @@ use crate::dispatch::report_rejection;
 /// records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
-    /// Before the response is handed back: a hang-up lands in TS's catch,
-    /// which always files 499.
+    /// Before the response is handed back: a hang-up always files 499.
     Handler,
     /// A stream whose head went out: a hang-up files 499 only where nothing
     /// assigned a status.
@@ -90,8 +89,7 @@ impl Finisher {
         }
     }
 
-    /// Records each completed request in `telemetry` (`finishLog`'s
-    /// `telemetry?.record`).
+    /// Records each completed request in `telemetry`.
     #[must_use]
     pub fn with_telemetry(mut self, telemetry: Arc<crate::telemetry::Telemetry>) -> Self {
         self.telemetry = Some(telemetry);
@@ -151,8 +149,8 @@ impl Finisher {
         }
         // PG acquired its terminal credit before admission, including for
         // this destructor path. There is no capacity wait with a slot held.
-        // Telemetry is recorded whether or not the writer took the row, as
-        // TS records after an append that may have failed.
+        // Telemetry is recorded whether or not the writer took the row (the
+        // append may have failed).
         if let Some(t) = &self.telemetry {
             t.record(&log);
         }

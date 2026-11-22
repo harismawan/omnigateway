@@ -1,5 +1,4 @@
-//! `ingress/anthropicTools.ts` and the tool table it reads
-//! (`packages/providers/src/anthropic/tools.ts`).
+//! Anthropic tool-schema parsing and the provider tool table it reads.
 
 use std::collections::HashSet;
 

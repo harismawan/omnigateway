@@ -39,8 +39,8 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     };
-    let code = if rest.as_slice() == ["cluster-cutover-sweep"] {
-        runtime.block_on(cluster_cutover_sweep())
+    let code = if rest.as_slice() == ["cluster-bucket-sweep"] {
+        runtime.block_on(cluster_bucket_sweep())
     } else {
         runtime.block_on(run())
     };
@@ -51,26 +51,26 @@ fn main() -> std::process::ExitCode {
 
 /// A separate one-shot, never part of ordinary replica startup. The operator
 /// must stop every writer in the selected namespace before invoking it.
-async fn cluster_cutover_sweep() -> std::process::ExitCode {
+async fn cluster_bucket_sweep() -> std::process::ExitCode {
     let Some(url) = process_env()
         .remove("OMNI_REDIS_URL")
         .filter(|v| !v.is_empty())
     else {
-        eprintln!("cluster cutover sweep requires OMNI_REDIS_URL");
+        eprintln!("cluster bucket sweep requires OMNI_REDIS_URL");
         return std::process::ExitCode::FAILURE;
     };
     logging::install(logging::level_of(LogLevel::Info));
     let Ok(coord) = omni_coord::redis::RedisCoord::connect(&url, Default::default()).await else {
-        tracing::error!("cluster cutover coordinator connection failed");
+        tracing::error!("cluster bucket sweep coordinator connection failed");
         return std::process::ExitCode::FAILURE;
     };
-    let result = coord.remote().sweep_buckets_for_cutover().await;
+    let result = coord.remote().sweep_buckets().await;
     coord.shutdown().await;
     if result.is_err() {
-        tracing::error!("cluster cutover sweep failed; keep the fleet stopped and retry");
+        tracing::error!("cluster bucket sweep failed; keep the fleet stopped and retry");
         return std::process::ExitCode::FAILURE;
     }
-    tracing::info!("cluster cutover bucket sweep complete");
+    tracing::info!("cluster bucket sweep complete");
     std::process::ExitCode::SUCCESS
 }
 

@@ -2113,8 +2113,8 @@ async fn a_stream_complete_at_head_time_goes_out_with_a_content_length() {
     stop(g).await;
 }
 
-/// Screening is not ported: keys that need it fail closed, as TS refuses
-/// when screening is not configured (`guardrail/judge.ts`, `smartRouter/check.ts`).
+/// Screening is not implemented: keys that need it fail closed, the same
+/// refusal as when screening is not configured.
 async fn screened(settings: &[(&str, &str)]) -> Gw {
     let g = boot_with(&[("m1", "mock-c3-d0")], Duration::from_secs(10)).await;
     add_key(
@@ -2714,7 +2714,7 @@ async fn a_barrier_on_a_full_queue_is_503() {
 }
 
 /// `/metrics` exists only with a token, takes exactly `Bearer <token>`, and
-/// counts a finished request under TS's series names.
+/// counts a finished request under the fixed series names.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn metrics_route_is_token_gated_and_records_completions() {
     let port = upstream().await;
@@ -2832,13 +2832,13 @@ async fn metrics_route_is_token_gated_and_records_completions() {
             "{body}"
         );
     }
-    // `localCounts()` is empty once the slot is released, and no scrape set
-    // the gauge while it was held: TS registers no `omni_inflight` series.
+    // The local counts are empty once the slot is released, and no scrape set
+    // the gauge while it was held: no `omni_inflight` series is registered.
     assert!(!body.contains("omni_inflight"), "{body}");
     running.shutdown();
     running.wait().await.expect("stop");
 
-    // No token: no route, TS's 404 for an unmatched GET.
+    // No token: no route, the fixed 404 for an unmatched GET.
     env.remove("OMNI_METRICS_TOKEN");
     let mut config = load_config(&env, || 0).expect("config");
     config.port = 0;
@@ -2955,8 +2955,8 @@ async fn upstream_count(base: &str) -> Option<u64> {
         .map(|v| v.parse().expect("count"))
 }
 
-/// TS's `nodeHttpClient` traces a destroyed request once, from its error
-/// event (`trace(undefined, true)`): a request deadline that fires before the
+/// A destroyed upstream request is traced exactly once, from its error
+/// path: a request deadline that fires before the
 /// upstream head is still one `omni_upstream_duration_seconds` observation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_deadline_before_the_upstream_head_is_one_upstream_observation() {
@@ -2981,7 +2981,7 @@ async fn a_deadline_before_the_upstream_head_is_one_upstream_observation() {
 }
 
 /// A client that hangs up before the upstream head: the attempt is
-/// cancelled, and TS's `onAbort` destroy → error → `trace` still counts it.
+/// cancelled, and the abort's destroy → error → trace path still counts it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_client_abort_before_the_upstream_head_is_one_upstream_observation() {
     let port = silent_upstream().await;
@@ -3177,7 +3177,7 @@ async fn admin_setup_login_status_logout_end_to_end() {
     let (_, _, b) = call(&g.base, "GET", "/api/status", &[("cookie", &admin)], "").await;
     assert!(b.contains("\"authenticated\":false"), "{b}");
 
-    // Unported `/api` paths keep their fallthrough answers.
+    // Unimplemented `/api` paths keep their fallthrough answers.
     let (s, _, b) = call(&g.base, "GET", "/api/unported", &[], "").await;
     assert_eq!(
         (s, b.as_str()),
@@ -3228,7 +3228,7 @@ async fn oversized_declared_bodies_are_413_off_v1_only() {
     drop(stop(g).await);
 }
 
-/// Review A4-minor 1: a store failure during first setup is TS's 400
+/// Review A4-minor 1: a store failure during first setup is a 400
 /// BAD_REQUEST with SQLite's message, and nothing is configured.
 #[tokio::test]
 async fn a_store_refused_setup_is_bad_request_with_sqlite_s_message() {

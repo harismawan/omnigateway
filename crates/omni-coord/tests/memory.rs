@@ -1,4 +1,4 @@
-//! `packages/coord/test/memory.test.ts`, ported: the memory-only properties.
+//! Contract tests for `MemoryCoord`: the memory-only properties.
 
 mod common;
 
@@ -126,12 +126,12 @@ async fn every_memory_call_completes_on_its_first_poll() {
     assert!(matches!(gauge.poll(&mut cx), Poll::Ready(Ok(0))));
 }
 
-/// I4: the frozen TS `memoryCoord` window, observed (Bun, `packages/coord`):
-/// claims at 1000, 999 (backdated), rollback 999, 1001, 998, rollback 1000,
-/// 1002, 61000, 61002 report `used` 0,1,1,2,3,3,1 and `resetAt`
-/// 1000,61000,61000,61000,61000,61001,121000. A backdated claim is a finite
-/// count, rollback removes that claim, and TS's arrival-order scan makes the
-/// last rollback (behind a later, smaller stamp) a no-op.
+/// I4: the window's pinned sequence: claims at 1000, 999 (backdated),
+/// rollback 999, 1001, 998, rollback 1000, 1002, 61000, 61002 report `used`
+/// 0,1,1,2,3,3,1 and `reset_at` 1000,61000,61000,61000,61000,61001,121000.
+/// A backdated claim is a finite count, rollback removes that claim, and
+/// the arrival-order scan makes the last rollback (behind a later, smaller
+/// stamp) a no-op.
 #[tokio::test]
 async fn window_semantics_match_ts_for_backdated_claims_and_rollback() {
     let coord = MemoryCoord::new(ManualClock::at(0.0).clock());
@@ -180,9 +180,8 @@ async fn rollback_stays_exact_with_many_distinct_live_stamps() {
     assert_eq!(next.before.used, 69_999.0);
 }
 
-/// M2: non-finite inputs behave as the frozen TS does. Recorded from Bun
-/// (`/tmp/opencode/d2-fix2/ts-window-nan.out`): claims at 1000, NaN, 30000,
-/// 2000, rollback NaN, 65000, 70000, 200000 give (used, resetAt)
+/// M2: non-finite inputs, pinned: claims at 1000, NaN, 30000,
+/// 2000, rollback NaN, 65000, 70000, 200000 give (used, reset_at)
 /// (0,1000) (0,NaN) (0,30000) (1,90000) (2,90000) (3,90000) (0,200000).
 #[tokio::test]
 async fn non_finite_stamps_behave_as_ts() {

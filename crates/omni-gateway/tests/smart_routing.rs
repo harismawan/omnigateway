@@ -77,9 +77,9 @@ async fn stopped_ready_sibling_is_dropped_without_caching() {
             ..
         }
     ));
-    // Both replies were ready, but Rust drops the undecided public sibling.
-    // Documented difference: frozen may count/cache an already-parsed sibling
-    // here; only aggregate classifier usage and cache warmth may differ.
+    // Both replies were ready, but the undecided public sibling is dropped
+    // (a documented choice); only aggregate classifier usage and cache warmth
+    // may differ.
     let mut ir = serde_json::to_value(&req.request).expect("IR");
     ir["messages"][0]["content"][0]["text"] = public.into();
     req.request = serde_json::from_value(ir).expect("IR");

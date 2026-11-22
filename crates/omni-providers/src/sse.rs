@@ -1,16 +1,17 @@
-//! The incremental SSE parser, ported from `packages/providers/src/sse.ts`.
+//! The incremental SSE parser.
 //!
-//! Byte-for-byte the TS semantics, including the parts that are TextDecoder's
-//! rather than the parser's:
+//! The parsing semantics are byte-stable, including the parts that are
+//! TextDecoder's rather than the parser's:
 //!
 //! - UTF-8 is decoded with replacement (WHATWG maximal-subpart, which is what
 //!   `String::from_utf8_lossy` does too), a sequence split across chunks is
 //!   carried, and one leading BOM is stripped. An incomplete sequence at end of
-//!   stream is dropped, because `parseSse` never flushes its decoder.
+//!   stream is dropped: the decoder is never flushed.
 //! - A record ends at a blank line in any of `\n\n`, `\n\r\n` (which also covers
 //!   `\r\n\r\n`); a trailing `\r` is stripped per line; a bare `\r` is data.
 //! - [`MAX_RECORD_CHARS`] is counted in UTF-16 code units, as JS counts
-//!   `string.length`, and checked at the same two points TS checks it.
+//!   `string.length`, and checked at two points: before parsing a whole
+//!   record, and on the growing unconsumed buffer.
 //!
 //! Linear in the input: the buffer is appended to, scanned from where the last
 //! scan stopped, and compacted once per chunk.

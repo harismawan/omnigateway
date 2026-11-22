@@ -1,4 +1,4 @@
-//! Frozen OpenAI Responses SSE semantics. Arbitrary payloads remain scoped;
+//! OpenAI Responses SSE semantics. Arbitrary payloads remain scoped;
 //! emitted native maps use the IR's iterative ownership implementation.
 use crate::{
     codec::{DecodeError, Flow, StreamDecoder},
@@ -65,7 +65,7 @@ impl OpenAiDecoder {
         output: Option<&Value>,
         content: Option<&Value>,
     ) -> Result<u32, DecodeError> {
-        // The frozen index key is a template string, not a two-part tuple.
+        // The index key is a template string, not a two-part tuple.
         let mut key = string(output)?.surrounded("", ":");
         key.push(&string(content)?);
         if let Some(i) = self.indices.iter().position(|k| k == &key) {

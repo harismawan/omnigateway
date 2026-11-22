@@ -1,19 +1,18 @@
-//! Provider quota readings, read as `listQuota` in
-//! `packages/store/src/sqlite/credentials.ts` reads them.
+//! Provider quota readings.
 
 use crate::error::StoreError;
 use crate::row;
 use rusqlite::Connection;
 use serde::Serialize;
 
-/// `WindowType`: a bucket name, not a duration (`durationFor`).
+/// A quota window bucket name, not a duration.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum WindowType {
     FiveHour,
     Daily,
     Weekly,
-    /// A stored name this build does not know. TS casts it through, and its
-    /// nominal length is then `undefined`; see [`WindowType::nominal_ms`].
+    /// A stored name this build does not know. It is kept verbatim, and its
+    /// nominal length is unknown; see [`WindowType::nominal_ms`].
     Other(String),
 }
 
@@ -36,8 +35,8 @@ impl WindowType {
         }
     }
 
-    /// `WINDOW_DURATION_MS[windowType]`. NaN for an unknown name, which is
-    /// what `undefined` becomes in the arithmetic TS does with it.
+    /// The window's nominal length in ms. NaN for an unknown name, so any
+    /// arithmetic with it stays NaN.
     pub fn nominal_ms(&self) -> f64 {
         match self {
             Self::FiveHour => 5.0 * 60.0 * 60.0 * 1000.0,
@@ -54,7 +53,7 @@ impl Serialize for WindowType {
     }
 }
 
-/// `QuotaWindow`. Numbers are JS numbers.
+/// One provider quota window. Numbers are JS numbers.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuotaWindow {
@@ -82,7 +81,7 @@ impl QuotaWindow {
 
 const Q: &str = "quota_windows";
 
-/// Bounded newest-first sample read; the caller applies the frozen JS re-sort.
+/// Bounded newest-first sample read; the caller applies the JS re-sort.
 pub fn list_quota_samples(
     conn: &Connection,
     since: f64,
@@ -199,7 +198,7 @@ fn opt_number(r: &rusqlite::Row<'_>, column: &str) -> Result<Option<f64>, StoreE
     }
 }
 
-/// `CredentialRepo.listQuota`: every stored reading.
+/// Every stored quota reading.
 pub fn list(conn: &Connection) -> Result<Vec<QuotaWindow>, StoreError> {
     let mut stmt = conn.prepare_cached("SELECT * FROM quota_windows")?;
     let mut rows = stmt.query([])?;
@@ -210,7 +209,7 @@ pub fn list(conn: &Connection) -> Result<Vec<QuotaWindow>, StoreError> {
             tracing::warn!("unaddressable quota credential id omitted from routing snapshot");
             continue;
         };
-        // Unknown window names still enforce their ceiling in TS. A BLOB's
+        // Unknown window names still enforce their ceiling. A BLOB's
         // Uint8Array string form is used in exclusion messages; its duration
         // lookup is unknown (NaN), just like an unknown text name.
         let window_name = match r.get_ref("window_type")? {

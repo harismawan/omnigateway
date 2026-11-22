@@ -1,4 +1,4 @@
-//! `packages/rtk/src/filters/status.ts`.
+//! Git-status output compression.
 
 use super::shared::{BoundedText, capped};
 use crate::jsre::js_regex;

@@ -1,7 +1,6 @@
-//! Day and hour bucketing, and the migration backfills, from
-//! `packages/store/src/sqlite/rollup.ts`.
+//! Day and hour bucketing, and the migration backfills.
 //!
-//! The bucketing functions work in `f64` because the TS ones do: `at` is never
+//! The bucketing functions work in `f64`: `at` is never
 //! validated and may be fractional, and the result is persisted as a key, so
 //! the arithmetic must be JavaScript's to the bit. `start_of_day_ms` is the
 //! integer form for a writer that only ever holds integer instants.
@@ -16,12 +15,12 @@ pub const HOUR_MS: f64 = 3_600_000.0;
 const DAY_MS: f64 = 86_400_000.0;
 const DAY_MS_INT: i64 = 86_400_000;
 
-/// `hourOf`: the `usage_rollup.hour` bucket an instant belongs to.
+/// The `usage_rollup.hour` bucket an instant belongs to.
 pub fn hour_of(at: f64) -> f64 {
     (at / HOUR_MS).floor()
 }
 
-/// `startOfDay`: the epoch of midnight at a fixed offset east of UTC
+/// The epoch of midnight at a fixed offset east of UTC
 /// containing `at`. `Math.floor` keeps a fractional `at` on an integer key.
 pub fn start_of_day(at: f64, offset_minutes: i64) -> f64 {
     #[allow(clippy::cast_precision_loss)]
@@ -29,14 +28,14 @@ pub fn start_of_day(at: f64, offset_minutes: i64) -> f64 {
     ((at + offset_ms) / DAY_MS).floor() * DAY_MS - offset_ms
 }
 
-/// `startOfDay` for an integer instant. Equal to [`start_of_day`] for every
+/// [`start_of_day`] for an integer instant. Equal to [`start_of_day`] for every
 /// instant inside the safe-integer range.
 pub fn start_of_day_ms(at: i64, offset_minutes: i64) -> i64 {
     let offset_ms = offset_minutes * 60_000;
     (at + offset_ms).div_euclid(DAY_MS_INT) * DAY_MS_INT - offset_ms
 }
 
-/// `hostDayOffsetMinutes`: the host's current offset in minutes east of UTC.
+/// The host's current offset in minutes east of UTC.
 ///
 /// The process-wide default for a node that leaves `OMNI_DAY_OFFSET_MINUTES`
 /// unset, read once at boot. Like `Date#getTimezoneOffset`, it honours `TZ`.
@@ -66,8 +65,8 @@ impl Key {
         })
     }
 
-    /// `key.join("\0")`, the grouping id. Built the same way so two tuples the
-    /// TS walk would merge are merged here too.
+    /// `key.join("\0")`, the grouping id: two tuples with the same id merge
+    /// into one row.
     fn id(&self) -> String {
         let mut id = js::number_to_string(self.day);
         for s in &self.strings {
@@ -137,7 +136,7 @@ const BACKFILL_UPSERT: &str = "
     cost_usd           = cost_usd + excluded.cost_usd,
     duration_ms_sum    = duration_ms_sum + excluded.duration_ms_sum";
 
-/// `backfillDaily`: seeds `usage_daily` from the logs already on disk.
+/// Seeds `usage_daily` from the logs already on disk.
 /// Runs inside the migration's transaction. Returns the rows written.
 pub fn backfill_daily(conn: &Connection, day_offset_minutes: i64) -> Result<usize, StoreError> {
     let mut groups: IndexMap<String, (Key, Counters)> = IndexMap::new();
@@ -187,7 +186,7 @@ pub fn backfill_daily(conn: &Connection, day_offset_minutes: i64) -> Result<usiz
     Ok(groups.len())
 }
 
-/// `backfillRtkUsage`: fills migration 6's two columns for the rows that
+/// Fills migration 6's two columns for the rows that
 /// exist, without adding the usage counters a second time.
 pub fn backfill_rtk_usage(conn: &Connection, day_offset_minutes: i64) -> Result<(), StoreError> {
     let mut groups: IndexMap<String, (Key, f64, f64)> = IndexMap::new();
@@ -237,7 +236,7 @@ const REBUILD: &str = "
    WHERE state = 'done' AND api_key_id IS NOT NULL
    GROUP BY api_key_id, CAST(at / 3600000 AS INTEGER)";
 
-/// `rebuildRollup`: recomputes `usage_rollup` from `request_logs`, whole.
+/// Recomputes `usage_rollup` from `request_logs`, whole.
 /// Runs inside the caller's transaction.
 pub fn rebuild_rollup(conn: &Connection) -> Result<(), StoreError> {
     conn.execute("DELETE FROM usage_rollup", [])?;

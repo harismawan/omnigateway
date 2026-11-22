@@ -1,4 +1,4 @@
-//! `packages/rtk/src/filters/diagnostics.ts`.
+//! Compiler-diagnostics output compression.
 
 use super::shared::{
     BoundedText, MAX_OUTPUT, ParsedBlock, Severity, diagnostic_blocks, render_gaps, select_block,

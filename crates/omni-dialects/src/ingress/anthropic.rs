@@ -1,4 +1,4 @@
-//! `POST /v1/messages` (and its `count_tokens` body): `ingress/anthropic.ts`.
+//! `POST /v1/messages` (and its `count_tokens` body).
 
 use omni_ir::error::GatewayError;
 use omni_ir::js::safe_token;
@@ -650,7 +650,7 @@ fn role_of(s: Option<&str>) -> Role {
     }
 }
 
-/// `parseAnthropicRequest`.
+/// Parse an Anthropic Messages body into the IR.
 pub fn parse(
     body: &Value,
     headers: &Headers,

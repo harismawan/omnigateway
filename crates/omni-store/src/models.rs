@@ -1,8 +1,7 @@
-//! Virtual models and their targets, read as `listModels` in
-//! `packages/store/src/sqlite/config.ts` reads them.
+//! Virtual models and their targets.
 //!
-//! TS parses `targets` with a bare `JSON.parse` and no validation, so the
-//! fields are typed here as loosely as TS uses them: every number is a JS
+//! `targets` is parsed with a bare `JSON.parse` and no validation, so the
+//! fields are typed as loosely as the wire uses them: every number is a JS
 //! number (`f64`), and keys this build does not know are kept in `extra` so
 //! the value serializes back unchanged.
 
@@ -43,7 +42,7 @@ pub fn operator_credentials(conn: &Connection) -> Result<Vec<OperatorCredential>
         .collect::<Result<Vec<_>, _>>()?)
 }
 
-/// `TargetPricing`: dollars per million tokens.
+/// Dollars per million tokens.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TargetPricing {
@@ -68,7 +67,7 @@ pub struct TargetPricing {
 }
 
 impl TargetPricing {
-    /// `cacheReadRate`: a tenth of input where no cache-read price is named.
+    /// A tenth of input where no cache-read price is named.
     pub fn cache_read_rate(&self) -> f64 {
         self.cache_read.unwrap_or(self.input * 0.1)
     }
@@ -81,7 +80,7 @@ pub struct Capabilities {
     pub reasoning: bool,
 }
 
-/// `Target`.
+/// One provider target a model is served by.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Target {
@@ -89,11 +88,12 @@ pub struct Target {
     pub lone_identity: std::collections::HashMap<String, Vec<u16>>,
     pub provider: String,
     /// Required for custom targets; absent on built-in ones. Kept as JSON
-    /// because `servesTarget` treats a non-string as matching nothing, and a
+    /// because `omni_router::serves_target` treats a non-string as matching
+    /// nothing, and a
     /// typed read would either refuse the row or lose that distinction.
     ///
     /// `None` is absent; `Some(Value::Null)` is an explicit `null`, which
-    /// `servesTarget` treats as a value matching no account.
+    /// `serves_target` treats as a value matching no account.
     #[serde(
         default,
         deserialize_with = "present",
@@ -121,7 +121,7 @@ fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<serde_json::
     serde_json::Value::deserialize(d).map(Some)
 }
 
-/// `VirtualModel`.
+/// A model the gateway serves, and the targets behind it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VirtualModel {
@@ -165,14 +165,14 @@ impl std::fmt::Display for ModelRowError {
     }
 }
 
-/// `ConfigRepo.listModels`, ordered by id, one result per row.
+/// Every virtual model, ordered by id, one result per row.
 ///
-/// TS parses each row's `targets` with a bare `JSON.parse` inside one `.map`,
-/// so a row that is not JSON throws the whole list there. The gateway's
+/// Each row's `targets` is parsed with a bare `JSON.parse`; a row that is not
+/// JSON must not throw the whole list. The gateway's
 /// routing snapshot must not: a row that does not read is returned as its own
 /// error, naming the model, and every other model is still served. JSON that
-/// is not shaped like `Target[]` is an error for that row too, where TS would
-/// carry it on and misbehave at routing.
+/// is not shaped like `Target[]` is an error for that row too, rather than
+/// carried on to misbehave at routing.
 ///
 /// Only a failure of the query itself, or an unreadable `id`, fails the whole
 /// read.
@@ -181,7 +181,7 @@ pub fn list(conn: &Connection) -> Result<Vec<Result<VirtualModel, ModelRowError>
     let mut rows = stmt.query([])?;
     let mut out = Vec::new();
     while let Some(r) = rows.next()? {
-        // TS retains a null/blob Map key. Neither can equal a request's string
+        // A null/blob id can never equal a request's string
         // model id, so omit only this unaddressable row, never the transaction.
         let Ok(id) = row::text(r, T, "id") else {
             tracing::warn!("unaddressable model id omitted from routing snapshot");

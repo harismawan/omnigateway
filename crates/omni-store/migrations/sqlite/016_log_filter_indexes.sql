@@ -3,7 +3,7 @@
 --
 -- Without it, filtering by a provider that has *no* traffic scans the whole
 -- table: there is nothing to seek, so proving the absence means reading every
--- row. `bun:sqlite` is synchronous, so that scan is the event loop — time in
+-- row. The SQLite read is synchronous, so that scan is the event loop — time in
 -- which no proxied request moves. Measured at 500,000 rows:
 --
 --   resolved_provider =        without index    with index

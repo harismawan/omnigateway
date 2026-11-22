@@ -1,4 +1,4 @@
-//! Bun's socket budget: writes rearm; inbound traffic must reach 16 KiB/s
+//! The socket budget: writes rearm; inbound traffic must reach 16 KiB/s
 //! worth of bytes per idle window. Inference requests disable the budget.
 use std::io::{self, IoSlice};
 use std::pin::Pin;
@@ -32,8 +32,8 @@ impl Activity {
 
     pub(crate) fn request(&self, inference: bool) {
         self.0.routed.store(true, Relaxed);
-        // Frozen proxy.ts explicitly calls server.timeout(request, 0) for
-        // these three routes, including their JSON and streaming responses.
+        // The three inference routes disable the per-request timeout,
+        // including their JSON and streaming responses.
         self.0.disabled.store(inference, Relaxed);
         self.0.received.store(0, Relaxed);
         self.touch();

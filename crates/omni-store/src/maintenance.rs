@@ -1,8 +1,8 @@
-//! Retention statements from the frozen SQLite maintenance repositories.
+//! Retention statements and horizon arithmetic.
 use crate::StoreError;
 use rusqlite::{Connection, params};
 
-/// Frozen config preserves raw log retention, but validates body retention.
+/// The config read preserves raw log retention, but validates body retention.
 /// Array/object ToPrimitive is deliberately outside this scalar compatibility surface.
 pub fn horizons(raw: Option<&str>, now: i64) -> Result<(f64, f64), StoreError> {
     use omni_ir::jsjson::{JsValue, parse_js};
@@ -51,7 +51,7 @@ pub fn horizons(raw: Option<&str>, now: i64) -> Result<(f64, f64), StoreError> {
     ))
 }
 
-/// Bun SQL infers bigint from the timestamp column. Its number text must be a
+/// The horizon binds into a bigint timestamp column. Its number text must be a
 /// PostgreSQL bigint literal: fractions, NaN, infinities and overflow are refused,
 /// not rounded or mapped to NULL as SQLite does with NaN.
 pub fn pg_horizon(horizon: f64) -> Result<i64, StoreError> {

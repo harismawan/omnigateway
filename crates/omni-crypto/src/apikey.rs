@@ -1,4 +1,4 @@
-//! Gateway API keys (`packages/store/src/sqlite/keys.ts`).
+//! Gateway API keys.
 //!
 //! `sk-omni-` + unpadded base64url of 32 CSPRNG bytes. Stored as an unsalted
 //! SHA-256 hex digest: the key is 256 bits of entropy, so a slow hash would buy
@@ -25,7 +25,7 @@ pub fn hash(raw: &str) -> String {
     crate::hex_lower(&Sha256::digest(raw.as_bytes()))
 }
 
-/// `api_keys.prefix`: `raw.slice(0, 12)` in UTF-16 units, as TS takes it.
+/// `api_keys.prefix`: the first 12 UTF-16 code units of the raw key.
 pub fn prefix(raw: &str) -> String {
     let units: Vec<u16> = raw.encode_utf16().take(PREFIX_COLUMN_CHARS).collect();
     String::from_utf16_lossy(&units)

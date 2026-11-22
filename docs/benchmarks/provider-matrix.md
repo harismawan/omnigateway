@@ -66,8 +66,8 @@ Intended real-measurement command (quiet host, fresh OUT, at least three rounds)
 
 ```sh
 export OMNI_RUST_BINARY=/path/to/release/omnigateway
-BASE_GATEWAY=/path/to/frozen-ts HEAD_GATEWAY="sh $PWD/scripts/run-rust-gateway.sh" \
-CLI='bun apps/cli/src/index.ts' OUT=/tmp/bench-real ROUNDS=5 MAX_LOAD=1 LOAD_WAIT=600 \
+BASE_GATEWAY=/path/to/base/omnigateway HEAD_GATEWAY="sh $PWD/scripts/run-rust-gateway.sh" \
+CLI='/path/to/release/omnigateway omni' OUT=/tmp/bench-real ROUNDS=5 MAX_LOAD=1 LOAD_WAIT=600 \
 bash scripts/bench-rounds.sh --duration 20s --warmup 3s --boots 5 \
   --gateway-cpus 0-3 --upstream-cpus 4-5 --load-cpus 6-7 --fresh-process
 bun scripts/bench-compare.ts /tmp/bench-real/base /tmp/bench-real/head
@@ -194,12 +194,12 @@ From this worktree (gateway processes run in scratch directories):
 
 ```sh
 bash scripts/bench-matrix.sh \
-  --gateway /tmp/merge-anthropic/ts \
-  --cli 'bun apps/cli/src/index.ts' --duration 2s --warmup 1s --boots 1 \
-  --out /tmp/bench-matrix/ts-custom.json
+  --gateway /tmp/merge-anthropic/base \
+  --cli '/tmp/merge-anthropic/base omni' --duration 2s --warmup 1s --boots 1 \
+  --out /tmp/bench-matrix/base-custom.json
 OMNI_RUST_BINARY=/tmp/merge-anthropic/rust \
   bash scripts/bench-matrix.sh --gateway "sh $PWD/scripts/run-rust-gateway.sh" \
-  --cli 'bun apps/cli/src/index.ts' --duration 2s --warmup 1s --boots 1 \
+  --cli '/tmp/merge-anthropic/rust omni' --duration 2s --warmup 1s --boots 1 \
   --out /tmp/bench-matrix/rust-custom.json
 ```
 
@@ -207,8 +207,8 @@ For measurement on a quiet host:
 
 ```sh
 export OMNI_RUST_BINARY=/path/to/release/omnigateway
-BASE_GATEWAY=/path/to/frozen-ts HEAD_GATEWAY="sh $PWD/scripts/run-rust-gateway.sh" \
-CLI='bun apps/cli/src/index.ts' OUT=/tmp/bench-matrix/real ROUNDS=5 MAX_LOAD=1 \
+BASE_GATEWAY=/path/to/base/omnigateway HEAD_GATEWAY="sh $PWD/scripts/run-rust-gateway.sh" \
+CLI='/path/to/release/omnigateway omni' OUT=/tmp/bench-matrix/real ROUNDS=5 MAX_LOAD=1 \
 bash scripts/bench-rounds.sh --duration 20s --warmup 3s --boots 5 \
   --gateway-cpus 0-3 --upstream-cpus 4-5 --load-cpus 6-7
 DURATION=20s bash scripts/bench-upstream-check.sh
@@ -266,9 +266,9 @@ For a short functional two-round selection check (not a performance claim):
 
 ```sh
 OMNI_RUST_BINARY=/tmp/bench-gate/bin/main-327f240f \
-BASE_GATEWAY=/tmp/bench-gate/bin/ts-frozen-f9cc6678 \
+BASE_GATEWAY=/tmp/bench-gate/bin/base-f9cc6678 \
 HEAD_GATEWAY="sh $PWD/scripts/run-rust-gateway.sh" \
-CLI='bun apps/cli/src/index.ts' OUT=/tmp/bench-matrix/check-rounds \
+CLI='/tmp/bench-gate/bin/main-327f240f omni' OUT=/tmp/bench-matrix/check-rounds \
 ROUNDS=2 ALLOW_BUSY=1 bash scripts/bench-rounds.sh \
   --only 'custom-chat.*' --duration 2s --warmup 1s --boots 1
 ```

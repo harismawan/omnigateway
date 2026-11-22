@@ -1,10 +1,10 @@
-//! `packages/rtk/src/filters/listings.ts`: `tree`, `ls -l`, `ls -R`/`-lR`
+//! `tree`, `ls -l`, `ls -R`/`-lR`
 //! and path lists.
 //!
 //! The tree is held as an arena and walked with explicit stacks: a `tree`
-//! output can nest as deep as it has rows, and the TS recursion is replaced
-//! rather than mirrored so adversarial depth cannot exhaust the Rust stack.
-//! Budget charges happen in the same order as the TS recursion.
+//! output can nest as deep as it has rows, so the walk is iterative and
+//! adversarial depth cannot exhaust the Rust stack. Budget charges happen
+//! in the same order a recursive walk would pay them.
 
 use super::shared::{BoundedText, MAX_OUTPUT};
 use crate::jsre::js_regex;
@@ -135,8 +135,8 @@ struct TreeCount {
     ambiguous: bool,
 }
 
-/// `subtreeCounts`, iteratively. One record per node, charged in the TS
-/// pre-order; a failed charge stops the walk as the TS recursion would.
+/// Subtree counts, iteratively. One record per node, charged in pre-order;
+/// a failed charge stops the walk.
 fn subtree_counts(
     input: &BoundedText<'_>,
     nodes: &[TreeNode<'_>],
@@ -179,7 +179,7 @@ enum Step {
     Leave(usize),
 }
 
-/// `appendSubtree`, iteratively, with the TS charge order.
+/// Append a subtree, iteratively, keeping the recursive charge order.
 fn append_subtree<'a>(
     input: &BoundedText<'a>,
     output: &mut Vec<Cow<'a, str>>,

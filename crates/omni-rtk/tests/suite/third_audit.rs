@@ -1,4 +1,5 @@
-//! `packages/rtk/test/third-audit.test.ts`.
+//! Audit regression suite: the global row bound, tree sibling grouping,
+//! package-warning dedup and wrapper/pipe eligibility.
 
 use super::common::*;
 use omni_rtk::command::classify_command;

@@ -1,16 +1,16 @@
 //! What the request path hands the writer: plain owned data, no storage types.
 //!
-//! The shapes follow `apps/gateway/src/logging.ts`. A request emits a
-//! [`LogEvent::Begin`] when routing first picks a target (`beginLog`), a
-//! [`LogEvent::Route`] on each failover (`routeLog`), and one
-//! [`LogEvent::Finish`] when it is done (`finishLog`), on success, error and
-//! cancel (status 499) alike. The `api_key_id` the TS helpers take as a separate
-//! `keyId` argument is a field here.
+//! A request emits a
+//! [`LogEvent::Begin`] when routing first picks a target, a
+//! [`LogEvent::Route`] on each failover, and one
+//! [`LogEvent::Finish`] when it is done, on success, error and
+//! cancel (status 499) alike. The `api_key_id` is a field on the events.
+//! The row-for-row contract is pinned by `tests/writer.rs`.
 
 use crate::CredentialHealth;
 use serde::Serialize;
 
-/// `newPendingRequestLog` plus the key: what is known when a request starts.
+/// What is known when a request starts, plus the key.
 /// Every other column of the pending row is a placeholder zero, which readers
 /// tell apart from a measurement by `state = 'pending'`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -26,7 +26,7 @@ pub struct PendingLog {
     pub credential_id: Option<String>,
 }
 
-/// `routeLog`'s target: the candidate dispatch moved to.
+/// The failover target: the candidate dispatch moved to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RouteTarget {
@@ -35,7 +35,7 @@ pub struct RouteTarget {
     pub credential_id: String,
 }
 
-/// A finished request: the TS `RequestLog` without `state`, which is always
+/// A finished request: the stored log row without `state`, which is always
 /// `done` here.
 ///
 /// Counters are integers because the gateway only ever produces integers for
@@ -73,13 +73,13 @@ pub struct RequestLog {
     /// Transient, never stored: the requested model held a lone surrogate,
     /// so `requested_model` is its lossy (U+FFFD) form and names a
     /// *different* model. The completion debits the key-wide subject only:
-    /// TS's `modelSubjectId` throws before any model subject is debited.
+    /// no model subject id can be formed, so none is debited.
     #[serde(skip)]
     pub model_unencodable: bool,
 }
 
 impl RequestLog {
-    /// `newCompletedRequestLog(id, at, { status })`: every measurement zero.
+    /// A completed log for `(id, at, status)`: every measurement zero.
     pub fn new(id: impl Into<String>, at: i64, status: i64) -> Self {
         Self {
             id: id.into(),
@@ -115,11 +115,11 @@ impl RequestLog {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum LogEvent {
-    /// `usage.begin`: files a pending row. A no-op when the id already has one.
+    /// Files a pending row. A no-op when the id already has one.
     Begin(PendingLog),
-    /// `usage.route`: rewrites the target of a row still pending.
+    /// Rewrites the target of a row still pending.
     Route { id: String, target: RouteTarget },
-    /// `usage.append`: completes the row (or files it done) and rolls it up.
+    /// Completes the row (or files it done) and rolls it up.
     /// Claims only a pending or absent row, so a second finish counts nothing.
     Finish(RequestLog),
 }
@@ -140,22 +140,22 @@ impl LogEvent {
 /// lands after a [`BreakerTransition`] in the same batch cannot carry a stale
 /// state back over it.
 ///
-/// On a pair with no row yet it files one with the `blankHealth` state
-/// (`closed`, no `opened_at`), which is the row `updateHealth` writes there.
+/// On a pair with no row yet it files one with the blank health state
+/// (`closed`, no `opened_at`), the row a fresh health mutation writes there.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HealthMeasurement {
     pub credential_id: String,
     pub model: String,
     pub consecutive_failures: i64,
-    /// A JS number; bound as `bun:sqlite` binds one.
+    /// A JS number; bound by the number-bind rule in `js.rs`.
     pub rate_limited_until: Option<f64>,
 }
 
-/// A breaker decision: the whole `credential_health` row as `updateHealth`
-/// would persist it after the transition.
+/// A breaker decision: the whole `credential_health` row as the health
+/// mutation would persist it after the transition.
 ///
 /// Never coalesced: every transition is applied in order, so the row a batch
-/// leaves is the row TS leaves applying them one by one. In single mode routing
+/// leaves is the row applying them one by one leaves. In single mode routing
 /// reads the in-process snapshot, so riding the batch is enough; the cluster
 /// slice routes these through the immediate path instead
 /// ([`super::HealthWriter`], a mutation applied under the shared lock),
@@ -196,7 +196,7 @@ impl From<BreakerTransition> for WriteEvent {
 
 /// A completed `request_logs` row, as stored, delivered after the batch
 /// that wrote it committed. The rate limiter debits its long windows with
-/// these, in commit order (TS: "row first, then the debit").
+/// these, in commit order: row first, then the debit.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Completion {
     /// Canonical top-level xid8 of the PG completing transaction. SQLite

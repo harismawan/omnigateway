@@ -531,7 +531,7 @@ async fn failures_are_shared_but_not_cached_and_rejection_disables() {
 #[tokio::test]
 async fn missing_token_and_unsupported_provider_do_not_call_transport() {
     let (_dir, service, http, mut c) = fixture(200).await;
-    // Missing rows exercise the supplied view, just as frozen TS does.
+    // Missing rows exercise the supplied view.
     c.id = "missing".into();
     c.provider = "unsupported".into();
     assert_eq!(

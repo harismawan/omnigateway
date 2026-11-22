@@ -1,10 +1,11 @@
-//! The incremental SSE parser against vectors exported from `parseSse`, plus
-//! the edge-case suite ported from `packages/providers/test/sse.test.ts`.
+//! The incremental SSE parser against conformance vectors and the edge-case
+//! suite; the vectors pin the exact parse results, so regenerating them is a
+//! deliberate wire change.
 
 mod common;
 
 use omni_providers::sse::{MAX_RECORD_CHARS, SseMessage, SseParser};
-/// Runs the parser over `chunks` the way `parseSse` consumes a body.
+/// Runs the parser over `chunks` the way a streaming body is consumed.
 fn run(chunks: &[&[u8]]) -> (Vec<SseMessage>, Option<omni_ir::error::GatewayError>) {
     let mut parser = SseParser::new();
     let mut out = Vec::new();

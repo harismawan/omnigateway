@@ -1,2 +1,0 @@
- 23:33:29 up 15 days, 22:03,  2 users,  load average: 0.93, 1.63, 2.52
-load_begin=1.19 waited_seconds=15 start_load=0.93

@@ -1,4 +1,5 @@
-//! `packages/rtk/test/fifth-audit.test.ts`.
+//! Audit regression suite: whitespace-prefixed failure retention, directory
+//! omission totals and warning/test identity.
 
 use super::common::*;
 

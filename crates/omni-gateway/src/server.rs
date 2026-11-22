@@ -1,6 +1,5 @@
-//! The HTTP surface (`app.ts` + `routes/proxy.ts` + `routes/models.ts`):
-//! `/health`, the three inference routes, `count_tokens`, `/v1/models`, and
-//! TS's 404 for everything else.
+//! The HTTP surface: `/health`, the three inference routes, `count_tokens`,
+//! `/v1/models`, and the fixed 404 for everything else.
 //!
 //! hyper 1 serves HTTP/1.1 directly; routing is a match on method and path.
 
@@ -32,7 +31,7 @@ use crate::dispatch::{self, Deps};
 use crate::finish::Finisher;
 use crate::telemetry::WriterRefusal;
 
-/// The `/v1/*` request-body limit (spec: at least several MiB; TS has none).
+/// The `/v1/*` request-body limit (spec: at least several MiB).
 pub const BODY_LIMIT: usize = 32 * 1024 * 1024;
 
 pub type Body = UnsyncBoxBody<Bytes, std::io::Error>;
@@ -405,7 +404,7 @@ impl App {
     pub(crate) fn routing_committed(&self, change: crate::routing::RoutingChange) {
         self.deps.refresher.routing_committed(change);
     }
-    /// `reportCatalogProblem`: `provider catalog repaired`, once per
+    /// `provider catalog repaired`, once per
     /// distinct `field provider` per process.
     pub fn report_catalog_problems(&self, problems: Vec<omni_control::api::CatalogProblem>) {
         if problems.is_empty() {
@@ -475,7 +474,8 @@ fn error_response(
     json_response(e.code.http_status(), APPLICATION_JSON, body, headers)
 }
 
-/// Elysia's 404 for an unmatched GET (the `/*` catch-all with no dashboard).
+/// The exact 404 body for an unmatched GET (the `/*` catch-all with no
+/// dashboard) — clients depend on it; pinned by `tests/server.rs`.
 pub(crate) fn not_found_get(path: &str) -> Response<Body> {
     let mut body = String::from("{\"error\":{\"code\":\"NOT_FOUND\",\"message\":");
     omni_ir::jsjson::write_str(&format!("no route for {path}"), &mut body);
@@ -483,7 +483,7 @@ pub(crate) fn not_found_get(path: &str) -> Response<Body> {
     json_response(404, JSON_UTF8, body, &[])
 }
 
-/// Elysia's 404 for any other unmatched method.
+/// The plain-text 404 for any other unmatched method — a wire contract.
 fn not_found_other() -> Response<Body> {
     let mut res = Response::new(full("NOT_FOUND"));
     *res.status_mut() = StatusCode::NOT_FOUND;
@@ -496,14 +496,14 @@ fn not_found_other() -> Response<Body> {
 
 /// Routes one request.
 ///
-/// Routes match `new URL(request.url).pathname`, as Elysia's do: dot
+/// Routes match the URL-normalized pathname: dot
 /// segments (and their `%2e` spellings) resolved and the path encode set
 /// applied. A plain path (every `/v1/*` call a client makes) skips
-/// normalization; the one copy below is the same `to_owned` the router made
-/// before normalization existed, needed because handlers take `req` by value.
+/// normalization; the one copy below is needed because handlers take `req`
+/// by value.
 pub(crate) fn route_path(raw: &str) -> std::borrow::Cow<'_, str> {
     let mut path = crate::static_files::pathname(raw);
-    // Elysia matches a route with one trailing slash as the route itself.
+    // A route with one trailing slash matches as the route itself.
     if path.len() > 1 && path.ends_with('/') && !path.ends_with("//") {
         let len = path.len() - 1;
         path.to_mut().truncate(len);
@@ -582,7 +582,7 @@ async fn handle_admitted(
     let path = crate::static_files::pathname(req.uri().path()).into_owned();
     let route = route_path(req.uri().path());
     let method = req.method().clone();
-    // Bun refuses a declared body over `maxRequestBodySize` before routing,
+    // A declared body over 128 MiB is refused with 413 before routing,
     // on every route but `/v1/*` (whose own limit is stricter).
     if !route.starts_with("/v1/") && crate::api::declares_oversized_body(&req) {
         return Ok(crate::api::payload_too_large());
@@ -617,7 +617,7 @@ async fn handle_admitted(
     Ok(res)
 }
 
-/// `date: <IMF-fixdate>` as Bun writes it on every response but a HEAD's,
+/// `date: <IMF-fixdate>` on every response but a HEAD's,
 /// formatted once per second per thread.
 fn stamp_date(res: &mut Response<Body>) {
     thread_local! {
@@ -660,14 +660,14 @@ fn is_plugin_api(route: &str) -> bool {
 }
 
 /// `/plugin-assets/:id/*` (a non-empty id, then a slash): with no plugin
-/// loaded, TS answers every such path its own 404.
+/// loaded, every such path answers the fixed asset 404.
 fn is_plugin_asset(path: &str, _route: &str) -> bool {
     path.strip_prefix("/plugin-assets/")
         .and_then(|rest| rest.split_once('/'))
         .is_some_and(|(id, _)| !id.is_empty())
 }
 
-/// `pluginUiRoutes`' `notFound()` for an id no plugin has.
+/// The fixed 404 for an id no plugin has.
 fn plugin_asset_not_found() -> Response<Body> {
     json_response(
         404,
@@ -690,14 +690,14 @@ fn plugins_unsupported() -> Response<Body> {
 
 /// `GET /metrics`: `authorization` must be exactly `Bearer <token>`,
 /// compared in constant time over equal lengths (the length itself is not
-/// secret, as in TS); anything else is a bare 401.
+/// secret); anything else is a bare 401.
 fn metrics(app: &App, req: &Request<Incoming>) -> Response<Body> {
     let Some(token) = &app.metrics_token else {
         return not_found_get(req.uri().path());
     };
     let supplied = header(req, "authorization").unwrap_or_default();
     let expected = format!("Bearer {token}");
-    // `timingSafeEqual` after a length check, as TS.
+    // Constant-time comparison after a length check.
     let ok = omni_crypto::ct_eq(supplied.as_bytes(), expected.as_bytes());
     if !ok {
         let mut res = Response::new(full(Bytes::new()));
@@ -856,7 +856,7 @@ async fn bench_flush(app: &App) -> Response<Body> {
 }
 
 /// WHATWG `Headers.get`: every value of `name`, HTTP whitespace trimmed,
-/// joined with `", "`. Non-UTF-8 bytes are read as Latin-1, as Bun does.
+/// joined with `", "`. Non-UTF-8 bytes are read as Latin-1.
 fn header(req: &Request<Incoming>, name: &str) -> Option<String> {
     let mut out: Option<String> = None;
     for v in req.headers().get_all(name) {
@@ -873,7 +873,7 @@ fn header(req: &Request<Incoming>, name: &str) -> Option<String> {
     out
 }
 
-/// `authenticateApiKey(apiKeyHeader(headers), now)` against the snapshot,
+/// API-key authentication against the snapshot,
 /// falling back to one guarded read for a key the snapshot does not hold.
 async fn authenticate(
     app: &App,
@@ -951,11 +951,11 @@ fn body_error(e: &(dyn std::error::Error + 'static)) -> GatewayError {
     }
 }
 
-/// `await request.json()`'s text: the body read under the limit (enforced
+/// The request body as text: read under the limit (enforced
 /// while reading) with at most `idle` between frames, decoded as UTF-8 with
 /// replacement and a leading BOM stripped. A body that goes quiet for `idle`
-/// ends the request; the connection task then closes the socket, as Bun's
-/// `idleTimeout` does.
+/// ends the request; the connection task then closes the socket (the idle
+/// timeout).
 async fn read_body(req: Request<Incoming>, idle: Duration) -> Result<String, GatewayError> {
     let mut body = Limited::new(req.into_body(), BODY_LIMIT);
     let mut bytes = bytes::BytesMut::new();
@@ -1036,8 +1036,8 @@ fn headers_of(req: &Request<Incoming>) -> Headers {
     h
 }
 
-/// `ingest`, with TS's answer for a body `JSON.parse` refuses: 500 INTERNAL
-/// carrying JavaScriptCore's own message.
+/// `ingest`, with the fixed answer for an unparseable body: 500 INTERNAL
+/// carrying the JavaScriptCore-style parse message (see [`crate::jsc_json`]).
 fn ingest_body(
     surface: Surface,
     body: &str,
@@ -1233,7 +1233,7 @@ async fn prepare_proxy(
     }
 }
 
-/// `handle` in `routes/proxy.ts`.
+/// One inference request, end to end.
 #[allow(clippy::too_many_lines)]
 async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Response<Body> {
     let now = app.deps.now;
@@ -1340,12 +1340,12 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
         let lone = ingested.model_lone.as_deref();
         omni_dialects::ingress::check_model_allowed(&chat.model, key.allows(&chat.model, lone))?;
         fin.requested_model = chat.model.clone();
-        // A model holding a lone surrogate the key admits: TS throws its
-        // URIError building the model's rate-limit subject, at admission
-        // where an override names it, else at the completion's debit after
-        // dispatch. Refused here instead, before anything is claimed or sent
-        // upstream (a documented divergence; see the A5 report). The row's
-        // completion debits the key-wide subject only, as TS's does.
+        // A model holding a lone surrogate the key admits: building its
+        // rate-limit subject fails with a URIError, at admission where an
+        // override names it, else at the completion's debit after dispatch.
+        // Refused here instead, before anything is claimed or sent upstream
+        // (a documented hardening; see the A5 report). The row's completion
+        // debits the key-wide subject only.
         if lone.is_some() {
             fin.model_unencodable = true;
             return Err(omni_dialects::ingress::lone_surrogate_model_error());
@@ -1561,7 +1561,7 @@ async fn proxy(app: Arc<App>, surface: Surface, req: Request<Incoming>) -> Respo
 
     match outcome {
         Ok(res) => res,
-        // Bun closes the socket: no answer, and the row reads as a hang-up.
+        // The socket closes: no answer, and the row reads as a hang-up.
         Err(e) if is_body_idle(&e) => {
             drop(fin);
             hang_up()
@@ -2077,7 +2077,7 @@ mod reservation_tests {
     }
 }
 
-/// `sseResponse`: frames into one reused buffer, `: keepalive` while idle,
+/// The SSE body: frames into one reused buffer, `: keepalive` while idle,
 /// and the row completed exactly once — at the end, on a break, or (through
 /// the finisher's `Drop`) when the client hangs up and the body is dropped.
 fn sse_body(
@@ -2090,7 +2090,7 @@ fn sse_body(
     let stream = async_stream::stream! {
         let mut buf = String::with_capacity(1024);
         // The first non-empty frame goes out alone, so `settle` still sees
-        // one frame exactly when TS's stream had one.
+        // one frame exactly when the stream had one.
         let mut sent_first = false;
         // An item pulled while coalescing that is not an event: handled by
         // the next loop turn, after the coalesced frame went out.
@@ -2176,8 +2176,8 @@ fn sse_body(
     http_body_util::BodyExt::boxed_unsync(StreamBody::new(stream))
 }
 
-/// Bun sends a stream body of one frame that is already complete when the
-/// head is written with `content-length`; two or more frames are chunked.
+/// A stream body of one frame that is already complete when the head is
+/// written goes out with `content-length`; two or more frames are chunked.
 /// So this pulls at most two frames without waiting: one frame and the end
 /// answers with a fixed length, anything else streams on unchanged (the
 /// frames already pulled first, in order). At most two frames are held.
@@ -2221,7 +2221,7 @@ async fn count_tokens(app: Arc<App>, req: Request<Incoming>) -> Response<Body> {
             key.allows(&chat.model, lone.as_deref()),
         )?;
         // `consume` builds the model's subject only where an override names
-        // it, and TS's URIError comes from exactly there; a lone-surrogate
+        // it, and the URIError comes from exactly there; a lone-surrogate
         // model no override names is judged against the key-wide limits.
         let key_wide;
         let limits = match lone.as_deref() {
@@ -2245,7 +2245,7 @@ async fn count_tokens(app: Arc<App>, req: Request<Incoming>) -> Response<Body> {
                 );
                 r.to_gateway_error()
             })?;
-        // The ponytail ruleset defaults off and is not ported.
+        // The ponytail ruleset defaults off and is not implemented.
         Ok(omni_ir::tokens::estimate_input_tokens(&chat))
     }
     .await;
@@ -2298,7 +2298,7 @@ async fn models(app: &App, req: &Request<Incoming>) -> Response<Body> {
         Err(e) => {
             tracing::error!(status = e.code.http_status(), code = e.code.as_str(),
                 reason = %e.message, "model listing failed");
-            // These two auth diagnostics are produced verbatim by frozen TS.
+            // These two auth diagnostics are byte-stable wire strings.
             // Other internal errors (notably strict SQLite reader failures)
             // must not expose Rust table/column/storage-class details.
             let frozen_diagnostic = e.message.starts_with("JSON Parse error: ")

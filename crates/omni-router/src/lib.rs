@@ -1,4 +1,4 @@
-//! Candidate ranking, ported from `packages/router/src`.
+//! Candidate ranking.
 //!
 //! Pure: no I/O and no clock. `now` and `rand` are parameters, so a ranking
 //! is reproducible from its inputs alone. The router reads credentials from

@@ -1,5 +1,5 @@
-//! The JavaScript coercions the TS decoders lean on, pinned against values
-//! measured with bun 1.4.4.
+//! The JavaScript coercions the decoders lean on, pinned against measured
+//! ECMAScript semantics.
 
 use omni_ir::js;
 use serde_json::{Value, json};
@@ -89,7 +89,7 @@ fn utf16_helpers() {
             assert_eq!(js::utf16_len(&s), s.encode_utf16().count(), "{piece} x {n}");
         }
     }
-    // A cut through a pair keeps the half as U+FFFD: what the TS string
+    // A cut through a pair keeps the half as U+FFFD: what the JS string
     // (which keeps the lone surrogate) becomes when converted lossily.
     assert_eq!(js::utf16_prefix("ab😀c", 3), "ab\u{fffd}");
     assert_eq!(js::utf16_prefix("ab😀c", 4), "ab😀");

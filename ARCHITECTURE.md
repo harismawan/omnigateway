@@ -3,11 +3,10 @@
 How OmniGateway is put together, for contributors and design auditors. [How it is
 built](#how-it-is-built) has the crate map and layering rules; the rest of this document
 details what sits behind them. Conventions that govern changes — boundaries, testing, traps —
-are in [CLAUDE.md](CLAUDE.md). Approved designs live in `docs/superpowers/specs/`; they name the
-0.x TypeScript code as it was, which is on the `bun-checkpoint` branch.
+are in [CLAUDE.md](CLAUDE.md). Approved designs live in `docs/superpowers/specs/`.
 
-Narrower Rust references: [Rust quota runtime](docs/rust-quota-runtime.md), [Rust CLI service
-boundary](docs/rust-cli-service.md), [cluster cutover](docs/rust-cluster-cutover.md).
+Narrower references: [quota runtime](docs/rust-quota-runtime.md), [CLI service
+boundary](docs/rust-cli-service.md), [cluster bucket sweep](docs/rust-cluster-bucket-sweep.md).
 
 ## Contents
 
@@ -154,8 +153,7 @@ sequenceDiagram
 The request path performs no store read. Keys, models, credentials (with secrets already
 decrypted), health, quota and settings are one `Arc<GatewaySnapshot>` behind an `ArcSwap`
 (`omni-gateway-core/src/snapshot.rs`); a request loads it once. A key not yet in the snapshot is
-looked up by one guarded store read (`miss.rs`: negative cache, read budget). This differs from
-0.x, which decrypted lazily per purpose.
+looked up by one guarded store read (`miss.rs`: negative cache, read budget).
 
 The log row opens on the first routed attempt (`LogEvent::Begin`) and closes exactly once: a
 `Finisher` (`finish.rs`) sends `Finish`, and if dropped unsent — the client hung up — sends the
@@ -227,11 +225,11 @@ store and debited by every completed request **after its row commits**: the writ
 batch's completions and runs seed reads on its own connection between batches, on one ordered
 channel (`ratelimit_seed.rs`), so a row is counted by the seed or by its debit, never both and
 never neither. Seeding does not block: an unseeded window admits against what can be checked
-(deliberate difference from 0.x, documented in `ratelimit.rs`). A refusal's exact reset is read
+(deliberate, documented in `ratelimit.rs`). A refusal's exact reset is read
 from the row stamps the seed loaded, so no store read precedes a 429.
 
 **Concurrency release is structural.** The single-node gauge is freed when the `Admission` is
-dropped, so the leak 0.x healed with a TTL cannot happen; the cluster gauge does need TTL and
+dropped, so the gauge cannot leak; the cluster gauge does need TTL and
 renewal (see [Clustering](#clustering)).
 
 **Per-model overrides stack, judged in one admission.** `limits.models` gives one requested model
@@ -648,8 +646,8 @@ and doctor are described in [Rust CLI service boundary](docs/rust-cli-service.md
 
 Not supported in 1.x. `<root>/plugins/` entries are warned about once at boot and never loaded;
 `/api/plugins*` answers 501, `/plugin-assets/<id>/*` 404; `omni plugin *` exits 1; doctor reports
-plugin directories without running them. Plugin tables in a restored 0.x database are left in
-place. The 0.x plugin host and its design are on `bun-checkpoint`.
+plugin directories without running them. Plugin tables in a restored database are left in
+place.
 
 ## Clustering
 
@@ -703,17 +701,17 @@ fails. Pins: `crates/omni-coord/tests/faults.rs`, `crates/omni-cluster-limit/tes
 Cluster gauge slots **expire while their holder is live**, so a long request names its slot (a
 random uuid per admission, never `requestId` — a named acquire is idempotent) and renews it on a
 timer, capped at `MAX_RENEWED_MS` (a day) so a leaked slot still lapses. Probe slots are not
-renewed. Unseeded long windows admit while the seed lands (the one deliberate difference from 0.x).
+renewed. Unseeded long windows admit while the seed lands (deliberate).
 
 Committed key, credential, quota and health changes publish row identities on the `routing`
 topic (`routing.rs`); the receiver reads current primary state and patches its snapshot, and a
 500 ms version poll repairs missed publications. PG inference reserves bounded writer capacity
 before admission (4 s deadline, which also revalidates the key and screening settings against the
 primary); a full queue returns the surface's overload response without dispatch. Under pressure
-only optional `Begin`/`Route` events are shed — unlike 0.x, which awaited them, so an overloaded
+only optional `Begin`/`Route` events are shed, so an overloaded
 replica's console may miss a pending row. Shutdown drains writer, commit consumer, limiter, then
-coordinator. A lineage change needs the [offline bucket sweep](docs/rust-cluster-cutover.md)
-(`omnigateway cluster-cutover-sweep`).
+coordinator. A lineage change needs the [offline bucket sweep](docs/rust-cluster-bucket-sweep.md)
+(`omnigateway cluster-bucket-sweep`).
 
 Console reads address a process: `stream:console` merges every replica's lines,
 `stream:console:<nodeId>` is one; `GET /api/nodes` lists the live ones; `node=all` shares one
@@ -726,4 +724,4 @@ Design: `docs/superpowers/specs/2026-09-02-horizontal-scaling-design.md`.
 OAuth flows may store a normalized, public `providerData.modelCatalog` snapshot. `omni-control`
 (`api.rs`, `public_rows`) merges those rows into `/api/catalog` without mutating the static
 catalog, decrypting secrets or calling upstream. Unknown pricing is null; absent limits stay
-unknown. Qoder, which used this most, is not served in 1.x ([Qoder](docs/qoder.md) describes 0.x).
+unknown. Qoder, which used this most, is not served in 1.x (see [Qoder](docs/qoder.md)).

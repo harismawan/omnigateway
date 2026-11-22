@@ -1,22 +1,21 @@
-//! The JavaScript coercions the TS codecs perform on untrusted JSON.
+//! The JavaScript coercions the codecs perform on untrusted JSON.
 //!
-//! The TS decoders read upstream payloads typed as `unknown` and coerce them
-//! with `String(x)`, `Number(x)`, truthiness and `JSON.parse`. A port that
-//! narrowed those to "the type the field should have" would decode a sloppy
+//! The decoders read upstream payloads as untyped JSON and coerce them
+//! with `String(x)`, `Number(x)`, truthiness and `JSON.parse`. Narrowing
+//! those to "the type the field should have" would decode a sloppy
 //! upstream differently, so each coercion here is the ECMAScript one, applied
 //! to a [`serde_json::Value`]. `None` stands for `undefined`.
 //!
-//! # Known differences from TS
+//! # Known deviations from ECMAScript semantics
 //!
 //! - **Lone surrogates** become U+FFFD. JS strings can hold a lone surrogate
-//!   (a `\udXXX` escape in JSON, or a slice cutting a pair) and TS re-escapes
-//!   it as `\udXXX` on output; a Rust `String` cannot hold one. Only
+//!   (a `\udXXX` escape in JSON, or a slice cutting a pair) and `JSON.stringify`
+//!   re-escapes it as `\udXXX` on output; a Rust `String` cannot hold one. Only
 //!   malformed client or upstream input reaches this, and the cost is a
-//!   prompt-cache key that differs from the TS gateway's for that input.
+//!   different prompt-cache key for that input.
 //! - **`Number()` coercion of usage counts.** The decoders coerce upstream
-//!   usage counts to numbers; TS does arithmetic on whatever arrived, so a
-//!   non-numeric string count passes through TS as a string where Rust has a
-//!   number (or NaN, rendered `null`).
+//!   usage counts to numbers; a non-numeric string count becomes a number
+//!   (or NaN, rendered `null`).
 //! - **Retry-After dates** (in `omni-providers`): the loose free-form date
 //!   strings JavaScriptCore's `Date.parse` accepts are not parsed; the HTTP,
 //!   RFC 2822 and ISO 8601 forms are.
@@ -251,7 +250,7 @@ pub fn utf16_len(s: &str) -> usize {
 /// `string.slice(0, units)`.
 ///
 /// A cut through a surrogate pair leaves the high half, which a Rust string
-/// cannot hold, so it becomes U+FFFD — what the TS string turns into the moment
+/// cannot hold, so it becomes U+FFFD — what a JS string turns into the moment
 /// it is encoded as UTF-8 anywhere.
 pub fn utf16_prefix(s: &str, units: usize) -> std::borrow::Cow<'_, str> {
     let mut used = 0;
@@ -275,7 +274,7 @@ pub fn utf16_prefix(s: &str, units: usize) -> std::borrow::Cow<'_, str> {
 /// One deliberate difference: JS keeps a lone surrogate escape (`"\ud83d"`) as
 /// a lone surrogate, which a Rust `String` cannot hold, and `serde_json` refuses
 /// it — dropping the whole payload. Each lone escape becomes U+FFFD instead,
-/// which is what the TS string becomes as soon as it is encoded as UTF-8.
+/// which is what the JS string becomes as soon as it is encoded as UTF-8.
 pub fn parse_json(text: &str) -> Option<Value> {
     match serde_json::from_str(text) {
         Ok(v) => Some(v),
@@ -377,8 +376,8 @@ pub fn object_assign(target: &mut serde_json::Map<String, Value>, source: Option
     }
 }
 
-/// `safeToken` (`packages/ir/src/logger.ts`): a client-supplied token an
-/// error message may quote, or `(unprintable)`. 1–64 of `[A-Za-z0-9_.:/+-]`.
+/// A client-supplied token an error message may quote, or `(unprintable)`.
+/// 1–64 of `[A-Za-z0-9_.:/+-]`.
 pub fn safe_token(value: &str) -> &str {
     let ok = (1..=64).contains(&value.len())
         && value

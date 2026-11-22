@@ -1,11 +1,10 @@
-//! Routing and retention settings, read as `getSettings` in
-//! `packages/store/src/sqlite/config.ts` reads them.
+//! Routing and retention settings: the merged object and its typed fields.
 //!
-//! `json` is the object TS returns, built by the same spread: the defaults,
+//! `json` is the object the gateway serves, built by one spread: the defaults,
 //! then every stored key on top (unknown keys included, with whatever value
-//! they hold), then the fields TS re-validates. `JSON.stringify` of it equals
-//! TS's byte for byte. The typed fields are read from `json`; a field TS does
-//! not re-validate and that holds a non-number reads as its default.
+//! they hold), then the re-validated fields. Its `JSON.stringify` bytes are
+//! the byte-stable wire format. The typed fields are read from `json`; a field
+//! that is not re-validated and holds a non-number reads as its default.
 
 use crate::error::StoreError;
 use crate::js;
@@ -53,7 +52,7 @@ pub fn default_settings_json() -> Value {
     })
 }
 
-/// `PonytailMode`.
+/// The ponytail mode setting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PonytailMode {
     Off,
@@ -63,7 +62,7 @@ pub enum PonytailMode {
 }
 
 impl PonytailMode {
-    /// `isPonytailMode`, mapping anything else to `Off`.
+    /// Recognised mode strings only; anything else becomes `Off`.
     fn read(value: Option<&Value>) -> Option<Self> {
         match value?.as_str()? {
             "off" => Some(Self::Off),
@@ -75,7 +74,7 @@ impl PonytailMode {
     }
 }
 
-/// `ScoringWeights`.
+/// The router's scoring weights.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScoringWeights {
     pub tier: f64,
@@ -86,7 +85,7 @@ pub struct ScoringWeights {
     pub load: f64,
 }
 
-/// `Settings`. Numbers are JS numbers.
+/// The typed settings. Numbers are JS numbers.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     pub weights: ScoringWeights,
@@ -112,7 +111,7 @@ pub struct Settings {
     pub smart_router_local_model: Option<String>,
     pub smart_router_policy: String,
     pub smart_router_timeout_ms: f64,
-    /// The whole object as TS returns it, unknown stored keys included.
+    /// The whole merged object, unknown stored keys included.
     pub json: Value,
 }
 
@@ -123,13 +122,13 @@ fn default_of(key: &str) -> Value {
         .unwrap_or(Value::Null)
 }
 
-/// `inRange`: an integer inside `1..=max`.
+/// An integer inside `1..=max`.
 fn in_range(value: Option<&Value>, max: f64) -> Option<f64> {
     let n = value?.as_f64()?;
     (js::is_integer(n) && (1.0..=max).contains(&n)).then_some(n)
 }
 
-/// `modelOrNull` / the guardrail model rule: a string that is not blank,
+/// The guardrail model rule: a string that is not blank,
 /// kept untrimmed.
 fn model_or_null(value: Option<&Value>) -> Value {
     match value {
@@ -142,7 +141,7 @@ fn exactly_true(value: Option<&Value>) -> bool {
     value == Some(&Value::Bool(true))
 }
 
-/// `knownWeights`: only the weights the router still scores, each a finite
+/// Only the weights the router still scores, each a finite
 /// number or its default.
 fn known_weights(stored: Option<&Value>) -> Value {
     let defaults = default_of("weights");
@@ -160,7 +159,7 @@ fn known_weights(stored: Option<&Value>) -> Value {
     Value::Object(out)
 }
 
-/// The object `getSettings` returns for a stored `settings` value.
+/// The settings object a stored `settings` value reads as.
 pub fn settings_json(raw: Option<&str>) -> Value {
     let Some(raw) = raw else {
         return default_settings_json();
@@ -215,7 +214,7 @@ pub fn settings_json(raw: Option<&str>) -> Value {
         Value::Bool(exactly_true(get("bodyLoggingCaptureStreamChunks"))),
     );
     set("weights", known_weights(get("weights")));
-    // `readGuardrailSettings`.
+    // The guardrail settings.
     set("guardrailModel", model_or_null(get("guardrailModel")));
     let ranged = |k: &str, max: f64| match in_range(get(k), max) {
         Some(_) => get(k).cloned().unwrap_or(Value::Null),
@@ -229,7 +228,7 @@ pub fn settings_json(raw: Option<&str>) -> Value {
         "guardrailHistoryTurns",
         ranged("guardrailHistoryTurns", GUARDRAIL_HISTORY_TURNS_MAX),
     );
-    // `readSmartRouterSettings`.
+    // The smart-router settings.
     set(
         "smartRouterEnabled",
         Value::Bool(exactly_true(get("smartRouterEnabled"))),
@@ -265,7 +264,7 @@ pub fn settings_json(raw: Option<&str>) -> Value {
 }
 
 impl Settings {
-    /// The typed view of a `getSettings` object.
+    /// The typed view of the settings object.
     pub fn from_json(json: Value) -> Self {
         let defaults = default_settings_json();
         let num = |v: &Value, k: &str| {
@@ -322,7 +321,7 @@ impl Settings {
     }
 }
 
-/// `ConfigRepo.putSettings`: merge the validated patch and commit one row.
+/// The stored settings text, as written.
 pub fn operator_raw(conn: &Connection) -> Result<Option<String>, StoreError> {
     Ok(conn
         .query_row("SELECT value FROM settings WHERE key='settings'", [], |r| {
@@ -340,7 +339,7 @@ pub fn write_operator_raw(conn: &Connection, raw: &str) -> Result<(), StoreError
     Ok(())
 }
 
-/// `ConfigRepo.putSettings`: merge the validated patch and commit one row.
+/// Merge the validated patch and commit one row.
 pub fn put(conn: &Connection, patch: &Value) -> Result<Value, StoreError> {
     let (next, raw) = merged(get(conn)?.json, patch);
     conn.execute("INSERT INTO settings(key,value) VALUES ('settings',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [&raw])?;
@@ -348,7 +347,7 @@ pub fn put(conn: &Connection, patch: &Value) -> Result<Value, StoreError> {
 }
 
 /// `{ ...current, ...patch, weights: { ...current.weights, ...patch.weights } }`
-/// and its `JSON.stringify`, as `putSettings` stores it on either backend.
+/// and its `JSON.stringify`, as `put` stores it on either backend.
 pub(crate) fn merged(mut next: Value, patch: &Value) -> (Value, String) {
     if let (Some(current), Some(patch)) = (next.as_object_mut(), patch.as_object()) {
         for (key, value) in patch {
@@ -369,10 +368,10 @@ pub(crate) fn merged(mut next: Value, patch: &Value) -> (Value, String) {
     (next, raw)
 }
 
-/// `ConfigRepo.getSettings`.
+/// The stored settings row, merged over the defaults.
 pub fn get(conn: &Connection) -> Result<Settings, StoreError> {
-    // A non-text value (only a hand edit writes one) parses in TS to a
-    // non-object, which reads as the defaults; `None` here reads the same.
+    // A non-text value (only a hand edit writes one) is not a settings
+    // object and reads as the defaults; `None` here reads the same.
     let raw: Option<String> = conn
         .prepare_cached("SELECT value FROM settings WHERE key = ?")?
         .query_row(["settings"], |r| {

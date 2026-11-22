@@ -80,9 +80,9 @@ fn v7_like(n: u64, ms: u64) -> String {
 /// Which request ids a run mints.
 #[derive(Clone, Copy, Debug)]
 enum Ids {
-    /// `req_<uuid v4>`, as TS mints them.
+    /// `req_<uuid v4>`, the legacy random mint.
     V4,
-    /// `req_<uuid v7>`, as the Rust gateway mints them.
+    /// `req_<uuid v7>`, as the gateway mints them.
     V7,
 }
 

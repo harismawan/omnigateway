@@ -26,5 +26,5 @@
 -- substring miss plans as a parallel sequential scan with a sort on top and
 -- `idx_request_logs_at` is never opened. Measured at 500,000 rows, widening it
 -- cost 15MB to 58MB and a wider row per insert, and bought 0.25ms of 86ms. The
--- backends share the predicate in `logPage.ts`, not the index shape.
+-- backends share the log-page predicate (`logs.rs`), not the index shape.
 CREATE INDEX idx_request_logs_provider ON request_logs (resolved_provider, at DESC, id DESC);

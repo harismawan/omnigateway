@@ -1,7 +1,7 @@
 //! Fix round 1 (review `d3-review.md`, rulings I1/I2, I3, I5): seeding is
 //! one atomic install with a commit watermark, debits skip what a seed
 //! counted on any replica, storage is bounded, shutdown resolves seeds and
-//! held debits, and TS's per-debit float arithmetic is kept. RED evidence
+//! held debits, and the per-debit float arithmetic is kept. RED evidence
 //! for each (the reviewer's repros, on `18cbb555`):
 //! `/tmp/opencode/d3-fix1/red-18cbb555.log`.
 
@@ -139,8 +139,8 @@ async fn debits_racing_another_replicas_seed_count_exactly_once() {
 }
 
 /// I2 (the reviewer's repro): a counts hash without its companion — what
-/// TS's `BUCKETS_SEED` alone leaves, or a lost companion — is never judged
-/// as complete (TS's reset, not `now + window`), and a seed replaces it.
+/// a bare `BUCKETS_SEED` leaves, or a lost companion — is never judged
+/// as complete (the row-range reset, not `now + window`), and a seed replaces it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn counts_without_their_metadata_are_never_a_complete_picture() {
     let Some(base) = redis_base() else { return };
@@ -186,7 +186,7 @@ async fn counts_without_their_metadata_are_never_a_complete_picture() {
 
 /// I2: the install is one step — at no instant does a reader find counts
 /// without metadata. Admissions hammer the key while seeds install over and
-/// over; every refusal's reset is TS's (never `now + window`).
+/// over; every refusal's reset is the exact one (never `now + window`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn no_admission_ever_sees_a_half_installed_seed() {
     let Some(base) = redis_base() else { return };

@@ -1,7 +1,7 @@
 //! The fail-open per-process limiter, for when the server cannot answer.
 //!
-//! TS `ApiKeyRateLimiter`'s own per-step sequence run against D2's
-//! `MemoryCoord` (TS `memoryCoord`'s windows and gauges, reviewed): per
+//! The per-step sequence run against D2's
+//! `MemoryCoord`: per
 //! subject the `1m` claim and the named gauge acquire (or read, for a
 //! consume), judged, and on a refusal rolled back. Long windows are not
 //! enforced here: their shared picture is unreachable and the request path

@@ -1,4 +1,4 @@
-//! `Snapshot` and `healthKey` (`packages/router/src/snapshot.ts`, `types.ts`).
+//! `Snapshot` and `healthKey`.
 
 use omni_store::settings::Settings;
 use omni_store::{Credential, CredentialHealth, QuotaWindow, VirtualModel};

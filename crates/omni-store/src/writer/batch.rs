@@ -1,20 +1,19 @@
-//! One batch, written in one transaction, leaving exactly the rows the TS
-//! store would have left after running the same events one at a time.
+//! One batch, written in one transaction, leaving exactly the rows the same
+//! events run one at a time would leave.
 //!
 //! - **`request_logs`.** The rows the batch touches are read, the events are
-//!   replayed against them in memory with the TS statement semantics (`begin`
+//!   replayed against them in memory with the statement semantics (`begin`
 //!   is a plain INSERT that fails on an existing id, `route` updates only a
 //!   pending row, `append` is the `COMPLETE` claim), and each changed row is
 //!   written once in one multi-row upsert.
-//! - **Rollups.** Each completed row is folded, as `complete` does after
-//!   reading it back with `SELECT *`, into its `usage_daily` and
+//! - **Rollups.** Each completed row is folded into its `usage_daily` and
 //!   `usage_rollup` rows in completion order, starting from what those rows
 //!   held, with SQLite's arithmetic. Each rollup row is then written once. The
 //!   row folded is the one this batch just wrote, held in memory, not read
 //!   back (see [`Logs::completed_rows`]).
 //! - **Health.** The last row per (credential, model) wins, written with the
-//!   `UPSERT_HEALTH` statement. A row the foreign key refuses is skipped, as
-//!   the TS `updateHealth` throws and changes nothing.
+//!   `UPSERT_HEALTH` statement. A row the foreign key refuses is skipped,
+//!   changing nothing.
 
 use super::events::{
     BreakerTransition, Completion, HealthMeasurement, LogEvent, PendingLog, RequestLog, WriteEvent,
@@ -106,7 +105,7 @@ fn json_strings(items: &[String]) -> SqlValue {
     SqlValue::Text(omni_ir::jsjson::to_string(&array))
 }
 
-/// `usage.ts` `values(log, state, nodeId)`, bound as `bun:sqlite` binds it.
+/// One log row's cells in `LOG_COLUMNS` order, bound by the JS-number bind rule.
 fn log_values(log: &RequestLog, state: &str, node_id: &str) -> LogRow {
     let int = SqlValue::Integer;
     vec![
@@ -141,7 +140,7 @@ fn log_values(log: &RequestLog, state: &str, node_id: &str) -> LogRow {
     ]
 }
 
-/// `newPendingRequestLog`: placeholders everywhere but the routing fields.
+/// Placeholders everywhere but the routing fields.
 fn pending_log(p: &PendingLog) -> RequestLog {
     let mut log = RequestLog::new(p.id.clone(), p.at, 0);
     log.api_key_id.clone_from(&p.api_key_id);
@@ -205,7 +204,7 @@ impl Logs {
     fn apply(&mut self, event: &LogEvent, node_id: &str) {
         match event {
             // A plain INSERT: an id that already has a row makes it throw, and
-            // `beginLog` swallows that.
+            // a repeated begin swallows that.
             LogEvent::Begin(p) => {
                 let slot = self.slot(&p.id);
                 if slot.is_none() {
@@ -261,13 +260,13 @@ impl Logs {
     }
 
     /// The completed rows, in completion order, as this batch stored them:
-    /// what `complete` reads back with `SELECT *` before rolling up, without
+    /// what a `SELECT *` read-back before rolling up would return, without
     /// the read. The upsert sets every column to the row held here, and a
     /// completed row is never changed again within the batch. Every cell is
     /// either one read from the table or one bound from the event, and a bound
     /// cell reads back as the same JS number or string (an integral
     /// `cost_usd` bound as an INTEGER reads back as the equal REAL, and
-    /// `log_values` never binds a `-0`). The TS comparison test holds the two
+    /// `log_values` never binds a `-0`). `tests/writer.rs` holds the two
     /// to the same rows.
     fn completed_rows_by_id(&self) -> impl Iterator<Item = (&String, &LogRow)> {
         self.completed
@@ -333,7 +332,7 @@ impl Rollup {
         }
     }
 
-    /// `x = x + excluded.x` for every counter, as the TS upsert does once per
+    /// `x = x + excluded.x` for every counter, once per
     /// request, against the row as it stood.
     fn add(
         &mut self,
@@ -414,14 +413,14 @@ impl Rollup {
     }
 }
 
-/// A stored cell as the JS value `toLog` hands the rollup, bound back.
+/// A stored cell as the JS number the rollup consumes, bound back.
 fn cell_number(v: &SqlValue, column: &str) -> Result<Num, StoreError> {
     let n = js::number(ValueRef::from(v))
         .ok_or_else(|| StoreError::Corrupt(format!("request_logs.{column} is not a number")))?;
     Ok(Num::bound(n))
 }
 
-/// `log.x ?? ""` for a key column.
+/// NULL reads as the empty string for a key column.
 fn or_empty(v: &SqlValue) -> SqlValue {
     match v {
         SqlValue::Null => SqlValue::Text(String::new()),
@@ -437,7 +436,7 @@ fn column(row: &[SqlValue], name: &str) -> Result<SqlValue, StoreError> {
         .ok_or_else(|| StoreError::Corrupt(format!("request_logs has no {name}")))
 }
 
-/// `rollupLog` and `rollupHour` for one stored row.
+/// The daily and hourly rollup folds for one stored row.
 fn roll_up(
     tx: &Transaction<'_>,
     daily: &mut Rollup,
@@ -492,7 +491,7 @@ fn roll_up(
 }
 
 /// `UPSERT_HEALTH` for a measurement: the two measured columns only. The
-/// inserted row's state is `blankHealth`'s.
+/// inserted row's state is a blank, closed breaker.
 const UPSERT_MEASUREMENT: &str = "INSERT INTO credential_health
    (credential_id, model, breaker_state, consecutive_failures, opened_at,
     rate_limited_until)
@@ -502,7 +501,7 @@ const UPSERT_MEASUREMENT: &str = "INSERT INTO credential_health
    rate_limited_until = excluded.rate_limited_until";
 
 /// Applies one health statement; a foreign-key refusal (no such credential)
-/// is what `updateHealth` throws on and writes nothing for, so it undoes only
+/// is a refusal of the write's values and writes nothing, so it undoes only
 /// itself and is counted.
 fn health_statement(
     tx: &Transaction<'_>,

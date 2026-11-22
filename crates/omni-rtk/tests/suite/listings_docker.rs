@@ -1,4 +1,5 @@
-//! `packages/rtk/test/listings-docker.test.ts`.
+//! Regression suite: tree/long-listing/docker compression and their origin
+//! gates.
 
 use super::common::*;
 

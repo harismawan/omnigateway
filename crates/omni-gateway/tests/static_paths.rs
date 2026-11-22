@@ -32,7 +32,7 @@ fn content_types_are_the_frozen_runtime_table() {
         n += 1;
     }
     assert!(n > 1000);
-    // `extension()` edge cases, as Bun's `bun_paths::extension` defines them.
+    // `extension()` edge cases (a dot-leading basename has no extension).
     for (name, ty) in [
         ("/r/noext", unknown.as_str()),
         ("/r/.hidden", unknown.as_str()),
@@ -54,10 +54,10 @@ fn content_types_are_the_frozen_runtime_table() {
 
 use omni_gateway::static_files::{Decision, decide};
 
-/// A2 fix round 1 (I1, a documented security divergence from TS): the SPA
+/// A2 fix round 1 (I1, a documented security hardening): the SPA
 /// fallback's `index.html` is canonicalized and contained exactly like a
 /// requested file. A root whose `index.html` links outside answers 404 for a
-/// missing navigation route, where frozen TS serves the outside file.
+/// missing navigation route — the outside file is never served.
 #[test]
 fn spa_fallback_index_must_stay_inside_the_root() {
     let dir = tempfile::tempdir().expect("tmp");
@@ -88,10 +88,10 @@ fn spa_fallback_index_must_stay_inside_the_root() {
     }
 }
 
-/// A2 I2, ruling "keep TS parity": only `/api` and `/v1` are refused before
-/// disk. `/metrics` with no token, `/metrics/x` and `/health/x` are dashboard
-/// paths like any other, so a navigation request gets the SPA index and a
-/// file with that name is served, as frozen TS does.
+/// A2 I2, ruling "keep the wire behavior": only `/api` and `/v1` are refused
+/// before disk. `/metrics` with no token, `/metrics/x` and `/health/x` are
+/// dashboard paths like any other, so a navigation request gets the SPA index
+/// and a file with that name is served.
 #[test]
 fn reserved_route_names_are_dashboard_paths_as_in_ts() {
     let dir = tempfile::tempdir().expect("tmp");

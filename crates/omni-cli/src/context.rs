@@ -20,7 +20,7 @@ fn absolute(base: &Path, value: &str) -> PathBuf {
     out
 }
 /// `createContext`: installation root, database path and deferred config.
-/// Resolving prints the ambient-database warning, as TS does before a command
+/// Resolving prints the ambient-database warning before a command
 /// runs; opening the store is a separate, later step.
 pub struct Context {
     pub root_source: &'static str,

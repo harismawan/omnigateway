@@ -1,4 +1,4 @@
-//! Responses-lite assembly. Positional provenance mirrors the frozen WeakMaps.
+//! Responses-lite assembly, with positional provenance in place of WeakMap identity.
 #![allow(dead_code)] // Connected by the OAuth wire builder in the next checkpoint.
 use omni_crypto::codex;
 use omni_ir::{deep, js, jsjson};

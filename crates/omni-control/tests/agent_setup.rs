@@ -1,5 +1,4 @@
-//! Reader contract from frozen `packages/control/src/setup.ts` and
-//! `apps/gateway/test/routes/admin.test.ts` at 1780bb39.
+//! Reader contract for `omni_control::setup::agent_setup`.
 use omni_control::setup::agent_setup;
 use omni_store::SqliteStore;
 use serde_json::{Value, json};

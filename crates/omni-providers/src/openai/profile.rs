@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::OnceLock};
 static ENV: OnceLock<HashMap<String, String>> = OnceLock::new();
-/// Capture the profile before serving requests, like the frozen module import.
+/// Capture the profile before serving requests.
 pub(super) fn initialize() {
     let _ = raw("OMNI_OPENAI_CLI_VERSION");
 }

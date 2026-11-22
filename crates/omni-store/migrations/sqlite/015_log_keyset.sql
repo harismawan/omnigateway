@@ -17,7 +17,7 @@
 -- The key and credential indexes are the two scoped reads that must stay
 -- bounded. `api_key_id` is every client page and every scoped operator read,
 -- and it is also the sliding-window limiter's edge scan, which runs on the
--- request hot path. `credential_id` is `lastUsedByCredential` — one seek to a
+-- request hot path. `credential_id` is `last_used_by_credential` — one seek to a
 -- head — and the account investigation an operator reaches for first.
 --
 -- Deliberately no index for `provider`, `resolved_model`, `state` or

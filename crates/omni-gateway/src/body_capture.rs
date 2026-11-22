@@ -1,4 +1,4 @@
-//! Request-local capture primitives, following frozen `bodyCapture.ts`.
+//! Request-local capture primitives.
 //! No headers enter this API. Collection is opt-in; the route must not create
 //! a collector or decorate its transport when any capture gate is closed.
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -14,7 +14,7 @@ pub struct CaptureCompletion {
 
 impl CaptureCompletion {
     pub fn frame(&mut self, frame: &str) {
-        // Frozen sseResponse calls onFrame before appending the wire delimiter.
+        // onFrame runs before the wire delimiter is appended.
         for frame in frame.split("\n\n") {
             if !frame.is_empty() {
                 self.sink.write(frame);
@@ -347,7 +347,7 @@ impl Collector {
         let capture_frames = s.capture_stream_chunks;
         let a = &mut s.attempts[index];
         a.truncated |= failed;
-        // Frozen catch does not flush an incomplete decoder suffix.
+        // A failed attempt does not flush an incomplete decoder suffix.
         if !failed {
             a.decoder.decode(&[], true, &mut a.response);
         }

@@ -70,7 +70,7 @@ fn exercise(case: &str) {
                 }
                 "format_schema" => {
                     // Arbitrary data under a shallow schema, not 40k schema
-                    // steps (which TS's separate schema-depth policy rejects).
+                    // steps (the separate schema-depth policy rejects those).
                     let mut schema = serde_json::Map::new();
                     deep::insert(&mut schema, "default".into(), value);
                     let mut spec = serde_json::Map::new();

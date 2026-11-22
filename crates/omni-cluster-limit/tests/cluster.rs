@@ -482,7 +482,7 @@ async fn preseed_covers_every_subject() {
     );
 }
 
-/// A slot held past its TTL is renewed (TS `RENEW_INTERVAL_MS`), so a long
+/// A slot held past its TTL is renewed (`RENEW_INTERVAL`), so a long
 /// request keeps its `concurrency: 1` ceiling; once released the key is
 /// free, and renewal never resurrects a released slot.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

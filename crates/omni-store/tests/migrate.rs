@@ -1,5 +1,6 @@
-//! Migrations: the ledger, the pragmas, the statement splitter, and parity with
-//! `openDb` from every partial state TS could have left a database in.
+//! Contract tests for the SQLite migrations: the ledger, the pragmas, the
+//! statement splitter, and resuming from every partial state an older build
+//! could have left a database in.
 
 mod common;
 

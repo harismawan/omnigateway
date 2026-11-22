@@ -1,5 +1,4 @@
-//! The Claude CLI's billing checksum and `cc_version` suffix
-//! (`packages/providers/src/body.ts`).
+//! The Claude CLI's billing checksum and `cc_version` suffix.
 
 use crate::cloak::xxh64_utf8;
 use sha2::{Digest as _, Sha256};

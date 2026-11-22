@@ -212,7 +212,7 @@ async fn oauth_create_reconnect_and_refresh_cas_postgres() {
     let winner = store.credential(&key, id).await.unwrap().unwrap();
     assert_eq!(winner.token_version, 2);
     assert_eq!(winner.secrets.access_token.as_deref(), Some("winner"));
-    // Explicit null clears the token (TS updateTokens also distinguishes null from undefined).
+    // Explicit null clears the token; an absent field leaves it unchanged.
     assert_eq!(winner.secrets.id_token.as_deref(), None);
     assert_eq!(
         winner.account_email.as_deref(),

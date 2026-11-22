@@ -1,4 +1,5 @@
-//! `packages/rtk/test/fourth-audit.test.ts`.
+//! Audit regression suite: middle subtype summaries, manager diagnostics,
+//! git-pull retention, warning identity and execution-wrapper options.
 
 use super::common::*;
 use omni_rtk::command::classify_command;

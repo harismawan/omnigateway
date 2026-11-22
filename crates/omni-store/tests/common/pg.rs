@@ -1,8 +1,8 @@
 //! Postgres test plumbing: one throwaway database per test on the server
 //! `OMNI_TEST_DATABASE_URL` names, dropped when the test ends.
 //!
-//! The TS contract harness (`packages/store/test/contract/harness.ts`) wipes
-//! `public` on one shared database and runs serially. Rust test threads run in
+//! Wiping `public` on one shared database would force serial runs.
+//! Rust test threads run in
 //! parallel, so each test gets a database of its own instead.
 
 use std::sync::atomic::{AtomicU32, Ordering};

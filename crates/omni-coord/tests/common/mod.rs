@@ -34,7 +34,7 @@ impl ManualClock {
 }
 
 /// `OMNI_TEST_REDIS_URL`, without a trailing `/<db>`. Tests that need a
-/// server return early (and say so) without it, as the TS suite skips.
+/// server return early (and say so) without it.
 ///
 /// With `OMNI_TEST_REQUIRE_REDIS=1` a missing server is a failure, not a
 /// skip, so a run that claims Redis coverage cannot pass without it.

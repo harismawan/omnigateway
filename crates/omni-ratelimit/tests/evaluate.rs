@@ -1,4 +1,5 @@
-//! Port of `packages/ratelimit/test/evaluate.test.ts`.
+//! Contract tests for `evaluate`: decisions, headroom, resets and
+//! `Retry-After`.
 
 use omni_ratelimit::limits::{CountWindows, LimitScope, SpendWindows};
 use omni_ratelimit::{
@@ -520,7 +521,7 @@ fn last_to_clear_picks_the_latest_reset_then_the_larger_overshoot() {
     assert!(last_to_clear(&[]).is_none());
 }
 
-/// `afterThisRequest` in `apps/gateway/src/routes/proxy.ts`.
+/// The `after_this_request` header adjustment.
 #[test]
 fn after_this_request_spends_one_request_and_nothing_else() {
     let d = evaluate(

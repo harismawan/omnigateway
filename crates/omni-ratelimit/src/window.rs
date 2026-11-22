@@ -5,7 +5,8 @@
 //! Expiration at end + window is conservative: only the trailing bucket can
 //! overcount. A minute overlaps up to 61 buckets. Exact mode resumes when empty.
 //!
-//! TS appends in arrival order and removes only an expired prefix. Backdated
+//! Entries are appended in arrival order and only an expired prefix is
+//! removed. Backdated
 //! records here are clamped to the high-water timestamp, preserving that prefix's
 //! conservative blocking behavior without an unbounded unsorted log. Reads below
 //! high-water fail closed (usize::MAX); they cannot reconstruct expired history.
@@ -19,7 +20,7 @@ pub struct SlidingWindow {
     entries: VecDeque<(f64, usize)>,
     held: usize,
     bucketed: bool,
-    // Clamping loses original timestamps and the TS reverse-scan stopping
+    // Clamping loses original timestamps and the reverse-scan stopping
     // point. Do not remove any representative until this history drains.
     clamped_history: bool,
     high_water: f64,

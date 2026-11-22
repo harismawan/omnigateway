@@ -1,7 +1,7 @@
-//! Custom's wire encoders, one per protocol (`packages/providers/src/custom/wire.ts`).
+//! Custom's wire encoders, one per protocol.
 //!
-//! Bodies are built as insertion-ordered JSON maps that mirror the TS object
-//! literal assignments step for step. Order is everything here: the body is
+//! Bodies are built as insertion-ordered JSON maps, one object-literal
+//! assignment step at a time. Order is everything here: the body is
 //! serialized with `omni_ir::jsjson`, and `JSON.stringify` writes keys in
 //! insertion order (array-index keys first). `Object.assign` keeps an existing
 //! key's position and appends new ones, which is what `Map::insert` does.

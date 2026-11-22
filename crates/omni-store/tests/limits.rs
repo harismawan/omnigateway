@@ -1,6 +1,6 @@
-//! `api_keys.limits` parsing against `parseLimitConfig` in
-//! `packages/ratelimit/src/catalog.ts`: the same rows accepted, the same
-//! rows refused, and the accepted ones re-serialized byte-identically.
+//! Contract tests for `api_keys.limits` parsing (`omni-ratelimit`'s limits
+//! schema): rows accepted and refused per the storage contract, and the
+//! accepted ones re-serialized byte-identically.
 
 mod common;
 

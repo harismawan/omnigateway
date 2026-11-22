@@ -1,13 +1,13 @@
-//! Coordination between the processes serving one installation — the Rust
-//! port of `packages/coord` (`Coord`, `memoryCoord`) and
-//! `apps/gateway/src/coord/redis.ts` (`redisCoord`).
+//! Coordination between the processes serving one installation: the
+//! [`Coord`] contract, the in-process [`MemoryCoord`] and the Redis/Valkey
+//! [`RedisCoord`].
 //!
 //! Every counter that a single process would keep in a map lives behind
 //! [`Coord`], so one gateway and a fleet of them run the same code: a fleet
 //! hands in [`RedisCoord`] (Redis or Valkey), a single process hands in
 //! [`MemoryCoord`].
 //!
-//! The one property every implementation holds (TS's contract): a claim is
+//! The one property every implementation holds: a claim is
 //! visible to every concurrent claimant the instant the call is *issued*.
 //!
 //! **Issued means first polled.** A Rust `async fn` does nothing until its
@@ -38,14 +38,14 @@
 //! - Cancelling an awaited Redis call after its first poll does not
 //!   withdraw the command; it may still execute.
 //!
-//! **Wire compatibility.** The Redis implementation keeps the key schema,
-//! value formats and Lua scripts the TS gateway used, byte-for-byte (see
-//! [`redis::scripts`], whose digests are pinned), so every process of one
+//! **Wire compatibility.** The Redis implementation's key schema, value
+//! formats and Lua scripts are byte-stable (see [`redis::scripts`], whose
+//! digests are pinned), so every process of one
 //! installation against the same server shares windows, gauges, buckets,
 //! leases, locks, sessions, OAuth pending state and the `omni:pubsub` channel.
 //!
-//! **Times** are milliseconds as `f64`, as in `omni-ratelimit` and TS, where
-//! they reach Lua arithmetic. TTLs are `u64`: every one reaches a `PX` or
+//! **Times** are milliseconds as `f64`, as in `omni-ratelimit`; they reach
+//! Lua arithmetic. TTLs are `u64`: every one reaches a `PX` or
 //! `PEXPIRE`, which Redis refuses fractional.
 
 use std::collections::BTreeMap;
@@ -66,7 +66,7 @@ pub use memory::MemoryCoord;
 pub use redis::{Fault, RedisCoord, RedisCoordOptions, Remote};
 
 /// The clock gauges, leases and `kv` (memory) expire against, in ms. Window
-/// and bucket calls take `now` as a parameter instead, as in TS.
+/// and bucket calls take `now` as a parameter instead.
 pub type Clock = Arc<dyn Fn() -> f64 + Send + Sync>;
 
 /// The wall clock, in epoch milliseconds.
@@ -93,17 +93,17 @@ pub type BucketRow = (f64, Counts);
 /// implementation (see [`RedisCoord`]).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CoordError {
-    /// TS `LockUnavailable`: `waitMs` passed without the lock, or the lock
-    /// could not be confirmed with the server.
+    /// `wait` passed without the lock, or the lock could not be confirmed
+    /// with the server.
     #[error("LOCK_UNAVAILABLE: {0}")]
     LockUnavailable(String),
-    /// TS `GatewayError("OVERLOADED", …)` from `kv`: the coordinator is
-    /// unreachable, and a session must not be verified against a fallback map
-    /// a password change on another process cannot end.
+    /// From `kv`: the coordinator is unreachable, and a session must not be
+    /// verified against a fallback map a password change on another process
+    /// cannot end.
     #[error("the coordinator is unreachable; try again shortly")]
     Unavailable,
-    /// TS `TypeError`: `""` is the Redis "unnamed" sentinel on the wire, so it
-    /// is refused as a holder name by every implementation.
+    /// `""` is the Redis "unnamed" sentinel on the wire, so it is refused as
+    /// a holder name by every implementation.
     #[error("gauge holder must be a non-empty string")]
     BlankHolder,
 }
@@ -111,7 +111,7 @@ pub enum CoordError {
 /// A held mutex, returned by [`Coord::lock`] and given back to
 /// [`Coord::unlock`]. Prefer [`with_lock`]. A token that is dropped without
 /// either is held until its TTL (Redis) or forever (memory, whose locks have
-/// no TTL, as in TS).
+/// no TTL).
 #[derive(Debug, PartialEq, Eq)]
 #[must_use = "a lock token that is never unlocked is held until its TTL"]
 pub struct LockToken {
@@ -130,8 +130,7 @@ impl LockToken {
 /// it must not block; it may subscribe or unsubscribe.
 pub type Handler = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
-/// The coordinator, method for method the TS `Coord` it was ported from. The
-/// comments below are the contract.
+/// The coordinator. The comments below are the contract.
 #[async_trait]
 pub trait Coord: Send + Sync {
     // --- window -------------------------------------------------------------
@@ -165,8 +164,8 @@ pub trait Coord: Send + Sync {
     // --- mutex --------------------------------------------------------------
 
     /// Takes `key`, or [`CoordError::LockUnavailable`] once `wait` has passed.
-    /// `ttl_ms` bounds a holder that never unlocks (Redis; memory ignores it,
-    /// as TS's does). Cancelling this future mid-acquire: Redis queues a
+    /// `ttl_ms` bounds a holder that never unlocks (Redis; memory ignores
+    /// it). Cancelling this future mid-acquire: Redis queues a
     /// token-safe release for the attempt, which frees the lock on the same
     /// connection; across a retirement the attempt's `SET` may land after it
     /// and hold the lock until `ttl_ms` (see [`with_lock`]).
@@ -232,7 +231,7 @@ pub trait Coord: Send + Sync {
     async fn kv_del_prefix(&self, prefix: &str) -> Result<(), CoordError>;
 }
 
-/// TS `withLock`: runs `body` while holding `key`, releasing on success, on
+/// Runs `body` while holding `key`, releasing on success, on
 /// error, and — detached — when the body panics or is cancelled.
 ///
 /// Cancelled while acquiring: in memory nothing is held. On Redis a
@@ -278,8 +277,8 @@ where
     Ok(out)
 }
 
-/// TS `splitSequenced`: the two halves of a `publish_sequenced` delivery, or
-/// `None` for an ordinary one.
+/// The two halves of a `publish_sequenced` delivery, or `None` for an
+/// ordinary one.
 pub fn split_sequenced(payload: &str) -> Option<(u64, &str)> {
     let sep = payload.find(':')?;
     if sep == 0 {
@@ -299,7 +298,7 @@ pub fn split_sequenced(payload: &str) -> Option<(u64, &str)> {
     Some((seq, &payload[sep + 1..]))
 }
 
-/// The topic TS's `app.ts` publishes routing changes on:
+/// The topic routing changes are published on:
 /// `{"from": <nodeId>, "change": <RoutingChange>}`.
 pub const ROUTING_TOPIC: &str = "routing";
 
@@ -307,7 +306,7 @@ pub const ROUTING_TOPIC: &str = "routing";
 /// with the publish path ready so fan-out state can be requested again.
 pub const RECONNECTED_TOPIC: &str = "coord:reconnected";
 
-/// The envelope of a `routing` message, as TS `app.ts` writes it.
+/// The envelope of a `routing` message.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RoutingMessage {
     pub from: String,
@@ -376,8 +375,8 @@ fn topic_matches(pattern: &str, topic: &str) -> bool {
     }
 }
 
-/// A subscription; TS's returned unsubscribe function. Dropping it
-/// unsubscribes, so hold it for as long as the handler should run.
+/// A subscription handle. Dropping it unsubscribes, so hold it for as long
+/// as the handler should run.
 #[must_use = "dropping a Subscription unsubscribes it"]
 pub struct Subscription {
     id: u64,
@@ -413,8 +412,8 @@ impl std::fmt::Debug for Subscription {
 
 // --- numbers on the wire --------------------------------------------------
 
-/// A number as JS `String(n)` writes it, for every value TS sends: integers
-/// without a fraction, other finite values in shortest round-trip form.
+/// A number in the wire's spelling (JS `String(n)` form): integers without
+/// a fraction, other finite values in shortest round-trip form.
 ///
 /// Rust's `Display` for `f64` is also shortest round-trip and differs from
 /// JS only in never using an exponent (`1e-7` is written `0.0000001`), which

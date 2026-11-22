@@ -1,13 +1,14 @@
-//! RTK: pure tool-result filters, ported from `packages/rtk` (TS freeze).
+//! RTK: pure tool-result filters.
 //!
 //! [`transform_request`] compresses eligible tool results in a request and
 //! reports what it did. It is copy-on-write: when nothing changes it returns
-//! [`Cow::Borrowed`] — the TS function's "same object" — and otherwise a new
+//! [`Cow::Borrowed`] — the "same object" — and otherwise a new
 //! request whose untouched messages equal the input's.
 //!
-//! All sizes, limits and the acceptance guard are in UTF-16 code units, as
-//! the TS `string.length` is. Patterns are the TS sources, translated to JS
-//! semantics by [`jsre`]; the three TS lookaheads are written out by hand.
+//! All sizes, limits and the acceptance guard are in UTF-16 code units
+//! (`string.length` semantics). Patterns are JS `RegExp` sources, matched
+//! with JS semantics by [`jsre`]; the three lookaheads are written out by
+//! hand.
 
 pub mod catalog;
 pub mod command;
@@ -386,7 +387,7 @@ fn specialized<'a>(
         }
         F::DeduplicateLog => deduplicate(input),
         F::SmartTruncate => keep_regions(input, 200, 100),
-        // Handled above; TS's switch is exhaustive over the remaining ids.
+        // Handled above; the switch is exhaustive over the remaining ids.
         _ => input.unchanged(),
     }
 }
@@ -437,10 +438,9 @@ fn filter(input: &BoundedText<'_>, origin: Origin, command: Option<&str>) -> Opt
     None
 }
 
-/// `transformRequest`. TS wraps each block, and the whole call, in a
-/// `try`/`catch` that counts `skippedInternalErrors`; nothing in this port
-/// can throw (no indexing panics, no allocation-failure recovery), so that
-/// counter is always zero here.
+/// `skippedInternalErrors` counts blocks whose compression threw; nothing
+/// here can throw (no indexing panics, no allocation-failure recovery), so
+/// that counter is always zero.
 pub fn transform_request<'a>(
     request: &'a ChatRequest,
     config: &RtkConfig,

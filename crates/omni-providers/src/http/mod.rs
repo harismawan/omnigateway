@@ -1,7 +1,7 @@
 //! The outbound HTTP/1.1 client.
 //!
-//! **Why not hyper's client.** The bytes on the wire must be exactly what
-//! `nodeHttpClient` writes: the caller's header pairs in order and casing, then
+//! **Why not hyper's client.** The bytes on the wire must be exactly the
+//! `node:http` framing: the caller's header pairs in order and casing, then
 //! `Content-Length`, `Host` and `Connection: keep-alive` *after* them. hyper's
 //! HTTP/1 encoder writes the `Host` it derives (or the one in the map) where the
 //! `HeaderMap` puts it, and its map groups a name's values together, so the
@@ -39,7 +39,7 @@ pub enum BodyEncoding {
     Zstd,
 }
 
-/// An upstream request with everything already decided (`HttpRequest` in TS).
+/// An upstream request with everything already decided.
 ///
 /// Headers are ordered and cased; the body is the finished string. There is no
 /// `signal`: the deadline is the caller dropping the future or the body.
@@ -143,10 +143,9 @@ pub enum HttpError {
 impl HttpError {
     /// Whether this is a transport failure dispatch files as `NETWORK`.
     ///
-    /// Mirrors `classify()`'s hints in `apps/gateway/src/dispatch/classify.ts`:
-    /// node's `ECONNREFUSED`, `ENOTFOUND`, `ETIMEDOUT`, `ECONNRESET` and
-    /// "socket hang up" match; a parse error or a TLS verification failure does
-    /// not, and TS files those as `INTERNAL`.
+    /// The dispatch classifier's hints: node's `ECONNREFUSED`, `ENOTFOUND`,
+    /// `ETIMEDOUT`, `ECONNRESET` and "socket hang up" match; a parse error or
+    /// a TLS verification failure does not — those are filed as `INTERNAL`.
     pub fn is_network(&self) -> bool {
         matches!(
             self,
@@ -305,9 +304,8 @@ impl Client {
         };
         let started = Instant::now();
         // `trace()`, once: on the response head, on a transport error, or —
-        // as TS's `onAbort` destroy → `error` → `trace(undefined, true)` —
-        // when this future is dropped before either (a request deadline or a
-        // client hang-up cancelling the attempt).
+        // traced as an abort — when this future is dropped before either (a
+        // request deadline or a client hang-up cancelling the attempt).
         let traced = self.on_head.as_ref().map(|hook| HeadTrace {
             hook: hook.clone(),
             provider: req.provider.clone(),
@@ -384,7 +382,7 @@ struct HeadTrace {
 
 impl Drop for HeadTrace {
     fn drop(&mut self) {
-        // Wall-clock whole milliseconds, as TS's `now() - startedAt`, but
+        // Wall-clock whole milliseconds since the attempt started, but
         // saturated at zero: a backwards clock step is not a duration, and
         // a negative observation would land in the first bucket as if real.
         (self.hook)(&self.provider, epoch_ms().saturating_sub(self.started_ms));

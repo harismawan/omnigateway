@@ -1,4 +1,4 @@
-//! `@omni/testkit` fixtures: `credential`, `target`, `health`, `quota`,
+//! Test fixtures: `credential`, `target`, `health`, `quota`,
 //! `snapshot`, `recent`.
 
 #![allow(dead_code)]

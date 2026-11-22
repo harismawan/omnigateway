@@ -1,13 +1,12 @@
-//! The provider codec contract (`packages/providers/src/codec.ts`).
+//! The provider codec contract.
 //!
 //! A codec describes one HTTP request and reads one stream back; the host
 //! ([`crate::adapter`]) performs the request, checks the status and owns every
 //! retry decision. Nothing here is async: the absence of I/O is a property of
 //! the shape.
 //!
-//! `decodeState` is an associated type rather than TS's `unknown`, so the
-//! "host handed back the wrong state" failure TS guards against at runtime
-//! cannot be written.
+//! `decodeState` is an associated type rather than an untyped value, so the
+//! "host handed back the wrong state" failure cannot be written.
 
 use std::collections::VecDeque;
 
@@ -121,22 +120,20 @@ pub enum Flow {
     Stop,
 }
 
-/// Why a decoder stopped with an error, as `guardStream` in
-/// `codecAdapter.ts` sees what a TS decoder throws.
+/// Why a decoder stopped with an error, as the host's stream guard sees it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DecodeError {
     /// A thrown `GatewayError`: the decoder's own classification (built with
     /// `fail`, say). The host passes it through **unchanged** — not restamped,
-    /// not bounded — whether or not events were already emitted, exactly as
-    /// `guardStream` rethrows `error instanceof GatewayError`.
+    /// not bounded — whether or not events were already emitted.
     Gateway(GatewayError),
-    /// Anything else thrown — a `TypeError` in TS. The host relabels it as
+    /// Anything else thrown. The host relabels it as
     /// the gateway-authored `UPSTREAM` `"<id> codec decode threw"`; the text
     /// is for debugging and never reaches the caller.
     Throw(&'static str),
 }
 
-/// Mirrors frozen `guard`: a classified refusal versus an ordinary throw.
+/// A classified refusal versus an ordinary throw.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BuildError {
     Gateway(GatewayError),

@@ -1,4 +1,4 @@
-//! Frozen Postgres retention; raw deletion and boundary-hour rebuild are atomic.
+//! Postgres retention; raw deletion and boundary-hour rebuild are atomic.
 use crate::StoreError;
 
 pub struct DatabaseStats {

@@ -1,12 +1,11 @@
 //! One batch on Postgres, written in one transaction, leaving exactly the
-//! rows `packages/store/src/postgres` would have left after running the same
-//! events one at a time (`usage.begin` / `route` / `append`, then
-//! `credentials.updateHealth`).
+//! rows the same events run one at a time would leave (begin / route /
+//! finish, then the health mutations).
 //!
 //! The shape is `batch.rs`'s, with Postgres's types and locks:
 //!
 //! - **`request_logs`.** The touched rows are read `FOR UPDATE`, the events
-//!   are replayed in memory with the TS statement semantics, and every
+//!   are replayed in memory with the statement semantics, and every
 //!   changed row is written by one `INSERT … SELECT FROM unnest(...)`
 //!   upsert. Its `DO UPDATE` is allowed only for ids the batch read and
 //!   locked: a row another writer inserted after the read is not
@@ -16,14 +15,14 @@
 //! - **Rollups.** Each completed row is folded into its `usage_daily` and
 //!   `usage_rollup` rows in completion order, in memory, starting from the
 //!   row as it stood (read `FOR UPDATE`), with `float8`/`bigint` arithmetic,
-//!   so the value written is bit-for-bit the one TS's per-request
+//!   so the value written is bit-for-bit the one per-request
 //!   `x = x + EXCLUDED.x` reaches. Written by one unnest upsert per table,
 //!   under the same read-set guard: two replicas opening the same hour race
 //!   on the insert, and the loser retries rather than overwriting.
-//! - **Health.** The touched pairs are locked with the advisory lock
-//!   `updateHealth` takes (`hashtext(credential|model)`), in a fixed order.
-//!   A pair whose credential does not exist is what `updateHealth`'s foreign
-//!   key throws on, as is a value its columns cannot hold; either event is
+//! - **Health.** The touched pairs are locked with the health mutation's
+//!   advisory lock (`hashtext(credential|model)`), in a fixed order.
+//!   A pair whose credential does not exist is refused by the foreign
+//!   key, as is a value its columns cannot hold; either event is
 //!   skipped and counted (`health_refused`, per event), without aborting the
 //!   batch, and without displacing a valid event before it.
 //! - **Refused logs.** A log event with a value Postgres would refuse is
@@ -90,7 +89,7 @@ fn json_strings(items: &[String]) -> String {
     omni_ir::jsjson::to_string(&array)
 }
 
-/// An `INTEGER` column. TS binds the JS number and Postgres refuses one out
+/// An `INTEGER` column. Postgres refuses a number out
 /// of range ("integer out of range"), failing that statement; the gateway
 /// never produces one, so here it fails the batch with the column named.
 fn int4(column: &str, v: i64) -> Result<i32, StoreError> {
@@ -101,7 +100,7 @@ fn int4(column: &str, v: i64) -> Result<i32, StoreError> {
     })
 }
 
-/// `usage.ts` `values(log, state, nodeId)`.
+/// One log row's cells, as the Postgres schema holds them.
 fn row_of(log: &RequestLog, state: &str, node_id: &str) -> Result<Row, StoreError> {
     Ok(Row {
         id: log.id.clone(),
@@ -243,8 +242,8 @@ impl Logs {
     }
 
     /// [`Self::apply`], where a log Postgres would refuse a value of (an
-    /// `INTEGER` out of range) changes nothing, as TS's `begin`/`append`
-    /// throws for that request alone. `false` when refused: the caller
+    /// `INTEGER` out of range) changes nothing, failing that request alone.
+    /// `false` when refused: the caller
     /// accounts for it as refused (and so failed), never as written.
     fn apply_logged(&mut self, event: &LogEvent, node_id: &str) -> bool {
         match self.apply(event, node_id) {
@@ -265,8 +264,8 @@ impl Logs {
 
     fn apply(&mut self, event: &LogEvent, node_id: &str) -> Result<(), StoreError> {
         match event {
-            // A plain INSERT: an id with a row makes it throw, and `beginLog`
-            // swallows that.
+            // A plain INSERT: an id with a row makes it throw, and a repeated
+            // begin swallows that.
             LogEvent::Begin(p) => {
                 let row = row_of(&pending_log(p), "pending", node_id)?;
                 let slot = self.slot(&p.id);
@@ -511,7 +510,7 @@ struct Hourly {
 }
 
 /// `bigint + bigint`, which Postgres refuses on overflow ("bigint out of
-/// range"), failing TS's upsert and so its whole `append`.
+/// range"), failing the upsert and so the whole completion.
 fn add(table: &str, a: i64, b: i64) -> Result<i64, StoreError> {
     a.checked_add(b)
         .ok_or_else(|| StoreError::Corrupt(format!("{table}: bigint out of range")))
@@ -867,7 +866,7 @@ async fn write_hourly(
     Ok(())
 }
 
-/// `rollupLog` and `rollupHour` for one stored row, as TS binds them.
+/// The daily and hourly rollup keys and counters for one stored row.
 fn roll_up(row: &Row, day_offset_minutes: i64) -> Result<Rolled, StoreError> {
     let day = rollup::start_of_day_ms(row.at, day_offset_minutes);
     let key = (
@@ -926,8 +925,8 @@ fn completion(row: &Row, debit_model: bool) -> Completion {
 
 // --- health -----------------------------------------------------------------
 
-/// `UPSERT_HEALTH` with the instants bound as TS binds a JS number into a
-/// `BIGINT` column: as `float8`, which Postgres rounds (half to even).
+/// The health upsert; the instants bind into the `BIGINT` columns
+/// as `float8`, which Postgres rounds (half to even).
 const UPSERT_HEALTH: &str = "INSERT INTO credential_health
    (credential_id, model, breaker_state, consecutive_failures, opened_at, rate_limited_until)
  VALUES ($1, $2, $3, $4, $5::float8::bigint, $6::float8::bigint)
@@ -937,8 +936,8 @@ const UPSERT_HEALTH: &str = "INSERT INTO credential_health
    opened_at = EXCLUDED.opened_at,
    rate_limited_until = EXCLUDED.rate_limited_until";
 
-/// A measurement: the two measured columns only; a fresh row is
-/// `blankHealth`'s.
+/// A measurement: the two measured columns only; a fresh row starts blank
+/// (`closed`, no `opened_at`).
 const UPSERT_MEASUREMENT: &str = "INSERT INTO credential_health
    (credential_id, model, breaker_state, consecutive_failures, opened_at, rate_limited_until)
  VALUES ($1, $2, 'closed', $3, NULL, $4::float8::bigint)
@@ -946,8 +945,8 @@ const UPSERT_MEASUREMENT: &str = "INSERT INTO credential_health
    consecutive_failures = EXCLUDED.consecutive_failures,
    rate_limited_until = EXCLUDED.rate_limited_until";
 
-/// A JS number bound into a `BIGINT` column: refused (as `updateHealth`
-/// throws) when it is not finite or rounds outside `int8`.
+/// A JS number bound into a `BIGINT` column: refused when it is not finite
+/// or rounds outside `int8`.
 fn instant_ok(v: Option<f64>) -> bool {
     v.is_none_or(|v| {
         v.is_finite()
@@ -957,7 +956,7 @@ fn instant_ok(v: Option<f64>) -> bool {
 }
 
 /// The row a health write would bind, or `None` where Postgres would refuse
-/// it (and TS's `updateHealth` throw, changing nothing).
+/// it, changing nothing.
 fn health_ok(failures: i64, opened: Option<f64>, until: Option<f64>) -> Option<i32> {
     let failures = i32::try_from(failures).ok()?;
     (instant_ok(opened) && instant_ok(until)).then_some(failures)
@@ -977,7 +976,7 @@ async fn write_health(c: &impl GenericClient, events: &[WriteEvent]) -> Result<u
     if pairs.is_empty() {
         return Ok(0);
     }
-    // `updateHealth`'s advisory lock per pair, taken in one fixed order.
+    // The same advisory lock per pair `update_health` takes, in one fixed order.
     let mut locks: Vec<String> = pairs.iter().map(|(c, m)| format!("{c}|{m}")).collect();
     locks.sort_unstable();
     locks.dedup();
@@ -987,8 +986,8 @@ async fn write_health(c: &impl GenericClient, events: &[WriteEvent]) -> Result<u
         )
         .await?;
     c.execute(&stmt, &[&locks]).await?;
-    // The foreign key, checked up front: a missing credential is what
-    // `updateHealth` throws on, and on Postgres a refused statement would
+    // The foreign key, checked up front: a missing credential is refused by
+    // `update_health`, and on Postgres a refused statement would
     // abort the whole batch. `FOR KEY SHARE` keeps the credential from going
     // away before commit, as the foreign key itself would.
     let mut ids: Vec<&str> = pairs.iter().map(|(c, _)| *c).collect();
@@ -1004,8 +1003,7 @@ async fn write_health(c: &impl GenericClient, events: &[WriteEvent]) -> Result<u
         .map(|r| r.try_get(0))
         .collect::<Result<_, _>>()?;
 
-    // Each event is validated where it stands, as TS's sequential
-    // `updateHealth` calls each throw (or not) on their own: a refused event
+    // Each event is validated where it stands, on its own: a refused event
     // never displaces one that would have landed before it.
     let mut measured: IndexMap<(&str, &str), (&HealthMeasurement, i32)> = IndexMap::new();
     let mut refused = 0;
@@ -1123,7 +1121,7 @@ async fn write_once(
         .iter()
         .filter_map(|(_, _, h)| h.as_ref().map(|(k, _)| k.clone()))
         .collect();
-    // Lock order, the same in every writer (and TS's `append`):
+    // Lock order, the same in every writer:
     // `request_logs`, then `usage_daily` read and written, then
     // `usage_rollup` read and written, then health. Within a table rows
     // are locked and written in key order, so two replicas over the same

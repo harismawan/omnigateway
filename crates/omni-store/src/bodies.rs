@@ -1,4 +1,4 @@
-//! Frozen body masking and bounding. UTF-16 carriers are intentional: masking
+//! Body masking and bounding. UTF-16 carriers are intentional: masking
 //! and uncut bounding preserve lone surrogates, while TextEncoder truncation
 //! replaces them only when an over-budget string is actually encoded/cut.
 use omni_ir::jsjson::JsValue;
@@ -270,7 +270,7 @@ fn pair(value: &JsValue) -> (JsValue, JsValue, bool) {
     )
 }
 
-/// `prepareArtifact`: mask before bounding, then whole-artifact omission.
+/// Mask before bounding, then whole-artifact omission.
 /// The caller must still seal the result, which refuses an oversized frame.
 pub fn prepare_artifact(input: &JsValue) -> (JsValue, String) {
     let (request, response, truncated) = pair(get(input, "client"));

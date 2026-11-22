@@ -1,4 +1,5 @@
-//! `packages/rtk/test/providerNative.test.ts`.
+//! Regression suite: provider-native blocks stay byte-identical and never
+//! block neighbouring compression.
 
 use super::common::*;
 use omni_rtk::transform_request;

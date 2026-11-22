@@ -1,8 +1,7 @@
-//! Egress parity: every IR event sequence in `dialects.json` was rendered by
-//! the real TS `anthropicStream` / `openaiStream` / `responsesStream` (frames
-//! serialized exactly as `sseResponse` in `routes/proxy.ts` writes them) and by
-//! the buffered renderers over TS `collect()`, recorded as the exact bytes TS
-//! sends. The Rust encoders and renderers must write the same bytes.
+//! Egress conformance: every IR event sequence in `dialects.json` is pinned
+//! as the exact bytes clients receive — the streaming SSE frames and the
+//! buffered renderers over `collect()`. The encoders and renderers must write
+//! those bytes; regenerating the vectors is a deliberate wire change.
 
 use omni_dialects::egress::{self, AnthropicStream, StreamEncoder};
 use omni_ir::error::{ErrorCode, GatewayError};

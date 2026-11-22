@@ -256,7 +256,7 @@ impl ResponseBody {
         }
     }
 
-    /// The adapter selected the streaming body (the frozen `body` getter).
+    /// The adapter selected the streaming body.
     pub fn start_stream(&mut self) {
         if let Some(observer) = self.observer.take() {
             let mut source = std::mem::replace(self, Self::from_chunks(Vec::new()));

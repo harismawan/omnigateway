@@ -1,6 +1,6 @@
 [package]
 name = "omni-rtk"
-description = "Pure tool-result filters (RTK), ported from packages/rtk."
+description = "Pure tool-result filters (RTK)."
 edition.workspace = true
 version.workspace = true
 license.workspace = true

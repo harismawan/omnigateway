@@ -1,9 +1,9 @@
-//! Frozen `modelDisplayName` and `resolveModelLimits`: pure snapshot projections.
+//! [`model_display_name`] and [`resolve_model_limits`]: pure snapshot projections.
 use crate::{Providers, serves_target};
 use omni_store::{AuthType, Credential, VirtualModel};
 use std::collections::HashMap;
 
-/// Request-local serving facts. Auths retain frozen Set insertion order, but
+/// Request-local serving facts. Auths retain Set insertion order, but
 /// collapse every non-OAuth spelling to its identical API-limit behavior.
 /// Pin buckets retain snapshot order even for duplicate ids in synthetic input.
 #[derive(Default)]

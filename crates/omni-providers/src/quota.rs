@@ -17,7 +17,7 @@ pub fn request(
         if data["projectId"].as_str().unwrap_or("").trim().is_empty() {
             return None;
         }
-        // The captured App shape, shared with bootstrap; 15s as frozen.
+        // The captured App shape, shared with bootstrap; 15s timeout.
         return Some(QuotaRequest {
             timeout: std::time::Duration::from_secs(15),
             http: crate::antigravity::oauth::code_assist_request(
@@ -76,7 +76,7 @@ pub fn request(
         _ => crate::anthropic::profile::headers(headers),
     };
     Some(QuotaRequest {
-        // Frozen JSON GETs specify 15s. Redemption POSTs use the host's
+        // JSON GETs use 15s. Redemption POSTs use the host's
         // 30s ceiling.
         timeout: std::time::Duration::from_secs(if operation == "redeem" { 30 } else { 15 }),
         http: AuthRequest {

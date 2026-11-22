@@ -218,7 +218,7 @@ fn lone_surrogate_override_keys_are_distinct_and_validated() {
     );
 }
 
-/// Review A5-I2: one row TS's `toKey` would throw on is that key's own
+/// Review A5-I2: an unreadable key row is that key's own
 /// error in the snapshot read, with `JSON.parse`'s message; fractional and
 /// REAL dates are numbers, not errors.
 #[test]

@@ -454,11 +454,11 @@ fn human(model: &JsValue, color: bool) -> Result<String, String> {
         )
     ))
 }
-/// Plugin providers are not ported. Frozen TS imports a plugin's server entry
+/// Plugin providers are not supported. A plugin's server entry would import
 /// only after discovery finds a loadable, schema-valid manifest declaring the
 /// `provider` capability; every earlier stop leaves exactly the built-ins and
-/// catalog/put print nothing about it. Rust matches those cases and refuses
-/// only where TS would import plugin code that could contribute a provider.
+/// catalog/put print nothing about it. This refuses only where plugin code
+/// could contribute a provider.
 fn refuse_plugins(root: &std::path::Path) -> Result<(), String> {
     let found = omni_control::plugins::provider_plugins(root);
     if found.is_empty() {
@@ -655,7 +655,7 @@ pub fn run(
         }
         if remove {
             let id = &args[0];
-            // Frozen control reads/parses every model before asking confirmation.
+            // Control reads/parses every model before asking confirmation.
             omni_control::models::cli_get(&store, id)?;
             if !flags.contains_key("yes") {
                 let question = format!("delete virtual model \"{id}\"?");
@@ -690,7 +690,7 @@ pub fn run(
         } else {
             omni_control::models::cli_list(&store)?
         };
-        // TS checks pins before emit, including JSON mode.
+        // Pins are checked before emit, including JSON mode.
         if show {
             pinned(targets(&models[0], true)?)?;
         }

@@ -1,7 +1,6 @@
-//! How the host treats a decoder's failure (`guardStream` in
-//! `packages/providers/src/codecAdapter.ts`): a thrown `GatewayError` passes
-//! through unchanged, before the first event or after events were emitted;
-//! anything else becomes `"<id> codec decode threw"`.
+//! How the host's stream guard treats a decoder's failure: a thrown
+//! `GatewayError` passes through unchanged, before the first event or after
+//! events were emitted; anything else becomes `"<id> codec decode threw"`.
 
 use std::collections::VecDeque;
 use std::future::Future;

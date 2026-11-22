@@ -1,8 +1,8 @@
 //! The three client dialects the gateway speaks.
 //!
 //! - [`ingress`]: parse and validate a client body into the IR
-//!   ([`omni_ir::request::ChatRequest`]), refusing with the exact
-//!   `BAD_REQUEST` messages the TS gateway sends.
+//!   ([`omni_ir::request::ChatRequest`]), refusing with byte-stable
+//!   `BAD_REQUEST` messages (clients match on them).
 //! - [`egress`]: render IR results back to each dialect, streaming (an
 //!   incremental SSE encoder writing into a caller-owned buffer) and
 //!   non-streaming, plus each dialect's error body and rate-limit headers.

@@ -18,8 +18,9 @@
 -- by the host: the host asks only whether a row exists.
 --
 -- Note what is *not* here: no row for the plugin's tables, and no cascade. A
--- plugin's tables outlive its rows here on purpose — see `PluginRepo.dropAll`
--- and `orphanTables`. Dropping a table because a plugin is currently absent
+-- plugin's tables outlive its rows here on purpose — removing a plugin
+-- leaves its tables orphaned, never dropped. Dropping a table because a
+-- plugin is currently absent
 -- destroys data irreversibly, and a restore is precisely the moment a plugin is
 -- most likely to be absent.
 CREATE TABLE plugin_migrations (

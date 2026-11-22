@@ -71,7 +71,7 @@ pub fn export_page(store: &SqliteStore, q: &Query, csv: bool) -> Result<ExportPa
         bindings.extend([at.clone(), at.clone(), id.clone()]);
     }
     if let Some((at, id)) = &q.cursor {
-        // Bun SQLite binds JS strings as UTF-8, replacing lone surrogates.
+        // SQL text binds as UTF-8, replacing lone surrogates.
         // The wire cursor retains UTF-16; only this SQL boundary narrows it.
         clauses.push("(at < ? OR (at = ? AND id < ?))".to_owned());
         bindings.extend([

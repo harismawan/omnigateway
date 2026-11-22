@@ -1,5 +1,5 @@
 //! Shared Date.parse compatibility. ISO dates are UTC; offset-free datetimes and
-//! legacy dates use the process local timezone, as the frozen Bun command does.
+//! legacy dates use the process local timezone.
 use chrono::{Local, NaiveDate, TimeZone};
 
 fn local_civil(stamp: i64, year: i64) -> Option<i64> {

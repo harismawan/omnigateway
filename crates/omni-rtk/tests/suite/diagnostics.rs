@@ -1,4 +1,5 @@
-//! `packages/rtk/test/diagnostics.test.ts`.
+//! Regression suite: lint/build command routing and unknown-origin diagnostic
+//! prose.
 
 use super::common::*;
 

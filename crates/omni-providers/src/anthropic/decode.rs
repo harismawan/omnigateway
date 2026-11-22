@@ -1,4 +1,4 @@
-//! Incremental Anthropic SSE decoder; mirrors the frozen provider decoder.
+//! Incremental Anthropic SSE decoder.
 use crate::{
     codec::{DecodeError, Flow, StreamDecoder},
     sse::SseMessage,

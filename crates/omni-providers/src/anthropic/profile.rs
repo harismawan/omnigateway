@@ -1,4 +1,4 @@
-//! Claude CLI identity captured once by gateway startup, as TS captures on import.
+//! Claude CLI identity captured once by gateway startup.
 use std::{collections::HashMap, sync::OnceLock};
 static ENV: OnceLock<HashMap<String, String>> = OnceLock::new();
 

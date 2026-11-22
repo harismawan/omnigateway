@@ -1,7 +1,7 @@
-//! Shared configuration: `loadConfig` from `packages/control/src/config.ts`,
-//! with every `OMNI_*` variable, the same validation and the same error text.
+//! Shared configuration: every `OMNI_*` variable, with its validation and
+//! exact error text.
 //!
-//! A pure function of an env map (plus the host offset, injected), as in TS.
+//! A pure function of an env map (plus the host offset, injected).
 //! The gateway passes only the process environment; the CLI caller explicitly
 //! merges its selected root's `.env` before calling this pure parser.
 
@@ -67,7 +67,7 @@ pub struct Config {
     pub trace_sample: f64,
 }
 
-/// A refusal to boot, carrying TS's exact message.
+/// A refusal to boot, carrying the exact error text.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
 pub struct ConfigError(pub String);

@@ -1,8 +1,8 @@
-//! The Prometheus registry and renderer (`telemetry/registry.ts`,
-//! `telemetry/render.ts`) and the recording hooks of `telemetry/index.ts`.
+//! The Prometheus registry and renderer, and the recording hooks.
 //!
-//! Same series, help and type lines, label sets and order, escaping, bucket
-//! boundaries, number formatting and cardinality cap as TS:
+//! The series, help and type lines, label sets and order, escaping, bucket
+//! boundaries, number formatting and cardinality cap are a fixed wire
+//! contract:
 //!
 //! - A series is identified by its metric and label *set*; its labels render
 //!   in the order of the first write that created it.
@@ -106,7 +106,7 @@ impl Metric {
         DEFINITIONS[self.index()].2
     }
 
-    /// The metric named `name`, if TS defines it.
+    /// The metric named `name`, if it is defined.
     pub fn from_name(name: &str) -> Option<Metric> {
         DEFINITIONS
             .iter()
@@ -128,7 +128,7 @@ fn add_f64(cell: &AtomicU64, v: f64) {
 }
 
 /// One histogram buffer: per-bucket counts (the first boundary a value
-/// fits; summed at render into TS's cumulative counts, `NaN` fitting none),
+/// fits; summed at render into cumulative counts, `NaN` fitting none),
 /// the sum, and the observations completed, written last.
 #[derive(Debug, Default)]
 struct Counts {
@@ -211,7 +211,7 @@ impl Histogram {
         self.swap()
     }
 
-    /// `add` on a histogram's value (its sum, as TS stores it). Not a path
+    /// `add` on a histogram's value (its sum). Not a path
     /// any recording site takes; serialized with scrapes so it is not lost.
     fn add(&self, v: f64) {
         let _g = self.lock();
@@ -264,7 +264,7 @@ impl Series {
     fn observe(&self, v: f64) {
         match &self.hist {
             Some(h) => h.observe(v),
-            // TS's `observe` on a counter or gauge adds the value and keeps a
+            // `observe` on a counter or gauge adds the value and keeps a
             // count and buckets that a non-histogram never renders.
             None => add_f64(&self.value, v),
         }
@@ -307,7 +307,7 @@ type Table = (HashMap<Box<str>, Arc<Series>>, Vec<Arc<Series>>);
 
 #[derive(Debug, Default)]
 struct State {
-    /// `rawSeries`: raw keys counted against the cap.
+    /// Raw keys counted against the cap.
     raw_series: HashSet<Arc<str>>,
     /// `folded`: raw keys already counted as folded.
     folded: HashSet<Arc<str>>,
@@ -318,7 +318,7 @@ struct State {
     tables: Vec<Table>,
 }
 
-/// `createMetricRegistry`.
+/// The metric registry.
 #[derive(Debug)]
 pub struct Registry {
     max_series: f64,
@@ -334,7 +334,7 @@ thread_local! {
 
 /// The identity of a label set: metric, then pairs sorted by name, each
 /// length-prefixed so no two sets share a key. A repeated name counts once
-/// with its last value, as the label object TS builds from it does.
+/// with its last value.
 fn write_key(metric: Metric, labels: &[(&str, &str)], out: &mut String) {
     out.clear();
     let mut sorted: smallvec_like::Pairs<'_> = smallvec_like::Pairs::from(labels);
@@ -579,7 +579,7 @@ impl Registry {
         held
     }
 
-    /// `renderPrometheus(snapshot())`.
+    /// Renders a snapshot of the registry.
     pub fn render(&self) -> String {
         self.render_with(&mut || {})
     }
@@ -698,15 +698,15 @@ fn push_number(out: &mut String, v: f64) {
     out.push('\n');
 }
 
-/// `createTelemetry`'s metrics half. Recording is a no-op unless metrics are
-/// enabled (`OMNI_METRICS_TOKEN` set), as in TS. Tracing is independently optional.
+/// The metrics half of telemetry. Recording is a no-op unless metrics are
+/// enabled (`OMNI_METRICS_TOKEN` set). Tracing is independently optional.
 #[derive(Debug)]
 pub struct Telemetry {
     enabled: bool,
     registry: Arc<Registry>,
     pub tracing: Option<Arc<crate::otlp::Tracing>>,
     writer_refusals: [std::sync::atomic::AtomicU64; WriterRefusal::ALL.len()],
-    /// `openBreakers`: per provider, in first-seen order.
+    /// Open breakers: per provider, in first-seen order.
     open_breakers: Mutex<Vec<(String, f64)>>,
 }
 
@@ -742,7 +742,7 @@ impl From<omni_store::writer::ReserveError> for WriterRefusal {
     }
 }
 
-/// The gateway's own version (`version.ts`): a build-time `OMNI_CLI_VERSION`
+/// The gateway's own version: a build-time `OMNI_CLI_VERSION`
 /// wins, then `OMNI_VERSION` from the environment, then `0.0.0-dev`.
 pub fn version(env: &HashMap<String, String>) -> String {
     match option_env!("OMNI_CLI_VERSION") {
@@ -808,7 +808,7 @@ impl Telemetry {
         self.tracing.as_ref().and_then(|t| t.get(request_id))
     }
 
-    /// `record(log, keyId)`: one finished request, from `finishLog`.
+    /// One finished request, recorded at completion.
     #[allow(clippy::cast_precision_loss)]
     pub fn record(&self, log: &omni_store::writer::RequestLog) {
         if let Some(t) = &self.tracing {
@@ -873,7 +873,7 @@ impl Telemetry {
         );
     }
 
-    /// `httpHead`: a provider response head (or transport failure) arrived.
+    /// A provider response head (or transport failure) arrived.
     #[allow(clippy::cast_precision_loss)]
     pub fn http_head(&self, provider: &str, duration_ms: u64) {
         if self.enabled {
@@ -920,7 +920,7 @@ impl Telemetry {
             .set(Metric::BreakerOpen, &[("provider", provider)], count);
     }
 
-    /// `rateLimit(dimension, window)`: an API-key rate-limit refusal.
+    /// An API-key rate-limit refusal.
     pub fn rate_limit(&self, dimension: &str, window: Option<&str>) {
         if self.enabled {
             self.registry.add(

@@ -1,4 +1,5 @@
-//! `packages/rtk/test/twelfth-audit.test.ts`.
+//! Audit regression suite: tree budget aborts, fail-open ambiguity and long
+//! git-status relation retention.
 
 use super::common::*;
 use omni_rtk::command::classify_command;

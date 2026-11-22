@@ -81,7 +81,7 @@ pub(crate) fn add_auto_cache(
     }
 }
 
-/// Model lookup normalization used by the frozen Anthropic catalog.
+/// Model lookup normalization used by the Anthropic catalog.
 fn model_id(model: &str) -> &str {
     let mut id = omni_ir::js::trim(model);
     if id.to_ascii_lowercase().ends_with("[1m]") {

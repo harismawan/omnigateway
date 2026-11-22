@@ -527,15 +527,8 @@ holds until then. A gzip codec is readable but not written
 No compression ratio is promised. `SIZE` in `omni bodies` and the console is the
 stored envelope, so it differs by format.
 
-Upgrade every reader before deploying this version. Every gateway replica, every
-CLI install, standbys, and anything restoring a dump that opens the same corpus
-must already run v0.13.5 or later, which reads both formats. A version older
-than v0.13.5 reports a binary artifact as `captured, but unreadable` and may
-record it `corrupt`; a v0.13.5-or-later reader recovers the row the next time it
-reads it. Roll back only to v0.13.5 or later; v0.13.5 itself stops binary writes
-and still reads the ones written. Rolling back further is unsafe until every binary
-artifact has expired under body retention, and disabling capture does not make it
-safe. An artifact above the reader's encoded-size ceiling (`1,048,641` bytes
+Every 1.x reader (gateway replica, CLI install, standby) reads all three
+formats. An artifact above the reader's encoded-size ceiling (`1,048,641` bytes
 for the hex envelope, `524,326` for the binary one) reads as unreadable
 without being deleted; the gateway never writes one, and it recovers on its own if
 a reader accepts it later. The row digest covers the whole stored envelope and is
@@ -557,7 +550,9 @@ compaction would give back, and every table by size — and takes snapshots.
 `omni db stats` prints the same figures. On Postgres both show the server's own
 size, the `request_bodies` table and the per-table listing instead; there is no
 file, so nothing here compacts, snapshots or restores it — `pg_dump` is the
-backup.
+backup. After restoring or replacing the Postgres lineage, run the
+[cluster bucket sweep](rust-cluster-bucket-sweep.md) before starting any
+replica: the Redis long-window counts belong to the old lineage.
 
 **What a snapshot is.** One self-contained SQLite file, written into a
 `snapshots/` directory beside the database. The write-ahead log is folded in, so

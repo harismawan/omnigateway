@@ -1,5 +1,5 @@
 //! Typed cell reads that name the table and column when a row holds something
-//! the TS reader could not have used either.
+//! the reader cannot use.
 
 use crate::error::StoreError;
 use crate::js;
@@ -30,7 +30,7 @@ pub(crate) fn opt_text(
     }
 }
 
-/// A JS number, as `bun:sqlite` returns INTEGER and REAL alike.
+/// A JS number: INTEGER and REAL cells read alike.
 pub(crate) fn number(row: &Row<'_>, table: &str, column: &str) -> Result<f64, StoreError> {
     let cell = row.get_ref(column)?;
     js::number(cell).ok_or_else(|| corrupt(table, column, "a number", cell))
@@ -51,7 +51,7 @@ pub(crate) fn opt_number(
 }
 
 /// An epoch-ms instant or a count. A REAL holding a whole number is accepted,
-/// since TS would read the same value; a fraction is not an instant.
+/// since a JS number reads the same value; a fraction is not an instant.
 pub(crate) fn integer(row: &Row<'_>, table: &str, column: &str) -> Result<i64, StoreError> {
     opt_integer(row, table, column)?.ok_or_else(|| {
         StoreError::Corrupt(format!("{table}.{column}: expected an integer, found null"))

@@ -1,4 +1,4 @@
-//! Port of `apps/gateway/test/auth/rateLimit.test.ts` for single mode.
+//! Contract tests for the single-mode API-key rate limiter.
 //!
 //! Seeding is in the background here (spec ruling), so a test that asserts
 //! on a long window first admits/prepares and runs the queued seeds, as the

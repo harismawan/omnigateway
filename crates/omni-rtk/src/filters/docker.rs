@@ -1,4 +1,4 @@
-//! `packages/rtk/src/filters/docker.ts`.
+//! Docker output compression.
 
 use super::shared::{BoundedText, capped, plain_edges, render_selection};
 use crate::jsre::js_regex;

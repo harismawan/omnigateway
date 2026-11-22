@@ -1,4 +1,5 @@
-//! `packages/rtk/test/seventh-audit.test.ts`.
+//! Audit regression suite: grep context modes, recursive-ls grouping and the
+//! shared parser budget.
 
 use super::common::*;
 use omni_rtk::command::{GrepMode, classify_command};

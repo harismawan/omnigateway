@@ -1,11 +1,12 @@
-//! Custom's stream decoders (`packages/providers/src/custom/decode.ts`).
+//! Custom's stream decoders.
 //!
-//! The TS decoders read payloads typed `unknown` and lean on JS coercion:
+//! The decoders read untyped payloads and lean on JS coercion:
 //! `String(x)`, `x ?? d`, truthiness, `for…of` over whatever arrived, `Map` /
 //! `Set` keys compared by SameValueZero, and template-string keys. Each is
 //! reproduced through [`omni_ir::js`], so a sloppy upstream decodes the same.
-//! One stated divergence: usage counts are coerced with `Number()`, where TS
-//! would carry a non-numeric `completion_tokens` through as-is.
+//! One stated divergence from raw JS: usage counts are coerced with
+//! `Number()`, so a non-numeric `completion_tokens` does not pass through
+//! as-is.
 
 use omni_ir::jsjson::{self, JsValue as Value};
 use omni_ir::stream::{Usage, usage_from_prompt_total};

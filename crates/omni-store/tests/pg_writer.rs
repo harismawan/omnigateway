@@ -1,6 +1,7 @@
-//! The batched writer on Postgres against the TS Postgres store: the same
+//! Contract tests for the batched writer on Postgres: the same
 //! events leave the same `request_logs`, `usage_daily`, `usage_rollup` and
-//! `credential_health` rows, however the Rust side batches them; and the
+//! `credential_health` rows as applying them one at a time, however they are
+//! batched; and the
 //! writer's ordering, retry and failure accounting are the SQLite writer's.
 
 mod common;
@@ -513,8 +514,8 @@ async fn a_seed_reads_everything_committed_before_it() {
 
 /// The read-set guard, deterministically: another session inserts the very
 /// rollup and log rows a batch read as absent, and commits while the batch's
-/// upsert waits on them. The batch must not overwrite them (TS would have
-/// added to the rollup and refused the duplicate begin); it fails as a
+/// upsert waits on them. The batch must not overwrite them (the contract
+/// adds to the rollup and refuses the duplicate begin); it fails as a
 /// conflict, is retried, and the retry folds onto what the other committed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_row_another_writer_inserted_after_the_read_is_added_to_not_overwritten() {
@@ -582,9 +583,8 @@ async fn a_row_another_writer_inserted_after_the_read_is_added_to_not_overwritte
     );
 }
 
-/// What Postgres would refuse a value of fails only that event, as TS's
-/// `begin`/`append`/`updateHealth` throws for that request alone and its
-/// callers swallow it: an `INTEGER` status out of range, a non-finite
+/// What Postgres would refuse a value of fails only that event, for that
+/// request alone: an `INTEGER` status out of range, a non-finite
 /// instant. The rest of the batch commits.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_value_postgres_refuses_fails_only_its_own_event() {

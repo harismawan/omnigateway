@@ -1,4 +1,5 @@
-//! `packages/rtk/test/audit-regressions.test.ts`.
+//! Audit regression suite: command-text safety gates and complete-block
+//! retention across the docker/lint/test/build parsers.
 
 use super::common::*;
 use omni_rtk::command::classify_command;

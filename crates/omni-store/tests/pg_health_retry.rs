@@ -389,7 +389,8 @@ fn seed_row() -> CredentialHealth {
 
 /// A COMMIT the server itself rejects (a deferred constraint, checked at
 /// COMMIT, severity ERROR, SQLSTATE 23514): positively not committed. The
-/// rejected write is a refusal of its values, as TS's `updateHealth` throws;
+/// rejected write is a refusal of its values, surfaced as an error from
+/// `update_health`;
 /// it is not counted uncertain, and the next mutation proceeds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_commit_the_server_rejects_is_not_uncertain() {

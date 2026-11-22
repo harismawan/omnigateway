@@ -1,4 +1,4 @@
-//! Frozen SQLite BodyRepo. File first, then the row; no rename/temporary file.
+//! SQLite body artifacts. File first, then the row; no rename/temporary file.
 use super::{node_join, prepare_put};
 use crate::{
     SqliteStore, StoreError,
@@ -16,7 +16,7 @@ fn io_error(e: std::io::Error) -> StoreError {
     StoreError::Refused(e.to_string())
 }
 
-/// `dir` is the request_bodies directory beside the database (as in frozen).
+/// `dir` is the request_bodies directory beside the database.
 pub fn put(
     c: &Connection,
     key: &FieldKey,
@@ -58,8 +58,8 @@ pub fn get(
         Cell::String(s) => DetailState::parse(s),
         _ => DetailState::None,
     };
-    // Only null short-circuits path validation. path.join throws for every
-    // other non-string, outside acquireArtifact's catch in frozen.
+    // Only null short-circuits path validation. `path.join` throws for every
+    // other non-string, outside the artifact fetch's catch.
     let rel_path = match &cells[2] {
         Cell::String(s) => Some(s.clone()),
         Cell::Null => None,

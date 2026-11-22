@@ -1,10 +1,9 @@
-//! The TS contract suite's semantics (`packages/store/test/contract`), ported
-//! for the surface the Rust store offers, run once per backend through
-//! [`Store`]: SQLite always, Postgres when `OMNI_TEST_DATABASE_URL` names a
-//! server (skipped visibly otherwise, as the TS harness does).
+//! Contract tests for the store's public surface, run once per backend
+//! through [`Store`]: SQLite always, Postgres when `OMNI_TEST_DATABASE_URL`
+//! names a server (skipped visibly otherwise).
 //!
 //! Rows are filed through the batched writer, which is how the gateway files
-//! them; the writer's own row-for-row equality with TS is `writer.rs` and
+//! them; the writer's own row-for-row contracts are `writer.rs` and
 //! `pg_writer.rs`.
 
 mod common;
@@ -355,7 +354,7 @@ async fn begin_route_append_updates_one_row_and_rolls_up_once() {
     .await;
 }
 
-/// `sumSince slides exactly, sums four token classes, excludes pending, and scopes`.
+/// `sum_since` slides exactly, sums four token classes, excludes pending, and scopes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sum_since_slides_exactly_excludes_pending_and_scopes() {
     each("contract_sum_since", 0, |s| async move {
@@ -396,7 +395,7 @@ async fn sum_since_slides_exactly_excludes_pending_and_scopes() {
     .await;
 }
 
-/// `sumBuckets answers whole hours from the rollup and finer grains from the rows`,
+/// `sum_buckets` answers whole hours from the rollup and finer grains from the rows,
 /// and the narrowed reads behind model overrides.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sum_buckets_and_narrowed_reads() {
@@ -524,7 +523,7 @@ async fn s_client(s: &Store) -> omni_store::pg::PgClient {
     }
 }
 
-/// `sweepPending retires own rows and a dead node's, and leaves a live node's alone`.
+/// `sweep_pending` retires own rows and a dead node's, and leaves a live node's alone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sweep_pending_retires_own_and_dead_rows_only() {
     each("contract_sweep", 0, |s| async move {
@@ -597,12 +596,12 @@ async fn the_change_probe_moves_on_a_configuration_write() {
 
 /// Review A5-R1: a key whose limits and allowlist hold lone surrogates
 /// beside a real U+FFFD survives read → write through the shared create and
-/// edit writers, on both backends, as the exact JSON TS would store.
+/// edit writers, on both backends, as the exact JSON the store writes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lone_surrogate_limits_and_allowlists_round_trip_through_shared_writers() {
     const LIMITS: &str = r#"{"requests":{"1m":5},"models":{"\ud800":{"concurrency":1},"\ufffd":{"requests":{"1m":2}},"7":{"tokens":{"5h":9}},"\udc00x":{"spend":{"1w":1.5}}}}"#;
     const ALLOW: &str = r#"["\ud800","\ufffd","x","\udc00"]"#;
-    // What `JSON.stringify(parseLimitConfig(JSON.parse(LIMITS)))` writes:
+    // What `JSON.stringify` of the parsed limits matrix writes:
     // the array index first, the rest in insertion order.
     const LIMITS_TS: &str = "{\"requests\":{\"1m\":5},\"models\":{\"7\":{\"tokens\":{\"5h\":9}},\"\\ud800\":{\"concurrency\":1},\"\u{fffd}\":{\"requests\":{\"1m\":2}},\"\\udc00x\":{\"spend\":{\"1w\":1.5}}}}";
     // `JSON.stringify(JSON.parse(ALLOW))`: a well-formed U+FFFD is literal.

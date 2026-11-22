@@ -1,15 +1,15 @@
 //! IR → client dialect: streaming encoders, buffered renderers, error bodies
-//! and rate-limit headers (`apps/gateway/src/egress/*.ts`, and the SSE framing
-//! and `Retry-After` rule from `routes/proxy.ts`).
+//! and rate-limit headers, with the SSE framing and `Retry-After` rule.
 //!
 //! # Streaming
 //!
 //! A [`StreamEncoder`] is fed one [`StreamEvent`] at a time and appends the
-//! encoded SSE frames (`event: <name>\ndata: <json>\n\n`, exactly as
-//! `sseResponse` writes them) to a caller-owned `String`. The caller reuses
+//! encoded SSE frames (`event: <name>\ndata: <json>\n\n` — these are the exact
+//! bytes clients receive) to a caller-owned `String`. The caller reuses
 //! that buffer across events: write it to the socket, `clear()` it, push the
-//! next event. [`StreamEncoder::finish`] writes whatever TS emits after the
-//! upstream stream ends (OpenAI's `[DONE]`, the Responses terminal events).
+//! next event. [`StreamEncoder::finish`] writes the dialect's closing frames
+//! after the upstream stream ends (OpenAI's `[DONE]`, the Responses terminal
+//! events).
 //!
 //! JSON is written with `omni_ir::jsjson` rules directly into the buffer;
 //! the payload objects that are themselves carried verbatim (native blocks,
@@ -38,7 +38,7 @@ pub enum Dialect {
 }
 
 impl Dialect {
-    /// The dialect's error body for `code` (`*ErrorBody`).
+    /// The dialect's error body for `code`.
     pub fn error_body(self, code: ErrorCode, message: impl Into<Text>) -> JsValue {
         let message = message.into();
         match self {
@@ -48,8 +48,8 @@ impl Dialect {
         }
     }
 
-    /// The dialect's rate-limit headers, in TS insertion order. `now` is the
-    /// instant the request arrived (`startedAt`); Anthropic ignores it.
+    /// The dialect's rate-limit headers, in wire insertion order. `now` is the
+    /// instant the request arrived; Anthropic ignores it.
     pub fn rate_limit_headers(
         self,
         headroom: &HeadroomByDimension,
@@ -62,8 +62,8 @@ impl Dialect {
     }
 }
 
-/// `retryAfterHeaders` (`routes/proxy.ts`): `Retry-After` in whole seconds,
-/// rounded up and floored at zero, on a refusal whose status is 429 only.
+/// `Retry-After` in whole seconds, rounded up and floored at zero, on a
+/// refusal whose status is 429 only.
 pub fn retry_after(error: &GatewayError) -> Option<String> {
     let ms = error.retry_after_ms?;
     if error.code.http_status() != 429 {
@@ -99,7 +99,7 @@ impl StreamEncoder {
         }
     }
 
-    /// The upstream stream ended: appends the frames TS writes after its loop.
+    /// The upstream stream ended: appends the dialect's closing frames.
     pub fn finish(&mut self, out: &mut String) {
         match self {
             StreamEncoder::Anthropic(_) => {}

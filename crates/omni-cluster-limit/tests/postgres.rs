@@ -194,7 +194,7 @@ async fn sum_5h(c: &omni_coord::RedisCoord) -> Counts {
         .expect("seeded")
 }
 
-/// What TS would hold: every committed row counted once — rows inside the
+/// The contract: every committed row counted once — rows inside the
 /// window by the seed or by their debit, long streams (`at` before the
 /// window) by their debit at completion time. Then compared with what the
 /// interleaving left.
@@ -278,7 +278,7 @@ async fn concurrent_writers_and_seeds_count_every_row_once() {
     a.flush_debits().await;
     assert_eq!(a.debits_pending().0, 0);
 
-    // TS's picture: four rows, each once. In-window rows: c1's first (1 h),
+    // The expected picture: four rows, each once. In-window rows: c1's first (1 h),
     // c2 (1 min), c3 (30 s); c1's long stream counted at completion.
     let s = sum_5h(&ca).await;
     assert_eq!(
@@ -312,7 +312,7 @@ async fn concurrent_writers_and_seeds_count_every_row_once() {
     //   but outside the selection — R1); c3 applied (committed after the
     //   snapshot); c2 applied (in progress at the snapshot: `xip`).
     // 1w — no 1w seed was running at the first flush and the picture was
-    //   incomplete: that entry (c1, c3) was ignored, as TS's unseeded
+    //   incomplete: that entry (c1, c3) was ignored, as unseeded
     //   buckets ignore adds; B's 1w seed, which took its snapshot after the
     //   gate was lifted (c1, c2, c3 all committed), read all four rows; c2's
     //   later 1w debit was then covered.

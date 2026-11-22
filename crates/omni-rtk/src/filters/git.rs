@@ -1,7 +1,7 @@
-//! `packages/rtk/src/filters/git.ts`: the Git anchor grammar shared by the
+//! The Git anchor grammar shared by the
 //! unknown-origin detector and the line retainer, and the operation filter.
 //!
-//! The fragments are the TS strings verbatim. Combined-diff content columns
+//! The fragments are kept verbatim. Combined-diff content columns
 //! are unbounded on purpose (`[ +-]*[-+]`): a combined diff for N parents
 //! prints N prefix columns per content row (and N+1 `@` on the hunk header),
 //! and git imposes no parent limit, so every finite bound has a merge whose

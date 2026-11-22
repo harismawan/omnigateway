@@ -102,7 +102,7 @@ until more than one external plugin needs it.
 **Value:** Medium; potentially high if the plugin ecosystem grows  
 **Estimated scope:** 3–6 days
 
-Evidence: none in 1.x — plugins are not supported (0.x plugin API: `bun-checkpoint`).
+Evidence: none in 1.x — plugins are not supported.
 
 ## Plugin opportunities
 

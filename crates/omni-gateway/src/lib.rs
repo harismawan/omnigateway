@@ -1,9 +1,9 @@
-//! The `omnigateway` binary's library: boot (`apps/gateway/src/index.ts`),
-//! the HTTP server, dispatch, egress, cancellation and shutdown.
+//! The `omnigateway` binary's library: boot, the HTTP server, dispatch,
+//! egress, cancellation and shutdown.
 //!
-//! Boot order, as TS: configuration, the store (migrated), a heartbeat and the
+//! Boot order: configuration, the store (migrated), a heartbeat and the
 //! pending-row sweep, the snapshot, the writer and limiter, then listen.
-//! SIGTERM/SIGINT stop accepting, let connections drain up to TS's 5 s
+//! SIGTERM/SIGINT stop accepting, let connections drain up to the 5 s
 //! deadline, flush the writer, and exit 0. A second signal exits 1.
 
 pub mod admin_auth;
@@ -90,7 +90,7 @@ pub fn spawn_preseeder(
                     .limits
                     .as_ref()
                     // Well-formed view on purpose: a lone-surrogate override
-                    // is never seeded (TS never builds its subject).
+                    // is never seeded (its subject is never built).
                     .map_or(
                         serde_json::Value::Null,
                         omni_store::LimitConfig::to_json_well_formed,
@@ -138,10 +138,10 @@ fn static_dir_for(exe: Option<std::path::PathBuf>) -> String {
         .unwrap_or_else(|| "public".to_owned())
 }
 
-/// Plugins are not run by this release (spec, non-goals). Where TS would
-/// load `<root>/plugins/<id>` (each directory, in sorted order; `root` is
-/// `OMNI_ROOT`, else the database's directory), one `warn` per entry; then
-/// TS's `plugins resolved` line with the count actually loaded, zero.
+/// Plugins are not run by this release (spec, non-goals). Each directory
+/// under `<root>/plugins` (sorted order; `root` is `OMNI_ROOT`, else the
+/// database's directory) gets one `warn`; then the `plugins resolved` line
+/// with the count actually loaded, zero.
 pub fn warn_plugins(root: Option<&str>, database_path: &str) {
     let root = root.map_or_else(
         || {
@@ -156,7 +156,7 @@ pub fn warn_plugins(root: Option<&str>, database_path: &str) {
     let mut ids: Vec<String> = std::fs::read_dir(&dir)
         .map(|it| {
             it.filter_map(Result::ok)
-                // `Dirent.isDirectory()`: a symlink is not followed.
+                // A symlink is not followed.
                 .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
                 .map(|e| e.file_name().to_string_lossy().into_owned())
                 .collect()
@@ -214,15 +214,15 @@ impl Running {
 pub struct Options {
     pub keepalive: Duration,
     pub stop_deadline: Duration,
-    /// Bun's `idleTimeout` (255 s, its maximum, which TS sets): how long a
-    /// request's headers may take, how long a keep-alive connection may sit
-    /// between requests, and how long the request body may go without a byte.
-    /// Also bounds socket inactivity during responses, except the three
-    /// inference POST routes (frozen TS's `server.timeout(request, 0)`).
-    /// There is no total body deadline, as in TS.
+    /// The idle timeout (255 s by default): how long a request's headers may
+    /// take, how long a keep-alive connection may sit between requests, and
+    /// how long the request body may go without a byte. Also bounds socket
+    /// inactivity during responses, except the three inference POST routes
+    /// (their per-request timeout is disabled). There is no total body
+    /// deadline.
     pub idle_timeout: Duration,
     /// `OMNI_BENCH=1`: serve `POST /__omni/bench/flush`, the bench harness's
-    /// writer barrier. Off by default; not a TS route, and never for
+    /// writer barrier. Off by default; a bench-only route, never for
     /// production: it makes the caller wait on the database.
     pub bench_endpoints: bool,
     /// The barrier's server-side deadline (30 s); tests shorten it.
@@ -242,7 +242,7 @@ pub struct Options {
     pub lifecycle: lifecycle::Lifecycle,
 }
 
-/// `idleTimeout: 255`.
+/// The default idle timeout: 255 s.
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(255);
 
 impl Default for Options {
@@ -267,8 +267,8 @@ impl Default for Options {
 /// The transport timer bounds slow heads and keep-alive waits, retaining the
 /// last inference request's exemption until an ordinary request is routed.
 ///
-/// hyper's own `date` header is off: Bun writes one on every response but a
-/// HEAD's, so [`server::handle`] stamps it (see `server::stamp_date`).
+/// hyper's own `date` header is off: the wire contract carries one on every
+/// response but a HEAD's, so [`server::handle`] stamps it (see `server::stamp_date`).
 pub fn http1_builder(_idle: Duration) -> hyper::server::conn::http1::Builder {
     let mut builder = hyper::server::conn::http1::Builder::new();
     builder.timer(hyper_util::rt::TokioTimer::new());
@@ -508,10 +508,9 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
     .await
     .map_err(|_| "boot seed installation timed out".to_string())??;
 
-    // `dashboardDir()`: `OMNI_STATIC_DIR` taken literally when set. Without
-    // it TS tries `./public` and `../../dashboard/dist` beside its bundle;
-    // the Rust binary has no bundle directory, so it tries `public/` beside
-    // the executable and the checkout's `apps/dashboard/dist`.
+    // `OMNI_STATIC_DIR` is taken literally when set. Without it the binary
+    // tries `public/` beside the executable, then the checkout's
+    // `apps/dashboard/dist`.
     let static_dir = config.static_dir.clone().unwrap_or_else(default_static_dir);
     let static_root = static_files::resolve_root(&static_dir);
     if std::path::Path::new(&static_dir).exists() {
@@ -1031,8 +1030,8 @@ mod tests {
         let path = dir.path().join("gateway.db");
         {
             let store = omni_store::SqliteStore::open(&path, 0).expect("open");
-            // `Bun.password.hash("correct-horse-battery", {argon2id, m=19456, t=40})`,
-            // with t raised: verification honours the stored parameters.
+            // An argon2id hash of "correct-horse-battery", m=19456, t=40
+            // (t deliberately raised): verification honours the stored parameters.
             store
                 .connection()
                 .execute(

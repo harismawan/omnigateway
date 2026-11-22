@@ -1,9 +1,10 @@
 //! Core SQLite migrations.
 //!
 //! The SQL lives in `crates/omni-store/migrations/sqlite/` (`include_str!`),
-//! byte-for-byte the files the TS store shipped, split the way it split them,
-//! recorded in the same `migrations(id, applied_at)` ledger. Installed databases
-//! record applied ids, so a shipped file is frozen: never edit one, add the next.
+//! a byte-stable storage format: installed databases depend on these exact
+//! bytes, recorded in the `migrations(id, applied_at)` ledger. Installed
+//! databases record applied ids, so a shipped file is frozen: never edit one,
+//! add the next.
 
 use crate::error::StoreError;
 use crate::{js, rollup};
@@ -13,11 +14,11 @@ use std::collections::HashSet;
 /// A data step run inside the migration's transaction, after its SQL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum After {
-    /// `backfillDaily`.
+    /// [`rollup::backfill_daily`].
     BackfillDaily,
-    /// `backfillRtkUsage`.
+    /// [`rollup::backfill_rtk_usage`].
     BackfillRtkUsage,
-    /// `rebuildRollup`.
+    /// [`rollup::rebuild_rollup`].
     RebuildRollup,
 }
 
@@ -42,7 +43,7 @@ const fn m(id: i64, sql: &'static str, after: Option<After>) -> Migration {
     Migration { id, sql, after }
 }
 
-/// `MIGRATIONS` in `db.ts`, in order.
+/// Every migration, in order.
 pub const MIGRATIONS: [Migration; 20] = [
     m(1, migration_sql!("001_init.sql"), None),
     m(
@@ -81,7 +82,7 @@ pub const MIGRATIONS: [Migration; 20] = [
 /// The newest migration this build knows.
 pub const LATEST_MIGRATION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].id;
 
-/// `statements` in `db.ts`: comment lines dropped, split on a semicolon that
+/// Comment lines dropped, split on a semicolon that
 /// ends a line, each piece trimmed, empties dropped.
 ///
 /// A line-end split, not a SQL parser. Enough for every file in
@@ -129,8 +130,8 @@ pub fn statements(sql: &str) -> Vec<String> {
         .collect()
 }
 
-/// Sets the connection pragmas `openDb` sets. `journal_mode` persists in the
-/// file; the other three are per connection and must be set on every open.
+/// Sets the connection pragmas every open applies. `journal_mode` persists in
+/// the file; the other three are per connection and must be set on every open.
 pub fn apply_pragmas(conn: &Connection) -> Result<(), StoreError> {
     // `journal_mode` answers with the mode in force, so it is a query.
     let _mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
@@ -143,7 +144,7 @@ pub fn apply_pragmas(conn: &Connection) -> Result<(), StoreError> {
 }
 
 /// Applies every migration the ledger does not record, each in its own
-/// transaction with its data step, as `openDb` does. Ids in the ledger this
+/// transaction with its data step. Ids in the ledger this
 /// build does not know (a newer build's) are left alone.
 pub fn migrate(conn: &mut Connection, day_offset_minutes: i64) -> Result<(), StoreError> {
     conn.execute_batch(
@@ -154,7 +155,7 @@ pub fn migrate(conn: &mut Connection, day_offset_minutes: i64) -> Result<(), Sto
         let mut rows = stmt.query([])?;
         let mut done = HashSet::new();
         while let Some(row) = rows.next()? {
-            // Bun's raw cells enter a JS Set: only Number cells can equal a
+            // Only number cells can equal a
             // numeric migration ID. Comparing against our small exact IDs
             // avoids coercing TEXT, rounding fractional REALs, or rejecting
             // unknown cells. Unknown ledger rows are never changed.
@@ -184,7 +185,7 @@ pub fn migrate(conn: &mut Connection, day_offset_minutes: i64) -> Result<(), Sto
 }
 
 fn apply(conn: &mut Connection, m: &Migration, day_offset_minutes: i64) -> Result<(), StoreError> {
-    // One `execute` per statement, as TS runs one `run` per statement: a step
+    // One `execute` per statement: a step
     // error must abort the transaction, never be skipped past.
     let tx = conn.transaction()?;
     for statement in statements(m.sql) {

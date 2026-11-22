@@ -1,4 +1,4 @@
-//! The key holder's HTTP surface (frozen `routes/client.ts`).
+//! The key holder's HTTP surface.
 
 use hyper::body::Incoming;
 use hyper::{Request, Response};

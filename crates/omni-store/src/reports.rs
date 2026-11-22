@@ -1,5 +1,5 @@
-//! SQLite report reads. Grouping happens in SQLite, as in the frozen store's
-//! `aggregate().all().map()`; the usage report's buckets are written to the
+//! SQLite report reads. Grouping happens in SQLite; the usage report's
+//! buckets are written to the
 //! answer as SQLite yields them, never held as values.
 use crate::{SqliteStore, StoreError};
 use omni_ir::jsjson::{JsValue, write_number, write_str};
@@ -85,7 +85,7 @@ fn label(cell: ValueRef<'_>) -> String {
     }
 }
 
-/// The usage buckets as the JSON array `JSON.stringify` writes for TS's
+/// The usage buckets as the JSON array `JSON.stringify` writes for the
 /// mapped rows, appended to `out`: one object per bucket, `key`, the ten
 /// measures, then `split` when the query has one.
 ///

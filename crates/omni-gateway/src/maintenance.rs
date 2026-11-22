@@ -1,4 +1,4 @@
-//! The frozen maintenance timers: no immediate tick, per-node heartbeat,
+//! The maintenance timers: no immediate tick, per-node heartbeat,
 //! leased hourly sweep. Blocking work is owned and drained on shutdown.
 use omni_coord::Coord;
 use omni_store::writer::WriterHandle;

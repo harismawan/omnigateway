@@ -1,12 +1,12 @@
-//! `GET /v1/models` (`routes/models.ts`, `resolveModelLimits` and
-//! `modelDisplayName` from `@omni/control/modelLimits.ts`).
+//! `GET /v1/models`: the model listing with resolved limits and display
+//! names.
 //!
 //! Catalog labels and limits use the same held snapshot as routing.
 
 use omni_ir::jsjson::{write_number, write_str};
 use omni_store::{Credential, VirtualModel};
 
-/// `modelListBody(models, credentials)`, as `JSON.stringify` writes it.
+/// The model-list JSON body; the byte layout is a wire contract.
 pub fn list_body(models: &[&VirtualModel], credentials: &[Credential]) -> String {
     static PROVIDERS: std::sync::OnceLock<omni_router::Providers> = std::sync::OnceLock::new();
     let providers = PROVIDERS.get_or_init(omni_router::Providers::builtin);

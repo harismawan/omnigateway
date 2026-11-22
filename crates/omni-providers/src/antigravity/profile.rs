@@ -1,4 +1,4 @@
-//! IDE identity, captured once as in the frozen module's import-time profile.
+//! IDE identity, captured once before serving.
 use std::{collections::HashMap, sync::OnceLock};
 
 static ENV: OnceLock<HashMap<String, String>> = OnceLock::new();
@@ -84,15 +84,15 @@ fn hub_user_agent() -> String {
 /// adds `Connection: keep-alive`, which the capture did not show. The quota RPC
 /// was seen only from the CLI 1.5.13; sending it with this App profile is the
 /// gateway's choice. Offline capture only: live acceptance is not yet measured.
-/// Same headers and pre-sort order as the TS `antigravityBootstrapRequest`.
+/// Same headers and pre-sort order as the captured bootstrap request.
 /// `Host` and `Content-Length` are supplied here, not by the transport:
 /// the transport appends a missing one after the ordered list, which is not
 /// the captured order.
 pub(crate) fn bootstrap_headers(token: &str, body: &str) -> Vec<(String, String)> {
     ordered(
-        // Listed in the captured order before sorting, as the TS builder
-        // does, so a partial OMNI_ORDER_ANTIGRAVITY leaves the unlisted ones
-        // identical on both runtimes.
+        // Listed in the captured order before sorting, so a partial
+        // OMNI_ORDER_ANTIGRAVITY leaves the unlisted ones in the captured
+        // order.
         vec![
             ("Host".into(), INFERENCE_HOST.into()),
             ("User-Agent".into(), hub_user_agent()),
@@ -112,7 +112,7 @@ pub(crate) fn bootstrap_headers(token: &str, body: &str) -> Vec<(String, String)
     )
 }
 
-/// App 2.34.0 Linux Hub identity, from the same fixture as the TS profile.
+/// App 2.34.0 Linux Hub identity, from the captured fixture.
 /// omniroute reported that Google refused a non-Mac identity; this offline
 /// capture neither confirms nor disproves that report. Live acceptance of the
 /// Linux Hub default is untested. Set `OMNI_UA_ANTIGRAVITY` to

@@ -9,9 +9,10 @@
 //! [`crate::scripts::DEBIT_BATCH`] calls, in arrival order (split only past
 //! `debit_batch_keys` or the request-size bound).
 //!
-//! **TS's float arithmetic (ruling I5).** Every cost is applied by its own
-//! `HINCRBYFLOAT`, in debit order, so the stored float is the one TS's
-//! per-debit sequence writes. Requests and tokens are integer sums (exact).
+//! **Float arithmetic (ruling I5).** Every cost is applied by its own
+//! `HINCRBYFLOAT`, in debit order: the fleet's per-debit float sequence is
+//! byte-stable, so mixed-version replicas compute identical counts (pinned
+//! by `tests/seeding.rs`). Requests and tokens are integer sums (exact).
 //! An entry that would outgrow one call starts a new entry for the same
 //! bucket after it, so order is kept across calls.
 //!
@@ -23,8 +24,8 @@
 //! before the window), even when one transaction holds both kinds. While a
 //! seed holds the bucket's lock and the picture is incomplete, the script
 //! answers *wait*: the entry is kept, ahead of newer ones, and retried once
-//! the install lands. Otherwise an incomplete picture ignores the debit, as
-//! TS's unseeded buckets do (the next seed reads the committed row; seeds
+//! the install lands. Otherwise an incomplete picture ignores the debit
+//! (the next seed reads the committed row; seeds
 //! install only under their lock, so no seed can be in its read then).
 //!
 //! **Bounds and loss (I3, R3).** Pending storage is bounded by
@@ -35,7 +36,7 @@
 //! are *lost*: counted in [`crate::Metrics::debit_buckets_lost`], logged,
 //! and the coordinator's lost-debit flag armed, so every `omni:b:*` key is
 //! dropped on the next successful call and reseeded from the store, which
-//! has the rows (TS's `lostDebit` policy).
+//! has the rows.
 //!
 //! **Cancellation (R2).** A flush owns the entries it took through a guard:
 //! if the flush is dropped (shutdown, or a cancelled `flush_debits`), the
@@ -253,7 +254,7 @@ pub(crate) fn lost(inner: &Inner, n: u64, why: &'static str) {
 }
 
 /// `omni:lock:seed:<bucket>` for a full `omni:b:<bucket>` hash name — the
-/// lock TS's `seed` takes (`withLock("seed:" + bucketKey)`).
+/// lock the seeder takes.
 pub(crate) fn lock_key(hash: &str) -> String {
     key(
         "lock",
@@ -334,7 +335,7 @@ async fn flush_until(inner: &Inner, yield_to_stop: bool) {
                 args.push(r.commit.clone());
                 args.push(r.rows.len().to_string());
                 for (at, tokens, cost) in &r.rows {
-                    // Every cost, zeros included: TS sends one
+                    // Every cost, zeros included: one
                     // `HINCRBYFLOAT` per debit, and a zero one still
                     // creates the field.
                     args.push(crate::js(*at));
@@ -380,8 +381,8 @@ async fn send(inner: &Inner, keys: &[String], args: &[String], own: &mut Owned<'
     let sent = std::mem::take(&mut own.in_flight);
     let out = match reply {
         Ok(Value::Array(out)) if out.len() == sent.len() => out,
-        // Not confirmed: it may or may not have applied. TS's policy for a
-        // debit that did not reach the server: reseed on recovery (an
+        // Not confirmed: it may or may not have applied. A debit that did
+        // not reach the server reseeds on recovery (an
         // applied-and-unconfirmed batch is then simply re-read).
         _ => return lost(inner, sent.len() as u64, "debit batch not confirmed"),
     };

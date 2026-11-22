@@ -1,4 +1,4 @@
-//! The frozen capabilities-only hypothetical request, using the live router.
+//! The capabilities-only hypothetical request, using the live router.
 use crate::{
     api::Failure,
     body_schema::{Z, parse_or_throw},
@@ -30,9 +30,9 @@ pub fn cli(
     })
 }
 
-/// Validate cells passed raw to the frozen human table, before any output.
+/// Validate cells passed raw to the human table, before any output.
 pub fn cli_table_cells(_store: &SqliteStore, result: &JsValue) -> Result<(), String> {
-    // Frozen constructs candidates before exclusions. Each table first measures
+    // Candidates are constructed before exclusions. Each table first measures
     // widths column-major (nullish cells become ""), then draws row-major
     // without the nullish fallback. Preserve both phases' error precedence.
     for (collection, columns) in [
@@ -294,7 +294,7 @@ fn models(store: &SqliteStore, selected: &str) -> Result<Vec<omni_store::Virtual
     let mut rows = stmt.query([]).map_err(Failure::internal)?;
     let mut out = Vec::new();
     while let Some(row) = rows.next().map_err(Failure::internal)? {
-        // Frozen JSON.parses every row, but only iterates the selected targets.
+        // Every row is JSON.parsed, but only the selected targets are iterated.
         let raw = cli_cell::json(row.get_ref("targets").map_err(Failure::internal)?)
             .map_err(Failure::internal)?;
         let id = cli_cell::string(row.get_ref("id").map_err(Failure::internal)?);

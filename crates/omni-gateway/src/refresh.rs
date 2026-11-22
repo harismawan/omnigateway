@@ -111,7 +111,7 @@ impl Refresher {
             }
         }
     }
-    /// Frozen scheduler: enabled OAuth inside a five-minute lead; sequential.
+    /// The scheduler's rule: enabled OAuth inside a five-minute lead; sequential.
     pub async fn sweep(
         self: &Arc<Self>,
         holder: Option<&Arc<omni_gateway_core::snapshot::SnapshotHolder>>,
@@ -307,7 +307,7 @@ impl Refresher {
             Ok::<_, omni_providers::http::HttpError>((response.status, response.body.text().await?))
         })
         .await
-        // All built-in flows run through frozen pluginFlow: send, body and
+        // All built-in flows share one path: send, body and
         // per-step deadline exceptions are raised into refresh, then relabelled.
         .map_err(|_| refresh_threw(&c.provider))?
         .map_err(|_| refresh_threw(&c.provider))?;
@@ -351,7 +351,7 @@ impl Refresher {
                 return Err(error);
             }
         };
-        // TextEncoder, which TS encryption uses, replaces unpaired UTF-16 units.
+        // Lossy decode: unpaired UTF-16 units become U+FFFD before encryption.
         let access = String::from_utf16_lossy(&result.access_token);
         let refresh = result.refresh_token.as_ref().map(js_text);
         let update = omni_store::credentials::TokenUpdate {
@@ -418,7 +418,7 @@ fn refresh_threw(provider: &str) -> GatewayError {
         format!("{provider} oauth refresh threw"),
     )
 }
-// TS setInterval keeps its phase; callbacks while `running` simply return.
+// The sweep timer keeps its phase; callbacks while `running` simply return.
 fn next_sweep(previous: tokio::time::Instant, now: tokio::time::Instant) -> tokio::time::Instant {
     let period = std::time::Duration::from_secs(60);
     let mut next = previous + period;

@@ -1,11 +1,10 @@
 //! Deeply nested JSON, handled without overflowing the stack.
 //!
-//! `JSON.parse` in Bun accepts more than a million levels of nesting, and the
-//! TS gateway carries a client's value that deep until it re-serializes it:
-//! `JSON.stringify` throws `RangeError` past [`MAX_DEPTH`] levels (measured on
-//! Bun 1.4.4, see the Task 5a report). So this crate accepts JSON up to
-//! [`MAX_DEPTH`] containers deep and refuses anything deeper, deterministically,
-//! before building a single value.
+//! The wire contract accepts JSON up to [`MAX_DEPTH`] containers deep and
+//! refuses anything deeper, deterministically, before building a single
+//! value; serializing a value deeper than [`MAX_DEPTH`] fails with
+//! `RangeError: Maximum call stack size exceeded`. The refusal is
+//! byte-stable (clients match on it).
 //!
 //! `serde_json`'s own parse, `Clone`, `Drop` and `Serialize` recurse once per
 //! level, which overflows a 2 MiB stack long before [`MAX_DEPTH`]. The helpers
@@ -21,8 +20,8 @@ use serde_json::{Map, Value};
 
 /// The deepest JSON value accepted, counted in nested arrays and objects.
 ///
-/// `JSON.stringify` in Bun 1.4.4 writes a value 40000 containers deep and
-/// throws `RangeError: Maximum call stack size exceeded` at 40001.
+/// Serialization writes a value 40000 containers deep and throws
+/// `RangeError: Maximum call stack size exceeded` at 40001.
 pub const MAX_DEPTH: usize = 40_000;
 
 /// Remaining stack below which [`grow`] switches to a fresh segment.
