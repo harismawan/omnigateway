@@ -22,8 +22,8 @@ data:
   # Must be the ingress host, not the Service.
   OMNI_BASE_URL: "https://omni.harismawan.com"
 
-  # Plugins are read from $OMNI_ROOT/plugins at boot. In a fleet every replica
-  # must hold the same set, so bake them into the image rather than mounting.
+  # Install root. 1.x loads no plugins: entries under $OMNI_ROOT/plugins are
+  # warned about once at boot and never run.
   OMNI_ROOT: "/data"
 
   # Boot-time permission only. Capture still needs the runtime setting

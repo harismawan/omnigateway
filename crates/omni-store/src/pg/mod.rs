@@ -1,6 +1,5 @@
-//! The Postgres store: the migrations `packages/store/src/postgres/db.ts`
-//! applies, and the same reads and writes the SQLite store offers, against a
-//! bounded pool.
+//! The Postgres store: the migrations in `migrations/postgres/`, and the same
+//! reads and writes the SQLite store offers, against a bounded pool.
 //!
 //! **Nothing here is on the request path.** The gateway serves from its
 //! in-memory snapshot, built from [`PgStore::snapshot_reads`] at boot and on

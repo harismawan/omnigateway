@@ -377,7 +377,7 @@ leaves the log empty, because the gateway still writes to stdout. Redirect the o
 the same path:
 
 ```bash
-bun apps/gateway/src/index.ts >> /var/log/omni.log 2>&1
+omnigateway >> /var/log/omni.log 2>&1
 ```
 
 `omni start` does both for the gateway it supervises, and under systemd the journal needs no
