@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { GatewayError } from "@omni/ir";
+import capture from "../../../crates/omni-providers/tests/fixtures/antigravity-2.34.0.json";
 import { antigravityCodec } from "../src/antigravity/codec.ts";
 import type { CodecInput } from "../src/codec.ts";
-import capture from "./fixtures/antigravity-2.34.0.json";
 
 const fail: CodecInput["fail"] = (code, message, opts) =>
   new GatewayError(code, message, opts as never);

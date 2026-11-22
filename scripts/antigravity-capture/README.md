@@ -73,6 +73,6 @@ not evidence for the App's identity.
 The recorder never forwards requests. The capture does not establish HTTP/2
 behavior or live backend acceptance.
 
-[fixture]: ../../packages/providers/test/fixtures/antigravity-2.34.0.json
+[fixture]: ../../crates/omni-providers/tests/fixtures/antigravity-2.34.0.json
 [design]: ../../docs/superpowers/specs/2026-09-05-antigravity-provider-design.md#current-inference-fingerprint
 [codex]: ../codex-capture/README.md

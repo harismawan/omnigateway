@@ -30,7 +30,10 @@ type Fixture = {
 };
 
 const FIXTURE: Fixture = JSON.parse(
-  readFileSync(resolve(import.meta.dir, "fixtures/codex-0.170.0.json"), "utf8"),
+  readFileSync(
+    resolve(import.meta.dir, "../../../crates/omni-providers/tests/fixtures/codex-0.170.0.json"),
+    "utf8",
+  ),
 );
 
 /** A thread id the client supplied: a UUID, so it passes through unchanged. */

@@ -7,7 +7,7 @@ for a given model and entry point. This directory runs the real client against a
 local server that records every request byte for byte, with a synthetic login.
 
 Current measured release: **0.170.0** (2026-11-18), fixture
-`packages/providers/test/fixtures/codex-0.170.0.json`. See the design's "Current
+`crates/omni-providers/tests/fixtures/codex-0.170.0.json`. See the design's "Current
 fingerprint" section for additions and deliberate gaps.
 
 Nothing here talks to OpenAI. The login is unsigned and fake, the server answers
@@ -85,7 +85,7 @@ committed**.
      noted in `CODEX_CATALOG_RELEASE`;
    - `packages/providers/src/openai/codexLite.ts` — input item shapes, turn
      metadata keys, `client_metadata` members;
-   - `packages/providers/test/fixtures/codex-<version>.json` — a new
+   - `crates/omni-providers/tests/fixtures/codex-<version>.json` — a new
      hand-sanitized fixture: ids, timestamps and the installation id replaced
      with placeholders, Codex's own prompt items and tool inventory removed, no
      paths. Point `openaiCodexFingerprint.test.ts` at it;
