@@ -1498,6 +1498,7 @@ dependencies = [
  "omni-providers",
  "omni-ratelimit",
  "omni-router",
+ "omni-rtk",
  "omni-store",
  "pprof",
  "rand",

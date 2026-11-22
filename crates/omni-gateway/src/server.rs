@@ -2245,7 +2245,8 @@ async fn count_tokens(app: Arc<App>, req: Request<Incoming>) -> Response<Body> {
                 );
                 r.to_gateway_error()
             })?;
-        // The ponytail ruleset defaults off and is not implemented.
+        // No RTK here, deliberately: the estimate over-counts what dispatch
+        // sends, which is the safe direction for a client pacing compaction.
         Ok(omni_ir::tokens::estimate_input_tokens(&chat))
     }
     .await;
