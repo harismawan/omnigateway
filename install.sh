@@ -273,13 +273,18 @@ if [ "$VERSION" = latest ]; then
     # on an empty tag.
     wget --help 2>&1 | grep -q -- '--spider' \
       || die "this wget cannot resolve the latest release tag; pass --version vX.Y.Z or install curl"
+    # GNU wget prints the raw Location header and its own "Location: ...
+    # [following]" line; keep only the first field of each value so the
+    # suffix never leaks into the tag.
     LATEST_URL=$(wget --spider -S "$RELEASE_BASE_URL/latest" 2>&1 \
-      | tr -d '\r' | sed -n 's/^[[:space:]]*[Ll]ocation:[[:space:]]*//p' | tail -n 1)
+      | tr -d '\r' | sed -n 's/^[[:space:]]*[Ll]ocation:[[:space:]]*//p' \
+      | awk '{print $1}' | tail -n 1)
   fi
   VERSION=${LATEST_URL##*/}
   [ -n "$VERSION" ] || die "could not resolve the latest release tag; pass --version vX.Y.Z or install curl"
 fi
 case $VERSION in
+  v[0-9]*[!A-Za-z0-9._+-]*) die "not a release tag: '$VERSION'" ;;
   v[0-9]*) ;;
   *) die "not a release tag: '$VERSION'" ;;
 esac
