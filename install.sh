@@ -545,5 +545,6 @@ say "  omni status"
 
 }
 
-# Truncation to exactly `main` (missing ` "$@"`) defines the function but runs nothing: inherent to the idiom.
+# A download cut anywhere before this line runs nothing. Cut to exactly `main`
+# (missing ` "$@"`), it runs main with no flags: inherent to the idiom.
 main "$@"
