@@ -373,7 +373,7 @@ else
       if [ "$DOWNLOADER" = curl ]; then
         PUBLIC_IP=$(curl -fsSL -m 4 "$PUBLIC_IP_URL" 2>/dev/null || true)
       else
-        PUBLIC_IP=$(wget -q -T 4 -O - "$PUBLIC_IP_URL" 2>/dev/null || true)
+        PUBLIC_IP=$(wget -q -t 1 -T 4 -O - "$PUBLIC_IP_URL" 2>/dev/null || true)
       fi
       case $PUBLIC_IP in
         *[!0-9.]*|'') PUBLIC_IP= ;;
@@ -487,7 +487,7 @@ else
         HEALTHY=1
         break
       fi
-    elif wget -q -T 2 -O /dev/null "http://127.0.0.1:$PORT/health" 2>/dev/null; then
+    elif wget -q -t 1 -T 2 -O /dev/null "http://127.0.0.1:$PORT/health" 2>/dev/null; then
       HEALTHY=1
       break
     fi
