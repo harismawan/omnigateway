@@ -107,6 +107,10 @@ jobs:
       - name: Install
         run: bun install --frozen-lockfile
 
+      # ubuntu runners ship shellcheck; install.sh is POSIX sh.
+      - name: Shellcheck install.sh
+        run: shellcheck install.sh
+
       # `pipefail` first, and it is the whole reason this is a `bash -c` block
       # rather than a one-liner. A pipeline reports the exit status of its LAST
       # command, so `bun test | tee` exits 0 whenever `tee` succeeds — which is
