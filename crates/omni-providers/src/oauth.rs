@@ -32,6 +32,15 @@ pub struct PendingFlow {
     pub challenge: String,
     pub state: String,
     pub redirect_uri: String,
+    /// Present only on device flows (RFC 8628); marks the flow as device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_code: Option<String>,
+    /// Device poll interval in seconds; the host owns the polling loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval: Option<f64>,
+    /// Provider-owned flow state (device identity, deadlines, machine ids).
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 #[derive(Clone, Serialize)]
@@ -39,6 +48,21 @@ pub struct PendingFlow {
 pub struct AuthorizeStart {
     pub authorize_url: String,
     pub pending: PendingFlow,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_code: Option<String>,
+}
+
+/// A device poll's outcome: `Pending` is control flow ("keep polling"), not a
+/// failure. Device poll parsers return `Result<FlowResult, DeviceError>`.
+#[derive(Debug)]
+pub enum DeviceError {
+    Pending,
+    Gateway(GatewayError),
+}
+impl From<GatewayError> for DeviceError {
+    fn from(error: GatewayError) -> Self {
+        Self::Gateway(error)
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -61,6 +85,10 @@ pub struct FlowResult {
     pub provider_data: serde_json::Map<String, Value>,
     pub access_token: Vec<u16>,
     pub refresh_token: Option<omni_ir::jsjson::JsValue>,
+    /// A provider-minted inference key (muse): the OAuth grant buys this key,
+    /// and the key is what the inference host accepts. Lossless UTF-16 like
+    /// `access_token`; `None` for flows that mint nothing.
+    pub api_key: Option<Vec<u16>>,
     pub expires_at: Option<f64>,
     pub account_email: Option<omni_ir::jsjson::JsValue>,
 }
@@ -71,6 +99,7 @@ impl Clone for FlowResult {
             provider_data: omni_ir::deep::clone_map(&self.provider_data),
             access_token: self.access_token.clone(),
             refresh_token: self.refresh_token.clone(),
+            api_key: self.api_key.clone(),
             expires_at: self.expires_at,
             account_email: self.account_email.clone(),
         }
@@ -80,6 +109,20 @@ impl Drop for FlowResult {
     fn drop(&mut self) {
         omni_ir::deep::drop_map_in_place(&mut self.provider_data);
     }
+}
+
+/// The boxed answer of one [`AuthExchange::exchange`] call: status and body.
+pub type ExchangeFuture<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<(u16, String), GatewayError>> + Send + 'a>,
+>;
+
+/// A bounded request channel a multi-step flow drives from the provider
+/// crate. The host implements it (origin allowlist, request cap, deadline
+/// ceiling); the flow only describes requests and reads answers, exactly as
+/// a codec does for inference. `seconds` is the flow's own deadline for the
+/// call, clamped by the host.
+pub trait AuthExchange: Send {
+    fn exchange<'a>(&'a mut self, request: AuthRequest, seconds: u64) -> ExchangeFuture<'a>;
 }
 
 pub fn token_error(status: u16, body: &Value) -> GatewayError {

@@ -235,7 +235,10 @@ impl Quota {
             return json!({"kind":"disabled","credentialId":id});
         }
         if c.auth_type != AuthType::OAuth
-            || !matches!(c.provider.as_str(), "openai" | "anthropic" | "antigravity")
+            || !matches!(
+                c.provider.as_str(),
+                "openai" | "anthropic" | "antigravity" | "kimi" | "muse"
+            )
         {
             return json!({"kind":"unsupported","credentialId":id});
         }
@@ -750,5 +753,27 @@ mod tests {
         drain.await.unwrap();
         assert_eq!(host.writes.load(Ordering::SeqCst), 1);
         assert_eq!(host.completed.load(Ordering::SeqCst), 1);
+    }
+    #[tokio::test]
+    async fn muse_usage_probe_401_degrades_to_no_data_and_never_disables() {
+        // TS muse.test.ts: "a dead login degrades the quota read, and nothing
+        // else" — the usage probe reads null on 401, the outcome is noData,
+        // and the credential keeps its enabled state with no writes.
+        let (_root, host, _) = fixture();
+        let mut fake = Arc::try_unwrap(host).ok().unwrap();
+        let mut muse = fake.credentials[0].clone();
+        muse.id = "muse1".into();
+        muse.provider = "muse".into();
+        fake.credentials = vec![muse];
+        fake.status.store(401, Ordering::SeqCst);
+        let host = Arc::new(fake);
+        let quota = Quota::new(host.clone());
+        let out = quota.refresh(Some("muse1")).await.unwrap();
+        assert_eq!(out["outcomes"][0]["kind"], "noData");
+        assert_eq!(out["outcomes"][0]["credentialId"], "muse1");
+        assert_eq!(host.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(host.writes.load(Ordering::SeqCst), 0);
+        assert!(host.credentials[0].enabled);
+        quota.drain().await;
     }
 }

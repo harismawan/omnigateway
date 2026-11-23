@@ -24,7 +24,11 @@ pub fn start(redirect: &str, verifier: &str, challenge: &str, state: &str) -> Au
             challenge: challenge.into(),
             state: state.into(),
             redirect_uri: redirect.into(),
+            device_code: None,
+            interval: None,
+            extra: serde_json::Map::new(),
         },
+        user_code: None,
     }
 }
 

@@ -930,3 +930,800 @@ async fn one_non_delta_event_over_the_byte_cap_commits_at_once() {
     assert!(matches!(events.last(), Some(StreamEvent::Error { .. })));
     flush(h).await;
 }
+
+#[tokio::test]
+async fn kimi_registered_codec_dispatches_the_coding_stream() {
+    let f = fixture(&["c0"]);
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute(
+        "UPDATE credentials SET provider='kimi',auth_type='oauth',access_token=api_key,provider_data='{\"deviceId\":\"dev-1\"}'",
+        [],
+    )
+    .expect("provider");
+    let h = harness(&f, vec![sse_ok(2)]);
+    let mut d = dispatch(h.deps.clone(), req("kimi-for-coding"));
+    let events = drain(&mut d).await;
+    assert!(matches!(events.first(), Some(StreamEvent::Start { .. })));
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    let log = d.log.lock().expect("log").clone();
+    assert_eq!(
+        (
+            log.status,
+            log.attempts,
+            log.input_tokens,
+            log.output_tokens
+        ),
+        (200, 1, 10, 4)
+    );
+    {
+        let calls = h.script.seen.lock().expect("seen");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].provider, "kimi");
+        assert_eq!(
+            calls[0].url,
+            "https://api.kimi.com/coding/v1/chat/completions"
+        );
+        assert!(
+            calls[0]
+                .headers
+                .contains(&("Authorization".into(), "Bearer sk-up".into()))
+        );
+        assert!(
+            calls[0]
+                .headers
+                .contains(&("X-Msh-Device-Id".into(), "dev-1".into()))
+        );
+        let sent: serde_json::Value = serde_json::from_str(&calls[0].body).expect("body");
+        assert_eq!(sent["model"], "kimi-for-coding");
+        assert_eq!(sent["stream"], true);
+        assert_eq!(
+            sent["stream_options"],
+            serde_json::json!({"include_usage": true})
+        );
+    }
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn kimi_non_streaming_client_is_served_by_collecting_the_stream() {
+    let f = fixture(&["c0"]);
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute(
+        "UPDATE credentials SET provider='kimi',auth_type='oauth',access_token=api_key,provider_data='{\"deviceId\":\"dev-1\"}'",
+        [],
+    )
+    .expect("provider");
+    let h = harness(&f, vec![sse_ok(1)]);
+    let request = Request {
+        request: chat("kimi-for-coding", false),
+        request_id: "req_t".into(),
+        api_key_id: Some("k1".into()),
+        route_started_at: 1_000,
+    };
+    let mut d = dispatch(h.deps.clone(), request);
+    let events = drain(&mut d).await;
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    {
+        let calls = h.script.seen.lock().expect("seen");
+        assert_eq!(calls.len(), 1);
+        let sent: serde_json::Value = serde_json::from_str(&calls[0].body).expect("body");
+        // The request going out streams either way; a non-streaming upstream
+        // would return JSON the SSE parser yields nothing from.
+        assert_eq!(sent["stream"], true);
+    }
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn kimi_retryable_failure_before_commit_fails_over() {
+    let f = fixture(&["c0", "c1"]);
+    set_setting(&f.path, "routingStrategy", "\"priority\"");
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute(
+        "UPDATE credentials SET provider='kimi',auth_type='oauth',access_token=api_key,provider_data='{\"deviceId\":\"dev-1\"}',tier=CASE id WHEN 'c0' THEN 1 ELSE 2 END",
+        [],
+    )
+    .expect("provider");
+    let h = harness(
+        &f,
+        vec![status(500, "{\"error\":{\"message\":\"boom\"}}"), sse_ok(1)],
+    );
+    let mut d = dispatch(h.deps.clone(), req("kimi-for-coding"));
+    let events = drain(&mut d).await;
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    let log = d.log.lock().expect("log").clone();
+    assert_eq!((log.status, log.attempts), (200, 2));
+    assert_eq!(log.credential_id.as_deref(), Some("c1"));
+    {
+        let calls = h.script.seen.lock().expect("seen");
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|c| c.provider == "kimi"));
+    }
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn kilo_registered_codec_dispatches_the_openrouter_stream() {
+    let f = fixture(&["c0"]);
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute(
+        "UPDATE credentials SET provider='kilo',auth_type='oauth',access_token=api_key,provider_data='{\"orgId\":\"org-42\"}'",
+        [],
+    )
+    .expect("provider");
+    let h = harness(&f, vec![sse_ok(2)]);
+    let mut d = dispatch(h.deps.clone(), req("kilo/anthropic/claude-sonnet-5"));
+    let events = drain(&mut d).await;
+    assert!(matches!(events.first(), Some(StreamEvent::Start { .. })));
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    let log = d.log.lock().expect("log").clone();
+    assert_eq!(
+        (
+            log.status,
+            log.attempts,
+            log.input_tokens,
+            log.output_tokens
+        ),
+        (200, 1, 10, 4)
+    );
+    {
+        let calls = h.script.seen.lock().expect("seen");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].provider, "kilo");
+        // An OAuth credential goes to the OpenRouter path, not the gateway one.
+        assert_eq!(
+            calls[0].url,
+            "https://api.kilo.ai/api/openrouter/chat/completions"
+        );
+        assert!(
+            calls[0]
+                .headers
+                .contains(&("Authorization".into(), "Bearer sk-up".into()))
+        );
+        assert!(
+            calls[0]
+                .headers
+                .contains(&("X-Kilocode-OrganizationID".into(), "org-42".into()))
+        );
+        assert!(
+            calls[0]
+                .headers
+                .contains(&("X-KILOCODE-EDITORNAME".into(), "vscode".into()))
+        );
+        let sent: serde_json::Value = serde_json::from_str(&calls[0].body).expect("body");
+        assert_eq!(sent["model"], "anthropic/claude-sonnet-5");
+        assert_eq!(sent["stream"], true);
+        assert_eq!(
+            sent["stream_options"],
+            serde_json::json!({"include_usage": true})
+        );
+    }
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn kilo_non_streaming_client_is_served_by_collecting_the_stream() {
+    let f = fixture(&["c0"]);
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute(
+        "UPDATE credentials SET provider='kilo',auth_type='oauth',access_token=api_key,provider_data='{}'",
+        [],
+    )
+    .expect("provider");
+    let h = harness(&f, vec![sse_ok(1)]);
+    let request = Request {
+        request: chat("kilo/anthropic/claude-sonnet-5", false),
+        request_id: "req_t".into(),
+        api_key_id: Some("k1".into()),
+        route_started_at: 1_000,
+    };
+    let mut d = dispatch(h.deps.clone(), request);
+    let events = drain(&mut d).await;
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    {
+        let calls = h.script.seen.lock().expect("seen");
+        assert_eq!(calls.len(), 1);
+        let sent: serde_json::Value = serde_json::from_str(&calls[0].body).expect("body");
+        // The request going out streams either way; a non-streaming upstream
+        // would return JSON the SSE parser yields nothing from.
+        assert_eq!(sent["stream"], true);
+        // An account with no organization sends no organization header.
+        assert!(
+            !calls[0]
+                .headers
+                .iter()
+                .any(|(n, _)| n == "X-Kilocode-OrganizationID")
+        );
+    }
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn kilo_retryable_failure_before_commit_fails_over() {
+    let f = fixture(&["c0", "c1"]);
+    set_setting(&f.path, "routingStrategy", "\"priority\"");
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute(
+        "UPDATE credentials SET provider='kilo',auth_type='oauth',access_token=api_key,provider_data='{}',tier=CASE id WHEN 'c0' THEN 1 ELSE 2 END",
+        [],
+    )
+    .expect("provider");
+    let h = harness(
+        &f,
+        vec![status(500, "{\"error\":{\"message\":\"boom\"}}"), sse_ok(1)],
+    );
+    let mut d = dispatch(h.deps.clone(), req("kilo/anthropic/claude-sonnet-5"));
+    let events = drain(&mut d).await;
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    let log = d.log.lock().expect("log").clone();
+    assert_eq!((log.status, log.attempts), (200, 2));
+    assert_eq!(log.credential_id.as_deref(), Some("c1"));
+    {
+        let calls = h.script.seen.lock().expect("seen");
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|c| c.provider == "kilo"));
+    }
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn kilo_oauth_401_never_refreshes_and_never_disables() {
+    // Kilo issues neither a refresh token nor an expiry (kilo/oauth.ts), and
+    // the AUTH retry gate requires hasRefreshToken (dispatch/index.ts): a 401
+    // is the attempt's error, not a refresh, and nothing disables the row.
+    let f = fixture(&["c0"]);
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute(
+        "UPDATE credentials SET provider='kilo',auth_type='oauth',access_token=api_key,provider_data='{}',refresh_token=NULL,expires_at=NULL",
+        [],
+    )
+    .expect("provider");
+    let h = harness(
+        &f,
+        vec![status(401, "{\"error\":{\"message\":\"denied\"}}")],
+    );
+    let mut d = dispatch(h.deps.clone(), req("kilo/anthropic/claude-sonnet-5"));
+    let events = drain(&mut d).await;
+    // AUTH is failover-retryable, so a lone candidate exhausts into
+    // AllCandidatesFailed carrying the upstream's own message — the same
+    // terminal shape TS dispatch yields when no candidate is left.
+    assert!(
+        matches!(
+            events.last(),
+            Some(StreamEvent::Error {
+                code: ErrorCode::AllCandidatesFailed,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    assert_eq!(
+        d.log.lock().expect("log").error_code.as_deref(),
+        Some("ALL_CANDIDATES_FAILED")
+    );
+    // Exactly the one inference call: no refresh leg before or after it.
+    assert_eq!(h.script.calls(), 1);
+    assert!(h.deps.holder.load().routing.credentials[0].enabled);
+    assert_eq!(rows(&f.path, "SELECT enabled FROM credentials"), [["1"]]);
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn kilo_oauth_null_expiry_is_never_due_for_the_sweep() {
+    // The scheduler's due() requires expiresAt !== null (oauth/scheduler.ts);
+    // kilo's permanent null expiry must keep it out of the sweep even with a
+    // refresh token present — reaching run() would disable it on the refusal.
+    let f = fixture(&["c0"]);
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute(
+        "UPDATE credentials SET provider='kilo',auth_type='oauth',access_token=api_key,provider_data='{}',refresh_token=?,expires_at=NULL",
+        [omni_crypto::field::encrypt(&key(), "refresh")],
+    )
+    .expect("provider");
+    let h = harness(&f, vec![]);
+    let outcome = h.deps.refresher.sweep(None).await.expect("sweep");
+    assert_eq!((outcome.refreshed, outcome.touched), (0, 0));
+    assert_eq!(h.script.calls(), 0);
+    assert!(h.deps.holder.load().routing.credentials[0].enabled);
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn kilo_api_key_dispatches_the_gateway_path_and_decodes_the_stream() {
+    let f = fixture(&["c0"]);
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute(
+        "UPDATE credentials SET provider='kilo',provider_data='{}'",
+        [],
+    )
+    .expect("provider");
+    let h = harness(&f, vec![sse_ok(2)]);
+    let mut d = dispatch(h.deps.clone(), req("kilo/anthropic/claude-sonnet-5"));
+    let events = drain(&mut d).await;
+    assert!(matches!(events.first(), Some(StreamEvent::Start { .. })));
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    let log = d.log.lock().expect("log").clone();
+    assert_eq!(
+        (
+            log.status,
+            log.attempts,
+            log.input_tokens,
+            log.output_tokens
+        ),
+        (200, 1, 10, 4)
+    );
+    {
+        let calls = h.script.seen.lock().expect("seen");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].provider, "kilo");
+        // An apiKey credential goes to the gateway path, not the OpenRouter one.
+        assert_eq!(
+            calls[0].url,
+            "https://api.kilo.ai/api/gateway/chat/completions"
+        );
+        assert!(
+            calls[0]
+                .headers
+                .contains(&("Authorization".into(), "Bearer sk-up".into()))
+        );
+    }
+    flush(h).await;
+}
+
+/// A Responses-shaped SSE turn for the grok proxy.
+fn grok_sse() -> Reply {
+    Reply::Http(
+        200,
+        vec![("content-type".into(), "text/event-stream".into())],
+        vec![
+            "event: response.created\ndata: {\"response\":{\"id\":\"r1\",\"model\":\"grok-4.6\"}}\n\n".into(),
+            "event: response.content_part.added\ndata: {\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"output_text\"}}\n\n".into(),
+            "event: response.output_text.delta\ndata: {\"output_index\":0,\"content_index\":0,\"delta\":\"hello\"}\n\n".into(),
+            "event: response.content_part.done\ndata: {\"output_index\":0,\"content_index\":0}\n\n".into(),
+            "event: response.completed\ndata: {\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}\n\n".into(),
+        ],
+    )
+}
+
+#[tokio::test]
+async fn grok_registered_codec_dispatches_the_proxy_stream() {
+    let f = fixture(&["c0"]);
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute(
+        "UPDATE credentials SET provider='grok',auth_type='oauth',access_token=api_key,provider_data='{\"agentId\":\"agent-1\"}'",
+        [],
+    )
+    .expect("provider");
+    let h = harness(&f, vec![grok_sse()]);
+    let mut d = dispatch(h.deps.clone(), req("grok-4.6"));
+    let events = drain(&mut d).await;
+    assert!(matches!(events.first(), Some(StreamEvent::Start { .. })));
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    let log = d.log.lock().expect("log").clone();
+    assert_eq!(
+        (
+            log.status,
+            log.attempts,
+            log.input_tokens,
+            log.output_tokens
+        ),
+        (200, 1, 10, 4)
+    );
+    {
+        let calls = h.script.seen.lock().expect("seen");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].provider, "grok");
+        // The OAuth bearer goes to the proxy, never to api.x.ai.
+        assert_eq!(calls[0].url, "https://cli-chat-proxy.grok.com/v1/responses");
+        for pair in [
+            ("Authorization", "Bearer sk-up"),
+            ("X-XAI-Token-Auth", "xai-grok-cli"),
+            ("x-authenticateresponse", "authenticate-response"),
+            ("x-grok-agent-id", "agent-1"),
+            ("x-grok-req-id", "req_t"),
+        ] {
+            assert!(
+                calls[0]
+                    .headers
+                    .contains(&(pair.0.to_owned(), pair.1.to_owned())),
+                "{pair:?} missing from {:?}",
+                calls[0].headers
+            );
+        }
+        let sent: serde_json::Value = serde_json::from_str(&calls[0].body).expect("body");
+        assert_eq!(sent["model"], "grok-4.6");
+        assert_eq!(sent["stream"], true);
+        assert_eq!(sent["store"], false);
+    }
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn grok_non_streaming_client_is_served_by_collecting_the_stream() {
+    let f = fixture(&["c0"]);
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute(
+        "UPDATE credentials SET provider='grok',auth_type='oauth',access_token=api_key,provider_data='{\"agentId\":\"agent-1\"}'",
+        [],
+    )
+    .expect("provider");
+    let h = harness(&f, vec![grok_sse()]);
+    let request = Request {
+        request: chat("grok-4.6", false),
+        request_id: "req_t".into(),
+        api_key_id: Some("k1".into()),
+        route_started_at: 1_000,
+    };
+    let mut d = dispatch(h.deps.clone(), request);
+    let events = drain(&mut d).await;
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    {
+        let calls = h.script.seen.lock().expect("seen");
+        assert_eq!(calls.len(), 1);
+        let sent: serde_json::Value = serde_json::from_str(&calls[0].body).expect("body");
+        // The request going out streams either way; a non-streaming upstream
+        // would return JSON the SSE parser yields nothing from.
+        assert_eq!(sent["stream"], true);
+    }
+    flush(h).await;
+}
+
+/// A Responses-shaped SSE turn for Meta's Model API front door.
+fn muse_sse() -> Reply {
+    Reply::Http(
+        200,
+        vec![("content-type".into(), "text/event-stream".into())],
+        vec![
+            "event: response.created\ndata: {\"response\":{\"id\":\"r1\",\"model\":\"muse-spark-1.3\"}}\n\n".into(),
+            "event: response.content_part.added\ndata: {\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"output_text\"}}\n\n".into(),
+            "event: response.output_text.delta\ndata: {\"output_index\":0,\"content_index\":0,\"delta\":\"hello\"}\n\n".into(),
+            "event: response.content_part.done\ndata: {\"output_index\":0,\"content_index\":0}\n\n".into(),
+            "event: response.completed\ndata: {\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}\n\n".into(),
+        ],
+    )
+}
+
+#[tokio::test]
+async fn muse_registered_codec_dispatches_the_responses_stream() {
+    let f = fixture(&["c0"]);
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    // The minted api key (the fixture's `api_key` column) is what inference
+    // carries; the OAuth token belongs to the mint and the usage probe alone.
+    conn.execute(
+        "UPDATE credentials SET provider='muse',auth_type='oauth',access_token=?,provider_data='{}'",
+        [omni_crypto::field::encrypt(&key(), "oauth-tok")],
+    )
+    .expect("provider");
+    let h = harness(&f, vec![muse_sse()]);
+    let mut d = dispatch(h.deps.clone(), req("muse-spark-1.3"));
+    let events = drain(&mut d).await;
+    assert!(matches!(events.first(), Some(StreamEvent::Start { .. })));
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    let log = d.log.lock().expect("log").clone();
+    assert_eq!(
+        (
+            log.status,
+            log.attempts,
+            log.input_tokens,
+            log.output_tokens
+        ),
+        (200, 1, 10, 4)
+    );
+    {
+        let calls = h.script.seen.lock().expect("seen");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].provider, "muse");
+        // No stored baseUrl: the codec's compiled default stands.
+        assert_eq!(calls[0].url, "https://api.meta.ai/v1/responses");
+        // The minted key authenticates, never the device-flow token.
+        assert!(
+            calls[0]
+                .headers
+                .contains(&("Authorization".into(), "Bearer sk-up".into()))
+        );
+        assert!(
+            calls[0]
+                .headers
+                .contains(&("Accept".into(), "text/event-stream".into()))
+        );
+        let sent: serde_json::Value = serde_json::from_str(&calls[0].body).expect("body");
+        assert_eq!(sent["model"], "muse-spark-1.3");
+        assert_eq!(sent["stream"], true);
+        assert_eq!(sent["store"], false);
+        // The session header and the body's cache key name the same
+        // conversation.
+        let session = calls[0]
+            .headers
+            .iter()
+            .find(|(n, _)| n == "x-meta-ai-gateway-session-id")
+            .map(|(_, v)| v.clone())
+            .expect("session header");
+        assert_eq!(sent["prompt_cache_key"], session);
+    }
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn muse_non_streaming_client_is_served_by_collecting_the_stream() {
+    let f = fixture(&["c0"]);
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    // A stored baseUrl is honoured (trailing slash normalized away).
+    conn.execute(
+        "UPDATE credentials SET provider='muse',auth_type='oauth',access_token=?,provider_data='{\"baseUrl\":\"https://api.meta.ai/v1/\"}'",
+        [omni_crypto::field::encrypt(&key(), "oauth-tok")],
+    )
+    .expect("provider");
+    let h = harness(&f, vec![muse_sse()]);
+    let request = Request {
+        request: chat("muse-spark-1.3", false),
+        request_id: "req_t".into(),
+        api_key_id: Some("k1".into()),
+        route_started_at: 1_000,
+    };
+    let mut d = dispatch(h.deps.clone(), request);
+    let events = drain(&mut d).await;
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    {
+        let calls = h.script.seen.lock().expect("seen");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].url, "https://api.meta.ai/v1/responses");
+        let sent: serde_json::Value = serde_json::from_str(&calls[0].body).expect("body");
+        // The request going out streams either way; a non-streaming upstream
+        // would return JSON the SSE parser yields nothing from.
+        assert_eq!(sent["stream"], true);
+    }
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn muse_retryable_failure_before_commit_fails_over() {
+    let f = fixture(&["c0", "c1"]);
+    set_setting(&f.path, "routingStrategy", "\"priority\"");
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute(
+        "UPDATE credentials SET provider='muse',auth_type='oauth',access_token=?,provider_data='{}',tier=CASE id WHEN 'c0' THEN 1 ELSE 2 END",
+        [omni_crypto::field::encrypt(&key(), "oauth-tok")],
+    )
+    .expect("provider");
+    let h = harness(
+        &f,
+        vec![
+            status(500, "{\"error\":{\"message\":\"boom\"}}"),
+            muse_sse(),
+        ],
+    );
+    let mut d = dispatch(h.deps.clone(), req("muse-spark-1.3"));
+    let events = drain(&mut d).await;
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    let log = d.log.lock().expect("log").clone();
+    assert_eq!((log.status, log.attempts), (200, 2));
+    assert_eq!(log.credential_id.as_deref(), Some("c1"));
+    {
+        let calls = h.script.seen.lock().expect("seen");
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|c| c.provider == "muse"));
+    }
+    flush(h).await;
+}
+
+// --- qoder: the Cosy-signed, body-encoded chat wire -------------------------
+// The credential's accessToken is the JSON bundle the device flow mints; the
+// codec Cosy-signs every request from it, so the fake upstream only records
+// the request shape and answers a plain Chat Completions SSE stream.
+
+const QODER_BUNDLE: &str = r#"{"version":1,"deviceToken":"device-token","uid":"u1","machineId":"machine-1","encryptUserInfo":"ZW5jcnlwdGVk","key":"0123456789abcdef","origin":"https://api2.qoder.sh","models":[{"key":"synthetic","displayName":"Synthetic","images":true,"reasoning":false,"maxInputTokens":1234}],"issuedAt":1700000000000}"#;
+const QODER_CHAT_URL: &str = "https://api2.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1";
+
+fn qoder_fixture(f: &Fixture) {
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute(
+        "UPDATE credentials SET provider='qoder',auth_type='oauth',access_token=?,provider_data='{}'",
+        [omni_crypto::field::encrypt(&key(), QODER_BUNDLE)],
+    )
+    .expect("provider");
+}
+
+#[tokio::test]
+async fn qoder_registered_codec_dispatches_the_cosy_stream() {
+    let f = fixture(&["c0"]);
+    qoder_fixture(&f);
+    let h = harness(&f, vec![sse_ok(2)]);
+    // The router catalog is deliberately empty: `provider/model` shorthand
+    // resolves against the registered provider, and the bundle carries the
+    // model metadata the wire needs.
+    let mut d = dispatch(h.deps.clone(), req("qoder/synthetic"));
+    let events = drain(&mut d).await;
+    assert!(matches!(events.first(), Some(StreamEvent::Start { .. })));
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    let log = d.log.lock().expect("log").clone();
+    assert_eq!(
+        (
+            log.status,
+            log.attempts,
+            log.input_tokens,
+            log.output_tokens
+        ),
+        (200, 1, 10, 4)
+    );
+    {
+        let calls = h.script.seen.lock().expect("seen");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].provider, "qoder");
+        assert_eq!(calls[0].url, QODER_CHAT_URL);
+        let auth = calls[0]
+            .headers
+            .iter()
+            .find(|(n, _)| n == "Authorization")
+            .map(|(_, v)| v.clone())
+            .expect("authorization");
+        assert!(auth.starts_with("Bearer COSY."), "{auth}");
+        for pair in [
+            ("Cosy-Key", "0123456789abcdef"),
+            ("Cosy-User", "u1"),
+            ("Cosy-MachineId", "machine-1"),
+            ("Cosy-MachineToken", "machine-1"),
+            ("Accept", "text/event-stream"),
+        ] {
+            assert!(
+                calls[0]
+                    .headers
+                    .contains(&(pair.0.to_owned(), pair.1.to_owned())),
+                "{pair:?} missing from {:?}",
+                calls[0].headers
+            );
+        }
+        // The body is Cosy-encoded, not plaintext JSON.
+        assert!(serde_json::from_str::<serde_json::Value>(&calls[0].body).is_err());
+        let decoded = omni_crypto::qoder::decode_body(&calls[0].body).expect("decoded");
+        let sent: serde_json::Value = serde_json::from_str(&decoded).expect("body");
+        assert_eq!(sent["stream"], true);
+        assert_eq!(sent["model_config"]["key"], "synthetic");
+        assert_eq!(sent["model_config"]["display_name"], "Synthetic");
+        assert_eq!(sent["model_config"]["max_input_tokens"], 1234);
+        // Text-only content travels as a plain string on this wire.
+        assert_eq!(sent["messages"][0]["content"], "hi");
+    }
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn qoder_non_streaming_client_is_served_by_collecting_the_stream() {
+    let f = fixture(&["c0"]);
+    qoder_fixture(&f);
+    let h = harness(&f, vec![sse_ok(1)]);
+    let request = Request {
+        request: chat("qoder/synthetic", false),
+        request_id: "req_t".into(),
+        api_key_id: Some("k1".into()),
+        route_started_at: 1_000,
+    };
+    let mut d = dispatch(h.deps.clone(), request);
+    let events = drain(&mut d).await;
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    {
+        let calls = h.script.seen.lock().expect("seen");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].url, QODER_CHAT_URL);
+        let decoded = omni_crypto::qoder::decode_body(&calls[0].body).expect("decoded");
+        let sent: serde_json::Value = serde_json::from_str(&decoded).expect("body");
+        // The request going out streams either way; the host collects it.
+        assert_eq!(sent["stream"], true);
+    }
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn qoder_exceed_quota_mid_stream_is_rate_limit_without_failover() {
+    let f = fixture(&["c0", "c1"]);
+    qoder_fixture(&f);
+    let h = harness(
+        &f,
+        vec![
+            Reply::Http(
+                200,
+                vec![("content-type".into(), "text/event-stream".into())],
+                vec![
+                    "data: {\"id\":\"u1\",\"model\":\"up\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n".into(),
+                    "data: [EXCEED_QUOTA]\n\n".into(),
+                ],
+            ),
+            sse_ok(1),
+        ],
+    );
+    let mut d = dispatch(h.deps.clone(), req("qoder/synthetic"));
+    let events = drain(&mut d).await;
+    // The delta committed the attempt: the quota sentinel is an in-stream
+    // error, not a failover to the second credential.
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::BlockDelta { .. }))
+    );
+    match events.last() {
+        Some(StreamEvent::Error { code, message, .. }) => {
+            assert_eq!(*code, ErrorCode::RateLimit);
+            assert_eq!(message, "Qoder quota exceeded");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(h.script.calls(), 1);
+    let log = d.log.lock().expect("log").clone();
+    assert_eq!(
+        (log.status, log.error_code.as_deref()),
+        (429, Some("RATE_LIMIT"))
+    );
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn qoder_retryable_failure_before_commit_fails_over() {
+    let f = fixture(&["c0", "c1"]);
+    set_setting(&f.path, "routingStrategy", "\"priority\"");
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute(
+        "UPDATE credentials SET provider='qoder',auth_type='oauth',access_token=?,provider_data='{}',tier=CASE id WHEN 'c0' THEN 1 ELSE 2 END",
+        [omni_crypto::field::encrypt(&key(), QODER_BUNDLE)],
+    )
+    .expect("provider");
+    let h = harness(
+        &f,
+        vec![status(500, "{\"error\":{\"message\":\"boom\"}}"), sse_ok(1)],
+    );
+    let mut d = dispatch(h.deps.clone(), req("qoder/synthetic"));
+    let events = drain(&mut d).await;
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    let log = d.log.lock().expect("log").clone();
+    assert_eq!((log.status, log.attempts), (200, 2));
+    assert_eq!(log.credential_id.as_deref(), Some("c1"));
+    {
+        let calls = h.script.seen.lock().expect("seen");
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|c| c.provider == "qoder"));
+    }
+    flush(h).await;
+}

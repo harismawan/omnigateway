@@ -82,8 +82,9 @@ fn descriptor(capabilities: Capabilities, prefixes: &[&str]) -> Descriptor {
 impl Providers {
     /// The built-in registry.
     ///
-    /// Anthropic, OpenAI and Antigravity use the generated catalog; other providers retain
-    /// empty catalogs until their codecs are implemented.
+    /// Anthropic, OpenAI, Antigravity, Kimi, Kilo, Grok and Muse use the generated
+    /// catalog. Qoder's catalog is account-derived (`providerData.modelCatalog`)
+    /// and `custom` has none, so both stay empty here.
     pub fn builtin() -> Self {
         let all = caps(true, true, true);
         let mut p = Self::default();
@@ -114,16 +115,21 @@ impl Providers {
         let mut openai = descriptor(all, &["gpt-", "o1", "o3", "o4"]);
         openai.catalog = catalog("openai");
         p.register("openai", openai);
-        p.register(
-            "kimi",
-            descriptor(caps(true, false, false), &["kimi-", "moonshot"]),
-        );
-        p.register("kilo", descriptor(all, &[]));
-        p.register("grok", descriptor(all, &["grok-"]));
+        let mut kimi = descriptor(caps(true, false, false), &["kimi-", "moonshot"]);
+        kimi.catalog = catalog("kimi");
+        p.register("kimi", kimi);
+        let mut kilo = descriptor(all, &[]);
+        kilo.catalog = catalog("kilo");
+        p.register("kilo", kilo);
+        let mut grok = descriptor(all, &["grok-"]);
+        grok.catalog = catalog("grok");
+        p.register("grok", grok);
         let mut antigravity = descriptor(all, &["gemini-"]);
         antigravity.catalog = catalog("antigravity");
         p.register("antigravity", antigravity);
-        p.register("muse", descriptor(all, &["muse-", "muse-spark"]));
+        let mut muse = descriptor(all, &["muse-", "muse-spark"]);
+        muse.catalog = catalog("muse");
+        p.register("muse", muse);
         p.register("qoder", descriptor(all, &[]));
         p.register("custom", descriptor(all, &[]));
         p

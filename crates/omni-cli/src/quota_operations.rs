@@ -199,7 +199,7 @@ pub fn run(command: &str, flags: &Flags, args: &[String]) -> Result<(), Error> {
             let out = if a["enabled"] != true {
                 json!({"kind":"disabled","credentialId":id})
             } else if a["authType"] != "oauth"
-                || !matches!(p, "openai" | "anthropic" | "antigravity")
+                || !matches!(p, "openai" | "anthropic" | "antigravity" | "kimi" | "muse")
             {
                 json!({"kind":"unsupported","credentialId":id})
             } else {

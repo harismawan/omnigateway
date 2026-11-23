@@ -25,7 +25,11 @@ pub fn start(verifier: &str, challenge: &str, state: &str) -> AuthorizeStart {
             challenge: challenge.into(),
             state: state.into(),
             redirect_uri: redirect.into(),
+            device_code: None,
+            interval: None,
+            extra: serde_json::Map::new(),
         },
+        user_code: None,
     }
 }
 
@@ -114,6 +118,7 @@ pub fn token_result(
         })?;
     Ok(FlowResult {
         id_token: None,
+        api_key: None,
         provider_data: serde_json::Map::new(),
         access_token: access.clone(),
         refresh_token: present(get(&body, "refresh_token"))

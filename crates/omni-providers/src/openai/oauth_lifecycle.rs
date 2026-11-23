@@ -113,6 +113,7 @@ pub fn token_result(
             .or_else(|| fallback.map(|s| s.encode_utf16().collect()))
             .map(JsValue::String),
         id_token,
+        api_key: None,
         expires_at: match get(&body, "expires_in") {
             Some(JsValue::Number(n)) => Some(now + n * 1000.0),
             _ => None,

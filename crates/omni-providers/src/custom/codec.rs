@@ -6,7 +6,9 @@ use serde_json::Value;
 
 use super::decode::{ChatDecoder, ResponsesDecoder};
 use super::wire::{to_custom_chat_wire, to_custom_responses_wire};
-use crate::codec::{CodecHttpRequest, CodecInput, CodecRequest, ProviderCodec, StreamDecoder};
+use crate::codec::{
+    CodecHttpRequest, CodecInput, CodecRequest, ProviderCodec, StreamDecoder, needs_scope,
+};
 use crate::http::Headers;
 
 /// The endpoint's dialect, a property of the credential.
@@ -80,34 +82,6 @@ impl ProviderCodec for CustomCodec {
             Protocol::Responses => Box::new(ResponsesDecoder::new()),
         }
     }
-}
-
-// A bounded-depth iterator stack, rather than a pending node per sibling.
-pub(crate) fn needs_scope(value: &Value) -> bool {
-    fn children(value: &Value) -> Option<Box<dyn Iterator<Item = &Value> + '_>> {
-        match value {
-            Value::Array(a) => Some(Box::new(a.iter())),
-            Value::Object(m) => Some(Box::new(m.values())),
-            _ => None,
-        }
-    }
-    let Some(root) = children(value) else {
-        return false;
-    };
-    let mut stack = vec![root];
-    while let Some(iter) = stack.last_mut() {
-        if let Some(child) = iter.next() {
-            if let Some(iter) = children(child) {
-                stack.push(iter);
-                if stack.len() > omni_ir::deep::SHALLOW_DEPTH {
-                    return true;
-                }
-            }
-        } else {
-            stack.pop();
-        }
-    }
-    false
 }
 
 fn build_request(input: &CodecInput<'_>) -> Result<CodecRequest<Protocol>, GatewayError> {

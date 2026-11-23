@@ -78,6 +78,36 @@ fn send_provider<'a>(
             request,
             http,
         )),
+        "kimi" => Box::pin(send(
+            &omni_providers::kimi::codec::KimiCodec,
+            "kimi",
+            request,
+            http,
+        )),
+        "kilo" => Box::pin(send(
+            &omni_providers::kilo::codec::KiloCodec,
+            "kilo",
+            request,
+            http,
+        )),
+        "grok" => Box::pin(send(
+            &omni_providers::grok::codec::GrokCodec,
+            "grok",
+            request,
+            http,
+        )),
+        "muse" => Box::pin(send(
+            &omni_providers::muse::codec::MuseCodec,
+            "muse",
+            request,
+            http,
+        )),
+        "qoder" => Box::pin(send(
+            &omni_providers::qoder::codec::QoderCodec,
+            "qoder",
+            request,
+            http,
+        )),
         _ => Box::pin(send(
             &omni_providers::custom::CustomCodec,
             omni_providers::custom::ID,
@@ -461,7 +491,14 @@ fn credentials_of(c: &Credential, secrets: Option<&omni_store::CredentialSecrets
     let secret = |s: &Secret| s.as_deref().map(str::to_owned);
     let (access_token, api_key) = match secrets {
         Some(s) => (secret(&s.access_token), secret(&s.api_key)),
-        None if c.auth_type == AuthType::OAuth => (secret(c.inference_secret()), None),
+        // Intentional deviation from TS, do not "fix" back: attempt.ts passes
+        // both secrets too, but its openForInference returns apiKey:null for
+        // OAuth rows, so only the token flows there. Here the minted key rides
+        // along because muse inference authenticates with that key ALONE —
+        // dropping it (TS's effective behavior) would break muse dispatch.
+        None if c.auth_type == AuthType::OAuth => {
+            (secret(c.inference_secret()), secret(&c.secrets.api_key))
+        }
         None => (None, secret(c.inference_secret())),
     };
     Credentials {
@@ -835,7 +872,7 @@ fn run(mut s: RunState) -> EventsStream {
             let preemptive_refresh_required = c.credential.auth_type == AuthType::OAuth
                 && c.credential.expires_at.is_some_and(|at| at - REFRESH_LEAD_MS as f64 <= attempt_now);
 
-            if c.target.provider != omni_providers::custom::ID && c.target.provider != "anthropic" && c.target.provider != "openai" && c.target.provider != "antigravity" {
+            if c.target.provider != omni_providers::custom::ID && c.target.provider != "anthropic" && c.target.provider != "openai" && c.target.provider != "antigravity" && c.target.provider != "kimi" && c.target.provider != "kilo" && c.target.provider != "grok" && c.target.provider != "muse" && c.target.provider != "qoder" {
                 let ttft = lock(&log).ttft_ms;
                 slot.release(ttft);
                 yield Err(GatewayError::new(

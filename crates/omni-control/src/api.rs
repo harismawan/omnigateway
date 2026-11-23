@@ -1343,4 +1343,66 @@ mod tests {
         // Root ICU collation of ['b','a','B',...] by localeCompare.
         assert_eq!(got.join("|"), "_x|-a|1|a|A|ä|a b|ab|b|B|é|z|Z");
     }
+
+    #[test]
+    fn qoder_dynamic_catalog_surfaces_through_the_public_catalog() {
+        // providerData as qoder's finish writes it: the public catalog rides
+        // on providerData.modelCatalog while the static catalog stays empty.
+        let rows = omni_providers::qoder::model_catalog::parse_model_catalog(
+            &omni_ir::jsjson::parse_js(
+                r#"{"assistant":[{"key":"synthetic","display_name":"Synthetic","is_vl":true,"max_input_tokens":1234}]}"#,
+            )
+            .expect("listing"),
+        )
+        .expect("rows");
+        let data = |context: f64| {
+            let mut models = rows.clone();
+            models[0].max_input_tokens = Some(context);
+            let value = serde_json::json!({
+                "machineId": "synthetic-stable",
+                "uid": "u1",
+                "inferenceOrigin": "https://api2.qoder.sh",
+                "catalogStatus": "available",
+                "modelCatalog": omni_providers::qoder::model_catalog::public_model_catalog(&models),
+                "inferenceModels": omni_providers::qoder::model_catalog::inference_rows(&models),
+            });
+            omni_ir::jsjson::parse_js(&value.to_string()).expect("data")
+        };
+        let accounts = vec![
+            ("qoder".to_owned(), data(1234.0)),
+            ("qoder".to_owned(), data(999.0)),
+        ];
+        let body =
+            catalog(&accounts, &mut |p| panic!("unexpected problem {p:?}")).expect("catalog");
+        let value: serde_json::Value = serde_json::from_str(&body).expect("json");
+        let providers = value["providers"].as_array().expect("providers");
+        let qoder = providers
+            .iter()
+            .find(|p| p["id"] == "qoder")
+            .expect("qoder");
+        let models = qoder["models"].as_array().expect("models");
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["id"], "synthetic");
+        assert_eq!(models[0]["label"], "Synthetic");
+        assert_eq!(models[0]["pricing"], serde_json::Value::Null);
+        // Grouped by id across accounts, the tightest stated limit wins.
+        assert_eq!(models[0]["limits"]["contextWindow"], 999);
+        assert_eq!(models[0]["auth"], serde_json::json!(["oauth"]));
+        // An unavailable catalog contributes nothing: manual models only.
+        let unavailable = omni_ir::jsjson::parse_js(
+            r#"{"machineId":"synthetic-stable","catalogStatus":"unavailable"}"#,
+        )
+        .expect("data");
+        let body = catalog(&[("qoder".to_owned(), unavailable)], &mut |p| {
+            panic!("unexpected problem {p:?}")
+        })
+        .expect("catalog");
+        let value: serde_json::Value = serde_json::from_str(&body).expect("json");
+        let providers = value["providers"].as_array().expect("providers");
+        let qoder = providers
+            .iter()
+            .find(|p| p["id"] == "qoder")
+            .expect("qoder");
+        assert!(qoder["models"].as_array().expect("models").is_empty());
+    }
 }

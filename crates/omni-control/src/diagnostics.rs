@@ -42,7 +42,17 @@ pub fn report(store: &omni_store::SqliteStore) -> Result<Value, String> {
     // doctor must diagnose what this binary can actually serve.
     let catalog = omni_router::Providers::builtin();
     let mut providers = omni_router::Providers::default();
-    for id in ["openai", "anthropic", "antigravity", "custom"] {
+    for id in [
+        "openai",
+        "anthropic",
+        "antigravity",
+        "kimi",
+        "kilo",
+        "grok",
+        "muse",
+        "qoder",
+        "custom",
+    ] {
         if let Some(descriptor) = catalog.get(id) {
             providers.register(id, descriptor.clone());
         }
@@ -148,7 +158,7 @@ mod tests {
     fn supported_registry_pins_and_readiness() {
         let store = omni_store::SqliteStore::open(":memory:", 0).unwrap();
         let c = store.connection();
-        c.execute("INSERT INTO virtual_models(id,targets,strategy,is_alias) VALUES ('saved',?1,'score',0)", [r#"[{"provider":"kilo","model":"remote","credentialId":"missing","tier":1,"weight":1,"costPerMTok":{"input":0,"output":0},"capabilities":{"tools":true,"images":true,"reasoning":true}}]"#]).unwrap();
+        c.execute("INSERT INTO virtual_models(id,targets,strategy,is_alias) VALUES ('saved',?1,'score',0)", [r#"[{"provider":"absent","model":"remote","credentialId":"missing","tier":1,"weight":1,"costPerMTok":{"input":0,"output":0},"capabilities":{"tools":true,"images":true,"reasoning":true}}]"#]).unwrap();
         c.execute("INSERT INTO api_keys(id,label,prefix,hash,created_at,guardrail_policy,smart_routing) VALUES ('key','test','p','h',0,'policy',1)",[]).unwrap();
         let report = super::report(&store).unwrap();
         assert_eq!(
@@ -157,7 +167,7 @@ mod tests {
         );
         assert_eq!(
             report["missingProviders"],
-            serde_json::json!(["saved/remote → kilo"])
+            serde_json::json!(["saved/remote → absent"])
         );
         assert_eq!(report["guardrail"]["problem"], "unconfigured");
         omni_store::settings::put(c,&serde_json::json!({"guardrailModel":"absent","smartRouterEnabled":true,"smartRouterClassifierModel":"openai/gpt-test","smartRouterLocalModel":"openai/gpt-test"})).unwrap();

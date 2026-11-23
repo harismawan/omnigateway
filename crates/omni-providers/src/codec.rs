@@ -18,6 +18,75 @@ use serde_json::{Map, Value};
 use crate::http::{BodyEncoding, Headers};
 use crate::sse::SseMessage;
 
+// A bounded-depth iterator stack, rather than a pending node per sibling.
+pub(crate) fn needs_scope(value: &Value) -> bool {
+    fn children(value: &Value) -> Option<Box<dyn Iterator<Item = &Value> + '_>> {
+        match value {
+            Value::Array(a) => Some(Box::new(a.iter())),
+            Value::Object(m) => Some(Box::new(m.values())),
+            _ => None,
+        }
+    }
+    let Some(root) = children(value) else {
+        return false;
+    };
+    let mut stack = vec![root];
+    while let Some(iter) = stack.last_mut() {
+        if let Some(child) = iter.next() {
+            if let Some(iter) = children(child) {
+                stack.push(iter);
+                if stack.len() > omni_ir::deep::SHALLOW_DEPTH {
+                    return true;
+                }
+            }
+        } else {
+            stack.pop();
+        }
+    }
+    false
+}
+
+/// Whether a content block carries client JSON a wire encoder may clone or
+/// serialize into recursive temporaries.
+pub(crate) fn deep_block(b: &omni_ir::request::ContentBlock) -> bool {
+    use omni_ir::request::ContentBlock;
+    match b {
+        ContentBlock::ToolUse(t) => needs_scope(&t.input),
+        ContentBlock::ProviderNative(n) => n.data.values().any(needs_scope),
+        ContentBlock::Text(t) => t.citations.iter().flatten().any(needs_scope),
+        ContentBlock::ToolResult(t) => t
+            .native
+            .iter()
+            .flatten()
+            .any(|n| n.data.values().any(needs_scope)),
+        _ => false,
+    }
+}
+
+/// Whether any carrier of client JSON in this request can reach a recursive
+/// clone, serialization or drop inside a wire encoder: tool input schemas and
+/// options, provider tool wire maps, vendor bag values (including the
+/// response-format schemas read out of them), and the JSON inside message
+/// content and system blocks. A superset scan — when in doubt about a
+/// carrier, it is included. `true` means the whole synchronous build
+/// (including temporary drops) must run inside `omni_ir::deep::scope`.
+pub(crate) fn needs_scope_request(req: &ChatRequest) -> bool {
+    req.vendor.iter().flat_map(|m| m.values()).any(needs_scope)
+        || req.tools.iter().flatten().any(|t| match t {
+            omni_ir::request::ToolDef::Portable(t) => {
+                needs_scope(&t.input_schema)
+                    || t.options.iter().flat_map(|m| m.values()).any(needs_scope)
+            }
+            omni_ir::request::ToolDef::Provider(t) => t.wire.values().any(needs_scope),
+        })
+        || req
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .chain(req.system.iter().flatten())
+            .any(deep_block)
+}
+
 /// `AdapterCredentials`: decrypted, from the in-memory snapshot.
 #[derive(Default)]
 pub struct Credentials {

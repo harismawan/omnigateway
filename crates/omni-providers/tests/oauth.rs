@@ -22,6 +22,9 @@ fn exchange_preserves_wire_order_and_checks_pasted_state() {
         challenge: "c".into(),
         state: "s".into(),
         redirect_uri: "r".into(),
+        device_code: None,
+        interval: None,
+        extra: serde_json::Map::new(),
     };
     let sent = exchange_request(" auth-code #s", &p).expect("exchange");
     assert_eq!(
@@ -106,4 +109,77 @@ fn refresh_rotates_or_preserves_and_errors_do_not_leak() {
             .code,
         ErrorCode::Auth
     );
+}
+
+#[test]
+fn pending_flow_old_json_round_trips_byte_stable() {
+    let old = r#"{"verifier":"v","challenge":"c","state":"s","redirectUri":"r"}"#;
+    let flow: PendingFlow = serde_json::from_str(old).expect("old json");
+    assert!(flow.device_code.is_none());
+    assert!(flow.interval.is_none());
+    assert!(flow.extra.is_empty());
+    assert_eq!(serde_json::to_string(&flow).expect("json"), old);
+}
+
+#[test]
+fn pending_flow_device_fields_serialize_only_when_present() {
+    let device = PendingFlow {
+        verifier: "v".into(),
+        challenge: "c".into(),
+        state: "s".into(),
+        redirect_uri: "r".into(),
+        device_code: Some("dc".into()),
+        interval: Some(3.0),
+        extra: serde_json::json!({"deviceId":"machine"})
+            .as_object()
+            .cloned()
+            .expect("map"),
+    };
+    let json = serde_json::to_string(&device).expect("json");
+    assert_eq!(
+        json,
+        r#"{"verifier":"v","challenge":"c","state":"s","redirectUri":"r","deviceCode":"dc","interval":3.0,"extra":{"deviceId":"machine"}}"#
+    );
+    let back: PendingFlow = serde_json::from_str(&json).expect("round trip");
+    assert_eq!(serde_json::to_string(&back).expect("json"), json);
+    let partial = PendingFlow {
+        device_code: Some("dc".into()),
+        interval: None,
+        extra: serde_json::Map::new(),
+        ..device
+    };
+    let json = serde_json::to_string(&partial).expect("json");
+    assert_eq!(
+        json,
+        r#"{"verifier":"v","challenge":"c","state":"s","redirectUri":"r","deviceCode":"dc"}"#
+    );
+}
+
+#[test]
+fn authorize_start_user_code_serializes_only_when_present() {
+    let mut start = start("v", "c", "s");
+    let json = serde_json::to_string(&start).expect("json");
+    assert!(!json.contains("userCode"));
+    start.user_code = Some("ABCD-1234".into());
+    let value: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(&start).expect("json")).expect("json");
+    assert_eq!(value["userCode"], "ABCD-1234");
+}
+
+#[test]
+fn device_error_wraps_gateway_errors_and_pending_is_distinct() {
+    use omni_providers::oauth::DeviceError;
+    fn poll() -> Result<(), DeviceError> {
+        Err(omni_ir::error::GatewayError::new(ErrorCode::Auth, "denied"))?;
+        Ok(())
+    }
+    match poll() {
+        Err(DeviceError::Gateway(e)) => {
+            assert_eq!(e.code, ErrorCode::Auth);
+            assert_eq!(e.message, "denied");
+        }
+        other => panic!("From<GatewayError> must wrap, got {other:?}"),
+    }
+    let pending = DeviceError::Pending;
+    assert!(matches!(pending, DeviceError::Pending));
 }

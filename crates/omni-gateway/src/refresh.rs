@@ -274,67 +274,122 @@ impl Refresher {
         if let omni_store::Secret::Unreadable(error) = &c.secrets.refresh_token {
             return Err(GatewayError::new(ErrorCode::Internal, error.to_string()));
         }
+        // TS checks the null refresh token FIRST, outside the disable-on-AUTH
+        // try: a credential with nothing to refresh keeps its enabled state.
         let token = c.secrets.refresh_token.as_deref().ok_or_else(|| {
             GatewayError::new(
                 ErrorCode::Auth,
                 format!("credential {} has no refresh token", c.id),
             )
         })?;
-        let request = match c.provider.as_str() {
-            "anthropic" => omni_providers::anthropic::oauth::refresh_request(token),
-            "openai" => omni_providers::openai::oauth::refresh_request(token),
-            "antigravity" => omni_providers::antigravity::oauth::refresh_request(token),
-            _ => {
-                return Err(GatewayError::new(
-                    ErrorCode::BadRequest,
-                    "provider does not support OAuth refresh",
-                ));
-            }
-        };
-        let response = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-            let response = self
-                .http
-                .send(HttpRequest {
-                    provider: c.provider.clone(),
-                    url: request.url,
-                    method: request.method,
-                    headers: request.headers,
-                    body: request.body,
-                    body_encoding: None,
-                    request_id: None,
-                })
-                .await?;
-            Ok::<_, omni_providers::http::HttpError>((response.status, response.body.text().await?))
-        })
-        .await
-        // All built-in flows share one path: send, body and
-        // per-step deadline exceptions are raised into refresh, then relabelled.
-        .map_err(|_| refresh_threw(&c.provider))?
-        .map_err(|_| refresh_threw(&c.provider))?;
-        #[allow(clippy::cast_precision_loss)]
-        let result = if c.provider == "openai" {
-            omni_providers::openai::oauth::token_result(
-                response.0,
-                &response.1,
-                Some(token),
-                (self.now)() as f64,
-                &c.provider_data,
-            )
-        } else if c.provider == "antigravity" {
-            omni_providers::antigravity::oauth::token_result(
-                response.0,
-                &response.1,
-                Some(token),
-                (self.now)() as f64,
-                &c.provider_data,
-            )
+        if c.provider == "kilo" {
+            // Kilo issues neither a refresh token nor an expiry, so this path
+            // should be unreachable; AUTH records that the credential is
+            // unusable until the operator reconnects, rather than retrying.
+            // Only reached WITH a refresh token: TS raises this refusal from
+            // inside provider.refresh, within the disable-on-AUTH path.
+            let error = omni_providers::kilo::oauth::refresh_refusal();
+            self.store
+                .disable_rejected_token(&c.id, (self.now)())
+                .await
+                .map_err(storage)?;
+            self.routing_committed(crate::routing::RoutingChange::Credential { id: c.id.clone() });
+            return Err(error);
+        }
+        // One identity per refresh: minting separately for the request and the
+        // result would send one device id upstream and store another.
+        let kimi_device = (c.provider == "kimi")
+            .then(|| omni_providers::kimi::device::from_data(c.provider_data.as_object()));
+        let result = if c.provider == "grok" {
+            // Two requests: discovery, then the token POST to the endpoint it
+            // published. A discovery failure is UPSTREAM, never AUTH.
+            grok_refresh(self, c, token).await
+        } else if c.provider == "muse" {
+            // Two requests: the refresh grant, then the key mint. Muse does
+            // not issue refresh tokens today, so this path is kept for the
+            // day it does rather than reached by the expiry sweep.
+            muse_refresh(self, token).await
+        } else if c.provider == "qoder" {
+            // The refresh grant, then the finish chain: userinfo, endpoint
+            // election and the signed model listing, under one runner.
+            qoder_refresh(self, c, token).await
         } else {
-            omni_providers::anthropic::oauth::token_result(
-                response.0,
-                &response.1,
-                Some(token),
-                (self.now)() as f64,
-            )
+            let request = match c.provider.as_str() {
+                "anthropic" => omni_providers::anthropic::oauth::refresh_request(token),
+                "openai" => omni_providers::openai::oauth::refresh_request(token),
+                "antigravity" => omni_providers::antigravity::oauth::refresh_request(token),
+                "kimi" => omni_providers::kimi::oauth::refresh_request(
+                    token,
+                    kimi_device
+                        .as_ref()
+                        .ok_or_else(|| GatewayError::new(ErrorCode::Internal, "internal error"))?,
+                ),
+                _ => {
+                    return Err(GatewayError::new(
+                        ErrorCode::BadRequest,
+                        "provider does not support OAuth refresh",
+                    ));
+                }
+            };
+            let response = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                let response = self
+                    .http
+                    .send(HttpRequest {
+                        provider: c.provider.clone(),
+                        url: request.url,
+                        method: request.method,
+                        headers: request.headers,
+                        body: request.body,
+                        body_encoding: None,
+                        request_id: None,
+                    })
+                    .await?;
+                Ok::<_, omni_providers::http::HttpError>((
+                    response.status,
+                    response.body.text().await?,
+                ))
+            })
+            .await
+            // All built-in flows share one path: send, body and
+            // per-step deadline exceptions are raised into refresh, then relabelled.
+            .map_err(|_| refresh_threw(&c.provider))?
+            .map_err(|_| refresh_threw(&c.provider))?;
+            #[allow(clippy::cast_precision_loss)]
+            let result = if c.provider == "openai" {
+                omni_providers::openai::oauth::token_result(
+                    response.0,
+                    &response.1,
+                    Some(token),
+                    (self.now)() as f64,
+                    &c.provider_data,
+                )
+            } else if c.provider == "antigravity" {
+                omni_providers::antigravity::oauth::token_result(
+                    response.0,
+                    &response.1,
+                    Some(token),
+                    (self.now)() as f64,
+                    &c.provider_data,
+                )
+            } else if c.provider == "kimi" {
+                omni_providers::kimi::oauth::token_result(
+                    response.0,
+                    &response.1,
+                    Some(token),
+                    (self.now)() as f64,
+                    kimi_device
+                        .as_ref()
+                        .ok_or_else(|| GatewayError::new(ErrorCode::Internal, "internal error"))?,
+                )
+            } else {
+                omni_providers::anthropic::oauth::token_result(
+                    response.0,
+                    &response.1,
+                    Some(token),
+                    (self.now)() as f64,
+                )
+            };
+            result
         };
         let mut result = match result {
             Ok(result) => result,
@@ -357,7 +412,7 @@ impl Refresher {
         let update = omni_store::credentials::TokenUpdate {
             access_token: Some(access),
             refresh_token: refresh,
-            api_key: None,
+            api_key: result.api_key.as_ref().map(|s| String::from_utf16_lossy(s)),
             id_token: result
                 .id_token
                 .as_ref()
@@ -417,6 +472,112 @@ fn refresh_threw(provider: &str) -> GatewayError {
         ErrorCode::Upstream,
         format!("{provider} oauth refresh threw"),
     )
+}
+/// grok's two-step refresh: discovery, then the token POST. The stored agent
+/// id rides forward; the old refresh token is the fallback when the response
+/// omits a rotated one.
+async fn grok_refresh(
+    host: &Refresher,
+    c: &Credential,
+    token: &str,
+) -> std::result::Result<omni_providers::oauth::FlowResult, GatewayError> {
+    let mut runner = crate::oauth_runner::ExchangeRunner::new(
+        host.http.as_ref(),
+        crate::oauth_runner::ExchangeConfig {
+            provider: "grok",
+            step: "refresh",
+            max_requests: 2,
+            origins: crate::oauth_runner::Origins::Validator(
+                &omni_providers::grok::oauth::trusted_origin,
+            ),
+        },
+    );
+    let response = runner
+        .send(omni_providers::grok::oauth::discovery_request(), 15)
+        .await?;
+    let endpoints = omni_providers::grok::oauth::discovery_result(response.0, &response.1)?;
+    let request = omni_providers::grok::oauth::refresh_request(token, &endpoints.token_url);
+    let response = runner.send(request, 30).await?;
+    #[allow(clippy::cast_precision_loss)]
+    let now = (host.now)() as f64;
+    let agent_id = omni_providers::grok::oauth::agent_id_from(c.provider_data.as_object());
+    omni_providers::grok::oauth::token_result(response.0, &response.1, Some(token), &agent_id, now)
+}
+/// muse's two-step refresh: the refresh grant, then the key mint spent on the
+/// NEW access token. The old refresh token is the fallback when the response
+/// omits a rotated one.
+async fn muse_refresh(
+    host: &Refresher,
+    token: &str,
+) -> std::result::Result<omni_providers::oauth::FlowResult, GatewayError> {
+    let mut runner = crate::oauth_runner::ExchangeRunner::new(
+        host.http.as_ref(),
+        crate::oauth_runner::ExchangeConfig {
+            provider: "muse",
+            step: "refresh",
+            max_requests: 2,
+            origins: crate::oauth_runner::Origins::Allowlist(
+                omni_providers::muse::oauth::AUTH_ORIGINS,
+            ),
+        },
+    );
+    let response = runner
+        .send(omni_providers::muse::oauth::refresh_request(token), 30)
+        .await?;
+    let grant = omni_providers::muse::oauth::refresh_token_result(response.0, &response.1)?;
+    let access = String::from_utf16_lossy(&grant.access_token);
+    let (status, text) = runner
+        .send(omni_providers::muse::oauth::mint_request(&access), 30)
+        .await?;
+    #[allow(clippy::cast_precision_loss)]
+    let now = (host.now)() as f64;
+    omni_providers::muse::oauth::exchange_result(grant, status, &text, Some(token), now)
+}
+/// qoder's multi-step refresh: the refresh grant, then userinfo, endpoint
+/// election and the signed model listing. The stored providerData seeds the
+/// last-good origin and catalog when a transient failure would lose them.
+async fn qoder_refresh(
+    host: &Refresher,
+    c: &Credential,
+    token: &str,
+) -> std::result::Result<omni_providers::oauth::FlowResult, GatewayError> {
+    let (request, machine_id) =
+        omni_providers::qoder::oauth::refresh_request(token, c.provider_data.as_object())?;
+    let mut runner = crate::oauth_runner::ExchangeRunner::new(
+        host.http.as_ref(),
+        crate::oauth_runner::ExchangeConfig {
+            provider: "qoder",
+            step: "refresh",
+            max_requests: 5,
+            origins: crate::oauth_runner::Origins::Allowlist(
+                omni_providers::qoder::oauth::AUTH_ORIGINS,
+            ),
+        },
+    );
+    let response = runner.send(request, 30).await?;
+    let merged =
+        omni_providers::qoder::oauth::refresh_token_result(response.0, &response.1, token)?;
+    let state = omni_providers::oauth::random_state();
+    let previous = c
+        .provider_data
+        .as_object()
+        .map(omni_ir::deep::clone_map)
+        .unwrap_or_default();
+    // The finish chain reads the clock per step, as TS does.
+    let clock = || {
+        #[allow(clippy::cast_precision_loss)]
+        let at = (host.now)() as f64;
+        at
+    };
+    omni_providers::qoder::oauth::finish(
+        &mut runner,
+        &merged,
+        &machine_id,
+        &clock,
+        &state,
+        &previous,
+    )
+    .await
 }
 // The sweep timer keeps its phase; callbacks while `running` simply return.
 fn next_sweep(previous: tokio::time::Instant, now: tokio::time::Instant) -> tokio::time::Instant {
