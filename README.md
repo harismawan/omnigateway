@@ -90,6 +90,22 @@ boundary, and the background loops.
 
 ## Install
 
+On a Linux or macOS machine, one command installs the release binary (no Node
+needed), writes a new `.env`, migrates the database, sets an admin password,
+installs a service and waits for `/health`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/harismawan/omnigateway/main/install.sh | sh
+```
+
+Main flags: `--version <tag>`, `--method binary|npm`, `--root <dir>`,
+`--port <n>`, `--base-url <url>`, `--no-service`, `--yes` (no prompts; supply
+the password via `OMNI_ADMIN_PASSWORD`). Re-running the same command is a safe
+upgrade: it follows the existing installation's root and method, never
+rewrites `.env` and never resets an existing admin password.
+
+### npm (alternative)
+
 ```bash
 npm i -g omnigateway
 ```
@@ -113,7 +129,8 @@ database.
 
 ### Upgrading an existing installation
 
-An upgrade is a fresh install of the binary; nothing is converted for you.
+The install script above upgrades an installation it finds. By hand, an
+upgrade is a fresh install of the binary; nothing is converted for you.
 The gateway reads an existing SQLite database as it is (same schema), so to
 keep your data point it at the old installation and replace the service
 yourself:

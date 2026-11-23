@@ -7,7 +7,15 @@ gateway is not on your laptop.
 
 ## Running it as a service
 
-On a machine with systemd:
+On a fresh machine the [install script](../install.sh) does the whole setup —
+binary, `.env`, database, admin password, service, health check — and re-running
+it upgrades in place:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/harismawan/omnigateway/main/install.sh | sh
+```
+
+By hand, on a machine with systemd:
 
 ```bash
 omni service install --enable    # writes a user unit for this installation
