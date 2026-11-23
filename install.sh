@@ -545,4 +545,5 @@ say "  omni status"
 
 }
 
+# Truncation to exactly `main` (missing ` "$@"`) defines the function but runs nothing: inherent to the idiom.
 main "$@"
