@@ -34,31 +34,7 @@ impl ProviderCodec for AnthropicCodec {
         &self,
         input: &CodecInput<'_>,
     ) -> Result<CodecRequest<ToolCloak>, GatewayError> {
-        let req = input.request;
-        let deep = req
-            .vendor
-            .iter()
-            .flat_map(|m| m.values())
-            .any(crate::custom::codec::needs_scope)
-            || req.tools.iter().flatten().any(|t| match t {
-                omni_ir::request::ToolDef::Portable(t) => {
-                    crate::custom::codec::needs_scope(&t.input_schema)
-                        || t.options
-                            .iter()
-                            .flat_map(|m| m.values())
-                            .any(crate::custom::codec::needs_scope)
-                }
-                omni_ir::request::ToolDef::Provider(t) => {
-                    t.wire.values().any(crate::custom::codec::needs_scope)
-                }
-            })
-            || req
-                .messages
-                .iter()
-                .flat_map(|m| &m.content)
-                .chain(req.system.iter().flatten())
-                .any(deep_block);
-        if deep {
+        if crate::codec::needs_scope_request(input.request) {
             omni_ir::deep::scope(|| build_request(input))
         } else {
             build_request(input)
@@ -71,20 +47,6 @@ impl ProviderCodec for AnthropicCodec {
     }
 }
 
-fn deep_block(b: &ContentBlock) -> bool {
-    use crate::custom::codec::needs_scope;
-    match b {
-        ContentBlock::ToolUse(t) => needs_scope(&t.input),
-        ContentBlock::ProviderNative(n) => n.data.values().any(needs_scope),
-        ContentBlock::Text(t) => t.citations.iter().flatten().any(needs_scope),
-        ContentBlock::ToolResult(t) => t
-            .native
-            .iter()
-            .flatten()
-            .any(|n| n.data.values().any(needs_scope)),
-        _ => false,
-    }
-}
 fn build_request(input: &CodecInput<'_>) -> Result<CodecRequest<ToolCloak>, GatewayError> {
     let req = input.request;
     let oauth = input.credentials.access_token.is_some();

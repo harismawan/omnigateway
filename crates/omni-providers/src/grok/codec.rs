@@ -68,59 +68,71 @@ impl ProviderCodec for GrokCodec {
     type State = ();
 
     fn build_request(&self, input: &CodecInput<'_>) -> Result<CodecRequest<()>, GatewayError> {
-        let oauth = input.credentials.access_token.is_some();
-        let encoded = super::wire::to_grok_wire(input.request, input.model);
-
-        let mut protocol = vec![("Content-Type".into(), "application/json".into())];
-        if let Some(token) = &input.credentials.access_token {
-            protocol.push(("Authorization".into(), format!("Bearer {token}")));
-            // Both are proxy-only. The API host has no idea what they mean.
-            protocol.push(("X-XAI-Token-Auth".into(), "xai-grok-cli".into()));
-            protocol.push((
-                "x-authenticateresponse".into(),
-                "authenticate-response".into(),
-            ));
-        } else if let Some(key) = &input.credentials.api_key {
-            protocol.push(("Authorization".into(), format!("Bearer {key}")));
+        // Tool schemas, vendor values and content-block JSON enter recursively
+        // cloned/serialized temporary maps (the `firstInput` cache-key preimage
+        // among them). Keep the entire synchronous lifetime (including
+        // temporary drops) inside the scope; only strings and metadata escape.
+        if crate::codec::needs_scope_request(input.request) {
+            omni_ir::deep::scope(|| build_request(input))
         } else {
-            // `AUTH` rather than a bare failure: dispatch gates its
-            // credential-refresh retry on this code.
-            return Err(GatewayError::new(
-                ErrorCode::Auth,
-                "grok credential has no token",
-            ));
+            build_request(input)
         }
-
-        protocol.extend(request_identity_headers(input.model, input.request_id));
-        // Bound to the credential at connect time and must stay stable; a
-        // fresh id per request is a visible behavioural difference from xAI's
-        // own client.
-        protocol.extend(super::device::headers(&input.credentials.provider_data));
-
-        // The client identity headers and `Accept` come from the profile.
-        let headers = super::profile::headers(protocol);
-
-        // Non-streaming client requests are served by collecting the stream in
-        // dispatch, so always ask for SSE.
-        let mut body = encoded.body;
-        omni_ir::deep::insert(&mut body, "stream".into(), Value::Bool(true));
-        let body = super::profile::order_fields(body, super::profile::BODY_ORDER);
-
-        Ok(CodecRequest {
-            request: CodecHttpRequest {
-                url: if oauth { PROXY_URL } else { API_URL }.into(),
-                method: "POST".into(),
-                headers,
-                body: omni_ir::jsjson::to_string(&Value::Object(body)),
-                body_encoding: None,
-            },
-            decode_state: (),
-            degradations: encoded.degradations,
-            cloaked_tools: None,
-        })
     }
 
     fn decoder(&self, (): (), _headers: &crate::http::Headers) -> Box<dyn StreamDecoder> {
         Box::new(super::decode::GrokDecoder::new())
     }
+}
+
+fn build_request(input: &CodecInput<'_>) -> Result<CodecRequest<()>, GatewayError> {
+    let oauth = input.credentials.access_token.is_some();
+    let encoded = super::wire::to_grok_wire(input.request, input.model);
+
+    let mut protocol = vec![("Content-Type".into(), "application/json".into())];
+    if let Some(token) = &input.credentials.access_token {
+        protocol.push(("Authorization".into(), format!("Bearer {token}")));
+        // Both are proxy-only. The API host has no idea what they mean.
+        protocol.push(("X-XAI-Token-Auth".into(), "xai-grok-cli".into()));
+        protocol.push((
+            "x-authenticateresponse".into(),
+            "authenticate-response".into(),
+        ));
+    } else if let Some(key) = &input.credentials.api_key {
+        protocol.push(("Authorization".into(), format!("Bearer {key}")));
+    } else {
+        // `AUTH` rather than a bare failure: dispatch gates its
+        // credential-refresh retry on this code.
+        return Err(GatewayError::new(
+            ErrorCode::Auth,
+            "grok credential has no token",
+        ));
+    }
+
+    protocol.extend(request_identity_headers(input.model, input.request_id));
+    // Bound to the credential at connect time and must stay stable; a
+    // fresh id per request is a visible behavioural difference from xAI's
+    // own client.
+    protocol.extend(super::device::headers(&input.credentials.provider_data));
+
+    // The client identity headers and `Accept` come from the profile.
+    let headers = super::profile::headers(protocol);
+
+    // Non-streaming client requests are served by collecting the stream in
+    // dispatch, so always ask for SSE.
+    let mut body = encoded.body;
+    omni_ir::deep::insert(&mut body, "stream".into(), Value::Bool(true));
+    let body = super::profile::order_fields(body, super::profile::BODY_ORDER);
+
+    Ok(CodecRequest {
+        request: CodecHttpRequest {
+            url: if oauth { PROXY_URL } else { API_URL }.into(),
+            method: "POST".into(),
+            headers,
+            body: omni_ir::jsjson::to_string(&Value::Object(body)),
+            body_encoding: None,
+        },
+        decode_state: (),
+        degradations: encoded.degradations,
+        cloaked_tools: None,
+    })
 }

@@ -236,11 +236,14 @@ pub fn usage(provider: &str, v: &Value, now: f64) -> Vec<Value> {
         // One plan window under `usage`, counters as strings. The sibling
         // `limits` array is per-minute burst ceilings, not the plan window:
         // mixing them in would park an account for a minute of throttling.
+        // `windowFrom(root.usage ?? root.Usage, "weekly", now)`: the window
+        // is pinned to weekly with no duration — kimi states none, and a
+        // stray duration key must not reclassify the plan window.
         return v
             .get("usage")
             .filter(|v| !v.is_null())
             .or_else(|| v.get("Usage").filter(|v| !v.is_null()))
-            .and_then(|root| window(root, "weekly", now))
+            .and_then(|root| window_from(root, "weekly", now, None))
             .into_iter()
             .collect();
     }

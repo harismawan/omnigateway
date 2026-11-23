@@ -173,7 +173,13 @@ impl QoderDecoder {
     /// One parsed record, envelope already unwrapped.
     fn apply(&mut self, chunk: &Value, out: &mut VecDeque<StreamEvent>) -> Result<(), DecodeError> {
         let chunk = Some(chunk);
-        // `"error" in chunk` is an own-property test, value irrelevant.
+        // `"error" in chunk` is an own-property test, value irrelevant. TS's
+        // `||` short-circuits here, so `String(chunk.code)` never coerces a
+        // hostile value once an error is present; the code check below must
+        // not run first.
+        if prop(chunk, "error").is_some() || prop(chunk, "success") == Some(&Value::Bool(false)) {
+            return Err(fail(ErrorCode::Upstream, "Qoder business error"));
+        }
         let code_ok = match prop(chunk, "code") {
             None => true,
             some => {
@@ -181,10 +187,7 @@ impl QoderDecoder {
                 text == "0" || text == "200"
             }
         };
-        if prop(chunk, "error").is_some()
-            || prop(chunk, "success") == Some(&Value::Bool(false))
-            || (!code_ok && prop(chunk, "choices").is_none())
-        {
+        if !code_ok && prop(chunk, "choices").is_none() {
             return Err(fail(ErrorCode::Upstream, "Qoder business error"));
         }
         let choices = prop(chunk, "choices").filter(|v| v.is_array());

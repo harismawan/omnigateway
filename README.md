@@ -9,8 +9,9 @@ Local service commands and their limits are documented in
 One endpoint in front of the AI accounts you already pay for.
 
 OmniGateway is a self-hosted gateway that speaks the Anthropic and OpenAI APIs
-and answers them using your own Anthropic, OpenAI (including Codex), and
-Google Antigravity subscriptions, plus any OpenAI-compatible endpoint you add. Point any compatible client at it, ask for a model you defined,
+and answers them using your own Anthropic, OpenAI (including Codex), Google
+Antigravity, Kimi, Kilo, Grok, Muse and Qoder subscriptions, plus any
+OpenAI-compatible endpoint you add. Point any compatible client at it, ask for a model you defined,
 and the gateway picks an account that can serve it — falling back to another
 when one is rate-limited, expired, or out of quota.
 
@@ -132,8 +133,8 @@ systemctl --user restart omnigateway
 ```
 
 Use the same `.env` and `OMNI_ENCRYPTION_KEY`, or the stored accounts cannot be
-decrypted. Plugins (their data stays) and accounts for Grok, Kimi, Kilo, Muse
-and Qoder are not served by 1.x; `omni doctor` lists what it found. Cluster
+decrypted. Plugins (their data stays) are not loaded by 1.x; `omni doctor`
+lists what it found. Cluster
 installations: after a Postgres restore or replacement, follow
 [the bucket sweep procedure](docs/rust-cluster-bucket-sweep.md).
 
@@ -162,7 +163,7 @@ omni start                 # serves the API and the console on 127.0.0.1:9000
 Connect an account. The CLI prints a URL to open, and waits:
 
 ```bash
-omni connect anthropic     # or: openai, antigravity
+omni connect anthropic     # or: openai, antigravity, kimi, kilo, grok, muse, qoder
 ```
 
 Every provider also takes a plain API key, if that is what you hold rather than
@@ -172,8 +173,8 @@ a subscription:
 omni credentials add-key anthropic     # prompts for the key, or reads stdin
 ```
 
-There is a sixth provider, `custom`, which points an existing wire codec at an
-origin you supply — an endpoint you host or pay for that is not one of the five.
+There is a ninth provider, `custom`, which points an existing wire codec at an
+origin you supply — an endpoint you host or pay for that is not one of the eight.
 It has no subscription to authorize, so there is no `omni connect custom`; it is
 an API key plus the endpoint to spend it against:
 
@@ -677,7 +678,9 @@ commit produced them.
 
 # Qoder provider
 
-Not served by the Rust gateway (1.x); this describes `omnigateway@0.15.5`.
-Experimental Qoder global account login, server-derived models and native streaming
-are available without installing its CLI. See [Qoder setup and limitations](docs/qoder.md).
+Served by the Rust gateway. Experimental Qoder global account login,
+server-derived models and native streaming are available without installing
+its CLI. The model catalog is dynamic: the OAuth flow stores the account's
+`providerData.modelCatalog` snapshot, which the console merges into the
+catalog. See [Qoder setup and limitations](docs/qoder.md).
 Live account compatibility is not yet verified; unknown prices are not free usage.

@@ -301,6 +301,9 @@ pub async fn start(config: Config, options: Options) -> Result<Running, String> 
     omni_providers::antigravity::profile::initialize();
     omni_providers::kimi::profile::initialize();
     omni_providers::kilo::profile::initialize();
+    omni_providers::grok::profile::initialize();
+    omni_providers::muse::profile::initialize();
+    omni_providers::qoder::profile::initialize();
     let kdf = {
         let secret = config.encryption_key.clone();
         tokio::task::spawn_blocking(move || omni_crypto::field::derive_key(&secret))

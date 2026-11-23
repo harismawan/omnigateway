@@ -119,13 +119,24 @@ pub fn start(
             "discovery document has an unusable authorization_endpoint",
         )
     })?;
-    // `searchParams.set`: an existing parameter keeps its position and takes
-    // the new value; a new one appends.
+    // `searchParams.set`: the first occurrence keeps its position and takes
+    // the new value, every later duplicate is removed, and a new name appends.
     let mut pairs: Vec<(String, String)> = url.query_pairs().into_owned().collect();
     let mut set = |name: &str, value: &str| {
-        if let Some(slot) = pairs.iter_mut().find(|(k, _)| k == name) {
-            slot.1 = value.to_owned();
-        } else {
+        let mut seen = false;
+        pairs.retain_mut(|(k, v)| {
+            if k != name {
+                return true;
+            }
+            if seen {
+                return false;
+            }
+            seen = true;
+            v.clear();
+            v.push_str(value);
+            true
+        });
+        if !seen {
             pairs.push((name.to_owned(), value.to_owned()));
         }
     };
@@ -326,7 +337,7 @@ fn email_from_id_token(id_token: Option<&[u16]>) -> Option<Vec<u16>> {
 /// produce bytes degrades to no email, exactly as the JSON parse would.
 fn base64url_lenient(payload: &str) -> Option<Vec<u8>> {
     use base64::Engine as _;
-    let cleaned: String = payload
+    let mut cleaned: String = payload
         .chars()
         .take_while(|c| *c != '=')
         .filter_map(|c| match c {
@@ -336,6 +347,11 @@ fn base64url_lenient(payload: &str) -> Option<Vec<u8>> {
             _ => None,
         })
         .collect();
+    // Node drops a single leftover character (a length ≡ 1 mod 4 can never
+    // encode a byte) and decodes the rest, rather than refusing the payload.
+    if cleaned.len() % 4 == 1 {
+        cleaned.pop();
+    }
     let engine = base64::engine::GeneralPurpose::new(
         &base64::alphabet::URL_SAFE,
         base64::engine::GeneralPurposeConfig::new()
@@ -343,4 +359,57 @@ fn base64url_lenient(payload: &str) -> Option<Vec<u8>> {
             .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent),
     );
     engine.decode(cleaned.as_bytes()).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_replaces_the_first_match_and_removes_later_duplicates() {
+        // `url.searchParams.set` on `?state=a&state=b` leaves one value.
+        let start = start(
+            "https://auth.x.ai/authorize?state=a&prompt=login&state=b",
+            "http://127.0.0.1:56121/callback",
+            "verifier",
+            "challenge",
+            "host-state",
+        )
+        .expect("start");
+        let url = url::Url::parse(&start.authorize_url).expect("url");
+        let states: Vec<_> = url
+            .query_pairs()
+            .filter(|(k, _)| k == "state")
+            .map(|(_, v)| v.into_owned())
+            .collect();
+        assert_eq!(states, ["host-state"]);
+        // The first occurrence keeps its position, before `prompt`.
+        let keys: Vec<_> = url.query_pairs().map(|(k, _)| k.into_owned()).collect();
+        let state = keys.iter().position(|k| k == "state").expect("state");
+        let prompt = keys.iter().position(|k| k == "prompt").expect("prompt");
+        assert!(state < prompt);
+    }
+
+    #[test]
+    fn lenient_base64url_drops_a_lone_leftover_character() {
+        // 5 cleaned chars ≡ 1 (mod 4): Node decodes "YWJj" and drops the "R".
+        assert_eq!(base64url_lenient("YWJjR").as_deref(), Some(&b"abc"[..]));
+        // A length ≡ 2 or 3 (mod 4) still decodes its whole groups.
+        assert_eq!(base64url_lenient("YWJj").as_deref(), Some(&b"abc"[..]));
+        assert_eq!(base64url_lenient("YWJ").as_deref(), Some(&b"ab"[..]));
+    }
+
+    #[test]
+    fn id_token_email_survives_a_lone_leftover_character() {
+        use base64::Engine as _;
+        let payload =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"email":"x@y.zz"}"#);
+        assert_eq!(payload.len() % 4, 0);
+        let token = format!("eyJhbGciOiJub25lIn0.{payload}Q.sig");
+        let email = email_from_id_token(Some(&token.encode_utf16().collect::<Vec<u16>>()));
+        assert_eq!(
+            email.map(|e| String::from_utf16_lossy(&e)).as_deref(),
+            Some("x@y.zz")
+        );
+    }
 }

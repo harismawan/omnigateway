@@ -339,3 +339,38 @@ fn wire_exposes_supported_vision_tools_and_records_unsupported_features() {
             .contains(&"qoder:reasoning-config-dropped".to_owned())
     );
 }
+
+#[test]
+fn thinking_signature_degradation_follows_js_truthiness() {
+    // `if (b.signature)`: an empty string is falsy, so Some("") records
+    // nothing; a non-empty signature records the drop.
+    let req: ChatRequest = serde_json::from_value(json!({
+        "model": "pool",
+        "stream": false,
+        "messages": [{"role": "assistant", "content": [
+            {"type": "thinking", "text": "hmm", "signature": ""}
+        ]}]
+    }))
+    .expect("request");
+    let creds = credentials(bundle());
+    let built = build(&req, &creds, Some("req-1"), None);
+    assert!(
+        !built
+            .degradations
+            .contains(&"qoder:thinking-signature-dropped".to_owned())
+    );
+    let req: ChatRequest = serde_json::from_value(json!({
+        "model": "pool",
+        "stream": false,
+        "messages": [{"role": "assistant", "content": [
+            {"type": "thinking", "text": "hmm", "signature": "sig"}
+        ]}]
+    }))
+    .expect("request");
+    let built = build(&req, &creds, Some("req-1"), None);
+    assert!(
+        built
+            .degradations
+            .contains(&"qoder:thinking-signature-dropped".to_owned())
+    );
+}

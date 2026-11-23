@@ -369,4 +369,5 @@ omni-providers/src/qoder/oauth.rs :: fn exchange_request( pending: &PendingFlow,
 omni-providers/src/qoder/oauth.rs :: fn poll_result(status: u16, body: &str) -> Result<JsValue, DeviceError>	iteratively dropped JsValue parse; caller screens fields before storage
 omni-providers/src/qoder/oauth.rs :: fn refresh_request( refresh_token: &str, provider_data: Option<&Map<String, Value>>, ) -> Result<(AuthRequest, String), GatewayError>	request contains only strings and header pairs
 omni-providers/src/qoder/oauth.rs :: fn refresh_token_result( status: u16, body: &str, fallback: &str, ) -> Result<JsValue, GatewayError>	iteratively dropped JsValue parse; caller screens fields before storage
+omni-providers/src/qoder/profile.rs :: fn initialize()	scalar/string API; no arbitrary JSON ownership
 omni-providers/src/qoder/wire.rs :: fn to_qoder_wire(input: &CodecInput<'_>, bundle: &Bundle) -> Encoded	internal: caller must be inside a deep scope; production entry point is the codec

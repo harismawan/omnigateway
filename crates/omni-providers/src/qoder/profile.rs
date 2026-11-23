@@ -8,7 +8,7 @@ use serde_json::{Map, Value};
 static ENV: OnceLock<HashMap<String, String>> = OnceLock::new();
 
 /// Capture before serving; library consumers capture on first use.
-fn initialize() {
+pub fn initialize() {
     capture(|| {
         std::env::vars_os()
             .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))

@@ -82,8 +82,9 @@ fn descriptor(capabilities: Capabilities, prefixes: &[&str]) -> Descriptor {
 impl Providers {
     /// The built-in registry.
     ///
-    /// Anthropic, OpenAI and Antigravity use the generated catalog; other providers retain
-    /// empty catalogs until their codecs are implemented.
+    /// Anthropic, OpenAI, Antigravity, Kimi, Kilo, Grok and Muse use the generated
+    /// catalog. Qoder's catalog is account-derived (`providerData.modelCatalog`)
+    /// and `custom` has none, so both stay empty here.
     pub fn builtin() -> Self {
         let all = caps(true, true, true);
         let mut p = Self::default();

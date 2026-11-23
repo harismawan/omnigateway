@@ -56,8 +56,13 @@ fn encode_tool_choice(c: &ToolChoice) -> Value {
 /// `JSON.stringify(req)` for the fallback request-id seed. The host normally
 /// supplies a request id; this only has to be deterministic.
 fn request_seed(req: &ChatRequest, machine_id: &str) -> String {
-    let value = serde_json::to_value(req).unwrap_or(Value::Null);
-    format!("{machine_id}:{}", jsjson::to_string(&value))
+    // The seed value is client JSON: serde writes it through the stack-growing
+    // serializer, but the temporary's drop recurses, so it lives and dies
+    // inside a deep scope. Only the string escapes.
+    omni_ir::deep::scope(|| {
+        let value = serde_json::to_value(req).unwrap_or(Value::Null);
+        format!("{machine_id}:{}", jsjson::to_string(&value))
+    })
 }
 
 pub fn to_qoder_wire(input: &CodecInput<'_>, bundle: &Bundle) -> Encoded {
@@ -90,7 +95,7 @@ pub fn to_qoder_wire(input: &CodecInput<'_>, bundle: &Bundle) -> Encoded {
                 }
                 ContentBlock::Thinking(t) => {
                     reasoning.push_str(&t.text);
-                    if t.signature.is_some() {
+                    if t.signature.as_ref().is_some_and(|s| !s.is_empty()) {
                         notes.note("qoder:thinking-signature-dropped");
                     }
                 }

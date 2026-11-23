@@ -352,3 +352,24 @@ fn interleaved_tool_deltas_stay_inside_their_own_open_content_blocks() {
         .collect();
     assert_eq!(starts, [(Some("a"), Some("one")), (Some("b"), Some("two"))]);
 }
+
+#[test]
+fn error_presence_short_circuits_before_code_coercion() {
+    // TS's `||` checks `"error" in chunk` (and `success === false`) before
+    // `String(chunk.code)` ever runs, so a hostile `code` object cannot turn
+    // a business error into a coercion throw.
+    for record in [
+        json!({"error": "boom", "code": {"toString": 1}}),
+        json!({"success": false, "code": {"toString": 1}}),
+    ] {
+        gateway(
+            drive(&[frame(record)]).expect_err("business error must fail"),
+            ErrorCode::Upstream,
+            "Qoder business error",
+        );
+    }
+    // Without an error or success flag the coercion still runs, and still
+    // throws as `String({toString: 1})` does in JS.
+    let err = drive(&[frame(json!({"code": {"toString": 1}}))]).expect_err("coercion must throw");
+    assert!(matches!(err, DecodeError::Throw(_)), "{err:?}");
+}

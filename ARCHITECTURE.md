@@ -334,8 +334,8 @@ An Anthropic 401 refreshes and retries once. Cancellation is structural: droppin
 drops the upstream body (closing the socket), the load slot and any probe claim. Pins:
 `crates/omni-gateway/tests/dispatch.rs`.
 
-Only four providers dispatch in 1.x — `anthropic`, `openai`, `antigravity`, `custom`
-(`send_provider`). Others stay in the catalog and routing registry; a target naming one fails
+All nine catalog providers dispatch — `anthropic`, `openai`, `antigravity`, `kimi`, `kilo`,
+`grok`, `muse`, `qoder`, `custom` (`send_provider`). A target naming an unknown provider fails
 its attempt with `INTERNAL "no adapter for provider …"`.
 
 **RTK and ponytail are not applied.** The settings `rtkEnabled` and `ponytailMode` are stored and
@@ -345,7 +345,8 @@ request as received. `crates/omni-rtk` is the ported filter set, unwired.
 ## Providers
 
 `crates/omni-providers`: one directory per provider codec — `anthropic/`, `openai/`,
-`antigravity/`, `custom/` — each roughly `codec.rs`, `wire.rs` (IR → body), `decode.rs`
+`antigravity/`, `kimi/`, `kilo/`, `grok/`, `muse/`, `qoder/`, `custom/` — each roughly
+`codec.rs`, `wire.rs` (IR → body), `decode.rs`
 (stream → `StreamEvent`), `profile.rs` (client fingerprint: header order, casing, user agent),
 `oauth.rs`. Shared at the crate root: `codec.rs` (the contract), `adapter.rs` (its host),
 `http/` (client), `sse.rs`, `http_error.rs`, `response_format.rs`, `tool_result_files.rs`,
@@ -724,4 +725,5 @@ Design: `docs/superpowers/specs/2026-09-02-horizontal-scaling-design.md`.
 OAuth flows may store a normalized, public `providerData.modelCatalog` snapshot. `omni-control`
 (`api.rs`, `public_rows`) merges those rows into `/api/catalog` without mutating the static
 catalog, decrypting secrets or calling upstream. Unknown pricing is null; absent limits stay
-unknown. Qoder, which used this most, is not served in 1.x (see [Qoder](docs/qoder.md)).
+unknown. Qoder, which uses this most, is served with a dynamic catalog built from that
+snapshot (see [Qoder](docs/qoder.md)).
