@@ -155,7 +155,7 @@ The nginx block, the Kubernetes base and GitOps releases: [docs/deploying.md](do
 - **Two grains of usage history.** Request logs prune after 30 days, a daily rollup keeps 400;
   a day uses a fixed UTC offset (the host's at boot — fleets set it explicitly).
 - **Body capture is forensics, not an archive.** Off unless both keys turn it on, expires on the
-  log window, capped at 100,000 rows; `omni bodies` reads one request, nothing searches across them.
+  log window, capped at 100,000 rows. `omni bodies` reads one request's capture; nothing searches across them.
 - **Snapshots are manual and local.** Nothing takes one on a schedule and there is no off-host
   target; retention bounds them and a restore takes one first. On Postgres, `pg_dump` is the backup.
 - **Quota readings come from the providers**, whose usage endpoints are undocumented; nothing reported is unknown, never unlimited.
