@@ -39,7 +39,12 @@ const STUB = `#!/bin/sh
 printf '%s\\n' "$*" >> "$OMNI_STUB_LOG"
 case "$1 $2" in
   "status --json")
-    printf '{"process":{"running":false},"adminConfigured":%s,"credentials":[],"storeError":null}\\n' "\${OMNI_STUB_ADMIN_CONFIGURED:-false}"
+    if [ "\${OMNI_STUB_STATUS_NO_FIELD:-}" = 1 ]; then
+      printf '{"process":{"running":false}}\\n'
+    else
+      printf '{"process":{"running":false},"adminConfigured":%s,"credentials":[],"storeError":null}\\n' "\${OMNI_STUB_ADMIN_CONFIGURED:-false}"
+    fi
+    exit "\${OMNI_STUB_STATUS_EXIT:-0}"
     ;;
   "doctor --json"|"omni doctor")
     printf '{"root":"%s","rootSource":"default"}\\n' "\${OMNI_STUB_DOCTOR_ROOT:-}"
@@ -49,6 +54,44 @@ case "$1 $2" in
     ;;
 esac
 exit 0
+`;
+
+/**
+ * A GNU-style wget: `--spider -S` prints both the raw Location header and
+ * wget's own "[following]" line; `-O <file> <url>` copies from the fake
+ * release. Every invocation's argv is recorded.
+ */
+const WGET_STUB = `#!/bin/sh
+printf '%s\\n' "$*" >> "$WGET_STUB_LOG"
+out=
+url=
+spider=0
+prev=
+for a in "$@"; do
+  if [ "$prev" = -O ]; then out=$a; prev=; continue; fi
+  case $a in
+    --help) printf 'GNU Wget (stub)\\n      --spider\\n  -O, --output-document\\n'; exit 0 ;;
+    --spider) spider=1 ;;
+    -O) prev=-O ;;
+    -*) ;;
+    *) url=$a ;;
+  esac
+done
+if [ "$spider" = 1 ]; then
+  printf '  HTTP/1.1 302 Found\\n  Location: /tag/%s\\nLocation: /tag/%s [following]\\n' \\
+    "$WGET_STUB_TAG" "$WGET_STUB_TAG" >&2
+  exit 0
+fi
+case $url in
+  */health) exit 0 ;;
+  */public-ip) printf '203.0.113.7'; exit 0 ;;
+esac
+name=\${url##*/}
+if [ "$out" = - ]; then
+  cat "$WGET_STUB_ASSETS/$name"
+else
+  cp "$WGET_STUB_ASSETS/$name" "$out"
+fi
 `;
 
 /** A release archive as `rust-binaries` packs it, with the stub as the binary. */
@@ -109,6 +152,28 @@ function fixture(badChecksum = false): { dir: string; assets: string; home: stri
 
 const SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
 
+/**
+ * A bin dir mirroring the system dirs minus curl, wget and the systemd tools,
+ * plus the wget stub: the only downloader on PATH is wget, and the script can
+ * never reach real systemd.
+ */
+function wgetOnlyBin(dir: string): string {
+  const bin = join(dir, "wget-bin");
+  mkdirSync(bin);
+  const seen = new Set(["curl", "wget", "systemctl", "loginctl"]);
+  for (const sys of SYSTEM_PATH.split(":")) {
+    if (!existsSync(sys)) continue;
+    for (const name of readdirSync(sys)) {
+      if (seen.has(name)) continue;
+      seen.add(name);
+      symlinkSync(join(sys, name), join(bin, name));
+    }
+  }
+  writeFileSync(join(bin, "wget"), WGET_STUB);
+  chmodSync(join(bin, "wget"), 0o755);
+  return bin;
+}
+
 // Async spawn: the fake release server shares this process's event loop, which
 // a spawnSync would block while curl waits for it.
 async function runInstall(options: {
@@ -118,10 +183,12 @@ async function runInstall(options: {
   env?: Record<string, string>;
   withBinOnPath?: boolean;
   pathPrepend?: string;
+  pathOverride?: string;
 }): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   const { home, base, args, env } = options;
   let path = options.withBinOnPath ? `${home}/.local/bin:${SYSTEM_PATH}` : SYSTEM_PATH;
   if (options.pathPrepend) path = `${options.pathPrepend}:${path}`;
+  if (options.pathOverride) path = options.pathOverride;
   const run = Bun.spawn(["sh", script, ...args], {
     env: {
       ...process.env,
@@ -471,4 +538,84 @@ test("a user unit file gives the root and npm method; --method binary overrides 
   expect(run.exitCode).toBe(0);
   expect(run.stdout).toContain(`Found an existing installation (root: ${root}, method: binary)`);
   expect(calls(home)).toContain(`db migrate --root ${root}`);
+});
+
+const wgetEnv = (home: string, assets: string): Record<string, string> => ({
+  OMNI_ADMIN_PASSWORD: "correct horse battery staple",
+  WGET_STUB_LOG: join(home, "wget.log"),
+  WGET_STUB_ASSETS: assets,
+  WGET_STUB_TAG: TAG,
+});
+
+const wgetCalls = (home: string): string[] =>
+  readFileSync(join(home, "wget.log"), "utf8")
+    .split("\n")
+    .filter((l) => l !== "");
+
+test("GNU wget spider output resolves the tag, not the '[following]' line", async () => {
+  const { dir, home, assets, base } = fixture();
+  const run = await runInstall({
+    home,
+    base,
+    args: ["--no-service", "--yes", "--base-url", "http://gw.example.test:9000"],
+    env: { ...wgetEnv(home, assets), OMNI_INSTALL_PUBLIC_IP_URL: "" },
+    pathOverride: wgetOnlyBin(dir),
+  });
+  expect(run.stderr).toBe("");
+  expect(run.exitCode).toBe(0);
+  const data = join(home, ".local", "share", "omnigateway");
+  expect(readlinkSync(join(data, "current"))).toBe(join(data, TAG));
+  expect(existsSync(join(data, TAG, "omnigateway"))).toBe(true);
+  expect(run.stdout).toContain(`OmniGateway ${TAG} is ready`);
+  expect(wgetCalls(home).some((l) => l.includes(`omnigateway-${TAG}-linux-x64.tar.gz`))).toBe(true);
+});
+
+test("wget health probe and public-IP lookup pass -t 1", async () => {
+  const { dir, home, assets, base } = fixture();
+  const run = await runInstall({
+    home,
+    base,
+    args: ["--version", TAG, "--yes"],
+    env: wgetEnv(home, assets),
+    pathOverride: wgetOnlyBin(dir),
+  });
+  expect(run.exitCode).toBe(0);
+  expect(envFile(join(home, ".config", "omnigateway"))).toContain(
+    "OMNI_BASE_URL=http://203.0.113.7:9000",
+  );
+  const ip = wgetCalls(home).find((l) => l.includes("/public-ip"));
+  const health = wgetCalls(home).find((l) => l.includes("/health"));
+  expect(ip).toBeDefined();
+  expect(ip).toContain("-t 1");
+  expect(health).toBeDefined();
+  expect(health).toContain("-t 1");
+});
+
+test("a failing omni status skips the password step with a warning, never resets", async () => {
+  const { home, base } = fixture();
+  const run = await runInstall({
+    home,
+    base,
+    args: ["--no-service", "--yes", "--base-url", "http://gw.example.test:9000"],
+    env: { OMNI_ADMIN_PASSWORD: "correct horse battery staple", OMNI_STUB_STATUS_EXIT: "1" },
+  });
+  expect(run.exitCode).toBe(0);
+  expect(run.stderr).toContain("could not tell whether an admin password is set");
+  expect(run.stderr).toContain(
+    `omni admin set-password --root ${join(home, ".config", "omnigateway")}`,
+  );
+  expect(calls(home).some((c) => c.startsWith("admin set-password"))).toBe(false);
+});
+
+test("status output without adminConfigured also skips the password step", async () => {
+  const { home, base } = fixture();
+  const run = await runInstall({
+    home,
+    base,
+    args: ["--no-service", "--yes", "--base-url", "http://gw.example.test:9000"],
+    env: { OMNI_ADMIN_PASSWORD: "correct horse battery staple", OMNI_STUB_STATUS_NO_FIELD: "1" },
+  });
+  expect(run.exitCode).toBe(0);
+  expect(run.stderr).toContain("could not tell whether an admin password is set");
+  expect(calls(home).some((c) => c.startsWith("admin set-password"))).toBe(false);
 });
