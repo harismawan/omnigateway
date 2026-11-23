@@ -14,6 +14,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   readlinkSync,
   rmSync,
   statSync,
@@ -409,4 +410,35 @@ test("detection through omnigateway on PATH calls it with omni doctor --json", a
   expect(run.exitCode).toBe(0);
   expect(calls(home)[0]).toBe("omni doctor --json");
   expect(calls(home)).toContain(`db migrate --root ${root}`);
+});
+
+test("a truncated download (first 60% of bytes) installs nothing under HOME", async () => {
+  const { dir, home, base } = fixture();
+  const bytes = readFileSync(script);
+  const truncated = join(dir, "truncated.sh");
+  writeFileSync(truncated, bytes.subarray(0, Math.floor(bytes.length * 0.6)));
+  const run = Bun.spawn(
+    ["sh", truncated, "--no-service", "--yes", "--base-url", "http://gw.example.test:9000"],
+    {
+      env: {
+        ...process.env,
+        HOME: home,
+        XDG_CONFIG_HOME: join(home, ".config"),
+        XDG_DATA_HOME: join(home, ".local", "share"),
+        PATH: SYSTEM_PATH,
+        OMNI_INSTALL_BASE_URL: base,
+        OMNI_INSTALL_UNAME_S: "Linux",
+        OMNI_INSTALL_UNAME_M: "x86_64",
+        OMNI_INSTALL_PUBLIC_IP_URL: `${base}/public-ip`,
+        OMNI_STUB_LOG: join(home, "calls.log"),
+        OMNI_STUB_STDIN: join(home, "stdin.log"),
+        OMNI_ADMIN_PASSWORD: "correct horse battery staple",
+      },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  await Promise.all([new Response(run.stdout).text(), new Response(run.stderr).text(), run.exited]);
+  expect(readdirSync(home)).toEqual([]);
 });

@@ -30,6 +30,10 @@ set -eu
 # release; the committed file installs the latest release.
 DEFAULT_VERSION=latest
 
+# Everything below lives in main(), called only by the very last line: a
+# truncated `curl | sh` download defines nothing and runs nothing.
+main() {
+
 RELEASE_BASE_URL=${OMNI_INSTALL_BASE_URL:-https://github.com/harismawan/omnigateway/releases}
 PUBLIC_IP_URL=${OMNI_INSTALL_PUBLIC_IP_URL-https://api.ipify.org}
 
@@ -513,3 +517,7 @@ say "  omni keys create --label laptop                 # printed once; keep it"
 say "  curl $DISPLAY_BASE/v1/chat/completions -H 'Authorization: Bearer <key>' \\"
 say "    -H 'Content-Type: application/json' -d '{\"model\":\"fast\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}'"
 say "  omni status"
+
+}
+
+main "$@"
