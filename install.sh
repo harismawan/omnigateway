@@ -250,7 +250,6 @@ fi
 UPGRADE=0
 if [ -n "$FOUND_ROOT" ] || [ -n "$FOUND_METHOD" ]; then
   UPGRADE=1
-  say "Found an existing installation (root: ${FOUND_ROOT:-unknown}, method: ${FOUND_METHOD:-binary}); upgrading it."
 fi
 if [ -n "$ROOT_FLAG" ]; then
   FOUND_ROOT=$ROOT_FLAG
@@ -260,6 +259,9 @@ if [ -n "$METHOD_FLAG" ]; then
 fi
 ROOT=${FOUND_ROOT:-$DEFAULT_ROOT}
 METHOD=${FOUND_METHOD:-binary}
+if [ "$UPGRADE" = 1 ]; then
+  say "Found an existing installation (root: $ROOT, method: $METHOD); upgrading it."
+fi
 
 # --- resolve the version ----------------------------------------------------
 
@@ -267,11 +269,15 @@ if [ "$VERSION" = latest ]; then
   if [ "$DOWNLOADER" = curl ]; then
     LATEST_URL=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$RELEASE_BASE_URL/latest")
   else
+    # busybox wget may lack --spider -S; refuse clearly instead of hanging
+    # on an empty tag.
+    wget --help 2>&1 | grep -q -- '--spider' \
+      || die "this wget cannot resolve the latest release tag; pass --version vX.Y.Z or install curl"
     LATEST_URL=$(wget --spider -S "$RELEASE_BASE_URL/latest" 2>&1 \
       | tr -d '\r' | sed -n 's/^[[:space:]]*[Ll]ocation:[[:space:]]*//p' | tail -n 1)
   fi
   VERSION=${LATEST_URL##*/}
-  [ -n "$VERSION" ] || die "could not resolve the latest release tag"
+  [ -n "$VERSION" ] || die "could not resolve the latest release tag; pass --version vX.Y.Z or install curl"
 fi
 case $VERSION in
   v[0-9]*) ;;
@@ -424,6 +430,12 @@ fi
 
 # --- step 7: service and start ----------------------------------------------
 
+# omni start/restart probes OMNI_BASE_URL for up to ~60s before returning.
+start_or_restart() {
+  say "Starting the gateway; omni probes OMNI_BASE_URL and may take up to a minute."
+  "$OMNI" "$@"
+}
+
 if [ "$NO_SERVICE" = 1 ]; then
   say "Skipping service install and start (--no-service). Start later with: $OMNI start --root $ROOT"
 else
@@ -443,18 +455,18 @@ else
         # omni stop/restart refuse --system; ask the manager directly.
         systemctl restart omnigateway.service
       else
-        "$OMNI" restart --root "$ROOT"
+        start_or_restart restart --root "$ROOT"
       fi
     elif [ "$IS_ROOT" = 1 ]; then
-      "$OMNI" start --system --root "$ROOT" || true
+      start_or_restart start --system --root "$ROOT" || true
     else
-      "$OMNI" start --root "$ROOT" || true
+      start_or_restart start --root "$ROOT" || true
     fi
   else
     if [ "$UPGRADE" = 1 ]; then
-      "$OMNI" restart --root "$ROOT" || true
+      start_or_restart restart --root "$ROOT" || true
     else
-      "$OMNI" start --root "$ROOT" || true
+      start_or_restart start --root "$ROOT" || true
     fi
     say "note: no systemd here; omni supervises the process, but it will not come back after a reboot."
   fi
@@ -466,11 +478,11 @@ else
   ATTEMPT=0
   while [ "$ATTEMPT" -lt 15 ]; do
     if [ "$DOWNLOADER" = curl ]; then
-      if curl -fsS -o /dev/null "http://127.0.0.1:$PORT/health" 2>/dev/null; then
+      if curl -fsS -m 2 -o /dev/null "http://127.0.0.1:$PORT/health" 2>/dev/null; then
         HEALTHY=1
         break
       fi
-    elif wget -q -O /dev/null "http://127.0.0.1:$PORT/health" 2>/dev/null; then
+    elif wget -q -T 2 -O /dev/null "http://127.0.0.1:$PORT/health" 2>/dev/null; then
       HEALTHY=1
       break
     fi
