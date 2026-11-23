@@ -20,15 +20,19 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
+            asset: linux-x64
             runner: ubuntu-latest
             platform: linux/amd64
           - target: aarch64-unknown-linux-musl
+            asset: linux-arm64
             runner: ubuntu-24.04-arm
             platform: linux/arm64
           - target: x86_64-apple-darwin
+            asset: darwin-x64
             runner: macos-15-intel
             platform: ""
           - target: aarch64-apple-darwin
+            asset: darwin-arm64
             runner: macos-15
             platform: ""
     runs-on: ${{ matrix.runner }}
@@ -99,7 +103,7 @@ jobs:
           cp "target/$TARGET/release/omnigateway" release-bin/
       - name: Package binary and dashboard
         env:
-          TARGET: ${{ matrix.target }}
+          ASSET: ${{ matrix.asset }}
         run: |
           cp -R apps/dashboard/dist release-bin/public
           cp LICENSE release-bin/
@@ -108,7 +112,7 @@ jobs:
           ./release-bin/omni --help
           test "$(./release-bin/omni --version)" = "${GITHUB_REF_NAME#v}"
           mkdir -p release-assets
-          tar -czf "release-assets/omnigateway-${GITHUB_REF_NAME}-${TARGET}.tar.gz" -C release-bin .
+          tar -czf "release-assets/omnigateway-${GITHUB_REF_NAME}-${ASSET}.tar.gz" -C release-bin .
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: rust-${{ matrix.target }}
@@ -311,12 +315,12 @@ jobs:
         run: |
           for arch in amd64 arm64; do
             case "$arch" in
-              amd64) target=x86_64-unknown-linux-musl; machine='Advanced Micro Devices X86-64' ;;
-              arm64) target=aarch64-unknown-linux-musl; machine='AArch64' ;;
+              amd64) asset=linux-x64; machine='Advanced Micro Devices X86-64' ;;
+              arm64) asset=linux-arm64; machine='AArch64' ;;
             esac
             dir="prebuilt/$arch"
             mkdir -p "$dir"
-            tar -xzf "release-assets/omnigateway-${GITHUB_REF_NAME}-${target}.tar.gz" -C "$dir"
+            tar -xzf "release-assets/omnigateway-${GITHUB_REF_NAME}-${asset}.tar.gz" -C "$dir"
             file "$dir/omnigateway"
             header=$(readelf -h "$dir/omnigateway")
             program=$(readelf -l "$dir/omnigateway")
