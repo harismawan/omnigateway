@@ -144,6 +144,7 @@ per-replica and says so: the console's **Console** screen shows one process's st
 a selector when there is more than one, and its default view is every process merged by time.
 What is per-replica and does not say so: the routing `load` weight is one round trip stale
 between replicas, so a burst arriving at once on two of them can stack for that long.
+The database panel reports Postgres size and table stats with credentials redacted.
 
 **No sticky sessions are needed.** The WebSocket the console holds may land on any replica; the
 ingress only needs to pass upgrades and hold an idle timeout above ten seconds. A rolling deploy
@@ -160,6 +161,28 @@ one a password change on another replica cannot end. `GET /health` reports `mode
 The Rust gateway (1.x) does not load plugins: each replica warns once per plugin directory in
 its own `<root>/plugins/` and skips it, so files baked into the image are staged, not run (see
 [Docker](#docker)). `POST /api/restart` refuses in cluster mode — roll the deployment instead.
+
+### The request-log writer under load
+
+Authenticated `/metrics` exposes
+process-local `omni_request_log_writer_*_total` counters for optional and
+terminal queue drops, persistence failures, and completion delivery loss.
+Cluster inference returns HTTP 503 before admission if the request-log writer is closed or its bounded wait queue is full or expires (4 seconds).
+On the authenticated `/metrics` endpoint, `omni_request_log_writer_reservation_refused_total`
+counts these refusals by `reason` (`closed`, `cap`, `deadline`). `revalidation` separately counts
+503s caused by a failed primary key or settings read after waiting. The response does not expose the cause.
+The cluster-only `omni_request_log_writer_queued` and `omni_request_log_writer_credits_in_use`
+gauges distinguish queued entries from the total budget in use, which also includes reservations.
+The gauges are sampled independently and exclude batches already dequeued for persistence.
+
+When incoming log events outpace the Postgres writer and half or less of its
+queue credit is free, cluster mode may skip `Begin` and `Route` log events
+instead of waiting. Authenticated `/metrics`
+reports these skips in `omni_request_log_writer_optional_dropped_total`;
+`omni_request_log_writer_terminal_dropped_total` tracks terminal queue loss
+separately. This policy never sheds `Finish` events and does not change completed
+rows, usage rollups, or rate-limit debits. The console may miss a request's
+in-flight row or a routing update under overload.
 
 ### Log capture in a fleet
 
