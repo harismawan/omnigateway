@@ -379,9 +379,10 @@ Detailed compatibility rules + measured client behaviour belong in `docs/superpo
   `omnigateway.db` > `~/.config/omnigateway`. Database: `--db` > root `.env` > ambient
   `OMNI_DB_PATH` > `omnigateway.db`. `--root` without `--db` drops ambient `OMNI_DB_PATH`, warns on
   stderr, and doctor reports it. Unpinned.
-- Only the 1.x-served providers are dispatched: `anthropic`, `openai`, `antigravity`, `custom`.
-  Others (`kimi`, `kilo`, `grok`, `muse`, `qoder`) stay in the catalog and routing registry; a
-  target naming one reaches `INTERNAL "no adapter for provider …"` at attempt time. Unpinned.
+- All nine catalog providers are dispatched: `anthropic`, `openai`, `antigravity`, `custom`,
+  `kimi`, `kilo`, `grok`, `muse`, `qoder`. A target naming anything else reaches
+  `INTERNAL "no adapter for provider …"` at attempt time. Qoder's catalog is dynamic
+  (`providerData.modelCatalog`); its router catalog stays empty.
 - `1m` and `concurrency` are process-local on a single node; `5h`/`1w` are seeded from the store and
   survive restart. In Rust the single-node gauge has **no TTL** (freed on `Drop`).
 - A success writes health only when `success_would_change` (`omni-router/src/breaker.rs`) says the
