@@ -15,17 +15,12 @@ import { join } from "node:path";
 
 const root = join(import.meta.dir, "..");
 
-/** One release archive target, and the npm package it becomes. */
+/** One release archive suffix (`<os>-<cpu>`), and the npm package it becomes. */
 export const PLATFORMS = [
-  { target: "x86_64-unknown-linux-musl", npm: "@omnigateway/linux-x64", os: "linux", cpu: "x64" },
-  {
-    target: "aarch64-unknown-linux-musl",
-    npm: "@omnigateway/linux-arm64",
-    os: "linux",
-    cpu: "arm64",
-  },
-  { target: "x86_64-apple-darwin", npm: "@omnigateway/darwin-x64", os: "darwin", cpu: "x64" },
-  { target: "aarch64-apple-darwin", npm: "@omnigateway/darwin-arm64", os: "darwin", cpu: "arm64" },
+  { asset: "linux-x64", npm: "@omnigateway/linux-x64", os: "linux", cpu: "x64" },
+  { asset: "linux-arm64", npm: "@omnigateway/linux-arm64", os: "linux", cpu: "arm64" },
+  { asset: "darwin-x64", npm: "@omnigateway/darwin-x64", os: "darwin", cpu: "x64" },
+  { asset: "darwin-arm64", npm: "@omnigateway/darwin-arm64", os: "darwin", cpu: "arm64" },
 ] as const;
 
 const COMMON = {
@@ -76,7 +71,7 @@ export async function buildPackages(options: {
   const { version, assets, out } = options;
   const tag = `v${version}`;
   const present = new Set(await readdir(assets));
-  const missing = PLATFORMS.map(({ target }) => `omnigateway-${tag}-${target}.tar.gz`).filter(
+  const missing = PLATFORMS.map(({ asset }) => `omnigateway-${tag}-${asset}.tar.gz`).filter(
     (name) => !present.has(name),
   );
   if (missing.length > 0) {
@@ -84,9 +79,9 @@ export async function buildPackages(options: {
   }
   await rm(out, { recursive: true, force: true });
   const dirs: string[] = [];
-  for (const { target, npm, os, cpu } of PLATFORMS) {
+  for (const { asset, npm, os, cpu } of PLATFORMS) {
     const dir = join(out, npm.replace("@omnigateway/", ""));
-    await unpack(join(assets, `omnigateway-${tag}-${target}.tar.gz`), dir);
+    await unpack(join(assets, `omnigateway-${tag}-${asset}.tar.gz`), dir);
     await chmod(join(dir, "omnigateway"), 0o755);
     await json(join(dir, "package.json"), {
       name: npm,
@@ -149,12 +144,12 @@ export async function verifyPacked(options: {
 }): Promise<number> {
   const { version, assets, tarballs } = options;
   let checked = 0;
-  for (const { target, npm } of PLATFORMS) {
+  for (const { asset, npm } of PLATFORMS) {
     const short = npm.replace("@omnigateway/", "");
     const tarball = tarballs.find((t) => t.includes(`omnigateway-${short}-${version}.tgz`));
     if (tarball === undefined) throw new Error(`no packed tarball for ${npm}@${version}`);
     const expected = await sha256(
-      await binaryOf(join(assets, `omnigateway-v${version}-${target}.tar.gz`), "./omnigateway"),
+      await binaryOf(join(assets, `omnigateway-v${version}-${asset}.tar.gz`), "./omnigateway"),
     );
     const actual = await sha256(await binaryOf(tarball, "package/omnigateway"));
     if (actual !== expected) {

@@ -3,7 +3,7 @@
 Day-two material for a running installation: how gateway keys are bounded and
 what the counts mean, where the gateway's own output goes, recording request
 bodies for an incident, and the database — snapshots, restore, compaction,
-clearing bodies. First-run setup is in the [README](../README.md).
+clearing bodies. First-run setup is in [install.md](install.md).
 
 ## Key limits
 
@@ -69,7 +69,8 @@ body or a disallowed model is told that (400 or 401) rather than 429.
 
 Overrides live inside the same `api_keys.limits` column, so rolling back to a
 build without them fails closed: that build cannot parse a key that carries
-one, refuses it at `/v1`, and lists it as unreadable. Remove the overrides
+one, refuses it at `/v1` with a 500, and lists it as unreadable; keys without
+an override are unaffected. Remove the overrides
 before rolling back, or expect those keys to stop working until you do.
 
 `--unset` names a pair that is actually set, so a typo fails rather than
@@ -112,7 +113,7 @@ screen, so a client that stopped working can be found rather than guessed at.
 ## Usage policies
 
 A key can carry a plain-language policy naming what it may be used for; a key
-without one is never judged and nothing below applies to it. Requests from a key
+without one is never judged, pays nothing, and nothing below applies to it. Requests from a key
 with a policy are judged by the classifier named in `guardrailModel` (a virtual
 model id or `provider/model`) before routing:
 
@@ -172,7 +173,9 @@ tool result in order, so a repeated request costs one call but each new tool tur
 in an agent's loop costs another — more latency per step and more classifier
 spend; a cached verdict writes no classifier row. Editing the policy, the classifier, or a `guardrailHistoryTurns`
 change that alters which messages are judged misses the cache naturally. Failures
-are never cached.
+are never cached. The key holder sees the policy and those classifier rows on
+their client dashboard. `omni doctor` warns when keys carry a policy and
+nothing can judge them.
 
 A guardrail, not a security boundary: it does not stop prompt injection aimed at
 the classifier, a request spread over more messages than the window, a client
@@ -212,7 +215,10 @@ says the same inline: `GET /api/settings` carries `smartRouterModels`
 (`{classifier, local}`, each `ok | unset | unresolved | notLocal`, judged whatever
 the switch), Settings shows a warning under each model picker, and the Keys board
 notice fires while a flagged key exists and the switch is on with either model
-unset, unresolved or not local-only.
+unset, unresolved or not local-only. By default `smartRouterPolicy` names
+personal data, credentials, salaries and HR records, customer records,
+non-public financials, and documents marked internal; the console's Settings
+screen edits it and can reset it to that default.
 
 What is judged: every text the request carries — system and mid-conversation
 system turns, user and assistant text, thinking, tool-call arguments, tool
@@ -231,6 +237,7 @@ under `smartRouterTimeoutMs`. The first `CONFIDENTIAL` stops the rest. More than
 | all public | the original model | `smart-router:public` |
 | confidential | `smartRouterLocalModel` | `smart-router:local` |
 | requested model already local-only | as requested, not judged | `smart-router:already-local` |
+| more than 64 segments still to judge | `smartRouterLocalModel`, not judged | `smart-router:local`, `smart-router:oversize` |
 | timeout, error, unreadable reply | `UPSTREAM` 502, "confidentiality check unavailable" | `smart-router:unavailable` |
 | a model unset, unresolved, or not local-only | `INTERNAL` 500, "confidential routing is not configured" | `smart-router:unconfigured` |
 
@@ -266,7 +273,8 @@ A reduction in leaks, not a security boundary: it does not stop deliberate
 evasion (encoding, splitting content across messages, prompt injection aimed at
 the classifier), content in images and files, or a classifier miss. Rolling back
 to a build without it ignores the column and sends everything external — it fails
-open.
+open. The client-visible signals are in
+[client-api.md](client-api.md#confidential-routing).
 
 ## Metrics and traces
 

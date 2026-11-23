@@ -38,15 +38,15 @@ afterEach(() => {
 });
 
 /** A release archive as `rust-binaries` packs it: binary, omni link, public/, LICENSE. */
-function archive(dir: string, target: string, tag: string, body: string): string {
-  const stage = join(dir, `stage-${target}`);
+function archive(dir: string, asset: string, tag: string, body: string): string {
+  const stage = join(dir, `stage-${asset}`);
   mkdirSync(join(stage, "public"), { recursive: true });
   writeFileSync(join(stage, "omnigateway"), body);
   chmodSync(join(stage, "omnigateway"), 0o755);
   symlinkSync("omnigateway", join(stage, "omni"));
   writeFileSync(join(stage, "public", "index.html"), "<html></html>");
   writeFileSync(join(stage, "LICENSE"), "MIT");
-  const file = join(dir, `omnigateway-${tag}-${target}.tar.gz`);
+  const file = join(dir, `omnigateway-${tag}-${asset}.tar.gz`);
   const tar = Bun.spawnSync(["tar", "-czf", file, "-C", stage, "."]);
   expect(tar.exitCode).toBe(0);
   return file;
@@ -57,7 +57,7 @@ function fixture(): { dir: string; assets: string; out: string } {
   dirs.push(dir);
   const assets = join(dir, "assets");
   mkdirSync(assets);
-  for (const { target } of PLATFORMS) archive(assets, target, "v1.0.0", `binary for ${target}`);
+  for (const { asset } of PLATFORMS) archive(assets, asset, "v1.0.0", `binary for ${asset}`);
   return { dir, assets, out: join(dir, "out") };
 }
 
@@ -66,14 +66,14 @@ const json = (path: string) => JSON.parse(readFileSync(path, "utf8"));
 test("every platform package carries its archive's bytes and claims only its host", async () => {
   const { assets, out } = fixture();
   await buildPackages({ version: "1.0.0", assets, out });
-  for (const { target, npm, os, cpu } of PLATFORMS) {
+  for (const { asset, npm, os, cpu } of PLATFORMS) {
     const pkg = join(out, npm.replace("@omnigateway/", ""));
     const manifest = json(join(pkg, "package.json"));
     expect(manifest.name).toBe(npm);
     expect(manifest.version).toBe("1.0.0");
     expect(manifest.os).toEqual([os]);
     expect(manifest.cpu).toEqual([cpu]);
-    expect(readFileSync(join(pkg, "omnigateway"), "utf8")).toBe(`binary for ${target}`);
+    expect(readFileSync(join(pkg, "omnigateway"), "utf8")).toBe(`binary for ${asset}`);
     expect(lstatSync(join(pkg, "omnigateway")).mode & 0o111).toBe(0o111);
     expect(existsSync(join(pkg, "public", "index.html"))).toBe(true);
     // npm drops symlinks from tarballs; the main package links `omni` instead.
@@ -109,10 +109,8 @@ test("the main package pins every platform at its own version and refuses Window
 
 test("a missing archive stops the build rather than publishing a partial set", async () => {
   const { assets, out } = fixture();
-  rmSync(join(assets, "omnigateway-v1.0.0-aarch64-apple-darwin.tar.gz"));
-  await expect(buildPackages({ version: "1.0.0", assets, out })).rejects.toThrow(
-    /aarch64-apple-darwin/,
-  );
+  rmSync(join(assets, "omnigateway-v1.0.0-darwin-arm64.tar.gz"));
+  await expect(buildPackages({ version: "1.0.0", assets, out })).rejects.toThrow(/darwin-arm64/);
 });
 
 test("an archive for another tag stops the build", async () => {

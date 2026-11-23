@@ -1,11 +1,14 @@
 # Rust packaging and launch policy
 
-Release archives contain the stripped `omnigateway` binary, an `omni` symlink,
-and the Bun-built dashboard in `public/`. Keep that directory beside the binary,
-or set `OMNI_STATIC_DIR`. Verify archives against the release's `SHA256SUMS`.
-Linux builds use native musl toolchains on amd64 and arm64; macOS builds use
-native runners. The Docker image retains its name, port, user, data volume and
-healthcheck, with `omni` also available on PATH.
+Release archives are named `omnigateway-<tag>-<os>-<cpu>.tar.gz` (`linux-x64`,
+`linux-arm64`, `darwin-x64`, `darwin-arm64`). They contain the stripped
+`omnigateway` binary, an `omni` symlink, and the Bun-built dashboard in
+`public/`. Keep that directory beside the binary, or set `OMNI_STATIC_DIR`.
+Verify archives against the release's `SHA256SUMS`, which also covers the
+`install.sh` attached to each release (its `DEFAULT_VERSION` stamped with the
+tag). Linux builds use native musl toolchains on amd64 and arm64; macOS builds
+use native runners. The Docker image retains its name, port, user, data volume
+and healthcheck, with `omni` also available on PATH.
 
 ## Allocator launch policy
 

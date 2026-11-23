@@ -1,11 +1,5 @@
 # OmniGateway
 
-For a Postgres lineage replacement or DB restore, see
-[the bucket sweep procedure](docs/rust-cluster-bucket-sweep.md) before starting any replica.
-
-Local service commands and their limits are documented in
-[Rust CLI service boundary](docs/rust-cli-service.md).
-
 One endpoint in front of the AI accounts you already pay for.
 
 OmniGateway is a self-hosted gateway that speaks the Anthropic and OpenAI APIs
@@ -20,331 +14,51 @@ Postgres and Redis when you need a fleet, and never logs the contents of your
 prompts or replies.
 
 ```bash
-npm i -g omnigateway
-omni start
+curl -fsSL https://raw.githubusercontent.com/harismawan/omnigateway/main/install.sh | sh
 ```
 
 > Status: in use and complete for its scope — see [Scope](#scope-and-limits).
 
-**Further reading**, once the gateway is up:
-
-- [docs/client-api.md](docs/client-api.md) — endpoints, authentication, rate-limit headers, and how tools decide where a request can go
-- [docs/operations.md](docs/operations.md) — key limits, logs, recording bodies, snapshots and restore
-- [docs/rust-quota-runtime.md](docs/rust-quota-runtime.md) — Rust single-node quota support and limits
-- [docs/deploying.md](docs/deploying.md) — systemd, reverse proxies, cluster mode, Docker and Kubernetes
-- [ARCHITECTURE.md](ARCHITECTURE.md) — how it is built
-
 ## What it does
 
-- **Speaks three dialects.** `POST /v1/messages` (Anthropic),
-  `POST /v1/chat/completions` (OpenAI) and `POST /v1/responses` (OpenAI
-  Responses, which is the only API Codex CLI speaks), including streaming,
-  translated to whichever provider actually serves the request.
-- **Filters bulky tool history, optionally.** Built-in RTK filters shorten
-  eligible large or repetitive shell and recognizable command output before
-  provider dispatch, preserve errors and non-tool-result content, and default off.
-- **Routes across your accounts.** Define a virtual model like `fast` or
-  `smart` with several targets; the gateway ranks them by tier, health,
-  remaining quota, cost, latency, and current load.
-- **Fails over.** A rate-limited or broken account is skipped, its circuit
-  breaker opens, and the next candidate is tried — before the response starts
-  streaming.
-- **Keeps OAuth alive.** Tokens refresh in the background, before a request
-  needs them.
-- **Watches provider quota.** It asks each provider what you have left and
-  routes by *pace*: 5% remaining is fine minutes before a reset and urgent with
-  six days to run.
-- **Issues its own keys.** Hand out gateway keys with per-key model allowlists
-  instead of sharing provider credentials, and bound each one by requests,
-  tokens, dollars, or requests in flight — per minute, per five hours, and per
-  week.
-- **Reports usage.** Requests, tokens, and cost by provider, model, key, and
-  day — metadata only.
-- **Backs itself up.** Snapshot the database from the console or the CLI, see
-  what it occupies, reclaim what deletion left behind, and restore a snapshot
-  without stopping the gateway.
-- **Ships an admin console and a CLI.** Both cover the same ground; use
-  whichever suits the machine you are on.
-
-## How it is built
-
-One Rust binary over a provider-neutral core, with provider knowledge in one crate, pure
-routing above that, and every side effect in the gateway process. The gateway and the CLI are
-two front ends over the same operator functions — the CLI opens the SQLite file directly, so it
-works when the gateway is down.
-
-**[ARCHITECTURE.md](ARCHITECTURE.md)** has the crate map and layering rules,
-then goes a level deeper: a request traced end to end, how routing ranks and
-excludes accounts, the commit point that decides whether failover is still
-possible, the provider codec shape, the database schema and its encryption
-boundary, and the background loops.
-
-## Requirements
-
-- Linux (x86_64 or aarch64) or macOS (Intel or Apple silicon). The gateway is
-  a native binary; npm (Node 18 or later) only installs it. There is no Windows
-  build (npm refuses the install there).
-- A directory that persists, for the SQLite database.
-- At least one Anthropic, OpenAI, or Antigravity account to connect, or a custom
-  OpenAI-compatible endpoint.
+- **Speaks three dialects.** Anthropic Messages, OpenAI Chat Completions and OpenAI Responses
+  (the only API Codex CLI speaks), streaming included, translated to whichever provider serves it.
+- **Filters bulky tool history, optionally.** Built-in RTK filters shorten eligible large or repetitive
+  shell and recognizable command output before dispatch, preserve errors and non-tool-result content, and default off.
+- **Routes across your accounts.** Define a virtual model like `fast` or `smart` with several
+  targets; the gateway ranks them by tier, health, remaining quota, cost, latency, and current load.
+- **Fails over.** A rate-limited or broken account is skipped, its circuit breaker opens, and the
+  next candidate is tried — before the response starts streaming.
+- **Keeps OAuth alive.** Tokens refresh in the background, before a request needs them.
+- **Watches provider quota.** It asks each provider what you have left and routes by *pace*:
+  5% remaining is fine minutes before a reset and urgent with six days to run.
+- **Issues its own keys.** Per-key model allowlists instead of shared provider credentials,
+  bounded by requests, tokens, dollars, or requests in flight — per minute, per five hours, per week.
+- **Reports usage.** Requests, tokens, and cost by provider, model, key, and day — metadata only.
+- **Backs itself up.** Snapshot the database from the console or the CLI, see what it occupies,
+  reclaim what deletion left behind, and restore without stopping the gateway.
+- **Ships an admin console and a CLI.** Both cover the same ground; use whichever suits the machine.
 
 ## Install
 
-```bash
-npm i -g omnigateway
-```
-
-One package carries the `omni` CLI, the gateway server, and the admin console
-the server hosts. npm picks the matching native build
-(`@omnigateway/<os>-<cpu>`); the same binaries are attached to each
-[GitHub release](https://github.com/harismawan/omnigateway/releases).
-
-npm 12 blocks install scripts by default. Allowing this package's lets it
-replace the `omni` and `omnigateway` launchers with symlinks to the binary:
+On a Linux or macOS machine, one command installs the release binary (no Node needed), writes a
+new `.env`, migrates the database, sets an admin password, installs a service and waits for `/health`:
 
 ```bash
-npm i -g omnigateway --allow-scripts=omnigateway
-# or once: npm config set allow-scripts=omnigateway --location=user
+curl -fsSL https://raw.githubusercontent.com/harismawan/omnigateway/main/install.sh | sh
 ```
 
-Without it everything still works, through a small Node launcher. The
-postinstall only creates those links; it never touches a service or a
-database.
+Alternatively `npm i -g omnigateway` (Node 18 or later): one package carries the CLI, the server,
+and the console. Linux or macOS on x64/arm64 only — there is no Windows build. Flags, npm details,
+release archives, upgrades and manual setup: [docs/install.md](docs/install.md).
 
-### Upgrading an existing installation
-
-An upgrade is a fresh install of the binary; nothing is converted for you.
-The gateway reads an existing SQLite database as it is (same schema), so to
-keep your data point it at the old installation and replace the service
-yourself:
-
-```bash
-omni stop                                  # or: systemctl --user stop omnigateway
-npm i -g omnigateway
-omni db backup --root <old root>           # optional: a snapshot first
-omni service install --force --root <old root>
-systemctl --user restart omnigateway
-```
-
-Use the same `.env` and `OMNI_ENCRYPTION_KEY`, or the stored accounts cannot be
-decrypted. Plugins (their data stays) are not loaded by 1.x; `omni doctor`
-lists what it found. Cluster
-installations: after a Postgres restore or replacement, follow
-[the bucket sweep procedure](docs/rust-cluster-bucket-sweep.md).
-
-## Getting started
-
-Pick a directory to hold the database and configuration. `~/.config/omnigateway`
-is where `omni` looks by default:
-
-```bash
-mkdir -p ~/.config/omnigateway && cd ~/.config/omnigateway
-printf 'OMNI_ENCRYPTION_KEY=%s\n' "$(openssl rand -base64 32)" > .env
-```
-
-That key encrypts your provider credentials at rest. **Keep it. Changing it
-makes every stored credential unreadable**, and there is no recovery path
-except reconnecting the accounts.
-
-Then set up and start:
-
-```bash
-omni db migrate            # create the database
-omni admin set-password    # prompts; the console signs in with this
-omni start                 # serves the API and the console on 127.0.0.1:9000
-```
-
-Connect an account. The CLI prints a URL to open, and waits:
+## Quick start
 
 ```bash
 omni connect anthropic     # or: openai, antigravity, kimi, kilo, grok, muse, qoder
+omni models put fast --from-catalog anthropic:claude-sonnet-5   # pricing seeded from the catalog
+omni keys create --label laptop    # the key is printed once and stored only as a hash
 ```
-
-Every provider also takes a plain API key, if that is what you hold rather than
-a subscription:
-
-```bash
-omni credentials add-key anthropic     # prompts for the key, or reads stdin
-```
-
-There is a ninth provider, `custom`, which points an existing wire codec at an
-origin you supply — an endpoint you host or pay for that is not one of the eight.
-It has no subscription to authorize, so there is no `omni connect custom`; it is
-an API key plus the endpoint to spend it against:
-
-```bash
-omni credentials add-key custom \
-  --endpoint-id my-endpoint --endpoint-label 'My endpoint' \
-  --origin https://api.example.com --protocol chat-completions
-```
-
-`--protocol` is `chat-completions` or `responses`, naming which codec to reuse.
-`--origin` is a bare origin — scheme and host, no path, query, or credentials in
-the URL.
-
-The console offers the same choice per provider on the Connect dialog.
-
-Define a virtual model your clients will ask for, seeding its pricing and
-capabilities from the built-in catalog:
-
-```bash
-omni models catalog                                  # what is available
-omni models put fast --from-catalog anthropic:claude-sonnet-5
-```
-
-Two providers price in ways a flat per-target rate cannot express — xAI above
-200K context and Kilo's `kilo-auto/*` routers.
-
-Mint a key for your client. **It is printed once and stored only as a hash:**
-
-```bash
-omni keys create --label laptop
-```
-
-Bound what the key can do with `--limit <dimension>:<window>=<value>`, repeated
-once per pair — `omni keys create --label ci --limit requests:1m=60`. An unset
-pair is unlimited. Windows slide, `tokens` and `spend` are debited on
-completion, and limits are editable afterwards with `omni keys limits`; the
-semantics are in [docs/operations.md](docs/operations.md#key-limits).
-
-One model can be held to a stricter ceiling than the rest of the key's traffic
-with `--model-limit <model>:<dimension>:<window>=<value>` (or
-`<model>:concurrency=<value>`) — `omni keys create --label ci --limit
-requests:1m=600 --model-limit opus:requests:1m=20`. The model is the one the
-request names, matched exactly; an override stacks with the key-wide limits, so
-a request for that model must pass both. `omni keys limits <id>
---unset-model-limit opus:requests:1m` removes a slot, and the last slot takes
-the override with it. **Rolling back** to a build without per-model limits
-refuses every key that carries an override (the older build cannot parse the
-stored limits, so the key answers 500 until its overrides are removed); keys
-without one are unaffected.
-
-A key can also carry an expiry, which is optional and off by default — a key
-with none works until it is revoked, and no upgrade ever attaches one:
-
-```bash
-omni keys create --label contractor --expires 2027-01-01
-omni keys expiry <id> --at 2027-06-01T12:00:00Z   # move it
-omni keys expiry <id> --never                     # take it away
-```
-
-Past the instant, every request the key makes is refused with the same answer a
-revoked or unknown key gets — deliberately indistinguishable. Unlike
-`omni keys revoke` this is reversible: a date already behind the clock is
-accepted and means "stop it now", and `--never` brings the key back. Expired
-keys stay listed, with their own state in `omni keys list` and on the console's
-keys board, so a client that stopped working can be found rather than guessed at.
-
-A key can also carry a **usage policy**: what it may be used *for*, in plain
-language. Each request through that key is then judged by a classifier model you
-choose, before it is routed:
-
-```bash
-omni settings set guardrailModel anthropic/claude-haiku-4   # or a virtual model id
-omni keys guardrail <id> --policy "Only software engineering and office documents. Refuse roleplay, homework, personal content."
-omni keys guardrail <id> --policy-file policy.txt
-omni keys guardrail <id> --clear
-```
-
-The classifier sees the request's system prompt and the last few messages a human
-wrote (`guardrailHistoryTurns`, default 3, 1..10), oldest first, and judges the
-newest in their light — so "continue" after a forbidden ask is judged as that
-ask. It also sees the text of the tool results that came back after the oldest of
-those messages (capped at 16,000 characters, newest first), as data the client
-received. It never sees images, files, tool-call arguments, or assistant replies,
-and only a plain `ALLOW` lets the request through. Tool output can sway the
-verdict either way — a fetched page can talk the classifier round or push it to
-refuse legitimate work — and an agent pays one classifier call per tool turn. A deny is refused as `CONTENT_FILTER` (400); a
-classifier that times out (`guardrailTimeoutMs`, default 10s), errors, or answers
-anything else refuses as `UPSTREAM` (502), and a key with a policy while
-`guardrailModel` is unset refuses as `INTERNAL` (500): **it fails closed**.
-Streaming requests receive the same refusals as in-stream errors. The refusal
-messages are fixed; the classifier's words never reach the client. Each check is
-its own request row under the key, tagged `guardrail:classifier` and charged to
-it, and verdicts are cached for an hour per key, policy, model and judged text,
-so a repeated request is judged once, though each new tool turn is a new one. The key holder sees
-the policy and those rows on their client dashboard. A key without a policy is
-never judged and pays nothing. `omni doctor` warns when keys carry a policy and
-nothing can judge them.
-
-**This is a guardrail, not a security boundary.** It stops ordinary misuse, not a
-client set on getting past it — by talking the classifier round, spreading a
-request over more messages than the window holds, leaving it out of the history
-it sends, hiding it in images, or planting text in tool output the classifier
-reads. **Rolling back** to
-a build without usage policies ignores them: every key's requests are served
-unjudged until you upgrade again.
-
-A key can also be set to **route confidential requests to a local model**. A
-classifier running on your own infrastructure reads what the request carries; if
-anything in it is confidential, the request is served by a model you host instead
-of the one the client asked for. It is active only when the global switch
-`smartRouterEnabled` **and** the key's flag are both on:
-
-```bash
-omni settings set smartRouterClassifierModel local-judge   # a virtual model, every target a custom endpoint
-omni settings set smartRouterLocalModel local-llm          # same rule
-omni settings set smartRouterEnabled true
-omni keys smart-routing <id> --on                          # or: omni keys create --smart-routing
-omni keys smart-routing <id> --off
-```
-
-Both models must be configured virtual models whose every target is the `custom`
-provider, and the gateway re-checks that at the moment of each send, so a model
-edited later cannot quietly start pointing at an external provider. Anything
-else is refused, never routed externally. `smartRouterPolicy` says what
-"confidential" means (personal data, credentials, salaries and HR records,
-customer records, non-public financials, documents marked internal, by default;
-editable on the console's Settings screen, which can reset it) and
-`smartRouterTimeoutMs` bounds each classifier call (default 10s, 1..60000).
-
-Everything the request carries is judged — system and mid-conversation system
-turns, user and assistant text, thinking, tool-call arguments, tool results, tool
-names, descriptions and input schemas, citations, the text inside provider-native
-blocks (a text document, a search result, an MCP result, a shell output) and
-pass-through vendor fields — not just the newest message, because a client
-resends the whole conversation. Only images, files and base64 payloads are not
-judged. The text is split into segments of up to
-8,000 characters, each judged `PUBLIC` or `CONFIDENTIAL` by the local classifier,
-at most four at a time. Verdicts are cached for an hour per classifier, policy
-and segment, so a conversation that grows is judged only on what is new; failures
-are not cached. A request with more than 64 segments still to judge goes local
-without being judged.
-
-| Outcome | Result | Row tag |
-| --- | --- | --- |
-| everything public | served by the model the client asked for | `smart-router:public` |
-| anything confidential | served by `smartRouterLocalModel` | `smart-router:local` |
-| more than 64 segments still to judge | served by `smartRouterLocalModel`, not judged | `smart-router:local`, `smart-router:oversize` |
-| asked for a local-only model already | served as asked, not judged | `smart-router:already-local` |
-| classifier timeout, error, or unreadable reply | refused, `UPSTREAM` (502) | `smart-router:unavailable` |
-| either model unset, unresolved, or not local-only | refused, `INTERNAL` (500) | `smart-router:unconfigured` |
-
-**It fails closed and never falls back to an external provider**: if the local
-model itself fails, the client gets that failure. A confidential request the local
-model cannot serve is refused with `NO_CANDIDATES` (503) rather than sent out — one
-carrying provider-native content (an Anthropic `search_result` or `document`, a
-server-tool result) or provider-defined tools (`web_search`, `bash`, …), which only
-that provider can accept, or tools or images the local model lacks. The row still
-carries `smart-router:local`. Each check is its own request
-row under the key, tagged `smart-router:classifier` and charged to it. When a
-key also has a usage policy, smart routing runs first, and a request that goes
-local has its policy judged by the smart-router classifier, never by
-`guardrailModel`. `omni doctor` has a "smart routing" row; the console's
-Settings screen warns under each model picker when the model is unset (switch
-on), does not resolve, or is not local-only, and the Keys board says when
-flagged keys' requests are refused or unscreened. The client
-dashboard shows "Confidential routing: on/off" for the key. The client-visible
-signals are in [docs/client-api.md](docs/client-api.md#confidential-routing).
-
-**This reduces leaks of ordinary confidential content; it is not a security
-boundary.** It does not stop deliberate evasion (encoding, splitting a secret
-across messages, prompt injection aimed at the classifier), confidential content
-inside images or files, or a classifier that simply misses. **Rolling back** to a
-build without it ignores the flag and sends every request to the external
-provider (it fails open) until you upgrade again.
-
-Now use it:
 
 ```bash
 curl http://127.0.0.1:9000/v1/chat/completions \
@@ -353,8 +67,14 @@ curl http://127.0.0.1:9000/v1/chat/completions \
   -d '{"model": "fast", "messages": [{"role": "user", "content": "Hello"}]}'
 ```
 
-Everything above is also available in the browser at
-`http://127.0.0.1:9000`, which walks the same steps.
+Everything above is also available in the browser at `http://127.0.0.1:9000`, which walks the same steps.
+
+- Hold a plain API key rather than a subscription: `omni credentials add-key <provider>` — [docs/install.md](docs/install.md#manual-setup).
+- Any other OpenAI-compatible origin: the `custom` provider — [docs/install.md](docs/install.md#manual-setup).
+- Bound a key with [limits](docs/operations.md#key-limits), per-model overrides included.
+- Give a key an [expiry](docs/operations.md#key-expiry) — reversible, unlike revoke.
+- Judge a key's requests against a plain-language [usage policy](docs/operations.md#usage-policies).
+- Send a key's confidential requests to a local model with [confidential routing](docs/operations.md#confidential-routing).
 
 ## Using it from a client
 
@@ -374,159 +94,46 @@ Authorization: Bearer <gateway-key>
 x-api-key: <gateway-key>
 ```
 
-Ask for one of your virtual models by name. A bare provider model
-(`claude-sonnet-5`, `gpt-5`) also works if an account can serve it. Most tools
-that accept a custom base URL work unchanged: set it to `http://127.0.0.1:9000`
-and use a gateway key where the provider key goes.
-
-Rate-limit headers, the `/v1/models` listing shape, and why an Anthropic-defined
-tool pins a request to an Anthropic account are in
-[docs/client-api.md](docs/client-api.md).
+Ask for a virtual model by name; a bare provider model also works if an account can serve it.
+Rate-limit headers, the listing shape, and how tools pin routing: [docs/client-api.md](docs/client-api.md).
 
 ## The CLI
 
-`omni --help` lists everything; `omni <command> --help` explains one. Every
-command takes `--json` for scripting, and `--root <path>` to manage an
-installation other than the default.
-
-`--root` names the installation, so an `OMNI_DB_PATH` exported in your shell is
-ignored alongside it and said so on stderr; that root's own `.env` still decides.
-Use `--db <path>` to point one command somewhere else.
+`omni --help` lists everything; `omni <command> --help` explains one. Every command takes `--json`.
 
 | | |
 | --- | --- |
 | `omni status` | the gateway, its accounts, and their quota, on one screen |
-| `omni health` | probe the gateway's `/health` endpoint |
 | `omni start` / `stop` / `restart` | run the gateway; `--foreground` attaches it to your terminal |
-| `omni doctor` | which installation it resolved, and whether it can act on it |
-| `omni logs` | recent requests as the gateway recorded them; filter and page with `--failed`, `--key`, `--since`, `--cursor` |
-| `omni logs export` | matching request metadata as CSV or JSONL on stdout; `--since` and `--until` required |
-| `omni bodies <request-id>` | captured bodies for one request; withheld unless you pass `--full` |
-| `omni console` | the gateway process's own output: boot, refreshes, quota, errors |
-| `omni usage` | spend and tokens, by provider, model, key, or day; `--account <id>` and `--key <id>` narrow to one account or gateway key |
-| `omni quota` | provider quota per window: use, burn rate, and when it runs out |
-| `omni quota refresh <id> \| --all` | read provider quota now, without waiting for the next poll |
-| `omni quota resets <id>` / `omni quota reset <id>` | list / spend a banked Codex or Claude quota reset (irreversible) |
 | `omni connect <provider>` | authorize an account from the terminal |
-| `omni credentials …` | list, show, enable, disable, `set`, `rm`, refresh, `add-key`, health |
 | `omni models …` | list, show, put, `rm`, `dry-run`, `catalog` |
 | `omni keys …` | list, create, `limits`, revoke |
-| `omni plugin …` | not supported in 1.x; see [Plugins](#plugins) |
-| `omni service install` / `uninstall` | write or remove a systemd unit for this installation |
-| `omni setup claude` / `opencode` | point a client's config at this gateway |
-| `omni settings get` / `set` | routing weights, retention, deadlines, and the runtime switches |
-| `omni admin set-password` | change the console password |
-| `omni db migrate` | create or upgrade the database |
-| `omni db stats` | size on disk, free pages, schema version, and what snapshots are held |
-| `omni db backup` / `snapshots` | take a snapshot, and list the ones retention has kept |
-| `omni db restore <id>` | put a snapshot back; shows a live-vs-snapshot count table, then asks. `--dry-run` shows the table and stops |
-| `omni db vacuum` | rewrite the database, reclaiming the pages deletion left free |
-| `omni db clear-bodies` | delete every captured request and response body; the requests stay logged |
+| `omni logs` | recent requests as the gateway recorded them |
+| `omni usage` | spend and tokens, by provider, model, key, or day |
+| `omni doctor` | which installation it resolved, and whether it can act on it |
 
-Two worth knowing:
-
-`omni models dry-run fast` shows exactly where a request would go and why —
-each candidate's score, and every account that was excluded with the reason.
-
-`omni status` is the "is anything wrong" command: process state, per-account
-health, and how much provider quota each account has left.
-
-## Running it somewhere other than your laptop
-
-`omni service install --enable` writes a systemd unit; behind a reverse proxy,
-set `OMNI_BASE_URL` and pass WebSocket upgrades and unbuffered SSE through.
-Several replicas behind a load balancer are **cluster mode** on Postgres and
-Redis. All of it, with the nginx block and the Kubernetes base, is in
-[docs/deploying.md](docs/deploying.md).
-
-In cluster mode, the database panel reports Postgres size and table stats
-with credentials redacted. Clearing captured bodies leaves request logs intact.
-The snapshot list is empty; use Postgres backup tooling rather than SQLite
-snapshot, import, restore, or vacuum actions. Authenticated `/metrics` exposes
-process-local `omni_request_log_writer_*_total` counters for optional and
-terminal queue drops, persistence failures, and completion delivery loss.
-Cluster inference returns HTTP 503 before admission if the request-log writer is closed or its bounded wait queue is full or expires (4 seconds).
-On the authenticated `/metrics` endpoint, `omni_request_log_writer_reservation_refused_total`
-counts these refusals by `reason` (`closed`, `cap`, `deadline`). `revalidation` separately counts
-503s caused by a failed primary key or settings read after waiting. The response does not expose the cause.
-The cluster-only `omni_request_log_writer_queued` and `omni_request_log_writer_credits_in_use`
-gauges distinguish queued entries from the total budget in use, which also includes reservations.
-The gauges are sampled independently and exclude batches already dequeued for persistence.
-
-When incoming log events outpace the Postgres writer and half or less of its
-queue credit is free, cluster mode may skip `Begin` and `Route` log events
-instead of waiting. Authenticated `/metrics`
-reports these skips in `omni_request_log_writer_optional_dropped_total`;
-`omni_request_log_writer_terminal_dropped_total` tracks terminal queue loss
-separately. This policy never sheds `Finish` events and does not change completed
-rows, usage rollups, or rate-limit debits. The console may miss a request's
-in-flight row or a routing update under overload.
+The full table, and `--root` / `--db` behaviour: [docs/cli.md](docs/cli.md).
 
 ## Configuration
 
 Configuration is environment variables, read from the installation's `.env`:
 
-| Variable | Required | Default | Purpose |
-| --- | --- | --- | --- |
-| `OMNI_ENCRYPTION_KEY` | Yes | — | Encrypts provider credentials at rest; 16 characters minimum |
-| `OMNI_HOST` | No | `127.0.0.1` | Listener host |
-| `OMNI_PORT` | No | `9000` | Listener port |
-| `OMNI_DB_PATH` | No | `./omnigateway.db` | SQLite database path |
-| `OMNI_BASE_URL` | No | derived from host and port | Public origin for OAuth callbacks; set this behind a reverse proxy |
-| `OMNI_STATIC_DIR` | No | the console shipped with the server | Serve a different console build |
-| `OMNI_LOG_LEVEL` | No | `info` | Stdout threshold: `debug`, `info`, `warn`, or `error` |
-| `OMNI_LOG_FILE` | No | the systemd journal, when there is one | Where stdout was already redirected, so the Console screen can read it back. Names a file; does not create one |
-| `OMNI_BODY_LOGGING_ALLOWED` | No | unset | Permits request/response body capture on this installation. Read at boot. Capture also needs the runtime setting; see [Recording bodies](docs/operations.md#recording-bodies) |
-| `OMNI_METRICS_TOKEN` | No | unset | Registers authenticated `GET /metrics`; unset means no route |
-| `OMNI_METRICS_MAX_SERIES` | No | `5000` | Series cap before new `api_key_id` values fold to `other` |
-| `OMNI_OTLP_ENDPOINT` | No | unset | Enables OTLP/HTTP span export to `<endpoint>/v1/traces` |
-| `OMNI_OTLP_HEADERS` | No | unset | Comma-separated `k=v` headers sent to the collector |
-| `OMNI_TRACE_SAMPLE` | No | `1.0` | Head sampling ratio from `0` to `1`; inbound sampled trace context is honoured |
-| `OMNI_ROOT` | No | the installation in the current directory, else `~/.config/omnigateway` | Which installation the CLI acts on, when `--root` is not passed |
-| `OMNI_CLUSTER_MODE` | No | unset | `true` selects [cluster mode](docs/deploying.md#running-more-than-one-gateway) and requires the two URLs below; unset is one process on SQLite, and then the URLs must be unset too |
-| `OMNI_DATABASE_URL` | In cluster mode | — | The shared Postgres store |
-| `OMNI_REDIS_URL` | In cluster mode | — | The coordinator every process of a cluster shares: rate-limit counters, sessions, leases, push fan-out |
-| `OMNI_DAY_OFFSET_MINUTES` | No | host's UTC offset at boot | Fixed minutes east of UTC for daily usage buckets; set explicitly and identically on every replica |
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `OMNI_ENCRYPTION_KEY` | required | Encrypts provider credentials at rest; 16 characters minimum |
+| `OMNI_HOST` | `127.0.0.1` | Listener host |
+| `OMNI_PORT` | `9000` | Listener port |
+| `OMNI_BASE_URL` | derived from host and port | Public origin for OAuth callbacks; set behind a reverse proxy |
+| `OMNI_DB_PATH` | `./omnigateway.db` | SQLite database path |
 
-`OMNI_ROOT` is the one variable read from your shell and never from a root's `.env`, for the
-reason it has to be: a variable that selects the installation cannot live inside the installation
-it selects. A `--root` flag additionally suppresses an ambient `OMNI_DB_PATH`, and says so on
-stderr, so pointing the CLI at one installation from inside an unrelated checkout cannot pick up
-that checkout's database.
+**Keep `OMNI_ENCRYPTION_KEY`. Changing it makes every stored credential unreadable.** Everything else is
+runtime settings, edited with `omni settings set` or in the console. Full table: [docs/configuration.md](docs/configuration.md).
 
-The provider client-identity overrides — `OMNI_UA_*`, `OMNI_ORDER_*`, and the per-provider CLI
-version pins — are deliberately left out of this table and documented in `.env.example`. They
-change how the gateway identifies itself to a provider, which is not configuration in the sense
-the rest of this table is.
+## Deploying
 
-Gateway events are written to stdout as one greppable line each. `OMNI_LOG_FILE` *names* where
-that output was captured; it does not redirect it — see
-[docs/operations.md](docs/operations.md#logs).
-
-Everything else lives in the database rather than the environment, so it can be
-changed without a restart: the six routing weights, `maxAttempts`,
-`requestDeadlineMs`, the circuit breaker's `breakerThreshold` and
-`breakerCooldownMs`, `logRetentionDays`, `bodyRetentionDays`, `quotaPollIntervalMs`, `rtkEnabled`,
-and the two body-capture switches. Edit them with `omni settings set` or in the
-console. `quotaPollIntervalMs` is the one exception: the poller reads it once at
-boot, so a change to it takes a restart. `requestDeadlineMs` defaults to `0`,
-which imposes no deadline at all; what that means for whatever sits in front of
-the gateway is
-[Behind a reverse proxy](docs/deploying.md#behind-a-reverse-proxy). Snapshot retention —
-`snapshotKeepLatest` and `snapshotMaxAgeDays` — is stored alongside them but
-deliberately edited on the Database screen instead; see
-[Snapshots and restore](docs/operations.md#snapshots-and-restore) for why.
-
-## Recording bodies, snapshots, and the database
-
-By default the gateway records no prompts and no responses; capture is opt-in
-and needs both `OMNI_BODY_LOGGING_ALLOWED=1` at boot and a runtime setting, and
-a key created with `--no-bodies` is never captured. Snapshots are one SQLite
-file each, taken live, never carrying captured bodies, and restorable without
-stopping the gateway. Both, with compaction and clearing bodies, are in
-[docs/operations.md](docs/operations.md).
-
-## Docker
+`omni service install --enable` writes a systemd unit. Behind a reverse proxy, set `OMNI_BASE_URL`
+and pass WebSocket upgrades and unbuffered SSE through. Several replicas behind a load balancer
+are **cluster mode** on Postgres and Redis. Docker:
 
 ```bash
 docker build -t omnigateway .
@@ -537,143 +144,59 @@ docker run --rm \
   omnigateway
 ```
 
-The container listens on `0.0.0.0:9000`, serves the console, and keeps its
-database under `/data`. Fleets, the Kubernetes base under `k8s/`,
-GitOps releases and restart policy are in
-[docs/deploying.md](docs/deploying.md#docker).
+The nginx block, the Kubernetes base and GitOps releases: [docs/deploying.md](docs/deploying.md).
 
 ## Scope and limits
 
-Worth knowing before you deploy it:
-
-- **One process on SQLite by default; a fleet is opt-in.** Cluster mode on
-  Postgres and Redis shares every limit, session and lease across replicas.
-  Without it, the `1m` window and the `concurrency` gauge are counted in the
-  gateway process and reset when it restarts; `5h` and `1w` are counted from
-  the database and survive one. Two gateways over one SQLite file are not a
-  cluster and would not see each other's short-window counts.
-- **One operator, with two narrower views.** An optional read-only console
-  password and a per-key client dashboard exist; there is no multi-tenancy —
-  every provider account is the operator's, whoever is looking.
-- **Two grains of usage history.** Detailed request logs are pruned after 30
-  days by default; a daily rollup is kept for 400 days. A day uses a fixed UTC
-  offset, defaulting to the host's current offset; fleets must set it explicitly.
-- **Body capture is forensics, not an archive.** It is off unless you turn it on
-  with both keys, it expires on the request-log window, and it is capped at
-  100,000 rows. `omni bodies` reads one request's capture; nothing searches
-  across them.
-- **Snapshots are manual, and local.** Nothing takes one on a schedule and there
-  is no off-host target; retention bounds what you have taken, and a restore
-  always takes one first. Copy them somewhere else yourself if the disk failing
-  is what you are guarding against. On Postgres there are none; `pg_dump` is
-  the backup.
-- **Quota readings come from the providers**, and their usage endpoints are
-  undocumented. An account with nothing reported is treated as unknown, never
-  as unlimited.
-- **The gateway does not know which model accepts which request shape.** An
-  unsupported combination surfaces as the provider's own 400 rather than being
-  caught earlier.
-- **Thinking controls retain their wire intent.** Anthropic `between_tools` passes
-  through; other providers treat it as off and report a degradation. Unparsed
-  Anthropic thinking fields (including beta controls) pass through only to
-  Anthropic; supply any required beta header yourself. Hidden adaptive display
-  omits generated Responses reasoning summaries, without inventing a default.
-- **Claude Code auto mode supports Anthropic server-side classifier results.**
-  On Anthropic targets, the gateway forwards `safeguards`, protocol headers, and
-  original `safeguard_results` in both streaming and buffered replies. Safeguard
-  requests retain the client's system blocks and tool names/IDs rather than the
-  ordinary OAuth system/tool transformations. Eligibility and no-charge checks
-  still depend on Anthropic's rollout for the upstream credential/model; routing
-  to another provider does not supply them. This is not a byte-transparent proxy:
-  gateway policies and other request normalization still apply.
-  After deploying this version, start a **new Claude Code session** and check
-  `/status` → **Auto mode server: Enabled**. If the upstream is not eligible,
-  `CLAUDE_CODE_AUTO_MODE_SERVER=0` before starting Claude Code uses its separate
-  classifier calls instead; these remain billed as token usage. See
-  [Anthropic's notice guide](https://code.claude.com/docs/en/auto-mode-classifier-billing).
-- **An OpenAI OAuth (ChatGPT) target presents itself as Codex, and answers like
-  it.** Requests on that leg follow Codex 0.170.0's captured TUI shape, which
-  changes model behaviour for every client routed there, Claude Code included:
-  one tool call per turn (`parallel_tool_calls: false`), terser answers
-  (`text.verbosity: "low"`), and a request that names no reasoning effort —
-  including adaptive thinking with no effort — runs at the model's Codex catalog
-  default (`low` or `medium`) rather than `medium`. A client's own `text`,
-  `reasoning` or tool choice still wins field by field. OpenAI API-key targets
-  are unaffected. Credentials connected before this pick up their per-credential
-  identity on their next token refresh. Details:
-  [the fingerprint design](docs/superpowers/specs/2026-10-16-codex-0163-fingerprint-design.md).
-- **GPT-6.2 Sol and Astra** are available for OpenAI API keys and ChatGPT OAuth.
-  The existing default model is unchanged. API input caps are 922K; OAuth uses
-  Codex's defaults, 500K for Sol and 272K for Astra (128K output on both legs).
-  Catalog prices are the short-context tier: above 272K input, input/cache rates
-  double and output is 1.5× for the whole request. Adjust saved target prices if
-  routinely using the long tier.
+- **One process on SQLite by default; a fleet is opt-in.** Without cluster mode, `1m` and `concurrency`
+  are process-local and reset on restart; `5h` and `1w` survive. Two gateways over one SQLite file are not a cluster.
+- **One operator, with two narrower views.** An optional read-only console password and a per-key
+  client dashboard; no multi-tenancy — every provider account is the operator's.
+- **Two grains of usage history.** Request logs prune after 30 days, a daily rollup keeps 400;
+  a day uses a fixed UTC offset (the host's at boot — fleets set it explicitly).
+- **Body capture is forensics, not an archive.** Off unless both keys turn it on, expires on the
+  log window, capped at 100,000 rows. `omni bodies` reads one request's capture; nothing searches across them.
+- **Snapshots are manual and local.** Nothing takes one on a schedule and there is no off-host
+  target; retention bounds them and a restore takes one first. Copy them elsewhere if a failing disk is the worry. On Postgres,
+  `pg_dump` is the backup.
+- **Quota readings come from the providers**, whose usage endpoints are undocumented; nothing reported is unknown, never unlimited.
+- **The gateway does not know which model accepts which request shape.** Unsupported combinations surface as the provider's own 400.
+- **Provider-specific behaviour** — thinking controls, Claude Code auto mode, the Codex-shaped
+  OpenAI OAuth leg, GPT-6.2 tiers, xAI/Kilo pricing: [docs/providers.md](docs/providers.md).
 - Not in scope: semantic caching, billing.
 
-What is missing on purpose, what is missing for now, and what is designed but not
-built: [docs/roadmap.md](docs/roadmap.md).
+What is missing on purpose, for now, or designed but not built: [docs/roadmap.md](docs/roadmap.md).
 
 ## Security
 
-- Treat `OMNI_ENCRYPTION_KEY`, gateway keys, and the SQLite file as secrets.
-  Anyone with the file *and* the key has your provider credentials.
-- Prompts and responses are never logged. Request logs hold metadata and token
-  counts only, and no body ever reaches stdout, the journal, or the Console
-  screen. Bodies are stored only if you opt in to
-  [body capture](docs/operations.md#recording-bodies), which needs both an environment variable
-  and a setting, encrypts what it writes, and can be refused per key.
+- Treat `OMNI_ENCRYPTION_KEY`, gateway keys, and the SQLite file as secrets. Anyone with the file
+  *and* the key has your provider credentials.
+- Prompts and responses are never logged; request logs hold metadata and token counts only, and no body
+  reaches stdout, the journal, or the Console screen. [Body capture](docs/operations.md#recording-bodies) is opt-in behind two keys, encrypts what it writes, and can be refused per key.
 - Gateway keys are stored as hashes. A lost key is reissued, not recovered.
-- A [snapshot](docs/operations.md#snapshots-and-restore) carries whatever the database does —
-  encrypted provider credentials, gateway key hashes — and is inert only because
-  `OMNI_ENCRYPTION_KEY` is not in it. Captured bodies are excluded, so a snapshot
-  is never a prompt corpus.
-- Secrets are never accepted on the command line — `omni` prompts for them or
-  reads stdin — so they stay out of your shell history and the process table.
-- Behind a reverse proxy, set `OMNI_BASE_URL` to the public HTTPS origin so
-  OAuth callbacks match what the providers have registered.
-- The gateway talks to your providers and to nobody else — except your collector, if you name
-  one with `OMNI_OTLP_ENDPOINT`. No CDN fonts or undeclared third-party origins.
+- A [snapshot](docs/operations.md#snapshots-and-restore) carries encrypted credentials and key
+  hashes — inert only because `OMNI_ENCRYPTION_KEY` is not in it. Captured bodies are excluded.
+- Secrets are never accepted on the command line — `omni` prompts or reads stdin — so they stay
+  out of shell history and the process table.
+- Behind a reverse proxy, set `OMNI_BASE_URL` to the public HTTPS origin so OAuth callbacks match.
+- The gateway talks to your providers and to nobody else — except your collector, if you name one
+  with `OMNI_OTLP_ENDPOINT`. No CDN fonts or undeclared third-party origins.
 - No plugins are loaded in 1.x: a `plugins/` directory is reported and never run.
 
-## Plugins
+## Documentation
 
-Not supported in 1.x.
-
-## Development
-
-Contributing, or running from a checkout? See
-[ARCHITECTURE.md](ARCHITECTURE.md) for how the system fits together,
-[CLAUDE.md](CLAUDE.md) for the repository map, architectural boundaries, and
-conventions, and `docs/superpowers/specs/` for the design documents
-behind each feature.
-
-The gateway is Rust (toolchain pinned in `rust-toolchain.toml`); the console is
-built with Bun 1.4.4.
-
-```bash
-git clone https://github.com/harismawan/omnigateway.git
-cd omnigateway
-bun install
-bun run build:dashboard       # the gateway serves this build
-export OMNI_ENCRYPTION_KEY="$(openssl rand -base64 32)"
-cargo run -p omni-gateway --bin omnigateway   # gateway on 9000; reads no .env
-cargo test --workspace
-```
-
-For dashboard development, run `bun run dev:dashboard` in another terminal
-(port 5173, API/health proxied to 9000). Bun rebuilds after source changes and
-reloads the page; component state resets, with no React Fast Refresh.
-`bun run --cwd apps/dashboard preview` serves an existing build on port 4173.
-Both commands accept `--host`, `--port` and `--upstream` options.
-
-Releases are published to npm from a `v*` tag, with provenance attesting which
-commit produced them.
-
-# Qoder provider
-
-Served by the Rust gateway. Experimental Qoder global account login,
-server-derived models and native streaming are available without installing
-its CLI. The model catalog is dynamic: the OAuth flow stores the account's
-`providerData.modelCatalog` snapshot, which the console merges into the
-catalog. See [Qoder setup and limitations](docs/qoder.md).
-Live account compatibility is not yet verified; unknown prices are not free usage.
+- [docs/install.md](docs/install.md) — the install script, npm, release archives, upgrades, manual setup
+- [docs/cli.md](docs/cli.md) — every `omni` command, `--json`, `--root` and `--db`
+- [docs/configuration.md](docs/configuration.md) — the full environment table and runtime settings
+- [docs/client-api.md](docs/client-api.md) — endpoints, authentication, rate-limit headers, tool routing
+- [docs/operations.md](docs/operations.md) — key limits, expiry, policies, logs, bodies, snapshots, restore
+- [docs/deploying.md](docs/deploying.md) — systemd, reverse proxies, cluster mode, Docker and Kubernetes
+- [docs/providers.md](docs/providers.md) — provider- and model-specific behaviour
+- [docs/qoder.md](docs/qoder.md) — Qoder setup and limitations
+- [docs/rust-quota-runtime.md](docs/rust-quota-runtime.md) — Rust single-node quota support and limits
+- [docs/rust-cli-service.md](docs/rust-cli-service.md) — local service commands and their limits
+- [docs/rust-cluster-bucket-sweep.md](docs/rust-cluster-bucket-sweep.md) — the bucket sweep after a Postgres lineage replacement or restore
+- [docs/rust-packaging.md](docs/rust-packaging.md) — release archives, launch policy, image promotion
+- [docs/roadmap.md](docs/roadmap.md) — what is missing on purpose, for now, or designed but not built
+- [ARCHITECTURE.md](ARCHITECTURE.md) — how it is built: crate map, a request end to end, routing, storage
+- [CONTRIBUTING.md](CONTRIBUTING.md) — running from a checkout and the check commands
