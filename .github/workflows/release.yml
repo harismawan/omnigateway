@@ -258,7 +258,17 @@ jobs:
           done
           # `npm update -g` follows `latest`. A skipped main publish (a rerun)
           # must already be there; never retag silently.
-          latest=$(npm view omnigateway dist-tags.latest)
+          #
+          # The registry answers reads from a cache that trails a publish by
+          # minutes (v1.1.0: still `1.0.0` right after, `1.1.0` ~2 min later),
+          # so wait for it rather than fail a release that went fine. Still
+          # wrong after 5 minutes is a real mismatch.
+          latest=
+          for _ in $(seq 1 20); do
+            latest=$(npm view omnigateway dist-tags.latest --prefer-online 2>/dev/null || true)
+            [ "$latest" = "$version" ] && break
+            sleep 15
+          done
           if [ "$latest" != "$version" ]; then
             echo "omnigateway@$version is published but latest is $latest; move it by hand (npm dist-tag add omnigateway@$version latest) if that is intended" >&2
             exit 1
