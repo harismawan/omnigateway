@@ -611,11 +611,17 @@ async fn device_exchange(
             // A first exchange carries no previous state, reconnect or not:
             // the TS flow passes `{}` here and providerData only on refresh.
             let previous = serde_json::Map::new();
+            // The finish chain reads the clock per step, as TS does.
+            let clock = || {
+                #[allow(clippy::cast_precision_loss)]
+                let at = (host.now)() as f64;
+                at
+            };
             omni_providers::qoder::oauth::finish(
                 &mut runner,
                 &token,
                 &machine_id,
-                now,
+                &clock,
                 &state,
                 &previous,
             )
@@ -746,7 +752,19 @@ async fn complete(
         .filter(|c| c.provider == provider)
         .map_or(&serde_json::Value::Null, |c| &c.provider_data);
     let pending = pending_value(&flow)?;
-    let result = if provider == "antigravity" {
+    let result = if device_flow(&flow) {
+        // A device provider's exchange ignores any pasted code and completes
+        // through its own poll path, exactly as TS `provider.exchange` does.
+        // Falling through to a pkce exchange here would leak the flow's
+        // verifier (and qoder's nonce) to the wrong provider's token endpoint.
+        match device_exchange(&provider, &host, &pending, data).await {
+            Ok(result) => result,
+            // The operator has not approved yet; the same marked error the
+            // poll path travels on, untranslated outside `poll_reply`.
+            Err(DeviceError::Pending) => return Err(pending_signal()),
+            Err(DeviceError::Gateway(error)) => return Err(error),
+        }
+    } else if provider == "antigravity" {
         tokio::time::timeout(
             std::time::Duration::from_secs(150),
             antigravity_exchange(&host, code, &pending),
@@ -760,7 +778,7 @@ async fn complete(
         })??
     } else if provider == "grok" {
         grok_exchange(&host, code, &pending).await?
-    } else {
+    } else if provider == "openai" || provider == "anthropic" {
         let request = if provider == "openai" {
             omni_providers::openai::oauth::exchange_request(code, &pending)?
         } else {
@@ -791,6 +809,10 @@ async fn complete(
         } else {
             omni_providers::anthropic::oauth::token_result(response.0, &response.1, None, now)?
         }
+    } else {
+        // No other pkce exchange exists; silently borrowing anthropic's
+        // would post one provider's flow secrets to another's endpoint.
+        return Err(internal());
     };
     persist_flow_result(host, holder, &flow, result).await
 }
@@ -2848,8 +2870,18 @@ mod tests {
         assert!(flows.pending("dev", false).await.is_err());
     }
 
-    #[tokio::test]
-    async fn kilo_refresh_refuses_and_disables_without_a_request() {
+    /// A stored kilo credential plus a refresher whose stub panics on any
+    /// request: both refresh outcomes must be decided without HTTP.
+    async fn kilo_refresh_harness(
+        refresh: Option<&str>,
+    ) -> (
+        tempfile::TempDir,
+        Arc<omni_store::Store>,
+        omni_crypto::field::FieldKey,
+        Arc<crate::refresh::Refresher>,
+        Arc<KiloStub>,
+        omni_store::credentials::Credential,
+    ) {
         let dir = tempfile::tempdir().expect("dir");
         let store = Arc::new(
             omni_store::Store::open(
@@ -2871,7 +2903,7 @@ mod tests {
         ));
         let tokens = omni_store::credentials::TokenUpdate {
             access_token: Some("kilo-token-1".into()),
-            refresh_token: None,
+            refresh_token: refresh.map(str::to_owned),
             api_key: None,
             id_token: None,
             expires_at: None,
@@ -2897,6 +2929,34 @@ mod tests {
             .await
             .expect("read")
             .expect("present");
+        (dir, store, key, host, http, credential)
+    }
+
+    #[tokio::test]
+    async fn kilo_refresh_without_a_token_is_no_refresh_token_and_stays_enabled() {
+        // TS checks the null refresh token before the provider's refusal,
+        // outside the disable-on-AUTH path: the credential is healthy, it
+        // simply has nothing to refresh.
+        let (_dir, store, key, host, http, credential) = kilo_refresh_harness(None).await;
+        let error = host.refresh(&credential).await.expect_err("no token");
+        assert_eq!(error.code, ErrorCode::Auth);
+        assert_eq!(error.message, "credential k1 has no refresh token");
+        assert!(http.requests().is_empty());
+        let stored = store
+            .credential(&key, "k1")
+            .await
+            .expect("read")
+            .expect("present");
+        assert!(stored.enabled);
+        assert_eq!(stored.disabled_reason, None);
+    }
+
+    #[tokio::test]
+    async fn kilo_refresh_with_a_token_refuses_and_disables_without_a_request() {
+        // Only a credential WITH a refresh token reaches the refusal, and
+        // that AUTH disables it, as TS's disable-on-AUTH path does.
+        let (_dir, store, key, host, http, credential) =
+            kilo_refresh_harness(Some("smuggled-refresh")).await;
         let error = host.refresh(&credential).await.expect_err("refused");
         assert_eq!(error.code, ErrorCode::Auth);
         assert_eq!(
@@ -4683,6 +4743,8 @@ mod tests {
             error.message,
             "qoder oauth exchange asked for more than 5 requests"
         );
+        // The gateway's own refusal, so qoder's transient fallback skips it.
+        assert!(error.gateway_authored);
     }
 
     #[tokio::test]
@@ -4719,6 +4781,7 @@ mod tests {
             error.message,
             "qoder oauth exchange described a request to an origin its manifest does not declare"
         );
+        assert!(error.gateway_authored);
     }
 
     /// A stored qoder credential plus a refresher driven by the sequence stub.
@@ -4999,5 +5062,109 @@ mod tests {
         let bundle = qoder_bundle(rows[0].secrets.access_token.as_deref());
         assert_eq!(bundle.machine_id, "synthetic-original");
         assert_eq!(bundle.device_token, "dummy-token");
+    }
+
+    // --- finish() routing for device flows ------------------------------------
+    // TS `complete` hands every flow to its own provider's exchange, and a
+    // device exchange ignores the pasted code. The host must never borrow
+    // anthropic's pkce exchange for a device flow: that would post qoder's
+    // verifier and nonce to api.anthropic.com.
+
+    /// The finish path without an `App`: take the flow, normalize, exchange —
+    /// exactly what `ConnectFlows::finish` does between the HTTP layers.
+    async fn finish_flow(
+        flows: &ConnectFlows,
+        host: Arc<crate::refresh::Refresher>,
+        holder: Arc<omni_gateway_core::snapshot::SnapshotHolder>,
+        id: &str,
+        code: &str,
+    ) -> Result<String> {
+        let flow = flows.pending(id, true).await?;
+        let provider = text(get(&flow, "provider")).ok_or_else(internal)?;
+        let pending = pending_value(&flow)?;
+        let code = normalize(&provider, &pending, code)?;
+        finish_exchange(host, holder, flow, code).await
+    }
+
+    #[tokio::test]
+    async fn qoder_finish_completes_via_the_poll_path_and_never_touches_anthropic() {
+        let http = KiloStub::new(qoder_login());
+        let (_dir, host, holder, flows) = kilo_harness(http.clone(), QODER_FLOW).await;
+        let id = finish_flow(&flows, host.clone(), holder, "dev", "pasted-code")
+            .await
+            .expect("device finish");
+        let sent = http.requests();
+        assert_eq!(sent.len(), 4);
+        assert_eq!(sent[0].url, QODER_POLL_URL);
+        for req in &sent {
+            assert!(
+                !req.url.contains("anthropic"),
+                "device finish leaked to {}",
+                req.url
+            );
+            // The pasted code is ignored, never forwarded anywhere.
+            assert!(!req.url.contains("pasted-code"));
+            assert!(!req.body.contains("pasted-code"));
+        }
+        let rows = host.store.list_credentials(&host.key).await.expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, id);
+        assert_eq!(rows[0].provider, "qoder");
+        assert_eq!(
+            qoder_bundle(rows[0].secrets.access_token.as_deref()).device_token,
+            "dummy-token"
+        );
+        assert!(flows.pending("dev", false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn kilo_finish_completes_through_the_device_exchange() {
+        let http = KiloStub::new(vec![
+            KiloReply::Response(200, KILO_APPROVED),
+            KiloReply::Response(200, r#"{"organizations":[]}"#),
+        ]);
+        let (_dir, host, holder, flows) = kilo_harness(http.clone(), KILO_FLOW).await;
+        let id = finish_flow(&flows, host.clone(), holder, "dev", "ignored-paste")
+            .await
+            .expect("device finish");
+        let sent = http.requests();
+        assert_eq!(sent[0].url, format!("{KILO_CODES_URL}/KILO-CODE-1"));
+        assert!(sent.iter().all(|r| !r.url.contains("anthropic")));
+        let rows = host.store.list_credentials(&host.key).await.expect("rows");
+        assert_eq!(rows[0].id, id);
+        assert_eq!(
+            rows[0].secrets.access_token.as_deref(),
+            Some("kilo-token-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn device_finish_before_approval_travels_on_the_pending_marker() {
+        let http = KiloStub::new(vec![KiloReply::Response(404, "{}")]);
+        let (_dir, host, holder, flows) = kilo_harness(http, QODER_FLOW).await;
+        let error = finish_flow(&flows, host, holder, "dev", "")
+            .await
+            .expect_err("not approved");
+        assert_eq!(error.code, ErrorCode::Auth);
+        assert_eq!(error.message, PENDING_MARKER);
+    }
+
+    #[tokio::test]
+    async fn complete_refuses_unknown_providers_instead_of_borrowing_anthropic() {
+        let http = KiloStub::new(Vec::new());
+        let (_dir, host, holder, _flows) = kilo_harness(
+            http.clone(),
+            r#"{"provider":"mystery","label":"x","pending":{"verifier":"v","challenge":"c","state":"s","redirectUri":""}}"#,
+        )
+        .await;
+        let flow = parse_js(
+            r#"{"provider":"mystery","label":"x","pending":{"verifier":"v","challenge":"c","state":"s","redirectUri":""}}"#,
+        )
+        .expect("flow");
+        let error = complete(host, holder, flow, "code#s")
+            .await
+            .expect_err("unknown provider");
+        assert_eq!(error.code, ErrorCode::Internal);
+        assert!(http.requests().is_empty());
     }
 }

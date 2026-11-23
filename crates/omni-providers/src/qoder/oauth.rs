@@ -96,11 +96,16 @@ fn secondary_code(status: u16) -> ErrorCode {
     }
 }
 
-fn transient(code: ErrorCode) -> bool {
-    matches!(
-        code,
-        ErrorCode::Upstream | ErrorCode::Timeout | ErrorCode::RateLimit
-    )
+/// A bad minute upstream, not a dead credential — and not the gateway's own
+/// refusal either. TS throws its runner's cap/origin refusals PAST the flow,
+/// so this catch never sees them; the Rust runner returns them here, marked
+/// `gateway_authored`, and they must propagate rather than fall back.
+fn transient(error: &GatewayError) -> bool {
+    !error.gateway_authored
+        && matches!(
+            error.code,
+            ErrorCode::Upstream | ErrorCode::Timeout | ErrorCode::RateLimit
+        )
 }
 
 fn status_error(code: ErrorCode, message: &str, status: u16) -> GatewayError {
@@ -377,7 +382,7 @@ async fn discover(
     access: &str,
     uid: &str,
     machine_id: &str,
-    now: f64,
+    now: &(dyn Fn() -> f64 + Sync),
 ) -> Result<String, GatewayError> {
     let (mut status, mut body) = exchange
         .exchange(
@@ -396,7 +401,8 @@ async fn discover(
     let mut v3 = false;
     if status == 401 || status == 403 {
         v3 = true;
-        let date = http_date(now);
+        // Fresh clock, as TS reads `input.now()` at the anonymous leg.
+        let date = http_date(now());
         let signature = omni_crypto::qoder::sign_anonymous(&date);
         (status, body) = exchange
             .exchange(
@@ -447,11 +453,15 @@ async fn discover(
 /// `previous` is the stored `providerData` on refresh and empty on a first
 /// exchange, exactly as the TS flow passes it: it seeds the last-good origin
 /// and catalog when a transient failure would otherwise lose them.
+///
+/// `now` is a clock, not a timestamp: TS reads `input.now()` freshly at the
+/// anonymous v3 `Date`, the listing's `Cosy-Date`, `issuedAt` and the expiry,
+/// and a chain that spans seconds must sign each step with its own minute.
 pub async fn finish(
     exchange: &mut dyn AuthExchange,
     token: &JsValue,
     machine_id: &str,
-    now: f64,
+    now: &(dyn Fn() -> f64 + Sync),
     random_state: &str,
     previous: &Map<String, Value>,
 ) -> Result<FlowResult, GatewayError> {
@@ -512,7 +522,7 @@ pub async fn finish(
                 .and_then(Value::as_str)
                 .and_then(trusted_str);
             match last_good {
-                Some(origin) if transient(error.code) => origin,
+                Some(origin) if transient(&error) => origin,
                 _ => return Err(error),
             }
         }
@@ -533,7 +543,7 @@ pub async fn finish(
     );
     omni_ir::deep::insert(&mut auth, "ideVersion".into(), json!(""));
     let auth_base64 = B64.encode(jsjson::to_string(&Value::Object(auth)));
-    let date = format!("{}", (now / 1000.0).floor() as i64);
+    let date = format!("{}", (now() / 1000.0).floor() as i64);
     let signature =
         omni_crypto::qoder::sign_auth(&auth_base64, &envelope.key, &date, "", MODEL_LIST_PATH);
     let listing = exchange
@@ -564,7 +574,7 @@ pub async fn finish(
         Ok(response) => response,
         // A transport failure is a bad minute, not a dead credential: read it
         // as the unavailable listing it is.
-        Err(error) if transient(error.code) => (503, String::new()),
+        Err(error) if transient(&error) => (503, String::new()),
         Err(error) => return Err(error),
     };
     let unavailable = status == 408 || status == 429 || status >= 500;
@@ -602,7 +612,11 @@ pub async fn finish(
     omni_ir::deep::insert(&mut bundle, "key".into(), json!(envelope.key));
     omni_ir::deep::insert(&mut bundle, "origin".into(), json!(origin));
     omni_ir::deep::insert(&mut bundle, "models".into(), bundle_rows(&models));
-    omni_ir::deep::insert(&mut bundle, "issuedAt".into(), omni_ir::stream::number(now));
+    omni_ir::deep::insert(
+        &mut bundle,
+        "issuedAt".into(),
+        omni_ir::stream::number(now()),
+    );
     let access_token = jsjson::to_string(&Value::Object(bundle));
 
     let mut provider_data = omni_ir::deep::clone_map(previous);
@@ -639,8 +653,197 @@ pub async fn finish(
             .map(|s| JsValue::String(s.encode_utf16().collect())),
         id_token: None,
         api_key: None,
-        expires_at: expires(token, now),
+        expires_at: expires(token, now()),
         account_email: text(user.get("email")).map(|s| JsValue::String(s.encode_utf16().collect())),
         provider_data,
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::oauth::ExchangeFuture;
+    use std::sync::atomic::{AtomicI64, Ordering};
+
+    /// A scripted finish-chain channel: records every described request and
+    /// answers from a queue, so tests can pin headers, dates and fallbacks.
+    struct Scripted {
+        replies: std::collections::VecDeque<Result<(u16, String), GatewayError>>,
+        seen: Vec<AuthRequest>,
+    }
+    impl Scripted {
+        fn new(replies: Vec<Result<(u16, String), GatewayError>>) -> Self {
+            Self {
+                replies: replies.into(),
+                seen: Vec::new(),
+            }
+        }
+    }
+    impl AuthExchange for Scripted {
+        fn exchange<'a>(&'a mut self, request: AuthRequest, _seconds: u64) -> ExchangeFuture<'a> {
+            self.seen.push(request);
+            let reply = self.replies.pop_front().expect("scripted reply");
+            Box::pin(async move { reply })
+        }
+    }
+
+    fn ok(body: &str) -> Result<(u16, String), GatewayError> {
+        Ok((200, body.into()))
+    }
+    const USER: &str = r#"{"id":"u1","email":"u@example.test"}"#;
+    const MODELS: &str = r#"{"assistant":[{"key":"synthetic","display_name":"Synthetic","is_vl":true,"max_input_tokens":1234}]}"#;
+
+    fn token() -> JsValue {
+        jsjson::parse_js(r#"{"token":"device-tok","user_id":"u1","expires_in":10}"#).unwrap()
+    }
+    fn header<'a>(request: &'a AuthRequest, name: &str) -> Option<&'a str> {
+        request
+            .headers
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+    }
+    fn bundle_of(result: &FlowResult) -> Value {
+        serde_json::from_str(&String::from_utf16_lossy(&result.access_token)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn finish_reads_the_clock_freshly_at_each_dated_step() {
+        // One minute per read: TS reads input.now() at the anonymous v3 Date,
+        // the listing's Cosy-Date, issuedAt and the expiry — never once for
+        // the whole chain.
+        let ticks = AtomicI64::new(0);
+        let clock = || (1_000_000 + ticks.fetch_add(1, Ordering::SeqCst) * 60_000) as f64;
+        let mut exchange = Scripted::new(vec![
+            ok(USER),
+            Ok((403, "{}".into())),
+            ok(r#"{"inferNodes":["https://api1.qoder.sh"]}"#),
+            ok(MODELS),
+        ]);
+        let result = finish(
+            &mut exchange,
+            &token(),
+            "machine-1",
+            &clock,
+            "state-seed",
+            &Map::new(),
+        )
+        .await
+        .expect("finish");
+        // The anonymous v3 leg signs the FIRST read's date.
+        let date = http_date(1_000_000.0);
+        assert_eq!(header(&exchange.seen[2], "Date"), Some(date.as_str()));
+        assert_eq!(
+            header(&exchange.seen[2], "Signature"),
+            Some(omni_crypto::qoder::sign_anonymous(&date).as_str())
+        );
+        // The listing's Cosy-Date is the SECOND read, a minute later, and the
+        // COSY signature is computed over that fresh date.
+        assert_eq!(header(&exchange.seen[3], "Cosy-Date"), Some("1060"));
+        let bundle = bundle_of(&result);
+        let auth = header(&exchange.seen[3], "Authorization").unwrap();
+        let parts: Vec<_> = auth.trim_start_matches("Bearer COSY.").split('.').collect();
+        assert_eq!(
+            parts[1],
+            omni_crypto::qoder::sign_auth(
+                parts[0],
+                bundle["key"].as_str().unwrap(),
+                "1060",
+                "",
+                MODEL_LIST_PATH
+            )
+        );
+        // issuedAt is the THIRD read; the relative expiry rides the FOURTH.
+        assert_eq!(bundle["issuedAt"].as_f64(), Some(1_120_000.0));
+        assert_eq!(result.expires_at, Some(1_190_000.0));
+    }
+
+    #[tokio::test]
+    async fn gateway_authored_discovery_refusal_never_falls_back_to_last_good() {
+        // TS throws its runner's cap/origin refusals past the flow, so the
+        // last-good fallback never sees them; a transport failure IS raised
+        // into the step and stays transient.
+        for authored in [false, true] {
+            let mut refusal = GatewayError::new(
+                ErrorCode::Upstream,
+                "qoder oauth refresh asked for more than 5 requests",
+            );
+            if authored {
+                refusal = refusal.gateway_authored();
+            }
+            let mut replies = vec![ok(USER), Err(refusal)];
+            if !authored {
+                replies.push(ok(MODELS));
+            }
+            let mut exchange = Scripted::new(replies);
+            let previous = json!({"inferenceOrigin":"https://api2.qoder.sh"})
+                .as_object()
+                .cloned()
+                .unwrap();
+            let clock = || 1_000_000.0;
+            let outcome = finish(
+                &mut exchange,
+                &token(),
+                "machine-1",
+                &clock,
+                "state-seed",
+                &previous,
+            )
+            .await;
+            if authored {
+                assert_eq!(
+                    outcome.err().expect("authored refusal propagates").message,
+                    "qoder oauth refresh asked for more than 5 requests"
+                );
+            } else {
+                let result = outcome.expect("transport failure falls back");
+                assert_eq!(bundle_of(&result)["origin"], "https://api2.qoder.sh");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn gateway_authored_listing_refusal_is_not_an_unavailable_catalog() {
+        for authored in [false, true] {
+            let mut refusal = GatewayError::new(
+                ErrorCode::Upstream,
+                "qoder oauth exchange described a request to an origin its manifest does not declare",
+            );
+            if authored {
+                refusal = refusal.gateway_authored();
+            }
+            let mut exchange = Scripted::new(vec![
+                ok(USER),
+                ok(r#"{"inferNodes":[{"url":"https://api1.qoder.sh"}]}"#),
+                Err(refusal),
+            ]);
+            let previous = json!({
+                "inferenceOrigin":"https://api1.qoder.sh",
+                "inferenceModels":[{"key":"synthetic","display_name":"Synthetic","is_vl":true,"is_reasoning":false,"max_input_tokens":1234}]
+            })
+            .as_object()
+            .cloned()
+            .unwrap();
+            let clock = || 1_000_000.0;
+            let outcome = finish(
+                &mut exchange,
+                &token(),
+                "machine-1",
+                &clock,
+                "state-seed",
+                &previous,
+            )
+            .await;
+            if authored {
+                assert_eq!(
+                    outcome.err().expect("authored refusal propagates").message,
+                    "qoder oauth exchange described a request to an origin its manifest does not declare"
+                );
+            } else {
+                let result = outcome.expect("transient outage tolerated");
+                assert_eq!(result.provider_data["catalogStatus"], json!("unavailable"));
+            }
+        }
+    }
 }

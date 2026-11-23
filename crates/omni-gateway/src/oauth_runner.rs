@@ -60,10 +60,17 @@ impl<'a> ExchangeRunner<'a> {
     ) -> Result<(u16, String), GatewayError> {
         self.sent += 1;
         if self.sent > self.config.max_requests {
-            return Err(self.failure(&format!(
-                "asked for more than {} requests",
-                self.config.max_requests
-            )));
+            // Gateway-authored, like TS `flowFailure`: the cap refusal is
+            // thrown PAST the flow in TS, so a provider's own catch (qoder's
+            // transient fallback) never sees it. Marking it here lets the
+            // provider exclude it while transport "threw" errors — raised
+            // INTO the step in TS — stay transient.
+            return Err(self
+                .failure(&format!(
+                    "asked for more than {} requests",
+                    self.config.max_requests
+                ))
+                .gateway_authored());
         }
         let url = url::Url::parse(&request.url).map_err(|_| self.failure("threw"))?;
         let allowed = match &self.config.origins {
@@ -73,9 +80,12 @@ impl<'a> ExchangeRunner<'a> {
             Origins::Validator(check) => check(&url),
         };
         if !allowed {
-            return Err(
-                self.failure("described a request to an origin its manifest does not declare")
-            );
+            // Same TS parity as the cap above: the origin refusal terminates
+            // the whole step there, so it must not read as a transient
+            // upstream failure inside a provider's fallback catch.
+            return Err(self
+                .failure("described a request to an origin its manifest does not declare")
+                .gateway_authored());
         }
         tokio::time::timeout(std::time::Duration::from_secs(seconds.min(30)), async {
             let response = self
@@ -182,15 +192,19 @@ mod tests {
             capped.message,
             "fixture oauth exchange asked for more than 1 requests"
         );
+        // The cap refusal is the gateway's own sentence, never the upstream's.
+        assert!(capped.gateway_authored);
         let mut stray = runner(&http, 4, Origins::Allowlist(&["https://good.test"]));
+        let stray = stray
+            .send(request("https://evil.test/token"), 30)
+            .await
+            .expect_err("origin");
         assert_eq!(
-            stray
-                .send(request("https://evil.test/token"), 30)
-                .await
-                .expect_err("origin")
-                .message,
+            stray.message,
             "fixture oauth exchange described a request to an origin its manifest does not declare"
         );
+        assert!(stray.gateway_authored);
+        let mut stray = runner(&http, 4, Origins::Allowlist(&["https://good.test"]));
         assert_eq!(
             stray
                 .send(request("not a url"), 30)
@@ -258,6 +272,9 @@ mod tests {
             .await
             .expect_err("timeout");
         assert_eq!(error.message, "fixture oauth exchange threw");
+        // A transport failure IS raised into the step in TS, where qoder
+        // reads it as transient — so it must not carry the authored flag.
+        assert!(!error.gateway_authored);
         assert_eq!(
             started.elapsed(),
             std::time::Duration::from_secs(30),

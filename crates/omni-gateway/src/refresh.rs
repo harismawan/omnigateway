@@ -274,10 +274,20 @@ impl Refresher {
         if let omni_store::Secret::Unreadable(error) = &c.secrets.refresh_token {
             return Err(GatewayError::new(ErrorCode::Internal, error.to_string()));
         }
+        // TS checks the null refresh token FIRST, outside the disable-on-AUTH
+        // try: a credential with nothing to refresh keeps its enabled state.
+        let token = c.secrets.refresh_token.as_deref().ok_or_else(|| {
+            GatewayError::new(
+                ErrorCode::Auth,
+                format!("credential {} has no refresh token", c.id),
+            )
+        })?;
         if c.provider == "kilo" {
             // Kilo issues neither a refresh token nor an expiry, so this path
             // should be unreachable; AUTH records that the credential is
             // unusable until the operator reconnects, rather than retrying.
+            // Only reached WITH a refresh token: TS raises this refusal from
+            // inside provider.refresh, within the disable-on-AUTH path.
             let error = omni_providers::kilo::oauth::refresh_refusal();
             self.store
                 .disable_rejected_token(&c.id, (self.now)())
@@ -286,12 +296,6 @@ impl Refresher {
             self.routing_committed(crate::routing::RoutingChange::Credential { id: c.id.clone() });
             return Err(error);
         }
-        let token = c.secrets.refresh_token.as_deref().ok_or_else(|| {
-            GatewayError::new(
-                ErrorCode::Auth,
-                format!("credential {} has no refresh token", c.id),
-            )
-        })?;
         // One identity per refresh: minting separately for the request and the
         // result would send one device id upstream and store another.
         let kimi_device = (c.provider == "kimi")
@@ -553,16 +557,27 @@ async fn qoder_refresh(
     let response = runner.send(request, 30).await?;
     let merged =
         omni_providers::qoder::oauth::refresh_token_result(response.0, &response.1, token)?;
-    #[allow(clippy::cast_precision_loss)]
-    let now = (host.now)() as f64;
     let state = omni_providers::oauth::random_state();
     let previous = c
         .provider_data
         .as_object()
         .map(omni_ir::deep::clone_map)
         .unwrap_or_default();
-    omni_providers::qoder::oauth::finish(&mut runner, &merged, &machine_id, now, &state, &previous)
-        .await
+    // The finish chain reads the clock per step, as TS does.
+    let clock = || {
+        #[allow(clippy::cast_precision_loss)]
+        let at = (host.now)() as f64;
+        at
+    };
+    omni_providers::qoder::oauth::finish(
+        &mut runner,
+        &merged,
+        &machine_id,
+        &clock,
+        &state,
+        &previous,
+    )
+    .await
 }
 // The sweep timer keeps its phase; callbacks while `running` simply return.
 fn next_sweep(previous: tokio::time::Instant, now: tokio::time::Instant) -> tokio::time::Instant {

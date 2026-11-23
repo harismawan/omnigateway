@@ -473,8 +473,11 @@ fn credentials_of(c: &Credential, secrets: Option<&omni_store::CredentialSecrets
     let secret = |s: &Secret| s.as_deref().map(str::to_owned);
     let (access_token, api_key) = match secrets {
         Some(s) => (secret(&s.access_token), secret(&s.api_key)),
-        // Both secrets travel, as in the TS attempt: an OAuth credential may
-        // also carry a minted api key (muse), which is what its codec reads.
+        // Intentional deviation from TS, do not "fix" back: attempt.ts passes
+        // both secrets too, but its openForInference returns apiKey:null for
+        // OAuth rows, so only the token flows there. Here the minted key rides
+        // along because muse inference authenticates with that key ALONE —
+        // dropping it (TS's effective behavior) would break muse dispatch.
         None if c.auth_type == AuthType::OAuth => {
             (secret(c.inference_secret()), secret(&c.secrets.api_key))
         }

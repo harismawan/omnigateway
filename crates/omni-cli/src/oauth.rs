@@ -24,6 +24,13 @@ fn gateway(e: omni_ir::error::GatewayError) -> (u8, String) {
 fn now() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
+/// The millisecond clock as a JS number, for provider finish chains that
+/// read it freshly at each step (qoder signs every leg with its own minute).
+fn now_ms() -> f64 {
+    #[allow(clippy::cast_precision_loss)]
+    let at = now() as f64;
+    at
+}
 fn normalize(
     provider: &str,
     pending: &omni_providers::oauth::PendingFlow,
@@ -364,7 +371,8 @@ async fn device_connect(
             #[allow(clippy::cast_precision_loss)]
             let at = now() as f64;
             let request = kilo::exchange_request(&start.pending, at).map_err(gateway)?;
-            let response = send(&client, provider, request, "exchange").await?;
+            // The poll is a GET: TS gives it the short 15s deadline.
+            let response = send_short(&client, provider, request, "exchange").await?;
             kilo::poll_result(response.0, &response.1)
         } else if provider == "muse" {
             use omni_providers::muse::oauth as muse;
@@ -390,7 +398,8 @@ async fn device_connect(
             let at = now() as f64;
             let (request, machine_id) =
                 qoder::exchange_request(&start.pending, at).map_err(gateway)?;
-            let response = send(&client, provider, request, "exchange").await?;
+            // The poll is a GET: TS gives it the short 15s deadline.
+            let response = send_short(&client, provider, request, "exchange").await?;
             match qoder::poll_result(response.0, &response.1) {
                 Ok(token) => {
                     // Only reached once the operator has approved: userinfo,
@@ -406,7 +415,7 @@ async fn device_connect(
                         &mut exchange,
                         &token,
                         &machine_id,
-                        at,
+                        &now_ms,
                         &state,
                         &serde_json::Map::new(),
                     )
@@ -489,13 +498,17 @@ impl omni_providers::oauth::AuthExchange for ClientExchange<'_> {
                 )
             };
             if self.sent > 5 {
+                // Gateway-authored, as TS `flowFailure` marks it: the cap
+                // refusal must not read as a transient upstream failure
+                // inside a provider's fallback catch.
                 return Err(omni_ir::error::GatewayError::new(
                     omni_ir::error::ErrorCode::Upstream,
                     format!(
                         "{} oauth {} asked for more than 5 requests",
                         self.provider, self.operation
                     ),
-                ));
+                )
+                .gateway_authored());
             }
             tokio::time::timeout(std::time::Duration::from_secs(seconds.min(30)), async {
                 let r = self
@@ -549,8 +562,10 @@ async fn send(
     .map_err(|_| (1, format!("UPSTREAM: {provider} oauth {operation} threw")))?
     .map_err(|_| (1, format!("UPSTREAM: {provider} oauth {operation} threw")))
 }
-/// The short deadline, for grok's OIDC discovery: a connect flow is waiting,
-/// so a stalled discovery should fail fast rather than hold the operator.
+/// The short deadline (TS `SHORT_TIMEOUT_MS`), for the calls that carry it:
+/// grok's OIDC discovery — a connect flow is waiting, so a stalled discovery
+/// should fail fast — and the GET device polls (kilo, qoder), which TS builds
+/// with the same 15s default.
 async fn send_short(
     client: &Client,
     provider: &str,
@@ -776,15 +791,18 @@ pub fn refresh(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
     // Bind the operator-read version: JS-rounded numbers, replacement TEXT,
     // distinct BLOB bytes. Same snapshot as fresh, released before provider HTTP.
     let provider = text(field(&c, "provider"));
+    // TS checks the null refresh token FIRST, outside the disable-on-AUTH
+    // path: a credential with nothing to refresh keeps its enabled state.
+    let token = secret(&s, &key, id)?
+        .ok_or_else(|| (1, format!("AUTH: credential {id} has no refresh token")))?;
     if provider == "kilo" {
-        // Kilo issues neither a refresh token nor an expiry: AUTH records that
-        // the credential is unusable until the operator reconnects.
+        // Kilo issues neither a refresh token nor an expiry: only a credential
+        // WITH a refresh token reaches this refusal, and AUTH records that it
+        // is unusable until the operator reconnects.
         let e = omni_providers::kilo::oauth::refresh_refusal();
         s.connection().execute("UPDATE credentials SET enabled=0,disabled_reason='tokenRejected',disabled_at=?,updated_at=? WHERE id=?",rusqlite::params![now(),now(),id]).map_err(error)?;
         return Err(gateway(e));
     }
-    let token = secret(&s, &key, id)?
-        .ok_or_else(|| (1, format!("AUTH: credential {id} has no refresh token")))?;
     let prior =
         serde_json::from_str(&jsjson::stringify(field(&c, "providerData")).unwrap_or_default())
             .unwrap_or(serde_json::Value::Null);
@@ -792,29 +810,22 @@ pub fn refresh(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
     // the same device id even when providerData has none yet.
     let kimi_device =
         (provider == "kimi").then(|| omni_providers::kimi::device::from_data(prior.as_object()));
-    // One identity per refresh for qoder too: the request and the finish chain
-    // sign with the same machine id.
-    let qoder_machine = (provider == "qoder")
-        .then(|| omni_providers::qoder::oauth::refresh_request(&token, prior.as_object()))
-        .transpose()
-        .map_err(gateway)?;
     let request = match provider.as_str() {
-        "openai" => omni_providers::openai::oauth::refresh_request(&token),
-        "anthropic" => omni_providers::anthropic::oauth::refresh_request(&token),
-        "antigravity" => omni_providers::antigravity::oauth::refresh_request(&token),
-        "grok" => omni_providers::grok::oauth::discovery_request(),
-        "muse" => omni_providers::muse::oauth::refresh_request(&token),
-        "qoder" => qoder_machine
-            .as_ref()
-            .ok_or((1, "INTERNAL: internal error".to_string()))?
-            .0
-            .clone(),
-        "kimi" => omni_providers::kimi::oauth::refresh_request(
+        "openai" => Some(omni_providers::openai::oauth::refresh_request(&token)),
+        "anthropic" => Some(omni_providers::anthropic::oauth::refresh_request(&token)),
+        "antigravity" => Some(omni_providers::antigravity::oauth::refresh_request(&token)),
+        "grok" => Some(omni_providers::grok::oauth::discovery_request()),
+        "muse" => Some(omni_providers::muse::oauth::refresh_request(&token)),
+        // Built inside the guarded block below: the missing-machineId AUTH
+        // must reach the disable handler, as TS's createRefresher does (the
+        // check lives inside the provider's refresh step there).
+        "qoder" => None,
+        "kimi" => Some(omni_providers::kimi::oauth::refresh_request(
             &token,
             kimi_device
                 .as_ref()
                 .ok_or((1, "INTERNAL: internal error".to_string()))?,
-        ),
+        )),
         _ => {
             return Err((
                 1,
@@ -827,6 +838,17 @@ pub fn refresh(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
         .build()
         .map_err(error)?;
     let result = rt.block_on(async {
+        // One identity per refresh for qoder: the request and the finish chain
+        // sign with the same machine id.
+        let (request, qoder_machine) = match request {
+            Some(request) => (request, None),
+            None => {
+                let (request, machine) =
+                    omni_providers::qoder::oauth::refresh_request(&token, prior.as_object())
+                        .map_err(gateway)?;
+                (request, Some(machine))
+            }
+        };
         let response = if provider == "grok" {
             send_short(&Client::new(), &provider, request, "refresh").await?
         } else {
@@ -872,14 +894,11 @@ pub fn refresh(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
             // election and the signed model listing. The old refresh token is
             // the fallback when the response omits a rotated one.
             use omni_providers::qoder::oauth as qoder;
-            let machine_id = &qoder_machine
+            let machine_id = qoder_machine
                 .as_ref()
-                .ok_or((1, "INTERNAL: internal error".to_string()))?
-                .1;
+                .ok_or((1, "INTERNAL: internal error".to_string()))?;
             let merged =
                 qoder::refresh_token_result(response.0, &response.1, &token).map_err(gateway)?;
-            #[allow(clippy::cast_precision_loss)]
-            let at = now() as f64;
             let state = omni_providers::oauth::random_state();
             let previous = prior
                 .as_object()
@@ -892,9 +911,16 @@ pub fn refresh(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
                 operation: "refresh",
                 sent: 1,
             };
-            qoder::finish(&mut exchange, &merged, machine_id, at, &state, &previous)
-                .await
-                .map_err(gateway)?
+            qoder::finish(
+                &mut exchange,
+                &merged,
+                machine_id,
+                &now_ms,
+                &state,
+                &previous,
+            )
+            .await
+            .map_err(gateway)?
         } else if provider == "kimi" {
             #[allow(clippy::cast_precision_loss)]
             let at = now() as f64;
@@ -961,4 +987,101 @@ fn refresh_output(
             }
         )
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    /// An installation root with its own `.env` key and one seeded credential.
+    /// The process environment is never touched: `resolve` reads the root's
+    /// `.env`, and the db flag points inside the root.
+    struct TempRoot(std::path::PathBuf);
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            drop(std::fs::remove_dir_all(&self.0));
+        }
+    }
+
+    const KEY: &str = "cli-oauth-test-key-0123456789";
+
+    fn harness(
+        provider: &str,
+        refresh: Option<&str>,
+        data: &str,
+    ) -> (TempRoot, HashMap<String, String>) {
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "omni-cli-oauth-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(".env"), format!("OMNI_ENCRYPTION_KEY={KEY}\n")).unwrap();
+        let db = root.join("db.sqlite");
+        let s = omni_store::SqliteStore::open(&db, 0).unwrap();
+        let key = omni_crypto::field::derive_key(KEY);
+        let access = omni_crypto::field::encrypt(&key, "old-access");
+        let refresh = refresh.map(|r| omni_crypto::field::encrypt(&key, r));
+        s.connection()
+            .execute(
+                "INSERT INTO credentials(id,provider,label,auth_type,enabled,tier,weight,access_token,refresh_token,provider_data,created_at,updated_at) VALUES('c1',?,'fixture','oauth',1,1,1,?,?,?,1,1)",
+                rusqlite::params![provider, access, refresh, data],
+            )
+            .unwrap();
+        drop(s);
+        let mut flags = HashMap::new();
+        flags.insert("root".into(), root.to_str().unwrap().to_owned());
+        flags.insert("db".into(), db.to_str().unwrap().to_owned());
+        flags.insert("json".into(), String::new());
+        (TempRoot(root), flags)
+    }
+
+    fn stored(flags: &HashMap<String, String>) -> (i64, Option<String>) {
+        let s = crate::context::open(flags).unwrap();
+        s.connection()
+            .query_row(
+                "SELECT enabled, disabled_reason FROM credentials WHERE id='c1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn kilo_refresh_without_a_token_stays_enabled() {
+        // TS checks the null refresh token before the provider's refusal and
+        // outside the disable-on-AUTH path: no request, no disable.
+        let (_root, flags) = harness("kilo", None, "{}");
+        let error = refresh(&flags, &["c1".into()]).expect_err("no token");
+        assert_eq!(error.1, "AUTH: credential c1 has no refresh token");
+        assert_eq!(stored(&flags), (1, None));
+    }
+
+    #[test]
+    fn kilo_refresh_with_a_token_refuses_and_disables() {
+        let (_root, flags) = harness("kilo", Some("smuggled-refresh"), "{}");
+        let error = refresh(&flags, &["c1".into()]).expect_err("refusal");
+        assert_eq!(
+            error.1,
+            "AUTH: kilo tokens cannot be refreshed; reconnect the kilo account to get a new one"
+        );
+        assert_eq!(stored(&flags), (0, Some("tokenRejected".into())));
+    }
+
+    #[test]
+    fn qoder_refresh_without_machine_id_disables_the_credential() {
+        // The missing-identity AUTH is raised inside the guarded block, so it
+        // reaches the disable handler — as TS's createRefresher does, where
+        // the check lives inside the provider's refresh step. No HTTP: the
+        // grant request cannot even be built without the identity.
+        let (_root, flags) = harness("qoder", Some("old-refresh"), "{}");
+        let error = refresh(&flags, &["c1".into()]).expect_err("identity");
+        assert_eq!(
+            error.1,
+            "AUTH: Qoder device identity missing; reconnect required"
+        );
+        assert_eq!(stored(&flags), (0, Some("tokenRejected".into())));
+    }
 }
