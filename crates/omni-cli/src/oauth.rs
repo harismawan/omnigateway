@@ -32,6 +32,7 @@ fn normalize(
     let (callback, label) = match provider {
         "openai" => ("http://localhost:1455/auth/callback", "OpenAI"),
         "antigravity" => ("https://antigravity.google/oauth-callback", "Antigravity"),
+        "grok" => ("http://127.0.0.1:56121/callback", "Grok"),
         _ => return Ok(code.into()),
     };
     let Ok(url) = url::Url::parse(code) else {
@@ -68,7 +69,7 @@ pub fn connect(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
         .ok_or((2, "provider is required".into()))?;
     if !matches!(
         provider.as_str(),
-        "openai" | "anthropic" | "antigravity" | "kimi" | "kilo"
+        "openai" | "anthropic" | "antigravity" | "kimi" | "kilo" | "grok"
     ) {
         return Err((
             2,
@@ -109,6 +110,31 @@ pub fn connect(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
             "antigravity" => {
                 omni_providers::antigravity::oauth::start(&verifier, &challenge, &state)
             }
+            "grok" => {
+                // Discovery first: the authorize URL is published by xAI's
+                // OIDC metadata, validated against the x.ai https rule.
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(error)?;
+                let response = rt.block_on(send_short(
+                    &Client::new(),
+                    provider,
+                    omni_providers::grok::oauth::discovery_request(),
+                    "start",
+                ))?;
+                let endpoints =
+                    omni_providers::grok::oauth::discovery_result(response.0, &response.1)
+                        .map_err(gateway)?;
+                omni_providers::grok::oauth::start(
+                    &endpoints.authorize_url,
+                    "http://127.0.0.1:56121/callback",
+                    &verifier,
+                    &challenge,
+                    &state,
+                )
+                .map_err(gateway)?
+            }
             _ => omni_providers::anthropic::oauth::start(&verifier, &challenge, &state),
         };
         eprintln!(
@@ -136,11 +162,18 @@ pub fn connect(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
                 })
             })
             .transpose()?;
+        // The state check runs before discovery: a forged paste never puts a
+        // request on the wire.
+        let grok_code = (provider == "grok")
+            .then(|| omni_providers::grok::oauth::pasted_code(&code, &start.pending))
+            .transpose()
+            .map_err(gateway)?;
         let request = match provider.as_str() {
             "openai" => omni_providers::openai::oauth::exchange_request(&code, &start.pending),
             "antigravity" => {
                 omni_providers::antigravity::oauth::exchange_request(&code, &start.pending)
             }
+            "grok" => Ok(omni_providers::grok::oauth::discovery_request()),
             _ => omni_providers::anthropic::oauth::exchange_request(&code, &start.pending),
         }
         .map_err(gateway)?;
@@ -156,8 +189,35 @@ pub fn connect(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
             .map_err(error)?;
         rt.block_on(async {
             let client = Client::new();
-            let response = send(&client, provider, request, "exchange").await?;
-            let mut result = token_result(provider, &response, None, &data)?;
+            let response = if provider == "grok" {
+                send_short(&client, provider, request, "exchange").await?
+            } else {
+                send(&client, provider, request, "exchange").await?
+            };
+            let mut result = if provider == "grok" {
+                let endpoints =
+                    omni_providers::grok::oauth::discovery_result(response.0, &response.1)
+                        .map_err(gateway)?;
+                let request = omni_providers::grok::oauth::exchange_request(
+                    grok_code.as_deref().unwrap_or_default(),
+                    &start.pending,
+                    &endpoints.token_url,
+                );
+                let response = send(&client, provider, request, "exchange").await?;
+                let agent = omni_providers::grok::device::mint();
+                #[allow(clippy::cast_precision_loss)]
+                let at = now() as f64;
+                omni_providers::grok::oauth::token_result(
+                    response.0,
+                    &response.1,
+                    None,
+                    &agent.agent_id,
+                    at,
+                )
+                .map_err(gateway)?
+            } else {
+                token_result(provider, &response, None, &data)?
+            };
             if provider == "antigravity" {
                 use omni_providers::antigravity::oauth as ag;
                 let access = String::from_utf16_lossy(&result.access_token);
@@ -342,6 +402,32 @@ async fn send(
     operation: &str,
 ) -> Result<(u16, String)> {
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let r = client
+            .send(HttpRequest {
+                provider: provider.into(),
+                url: request.url,
+                method: request.method,
+                headers: request.headers,
+                body: request.body,
+                body_encoding: None,
+                request_id: None,
+            })
+            .await?;
+        Ok::<_, omni_providers::http::HttpError>((r.status, r.body.text().await?))
+    })
+    .await
+    .map_err(|_| (1, format!("UPSTREAM: {provider} oauth {operation} threw")))?
+    .map_err(|_| (1, format!("UPSTREAM: {provider} oauth {operation} threw")))
+}
+/// The short deadline, for grok's OIDC discovery: a connect flow is waiting,
+/// so a stalled discovery should fail fast rather than hold the operator.
+async fn send_short(
+    client: &Client,
+    provider: &str,
+    request: AuthRequest,
+    operation: &str,
+) -> Result<(u16, String)> {
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
         let r = client
             .send(HttpRequest {
                 provider: provider.into(),
@@ -579,6 +665,7 @@ pub fn refresh(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
         "openai" => omni_providers::openai::oauth::refresh_request(&token),
         "anthropic" => omni_providers::anthropic::oauth::refresh_request(&token),
         "antigravity" => omni_providers::antigravity::oauth::refresh_request(&token),
+        "grok" => omni_providers::grok::oauth::discovery_request(),
         "kimi" => omni_providers::kimi::oauth::refresh_request(
             &token,
             kimi_device
@@ -597,8 +684,31 @@ pub fn refresh(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
         .build()
         .map_err(error)?;
     let result = rt.block_on(async {
-        let response = send(&Client::new(), &provider, request, "refresh").await?;
-        let result = if provider == "kimi" {
+        let response = if provider == "grok" {
+            send_short(&Client::new(), &provider, request, "refresh").await?
+        } else {
+            send(&Client::new(), &provider, request, "refresh").await?
+        };
+        let result = if provider == "grok" {
+            // Two requests: discovery, then the token POST to the endpoint it
+            // published. The stored agent id rides forward.
+            let endpoints = omni_providers::grok::oauth::discovery_result(response.0, &response.1)
+                .map_err(gateway)?;
+            let request =
+                omni_providers::grok::oauth::refresh_request(&token, &endpoints.token_url);
+            let response = send(&Client::new(), &provider, request, "refresh").await?;
+            let agent_id = omni_providers::grok::oauth::agent_id_from(prior.as_object());
+            #[allow(clippy::cast_precision_loss)]
+            let at = now() as f64;
+            omni_providers::grok::oauth::token_result(
+                response.0,
+                &response.1,
+                Some(&token),
+                &agent_id,
+                at,
+            )
+            .map_err(gateway)?
+        } else if provider == "kimi" {
             #[allow(clippy::cast_precision_loss)]
             let at = now() as f64;
             omni_providers::kimi::oauth::token_result(

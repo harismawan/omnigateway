@@ -120,7 +120,9 @@ impl Providers {
         let mut kilo = descriptor(all, &[]);
         kilo.catalog = catalog("kilo");
         p.register("kilo", kilo);
-        p.register("grok", descriptor(all, &["grok-"]));
+        let mut grok = descriptor(all, &["grok-"]);
+        grok.catalog = catalog("grok");
+        p.register("grok", grok);
         let mut antigravity = descriptor(all, &["gemini-"]);
         antigravity.catalog = catalog("antigravity");
         p.register("antigravity", antigravity);

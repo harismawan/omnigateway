@@ -20,6 +20,7 @@ const PROVIDERS: &[(&str, &str)] = &[
     ("antigravity", "https://antigravity.google/oauth-callback"),
     ("kimi", ""),
     ("kilo", ""),
+    ("grok", "http://127.0.0.1:56121/callback"),
 ];
 fn bad(s: &str) -> GatewayError {
     GatewayError::new(ErrorCode::BadRequest, s)
@@ -239,6 +240,37 @@ impl ConnectFlows {
             let start = omni_providers::kilo::oauth::begin_result(response.0, &response.1, now)?;
             return self
                 .store_flow(provider, label, credential, &start, "device", false)
+                .await;
+        }
+        if *provider == "grok" {
+            // Discovery first: the authorize URL is published by xAI's OIDC
+            // metadata, validated against the x.ai https rule before use.
+            let mut runner = crate::oauth_runner::ExchangeRunner::new(
+                app.deps.refresher.http.as_ref(),
+                crate::oauth_runner::ExchangeConfig {
+                    provider: "grok",
+                    step: "start",
+                    max_requests: 1,
+                    origins: crate::oauth_runner::Origins::Validator(
+                        &omni_providers::grok::oauth::trusted_origin,
+                    ),
+                },
+            );
+            let response = runner
+                .send(omni_providers::grok::oauth::discovery_request(), 15)
+                .await?;
+            let endpoints = omni_providers::grok::oauth::discovery_result(response.0, &response.1)?;
+            let (verifier, challenge) = omni_providers::oauth::pkce();
+            let state = omni_providers::oauth::random_state();
+            let start = omni_providers::grok::oauth::start(
+                &endpoints.authorize_url,
+                redirect,
+                &verifier,
+                &challenge,
+                &state,
+            )?;
+            return self
+                .store_flow(provider, label, credential, &start, "pkce", true)
                 .await;
         }
         let (verifier, challenge) = omni_providers::oauth::pkce();
@@ -531,6 +563,8 @@ fn normalize(provider: &str, pending: &PendingFlow, code: &str) -> Result<String
     let expected = url::Url::parse(callback).map_err(|_| internal())?;
     let label = if provider == "antigravity" {
         "Antigravity"
+    } else if provider == "grok" {
+        "Grok"
     } else {
         "OpenAI"
     };
@@ -614,6 +648,8 @@ async fn complete(
                 "antigravity oauth exchange did not finish within 150000ms",
             )
         })??
+    } else if provider == "grok" {
+        grok_exchange(&host, code, &pending).await?
     } else {
         let request = if provider == "openai" {
             omni_providers::openai::oauth::exchange_request(code, &pending)?
@@ -647,6 +683,40 @@ async fn complete(
         }
     };
     persist_flow_result(host, holder, &flow, result).await
+}
+
+/// grok's two-step exchange: discovery, then the token POST to the endpoint
+/// it published. The state check runs before discovery, so a forged paste
+/// never puts a request on the wire.
+async fn grok_exchange(
+    host: &crate::refresh::Refresher,
+    code: &str,
+    pending: &PendingFlow,
+) -> Result<FlowResult> {
+    let raw_code = omni_providers::grok::oauth::pasted_code(code, pending)?;
+    let mut runner = crate::oauth_runner::ExchangeRunner::new(
+        host.http.as_ref(),
+        crate::oauth_runner::ExchangeConfig {
+            provider: "grok",
+            step: "exchange",
+            max_requests: 2,
+            origins: crate::oauth_runner::Origins::Validator(
+                &omni_providers::grok::oauth::trusted_origin,
+            ),
+        },
+    );
+    let response = runner
+        .send(omni_providers::grok::oauth::discovery_request(), 15)
+        .await?;
+    let endpoints = omni_providers::grok::oauth::discovery_result(response.0, &response.1)?;
+    let request =
+        omni_providers::grok::oauth::exchange_request(&raw_code, pending, &endpoints.token_url);
+    let response = runner.send(request, 30).await?;
+    #[allow(clippy::cast_precision_loss)]
+    let now = (host.now)() as f64;
+    // The agent id is minted once, here, and frozen onto the credential.
+    let agent = omni_providers::grok::device::mint();
+    omni_providers::grok::oauth::token_result(response.0, &response.1, None, &agent.agent_id, now)
 }
 
 /// Persistence half of a completed exchange, shared by the pkce and device
@@ -1001,6 +1071,10 @@ mod tests {
             catalog["antigravity"]["callback"]["uri"].as_str(),
             Some(PROVIDERS[2].1)
         );
+        assert_eq!(
+            catalog["grok"]["callback"]["uri"].as_str(),
+            Some(PROVIDERS[5].1)
+        );
     }
     #[test]
     fn connect_callback_parser() {
@@ -1040,6 +1114,38 @@ mod tests {
             .is_err()
         );
         assert!(normalize("openai", &p, "http://localhost:1455/auth/callback?code=a").is_err());
+        let g = PendingFlow {
+            verifier: String::new(),
+            challenge: String::new(),
+            state: "state".into(),
+            redirect_uri: PROVIDERS[5].1.into(),
+            device_code: None,
+            interval: None,
+            extra: serde_json::Map::new(),
+        };
+        assert_eq!(
+            normalize(
+                "grok",
+                &g,
+                "http://127.0.0.1:56121/callback?code=a&state=state"
+            )
+            .expect("callback"),
+            "a#state"
+        );
+        assert!(
+            normalize(
+                "grok",
+                &g,
+                "http://127.0.0.1:56121/callback?code=a&state=wrong"
+            )
+            .is_err()
+        );
+        let missing = normalize("grok", &g, "http://127.0.0.1:56121/callback?code=a")
+            .expect_err("missing state");
+        assert_eq!(
+            missing.message,
+            "Grok callback URL must contain code and state"
+        );
     }
     #[test]
     fn antigravity_callback_parser() {
@@ -2694,5 +2800,572 @@ mod tests {
             .expect("read")
             .expect("present");
         assert!(!stored.enabled);
+    }
+
+    // --- grok pkce + discovery flow ------------------------------------------
+    // Mirrors control/test/oauth/grok.test.ts against the real host wiring:
+    // discovery on every step, the x.ai origin rule, the pasted-state check
+    // before any request, and the connect-time agent identity.
+
+    const GROK_DISCOVERY_URL: &str = "https://auth.x.ai/.well-known/openid-configuration";
+    const GROK_AUTHORIZE_URL: &str = "https://auth.x.ai/oauth2/auth";
+    const GROK_TOKEN_URL: &str = "https://auth.x.ai/oauth2/token";
+    const GROK_CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
+    const GROK_SCOPES: &str = "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write workspaces:read workspaces:write";
+    const GROK_CALLBACK: &str = "http://127.0.0.1:56121/callback";
+    const GROK_FLOW: &str = r#"{"provider":"grok","label":"grok","pending":{"verifier":"v","challenge":"c","state":"s","redirectUri":"http://127.0.0.1:56121/callback"}}"#;
+    const GROK_OK_TOKEN: &str =
+        r#"{"access_token":"test-token-1","refresh_token":"test-token-2","expires_in":3600}"#;
+    const GROK_DISCOVERY: &str = r#"{"authorization_endpoint":"https://auth.x.ai/oauth2/auth","token_endpoint":"https://auth.x.ai/oauth2/token"}"#;
+    const GROK_EXCHANGE_BODY: &str = "grant_type=authorization_code&code=auth-code&redirect_uri=http%3A%2F%2F127.0.0.1%3A56121%2Fcallback&client_id=b1a00492-073a-47ea-816f-4c329264a828&code_verifier=v";
+    const GROK_REFRESH_BODY: &str = "grant_type=refresh_token&client_id=b1a00492-073a-47ea-816f-4c329264a828&refresh_token=test-token-2";
+
+    /// Answers discovery and the token endpoint separately, since every grok
+    /// flow makes both calls. `token_req()` is the request assertions care about.
+    struct GrokStub {
+        discovery: (u16, String),
+        token: (u16, String),
+        seen: std::sync::Mutex<Vec<omni_providers::http::HttpRequest>>,
+    }
+    impl GrokStub {
+        fn new(token: (u16, &str)) -> Arc<Self> {
+            Self::with_discovery(token, (200, GROK_DISCOVERY))
+        }
+        fn with_discovery(token: (u16, &str), discovery: (u16, &str)) -> Arc<Self> {
+            Arc::new(Self {
+                discovery: (discovery.0, discovery.1.into()),
+                token: (token.0, token.1.into()),
+                seen: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+        fn calls(&self) -> Vec<omni_providers::http::HttpRequest> {
+            self.seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+        fn token_req(&self) -> omni_providers::http::HttpRequest {
+            self.calls()
+                .into_iter()
+                .find(|req| req.url != GROK_DISCOVERY_URL)
+                .expect("the token endpoint was never called")
+        }
+    }
+    impl omni_providers::http::HttpClient for GrokStub {
+        fn send(
+            &self,
+            req: omni_providers::http::HttpRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = std::result::Result<
+                            omni_providers::http::HttpResponse,
+                            omni_providers::http::HttpError,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            self.seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(req.clone());
+            let (status, body) = if req.url == GROK_DISCOVERY_URL {
+                self.discovery.clone()
+            } else {
+                self.token.clone()
+            };
+            Box::pin(async move {
+                Ok(omni_providers::http::HttpResponse {
+                    status,
+                    headers: omni_providers::http::Headers::new(),
+                    body: omni_providers::http::ResponseBody::from_bytes(body),
+                })
+            })
+        }
+    }
+
+    /// A grok exchange host with a fixed clock, so expiry arithmetic is pinnable.
+    async fn grok_harness(
+        http: Arc<dyn omni_providers::http::HttpClient>,
+    ) -> (
+        tempfile::TempDir,
+        Arc<crate::refresh::Refresher>,
+        Arc<omni_gateway_core::snapshot::SnapshotHolder>,
+    ) {
+        let dir = tempfile::tempdir().expect("dir");
+        let store = Arc::new(
+            omni_store::Store::open(
+                omni_store::StoreConfig::Sqlite {
+                    path: dir.path().join("db"),
+                },
+                0,
+            )
+            .await
+            .expect("store"),
+        );
+        let key = omni_crypto::field::derive_key("test-key");
+        let holder = Arc::new(
+            omni_gateway_core::snapshot::SnapshotHolder::build(
+                &omni_store::SqliteStore::open(dir.path().join("db"), 0).expect("sqlite"),
+                key.clone(),
+                0.0,
+            )
+            .expect("snapshot"),
+        );
+        let host = Arc::new(crate::refresh::Refresher::new(store, key, http, || {
+            1_000_000
+        }));
+        (dir, host, holder)
+    }
+
+    /// A stored grok credential with a frozen agent id, plus a refresher
+    /// driven by the stub.
+    async fn grok_refresh_harness(
+        http: Arc<GrokStub>,
+    ) -> (
+        tempfile::TempDir,
+        Arc<omni_store::Store>,
+        omni_crypto::field::FieldKey,
+        Arc<crate::refresh::Refresher>,
+        omni_store::credentials::Credential,
+    ) {
+        let dir = tempfile::tempdir().expect("dir");
+        let store = Arc::new(
+            omni_store::Store::open(
+                omni_store::StoreConfig::Sqlite {
+                    path: dir.path().join("db"),
+                },
+                0,
+            )
+            .await
+            .expect("store"),
+        );
+        let key = omni_crypto::field::derive_key("test-key");
+        let host = Arc::new(crate::refresh::Refresher::new(
+            store.clone(),
+            key.clone(),
+            http,
+            || 1_000_000,
+        ));
+        let tokens = omni_store::credentials::TokenUpdate {
+            access_token: Some("test-token-1".into()),
+            refresh_token: Some("test-token-2".into()),
+            api_key: None,
+            id_token: None,
+            expires_at: Some(2_000_000.0),
+            updated_at: 0,
+        };
+        store
+            .save_oauth(
+                &key,
+                &omni_store::credentials::OAuthCredential {
+                    id: "g1",
+                    provider: "grok",
+                    label: "grok",
+                    provider_data: r#"{"agentId":"agent-1"}"#,
+                    account_email: None,
+                    tokens: &tokens,
+                    reconnect: false,
+                },
+            )
+            .await
+            .expect("save");
+        let credential = store
+            .credential(&key, "g1")
+            .await
+            .expect("read")
+            .expect("present");
+        (dir, store, key, host, credential)
+    }
+
+    fn grok_flow() -> JsValue {
+        parse_js(GROK_FLOW).expect("flow")
+    }
+
+    #[tokio::test]
+    async fn grok_is_registered_as_a_pasteable_pkce_provider() {
+        assert!(PROVIDERS.contains(&("grok", GROK_CALLBACK)));
+        let start =
+            omni_providers::grok::oauth::start(GROK_AUTHORIZE_URL, GROK_CALLBACK, "v", "c", "s")
+                .expect("start");
+        let flows = ConnectFlows::default();
+        let reply = flows
+            .store_flow("grok", string("grok"), None, &start, "pkce", true)
+            .await
+            .expect("reply");
+        let value: serde_json::Value = serde_json::from_str(&reply).expect("json");
+        assert_eq!(value["kind"], "pkce");
+        assert_eq!(value["supportsManualPaste"], true);
+        assert_eq!(value["userCode"], serde_json::Value::Null);
+        let flow = flows
+            .pending(value["flowId"].as_str().expect("id"), false)
+            .await
+            .expect("stored");
+        assert!(!device_flow(&flow));
+        let pending = pending_value(&flow).expect("pending");
+        assert_eq!(pending.verifier, "v");
+        assert_eq!(pending.redirect_uri, GROK_CALLBACK);
+    }
+
+    #[test]
+    fn grok_builds_an_authorize_url_on_the_discovered_endpoint() {
+        let endpoints =
+            omni_providers::grok::oauth::discovery_result(200, GROK_DISCOVERY).expect("discovery");
+        assert_eq!(endpoints.authorize_url, GROK_AUTHORIZE_URL);
+        assert_eq!(endpoints.token_url, GROK_TOKEN_URL);
+        let start = omni_providers::grok::oauth::start(
+            &endpoints.authorize_url,
+            GROK_CALLBACK,
+            "v",
+            "c",
+            "s",
+        )
+        .expect("start");
+        let url = url::Url::parse(&start.authorize_url).expect("url");
+        assert_eq!(
+            format!("{}{}", url.origin().ascii_serialization(), url.path()),
+            GROK_AUTHORIZE_URL
+        );
+        let param = |name: &str| {
+            url.query_pairs()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.into_owned())
+        };
+        assert_eq!(param("response_type").as_deref(), Some("code"));
+        assert_eq!(param("client_id").as_deref(), Some(GROK_CLIENT_ID));
+        assert_eq!(param("redirect_uri").as_deref(), Some(GROK_CALLBACK));
+        assert_eq!(param("scope").as_deref(), Some(GROK_SCOPES));
+        assert_eq!(param("code_challenge_method").as_deref(), Some("S256"));
+        assert_eq!(param("code_challenge").as_deref(), Some("c"));
+        assert_eq!(param("state").as_deref(), Some("s"));
+        assert!(param("nonce").is_some_and(|n| !n.is_empty()));
+        assert_eq!(start.pending.redirect_uri, GROK_CALLBACK);
+        // xAI's own build client, never the third-party `plan=generic` pair.
+        assert_eq!(param("referrer").as_deref(), Some("grok-build"));
+        assert!(param("plan").is_none());
+    }
+
+    #[test]
+    fn grok_derives_the_challenge_from_the_verifier_it_kept() {
+        let (verifier, challenge) = omni_providers::oauth::pkce();
+        assert_eq!(verifier.len(), 43);
+        assert_eq!(challenge, omni_providers::oauth::pkce_challenge(&verifier));
+        // An independently computed S256 vector, so the assertion above is
+        // not the function checking itself.
+        assert_eq!(
+            omni_providers::oauth::pkce_challenge("test-verifier"),
+            "JBbiqONGWPaAmwXk_8bT6UnlPfrn65D32eZlJS-zGG0"
+        );
+    }
+
+    #[tokio::test]
+    async fn grok_exchanges_a_code_with_a_form_body_and_the_client_identity() {
+        let http = GrokStub::new((200, GROK_OK_TOKEN));
+        let (_dir, host, holder) = grok_harness(http.clone()).await;
+        complete(host, holder, grok_flow(), "auth-code#s")
+            .await
+            .expect("exchange");
+        let sent = http.token_req();
+        assert_eq!(sent.url, GROK_TOKEN_URL);
+        assert_eq!(sent.method, "POST");
+        assert_eq!(sent.body, GROK_EXCHANGE_BODY);
+        assert!(!sent.body.contains("client_secret"));
+        for pair in [
+            ("Content-Type", "application/x-www-form-urlencoded"),
+            ("x-grok-client-identifier", "grok-shell"),
+            ("Accept", "application/json"),
+        ] {
+            assert!(
+                sent.headers
+                    .iter()
+                    .any(|(n, v)| (n.as_str(), v.as_str()) == pair),
+                "{pair:?} missing from {:?}",
+                sent.headers
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn grok_refuses_a_forged_state_before_any_request() {
+        let http = GrokStub::new((200, GROK_OK_TOKEN));
+        let (_dir, host, holder) = grok_harness(http.clone()).await;
+        let error = complete(host, holder, grok_flow(), "auth-code#forged")
+            .await
+            .expect_err("forged");
+        assert_eq!(error.code, ErrorCode::Auth);
+        assert_eq!(error.message, "authorization state mismatch");
+        // The authorization code must never have left the process.
+        assert!(http.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn grok_mints_a_synthetic_agent_id_at_connect_time() {
+        let http = GrokStub::new((200, GROK_OK_TOKEN));
+        let (_dir, host, holder) = grok_harness(http).await;
+        let id = complete(host.clone(), holder.clone(), grok_flow(), "auth-code#s")
+            .await
+            .expect("exchange");
+        let rows = host.store.list_credentials(&host.key).await.expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].provider, "grok");
+        assert_eq!(
+            rows[0].secrets.access_token.as_deref(),
+            Some("test-token-1")
+        );
+        assert_eq!(
+            rows[0].secrets.refresh_token.as_deref(),
+            Some("test-token-2")
+        );
+        // Synthetic, not the machine's own name: this id goes upstream on
+        // every request, and a hostname is routinely an operator's name.
+        let agent_id = rows[0].provider_data["agentId"].as_str().expect("agentId");
+        assert_eq!(agent_id.len(), 36);
+        assert!(
+            agent_id
+                .chars()
+                .all(|c| c == '-' || (c.is_ascii_hexdigit() && !c.is_ascii_uppercase()))
+        );
+        let connected = &holder.load().routing.credentials[0];
+        assert_eq!(connected.id, id);
+        assert_eq!(connected.expires_at, Some(1_000_000.0 + 3_600_000.0));
+    }
+
+    #[tokio::test]
+    async fn grok_reads_the_account_email_from_the_id_token() {
+        use base64::Engine as _;
+        let b64 = |value: serde_json::Value| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value.to_string())
+        };
+        let id_token = format!(
+            "{}.{}.signature",
+            b64(serde_json::json!({"alg": "RS256"})),
+            b64(serde_json::json!({"email": "user@example.com"}))
+        );
+        let body = serde_json::json!({"access_token": "test-token-1", "id_token": id_token});
+        let http = GrokStub::new((200, &body.to_string()));
+        let (_dir, host, holder) = grok_harness(http).await;
+        complete(host.clone(), holder, grok_flow(), "auth-code#s")
+            .await
+            .expect("exchange");
+        let rows = host.store.list_credentials(&host.key).await.expect("rows");
+        assert_eq!(rows[0].account_email.as_deref(), Some("user@example.com"));
+    }
+
+    #[tokio::test]
+    async fn grok_tolerates_a_token_response_with_no_id_token() {
+        let http = GrokStub::new((200, r#"{"access_token":"test-token-1"}"#));
+        let (_dir, host, holder) = grok_harness(http).await;
+        complete(host.clone(), holder, grok_flow(), "auth-code#s")
+            .await
+            .expect("exchange");
+        let rows = host.store.list_credentials(&host.key).await.expect("rows");
+        assert_eq!(rows[0].account_email, None);
+        assert_eq!(rows[0].expires_at, None);
+    }
+
+    #[tokio::test]
+    async fn grok_refresh_sends_the_stored_token_and_reads_no_usage() {
+        let http = GrokStub::new((200, GROK_OK_TOKEN));
+        let (_dir, _store, _key, host, credential) = grok_refresh_harness(http.clone()).await;
+        let secrets = host.refresh(&credential).await.expect("refresh");
+        assert_eq!(secrets.access_token.as_deref(), Some("test-token-1"));
+        assert_eq!(http.token_req().body, GROK_REFRESH_BODY);
+        // Exactly discovery + token: a grok account's usage is unknown
+        // rather than unlimited, because nothing here probes a usage endpoint.
+        let urls: Vec<String> = http.calls().into_iter().map(|r| r.url).collect();
+        assert_eq!(urls, [GROK_DISCOVERY_URL, GROK_TOKEN_URL]);
+    }
+
+    #[tokio::test]
+    async fn grok_refresh_keeps_the_previous_refresh_token_when_omitted() {
+        // xAI rotates conditionally. Reading the omission as a null would
+        // destroy a working credential on its first refresh.
+        let http = GrokStub::new((200, r#"{"access_token":"test-token-3","expires_in":60}"#));
+        let (_dir, store, key, host, credential) = grok_refresh_harness(http).await;
+        let secrets = host.refresh(&credential).await.expect("refresh");
+        assert_eq!(secrets.access_token.as_deref(), Some("test-token-3"));
+        assert_eq!(secrets.refresh_token.as_deref(), Some("test-token-2"));
+        let stored = store
+            .credential(&key, "g1")
+            .await
+            .expect("read")
+            .expect("present");
+        assert_eq!(stored.expires_at, Some(1_000_000.0 + 60_000.0));
+        assert_eq!(
+            stored.secrets.refresh_token.as_deref(),
+            Some("test-token-2")
+        );
+    }
+
+    #[tokio::test]
+    async fn grok_refresh_takes_a_rotated_refresh_token() {
+        let http = GrokStub::new((
+            200,
+            r#"{"access_token":"t","refresh_token":"test-token-10"}"#,
+        ));
+        let (_dir, _store, _key, host, credential) = grok_refresh_harness(http).await;
+        let secrets = host.refresh(&credential).await.expect("refresh");
+        assert_eq!(secrets.refresh_token.as_deref(), Some("test-token-10"));
+    }
+
+    #[tokio::test]
+    async fn grok_refresh_carries_the_connect_time_agent_id_forward() {
+        let http = GrokStub::new((200, GROK_OK_TOKEN));
+        let (_dir, store, key, host, credential) = grok_refresh_harness(http).await;
+        host.refresh(&credential).await.expect("refresh");
+        let stored = store
+            .credential(&key, "g1")
+            .await
+            .expect("read")
+            .expect("present");
+        assert_eq!(
+            stored.provider_data,
+            serde_json::json!({"agentId": "agent-1"})
+        );
+    }
+
+    #[tokio::test]
+    async fn grok_discovery_refuses_untrusted_token_endpoints() {
+        for endpoint in [
+            "http://auth.x.ai/oauth2/token",          // plaintext
+            "https://auth.evil.example/oauth2/token", // another domain
+            "https://evilx.ai/oauth2/token",          // a lookalike domain
+            "https://x.ai.attacker.example/token",    // a prefixed domain
+        ] {
+            let discovery = serde_json::json!({
+                "authorization_endpoint": GROK_AUTHORIZE_URL,
+                "token_endpoint": endpoint,
+            });
+            let http =
+                GrokStub::with_discovery((200, GROK_OK_TOKEN), (200, &discovery.to_string()));
+            let (_dir, host, holder) = grok_harness(http.clone()).await;
+            let error = complete(host, holder, grok_flow(), "auth-code#s")
+                .await
+                .expect_err(endpoint);
+            assert_eq!(error.code, ErrorCode::Upstream, "{endpoint}");
+            assert_eq!(
+                error.message,
+                "discovery document token_endpoint is not an x.ai https url"
+            );
+            // The authorization code must never have left the process.
+            let urls: Vec<String> = http.calls().into_iter().map(|r| r.url).collect();
+            assert_eq!(urls, [GROK_DISCOVERY_URL], "{endpoint}");
+        }
+    }
+
+    #[tokio::test]
+    async fn grok_discovery_accepts_a_subdomain_of_x_ai() {
+        let http = GrokStub::with_discovery(
+            (200, GROK_OK_TOKEN),
+            (
+                200,
+                r#"{"authorization_endpoint":"https://accounts.x.ai/oauth2/auth","token_endpoint":"https://accounts.x.ai/oauth2/token"}"#,
+            ),
+        );
+        let (_dir, host, holder) = grok_harness(http.clone()).await;
+        complete(host, holder, grok_flow(), "auth-code#s")
+            .await
+            .expect("exchange");
+        assert_eq!(http.token_req().url, "https://accounts.x.ai/oauth2/token");
+    }
+
+    #[tokio::test]
+    async fn grok_discovery_refuses_unusable_documents() {
+        for (status, body, message) in [
+            (
+                200,
+                r#"{"token_endpoint":"https://auth.x.ai/oauth2/token"}"#,
+                "discovery document has no authorization_endpoint",
+            ),
+            (
+                200,
+                "<html>not json</html>",
+                "discovery endpoint returned an unusable response",
+            ),
+            (
+                500,
+                r#"{"error":"internal_error"}"#,
+                "discovery endpoint returned http_500",
+            ),
+        ] {
+            let http = GrokStub::with_discovery((200, GROK_OK_TOKEN), (status, body));
+            let (_dir, host, holder) = grok_harness(http).await;
+            let error = complete(host, holder, grok_flow(), "auth-code#s")
+                .await
+                .expect_err(message);
+            assert_eq!(error.code, ErrorCode::Upstream, "{message}");
+            assert_eq!(error.message, message);
+        }
+    }
+
+    #[tokio::test]
+    async fn grok_rejected_discovery_does_not_read_as_a_repudiation() {
+        // The refresher disables a credential on AUTH alone, and a discovery
+        // document says nothing about whether the refresh token is still good.
+        let http = GrokStub::with_discovery(
+            (200, GROK_OK_TOKEN),
+            (
+                200,
+                r#"{"authorization_endpoint":"https://auth.x.ai/oauth2/auth","token_endpoint":"http://auth.x.ai/token"}"#,
+            ),
+        );
+        let (_dir, store, key, host, credential) = grok_refresh_harness(http).await;
+        let error = host.refresh(&credential).await.expect_err("discovery");
+        assert_eq!(error.code, ErrorCode::Upstream);
+        let stored = store
+            .credential(&key, "g1")
+            .await
+            .expect("read")
+            .expect("present");
+        assert!(stored.enabled);
+    }
+
+    #[tokio::test]
+    async fn grok_refresh_classifies_token_endpoint_failures() {
+        for (status, body, code) in [
+            (401, r#"{"error":"invalid_grant"}"#, ErrorCode::Auth),
+            (500, r#"{"error":"internal_error"}"#, ErrorCode::Upstream),
+            (503, "{}", ErrorCode::Upstream),
+            (429, r#"{"error":"rate_limited"}"#, ErrorCode::RateLimit),
+        ] {
+            let http = GrokStub::new((status, body));
+            let (_dir, store, key, host, credential) = grok_refresh_harness(http).await;
+            let error = host.refresh(&credential).await.expect_err("classified");
+            assert_eq!(error.code, code, "{status} {body}");
+            let stored = store
+                .credential(&key, "g1")
+                .await
+                .expect("read")
+                .expect("present");
+            assert_eq!(stored.enabled, code != ErrorCode::Auth, "{status} {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn grok_exchange_without_an_access_token_fails_the_flow() {
+        let http = GrokStub::new((200, r#"{"refresh_token":"test-token-2"}"#));
+        let (_dir, host, holder) = grok_harness(http).await;
+        let error = complete(host, holder, grok_flow(), "auth-code#s")
+            .await
+            .expect_err("no access token");
+        assert_eq!(error.code, ErrorCode::Auth);
+        assert_eq!(error.message, "token endpoint returned no access_token");
+    }
+
+    #[tokio::test]
+    async fn grok_never_puts_the_verifier_or_the_code_in_an_error_message() {
+        let http = GrokStub::new((400, r#"{"error":"invalid_grant"}"#));
+        let (_dir, host, holder) = grok_harness(http).await;
+        let flow = parse_js(
+            r#"{"provider":"grok","label":"grok","pending":{"verifier":"verifier-must-not-be-quoted","challenge":"c","state":"s","redirectUri":"http://127.0.0.1:56121/callback"}}"#,
+        )
+        .expect("flow");
+        let error = complete(host, holder, flow, "code-must-not-be-quoted#s")
+            .await
+            .expect_err("rejected");
+        assert!(!error.message.contains("verifier-must-not-be-quoted"));
+        assert!(!error.message.contains("code-must-not-be-quoted"));
+        assert!(error.message.contains("invalid_grant"), "{}", error.message);
     }
 }

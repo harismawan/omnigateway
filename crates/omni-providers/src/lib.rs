@@ -12,6 +12,7 @@ pub mod anthropic;
 pub mod antigravity;
 pub mod codec;
 pub mod custom;
+pub mod grok;
 pub mod http;
 pub mod http_error;
 pub mod kilo;

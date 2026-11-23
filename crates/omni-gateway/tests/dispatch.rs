@@ -1183,3 +1183,107 @@ async fn kilo_retryable_failure_before_commit_fails_over() {
     }
     flush(h).await;
 }
+
+/// A Responses-shaped SSE turn for the grok proxy.
+fn grok_sse() -> Reply {
+    Reply::Http(
+        200,
+        vec![("content-type".into(), "text/event-stream".into())],
+        vec![
+            "event: response.created\ndata: {\"response\":{\"id\":\"r1\",\"model\":\"grok-4.6\"}}\n\n".into(),
+            "event: response.content_part.added\ndata: {\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"output_text\"}}\n\n".into(),
+            "event: response.output_text.delta\ndata: {\"output_index\":0,\"content_index\":0,\"delta\":\"hello\"}\n\n".into(),
+            "event: response.content_part.done\ndata: {\"output_index\":0,\"content_index\":0}\n\n".into(),
+            "event: response.completed\ndata: {\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}\n\n".into(),
+        ],
+    )
+}
+
+#[tokio::test]
+async fn grok_registered_codec_dispatches_the_proxy_stream() {
+    let f = fixture(&["c0"]);
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute(
+        "UPDATE credentials SET provider='grok',auth_type='oauth',access_token=api_key,provider_data='{\"agentId\":\"agent-1\"}'",
+        [],
+    )
+    .expect("provider");
+    let h = harness(&f, vec![grok_sse()]);
+    let mut d = dispatch(h.deps.clone(), req("grok-4.6"));
+    let events = drain(&mut d).await;
+    assert!(matches!(events.first(), Some(StreamEvent::Start { .. })));
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    let log = d.log.lock().expect("log").clone();
+    assert_eq!(
+        (
+            log.status,
+            log.attempts,
+            log.input_tokens,
+            log.output_tokens
+        ),
+        (200, 1, 10, 4)
+    );
+    {
+        let calls = h.script.seen.lock().expect("seen");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].provider, "grok");
+        // The OAuth bearer goes to the proxy, never to api.x.ai.
+        assert_eq!(calls[0].url, "https://cli-chat-proxy.grok.com/v1/responses");
+        for pair in [
+            ("Authorization", "Bearer sk-up"),
+            ("X-XAI-Token-Auth", "xai-grok-cli"),
+            ("x-authenticateresponse", "authenticate-response"),
+            ("x-grok-agent-id", "agent-1"),
+            ("x-grok-req-id", "req_t"),
+        ] {
+            assert!(
+                calls[0]
+                    .headers
+                    .contains(&(pair.0.to_owned(), pair.1.to_owned())),
+                "{pair:?} missing from {:?}",
+                calls[0].headers
+            );
+        }
+        let sent: serde_json::Value = serde_json::from_str(&calls[0].body).expect("body");
+        assert_eq!(sent["model"], "grok-4.6");
+        assert_eq!(sent["stream"], true);
+        assert_eq!(sent["store"], false);
+    }
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn grok_non_streaming_client_is_served_by_collecting_the_stream() {
+    let f = fixture(&["c0"]);
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute(
+        "UPDATE credentials SET provider='grok',auth_type='oauth',access_token=api_key,provider_data='{\"agentId\":\"agent-1\"}'",
+        [],
+    )
+    .expect("provider");
+    let h = harness(&f, vec![grok_sse()]);
+    let request = Request {
+        request: chat("grok-4.6", false),
+        request_id: "req_t".into(),
+        api_key_id: Some("k1".into()),
+        route_started_at: 1_000,
+    };
+    let mut d = dispatch(h.deps.clone(), request);
+    let events = drain(&mut d).await;
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    {
+        let calls = h.script.seen.lock().expect("seen");
+        assert_eq!(calls.len(), 1);
+        let sent: serde_json::Value = serde_json::from_str(&calls[0].body).expect("body");
+        // The request going out streams either way; a non-streaming upstream
+        // would return JSON the SSE parser yields nothing from.
+        assert_eq!(sent["stream"], true);
+    }
+    flush(h).await;
+}

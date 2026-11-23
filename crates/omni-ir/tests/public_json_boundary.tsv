@@ -199,6 +199,20 @@ omni-providers/src/custom/codec.rs :: fn endpoint_url(origin: &str, base_path: &
 omni-providers/src/custom/decode/chat.rs :: fn new() -> Self	constructor creates empty decoder; queued StreamEvent owns iterative Drop
 omni-providers/src/custom/decode/responses.rs :: fn new() -> Self	constructor creates empty decoder; queued StreamEvent owns iterative Drop
 omni-providers/src/custom/wire.rs :: fn to_custom_chat_wire(req: &ChatRequest, model: &str) -> Encoded	internal: caller must be inside a deep scope; production entry points are the codec and ingest
+omni-providers/src/grok/decode.rs :: fn new() -> Self	constructor creates empty decoder; queued StreamEvent owns iterative Drop
+omni-providers/src/grok/device.rs :: fn headers(provider_data: &Map<String, Value>) -> Vec<(String, String)>	borrows provider data; reads scalar string fields into string pairs
+omni-providers/src/grok/device.rs :: fn mint() -> GrokDevice	owned strings only
+omni-providers/src/grok/oauth.rs :: fn agent_id_from(provider_data: Option<&Map<String, Value>>) -> String	borrows provider data; reads one scalar string into an owned string or mints one
+omni-providers/src/grok/oauth.rs :: fn discovery_request() -> AuthRequest	request contains only strings and header pairs
+omni-providers/src/grok/oauth.rs :: fn discovery_result(status: u16, text: &str) -> Result<Endpoints, GatewayError>	iteratively dropped JsValue parse; endpoints are owned strings only
+omni-providers/src/grok/oauth.rs :: fn exchange_request(raw_code: &str, pending: &PendingFlow, token_url: &str) -> AuthRequest	request contains only strings and header pairs
+omni-providers/src/grok/oauth.rs :: fn pasted_code(code: &str, pending: &PendingFlow) -> Result<String, GatewayError>	string splitting only; owned string output
+omni-providers/src/grok/oauth.rs :: fn refresh_request(refresh_token: &str, token_url: &str) -> AuthRequest	request contains only strings and header pairs
+omni-providers/src/grok/oauth.rs :: fn start( authorize_url: &str, redirect_uri: &str, verifier: &str, challenge: &str, state: &str, ) -> Result<AuthorizeStart, GatewayError>	owned strings only; pending holds scalar strings
+omni-providers/src/grok/oauth.rs :: fn token_result( status: u16, text: &str, fallback_refresh: Option<&str>, agent_id: &str, now: f64, ) -> Result<FlowResult, GatewayError>	iteratively dropped JsValue parse; borrow-only field extraction into scalar strings; FlowResult owns deep-safe Clone/Drop
+omni-providers/src/grok/oauth.rs :: fn trusted_origin(url: &url::Url) -> bool	borrow-only URL inspection; boolean output
+omni-providers/src/grok/profile.rs :: fn initialize()	scalar/string API; no arbitrary JSON ownership
+omni-providers/src/grok/wire.rs :: fn to_grok_wire(req: &ChatRequest, model: &str) -> Encoded	internal: caller must be inside a deep scope; production entry points are the codec and ingest
 omni-providers/src/http/body.rs :: async fn next_chunk(&mut self) -> Option<Result<Bytes, HttpError>>	bytes/strings or HTTP state; no parsed arbitrary JSON ownership
 omni-providers/src/http/body.rs :: async fn text(mut self) -> Result<String, HttpError>	bytes/strings or HTTP state; no parsed arbitrary JSON ownership
 omni-providers/src/http/body.rs :: fn append_received(&mut self, name: &str, value: &str)	bytes/strings or HTTP state; no parsed arbitrary JSON ownership

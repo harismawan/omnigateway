@@ -13,8 +13,7 @@ use omni_providers::{
 /// providers; a validator covers hosts published through discovery (grok).
 pub(crate) enum Origins<'a> {
     Allowlist(&'a [&'a str]),
-    // Grok's discovery-published hosts land in a later commit.
-    #[allow(dead_code)]
+    /// Hosts published through discovery (grok), checked per request.
     Validator(&'a (dyn Fn(&url::Url) -> bool + Sync)),
 }
 
