@@ -158,9 +158,11 @@ if [ "$IS_ROOT" = 1 ]; then
 else
   DATA_DIR=${XDG_DATA_HOME:-$HOME/.local/share}/omnigateway
   BIN_DIR=$HOME/.local/bin
-  UNIT_FILE=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/omnigateway.service
+  # The CLI hardcodes these paths (omni-cli context.rs / service.rs unit);
+  # XDG_CONFIG_HOME must not fork the script away from them.
+  UNIT_FILE=$HOME/.config/systemd/user/omnigateway.service
 fi
-DEFAULT_ROOT=${XDG_CONFIG_HOME:-$HOME/.config}/omnigateway
+DEFAULT_ROOT=$HOME/.config/omnigateway
 
 # --- step 0: find an existing installation ----------------------------------
 

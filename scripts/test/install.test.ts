@@ -349,3 +349,19 @@ test("an unsupported uname -m refuses with the supported list", async () => {
   expect(run.stderr).toContain("darwin-arm64");
   expect(existsSync(join(home, ".local", "share", "omnigateway"))).toBe(false);
 });
+
+test("XDG_CONFIG_HOME does not move the root: the CLI hardcodes ~/.config/omnigateway", async () => {
+  const { home, base } = fixture();
+  const run = await runInstall({
+    home,
+    base,
+    args: ["--no-service", "--yes", "--base-url", "http://gw.example.test:9000"],
+    env: {
+      OMNI_ADMIN_PASSWORD: "correct horse battery staple",
+      XDG_CONFIG_HOME: join(home, "xdg-elsewhere"),
+    },
+  });
+  expect(run.exitCode).toBe(0);
+  expect(existsSync(join(home, ".config", "omnigateway", ".env"))).toBe(true);
+  expect(existsSync(join(home, "xdg-elsewhere", "omnigateway"))).toBe(false);
+});
