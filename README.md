@@ -24,7 +24,7 @@ curl -fsSL https://raw.githubusercontent.com/harismawan/omnigateway/main/install
 - **Speaks three dialects.** Anthropic Messages, OpenAI Chat Completions and OpenAI Responses
   (the only API Codex CLI speaks), streaming included, translated to whichever provider serves it.
 - **Filters bulky tool history, optionally.** Built-in RTK filters shorten eligible large or repetitive
-  shell and command output before dispatch, preserve errors and non-tool-result content, and default off.
+  shell and recognizable command output before dispatch, preserve errors and non-tool-result content, and default off.
 - **Routes across your accounts.** Define a virtual model like `fast` or `smart` with several
   targets; the gateway ranks them by tier, health, remaining quota, cost, latency, and current load.
 - **Fails over.** A rate-limited or broken account is skipped, its circuit breaker opens, and the
@@ -157,7 +157,8 @@ The nginx block, the Kubernetes base and GitOps releases: [docs/deploying.md](do
 - **Body capture is forensics, not an archive.** Off unless both keys turn it on, expires on the
   log window, capped at 100,000 rows. `omni bodies` reads one request's capture; nothing searches across them.
 - **Snapshots are manual and local.** Nothing takes one on a schedule and there is no off-host
-  target; retention bounds them and a restore takes one first. On Postgres, `pg_dump` is the backup.
+  target; retention bounds them and a restore takes one first. Copy them elsewhere if a failing disk is the worry. On Postgres,
+  `pg_dump` is the backup.
 - **Quota readings come from the providers**, whose usage endpoints are undocumented; nothing reported is unknown, never unlimited.
 - **The gateway does not know which model accepts which request shape.** Unsupported combinations surface as the provider's own 400.
 - **Provider-specific behaviour** — thinking controls, Claude Code auto mode, the Codex-shaped

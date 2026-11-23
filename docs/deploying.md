@@ -119,7 +119,8 @@ mode**, switched on by `OMNI_CLUSTER_MODE=true` and needing two things beside th
 
 - **Postgres** as the store, named by `OMNI_DATABASE_URL`. Every replica reads and writes one
   database; there is no SQLite file, no snapshot, no restore, and no `omni db vacuum` — those are
-  `pg_dump`'s job now, and the Database screen says so.
+  `pg_dump`'s job now, and the Database screen says so. The snapshot list stays empty and
+  snapshot import is refused alongside them.
 - **Redis** (or Valkey) as the coordinator, named by `OMNI_REDIS_URL`. It holds what a fleet must
   agree on and a database is the wrong shape for: the per-minute request ring and the concurrency
   gauge, the long-window counters, admin sessions, pending OAuth flows, quota-probe cooldowns, the
