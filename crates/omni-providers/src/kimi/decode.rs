@@ -412,7 +412,15 @@ fn usage_of(
     let p = checked(nullish_or(prompt, Some(&zero)))?;
     let r = checked(nullish_or(read, Some(&zero)))?;
     let w = checked(nullish_or(write, Some(&zero)))?;
-    Ok(usage_from_prompt_total(p, n(output), r, w))
+    let mut usage = usage_from_prompt_total(p, n(output), r, w);
+    // Only the subtraction operands are coerced; TS passes output and
+    // cache-read counters to the client verbatim when they are not numbers.
+    // Cache-write has no raw field — the residual gap openai/grok/muse carry.
+    let out = nullish_or(output, Some(&zero)).unwrap_or(&zero);
+    let rd = nullish_or(read, Some(&zero)).unwrap_or(&zero);
+    usage.raw_output_tokens = out.as_f64().is_none().then(|| Box::new(out.clone()));
+    usage.raw_cache_read_tokens = rd.as_f64().is_none().then(|| Box::new(rd.clone()));
+    Ok(usage)
 }
 
 fn string(v: Option<&Value>) -> Result<Text, DecodeError> {

@@ -132,7 +132,9 @@ fn the_quota_dispatch_reads_subs_usage_off_a_mint_shaped_body() {
     let request =
         omni_providers::quota::request("muse", "usage", "oauth-tok", &json!({}), Value::Null)
             .expect("muse usage probe");
-    assert_eq!(request.timeout.as_secs(), 15);
+    // A POST rides TS `postJsonRequest`'s unset timeout, so the host's 30s
+    // step ceiling applies — not the 15s the GET probes default to.
+    assert_eq!(request.timeout.as_secs(), 30);
     assert_eq!(request.http.url, "https://api.meta.ai/muse-code/key");
     assert_eq!(request.http.method, "POST");
     assert_eq!(request.http.body, "{}");

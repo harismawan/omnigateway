@@ -42,7 +42,9 @@ pub fn request(
         // issue of a new one. The returned key is deliberately dropped:
         // `usage` has no channel to persist one.
         return Some(QuotaRequest {
-            timeout: std::time::Duration::from_secs(15),
+            // A POST: TS `postJsonRequest` states no timeout, so the host's
+            // 30s step ceiling applies — not the 15s the GET probes ride.
+            timeout: std::time::Duration::from_secs(30),
             http: crate::muse::oauth::mint_request(token),
         });
     }

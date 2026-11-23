@@ -532,3 +532,49 @@ fn a_malformed_or_non_object_payload_is_skipped_not_fatal() {
     let events = drive(&["not json".into(), "5".into(), DONE.into()]);
     assert_eq!(events, [end(StopReason::EndTurn, Usage::default())]);
 }
+
+#[test]
+fn non_numeric_usage_counters_reach_the_client_verbatim() {
+    let events = drive(&[
+        chunk(json!({"id": "c1", "model": "kimi-k2", "choices": []})),
+        chunk(
+            json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 100, "completion_tokens": "42", "prompt_tokens_details": {"cached_tokens": "60"}}}),
+        ),
+        DONE.into(),
+    ]);
+    let Some(StreamEvent::End { usage, .. }) = events.last() else {
+        panic!("no end event");
+    };
+    // The subtraction runs on the coerced numbers...
+    assert_eq!(usage.input_tokens, 40.0);
+    assert_eq!(usage.output_tokens, 42.0);
+    assert_eq!(usage.cache_read_tokens, 60.0);
+    // ...but the client sees the upstream's own values, as TS passes them.
+    assert_eq!(
+        usage.client_output(),
+        omni_ir::jsjson::JsValue::String("42".encode_utf16().collect())
+    );
+    assert_eq!(
+        usage.client_cache_read(),
+        omni_ir::jsjson::JsValue::String("60".encode_utf16().collect())
+    );
+}
+
+#[test]
+fn an_object_valued_output_counter_is_kept_raw_not_dropped() {
+    let events = drive(&[
+        chunk(json!({"id": "c1", "model": "kimi-k2", "choices": []})),
+        chunk(
+            json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 10, "completion_tokens": {"n": 1}}}),
+        ),
+        DONE.into(),
+    ]);
+    let Some(StreamEvent::End { usage, .. }) = events.last() else {
+        panic!("no end event");
+    };
+    assert!(usage.output_tokens.is_nan());
+    assert_eq!(
+        usage.client_output(),
+        omni_ir::jsjson::JsValue::from(&json!({"n": 1}))
+    );
+}

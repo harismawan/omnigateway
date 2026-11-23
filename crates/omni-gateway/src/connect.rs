@@ -432,6 +432,10 @@ impl ConnectFlows {
             .map_or(&serde_json::Value::Null, |c| &c.provider_data);
         match device_exchange(&provider, host, &pending, data).await {
             Ok(result) => {
+                // Take before persist, unlike TS's persist-then-take: a flow
+                // that expired mid-exchange (or was claimed by another poll)
+                // must not store a credential. Fails closed — the token is
+                // discarded and the operator reconnects.
                 self.pending(id, true).await?;
                 persist_flow_result(host.clone(), holder.clone(), &flow, result).await
             }

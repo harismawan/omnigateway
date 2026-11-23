@@ -99,16 +99,17 @@ fn ingress_to_custom_build_depth() {
 }
 
 /// The five ported codecs must build client-controlled deep JSON without a
-/// stack overflow on a 2 MiB worker: deep tool `inputSchema`s and deep vendor
-/// bag values, at the ingress ceiling (`deep::MAX_DEPTH`) and just above the
-/// shallow gate. Mirrors `anthropic_outbound_depth`'s harness.
+/// stack overflow on a 2 MiB worker: deep tool `inputSchema`s, deep toolUse
+/// `input`s and deep vendor bag values, at the ingress ceiling
+/// (`deep::MAX_DEPTH`) and just above the shallow gate. Mirrors
+/// `anthropic_outbound_depth`'s harness.
 #[test]
 fn five_provider_outbound_depth() {
     if std::env::var_os("OMNI_FIVE_DEPTH_CHILD").is_some() {
         std::thread::Builder::new().stack_size(2*1024*1024).spawn(|| {
             for depth in [10_005, deep::MAX_DEPTH] {
                 for provider in ["kimi", "kilo", "grok", "muse", "qoder"] {
-                    for carrier in ["schema", "vendor"] {
+                    for carrier in ["schema", "vendor", "input"] {
                         eprintln!("start {provider} {depth} {carrier}");
                         let nested = format!("{}0{}", "[".repeat(depth-8), "]".repeat(depth-8));
                         // Every ingress writes the bag named after the surface;
@@ -116,19 +117,27 @@ fn five_provider_outbound_depth() {
                         let bag = if provider == "muse" { "openai" } else { provider };
                         let tail = match carrier {
                             "schema" => format!(r#", "tools":[{{"kind":"portable","name":"f","inputSchema":{{"x":{nested}}}}}]"#),
+                            "input" => String::new(),
                             _ => format!(r#", "vendor":{{"{bag}":{{"x":{nested}}}}}"#),
                         };
-                        let raw = format!(r#"{{"model":"m","stream":true,"messages":[{{"role":"user","content":[{{"type":"text","text":"hi"}}]}}]{tail}}}"#);
+                        let content = if carrier == "input" {
+                            format!(r#"{{"type":"toolUse","id":"t","name":"f","input":{nested}}}"#)
+                        } else {
+                            r#"{"type":"text","text":"hi"}"#.into()
+                        };
+                        let raw = format!(r#"{{"model":"m","stream":true,"messages":[{{"role":"user","content":[{content}]}}]{tail}}}"#);
                         let value = deep::Owned(deep::parse(&raw).expect("json"));
                         let mut shallow = deep::clone(&value.0);
                         let path = match carrier {
                             "schema" => "/tools/0/inputSchema/x".to_owned(),
+                            "input" => "/messages/0/content/0/input".to_owned(),
                             _ => format!("/vendor/{bag}/x"),
                         };
                         let payload = shallow.pointer_mut(&path).expect("payload").take();
                         let mut request: omni_ir::request::ChatRequest = serde_json::from_value(shallow).expect("IR");
                         match carrier {
                             "schema" => if let omni_ir::request::ToolDef::Portable(t) = &mut request.tools.as_mut().expect("tools")[0] { t.input_schema["x"] = payload; },
+                            "input" => if let omni_ir::request::ContentBlock::ToolUse(t) = &mut request.messages[0].content[0] { t.input = payload; },
                             _ => request.vendor.as_mut().expect("vendor")[bag]["x"] = payload,
                         }
                         let creds = if provider == "qoder" {
@@ -157,7 +166,7 @@ fn five_provider_outbound_depth() {
                         };
                         if provider == "qoder" {
                             let plain = omni_crypto::qoder::decode_body(&built.body).expect("encoded body");
-                            if carrier == "schema" {
+                            if carrier != "vendor" {
                                 assert!(plain.contains(&nested), "lost {carrier} depth {depth}");
                             }
                             // The vendor bag is dropped on this wire; the
