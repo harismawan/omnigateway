@@ -40,7 +40,7 @@ case "$1 $2" in
   "status --json")
     printf '{"process":{"running":false},"adminConfigured":%s,"credentials":[],"storeError":null}\\n' "\${OMNI_STUB_ADMIN_CONFIGURED:-false}"
     ;;
-  "doctor --json")
+  "doctor --json"|"omni doctor")
     printf '{"root":"%s","rootSource":"default"}\\n' "\${OMNI_STUB_DOCTOR_ROOT:-}"
     ;;
   "admin set-password")
@@ -116,9 +116,11 @@ async function runInstall(options: {
   args: string[];
   env?: Record<string, string>;
   withBinOnPath?: boolean;
+  pathPrepend?: string;
 }): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   const { home, base, args, env } = options;
-  const path = options.withBinOnPath ? `${home}/.local/bin:${SYSTEM_PATH}` : SYSTEM_PATH;
+  let path = options.withBinOnPath ? `${home}/.local/bin:${SYSTEM_PATH}` : SYSTEM_PATH;
+  if (options.pathPrepend) path = `${options.pathPrepend}:${path}`;
   const run = Bun.spawn(["sh", script, ...args], {
     env: {
       ...process.env,
@@ -385,4 +387,26 @@ test("an existing .env is parsed like the CLI: export prefix, quotes, last occur
   expect(envFile(root)).toBe(original);
   expect(run.stdout).toContain("Dashboard: http://x.example.test:9200");
   expect(run.stdout).toContain("Port 9200 must be open");
+});
+
+test("detection through omnigateway on PATH calls it with omni doctor --json", async () => {
+  const { dir, home, base } = fixture();
+  const stubDir = join(dir, "bin");
+  mkdirSync(stubDir);
+  writeFileSync(join(stubDir, "omnigateway"), STUB);
+  chmodSync(join(stubDir, "omnigateway"), 0o755);
+  const root = join(home, "detected-root");
+  const run = await runInstall({
+    home,
+    base,
+    args: ["--no-service", "--yes", "--base-url", "http://gw.example.test:9000"],
+    env: {
+      OMNI_ADMIN_PASSWORD: "correct horse battery staple",
+      OMNI_STUB_DOCTOR_ROOT: root,
+    },
+    pathPrepend: stubDir,
+  });
+  expect(run.exitCode).toBe(0);
+  expect(calls(home)[0]).toBe("omni doctor --json");
+  expect(calls(home)).toContain(`db migrate --root ${root}`);
 });

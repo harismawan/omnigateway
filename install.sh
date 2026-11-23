@@ -216,6 +216,22 @@ classify_method() {
   esac
 }
 
+# The gateway binary only acts as the CLI when argv0 is omni or the first
+# argument is omni (omni-gateway main.rs). timeout may not exist (macOS);
+# where it does, it caps a hung doctor call.
+detect_root() {
+  if [ "${ON_PATH##*/}" = omni ]; then
+    set -- "$ON_PATH" doctor --json
+  else
+    set -- "$ON_PATH" omni doctor --json
+  fi
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 10 "$@"
+  else
+    "$@"
+  fi
+}
+
 FOUND_ROOT=
 FOUND_METHOD=
 if [ -f "$UNIT_FILE" ]; then
@@ -223,7 +239,7 @@ if [ -f "$UNIT_FILE" ]; then
   FOUND_METHOD=$(classify_method "$(sed -n 's/^ExecStart=//p' "$UNIT_FILE" | head -n 1)")
 elif ON_PATH=$(command -v omni 2>/dev/null || command -v omnigateway 2>/dev/null); then
   FOUND_METHOD=$(classify_method "$(resolve_path "$ON_PATH")")
-  FOUND_ROOT=$("$ON_PATH" doctor --json 2>/dev/null \
+  FOUND_ROOT=$(detect_root 2>/dev/null \
     | sed -n 's/.*"root"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1) || FOUND_ROOT=
 fi
 
