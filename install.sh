@@ -420,17 +420,25 @@ fi
 
 # --- step 6: admin password -------------------------------------------------
 
-if "$OMNI" status --json --root "$ROOT" \
-  | grep -q '"adminConfigured"[[:space:]]*:[[:space:]]*true'; then
-  :
-elif [ -n "${OMNI_ADMIN_PASSWORD:-}" ]; then
-  printf '%s\n' "$OMNI_ADMIN_PASSWORD" | "$OMNI" admin set-password --root "$ROOT"
-elif [ "$ASSUME_YES" = 1 ]; then
-  die "no admin password is set and --yes was given; supply one via OMNI_ADMIN_PASSWORD"
-elif have_tty; then
-  "$OMNI" admin set-password --root "$ROOT" < /dev/tty
+# A failed status call says nothing about the password; resetting one that
+# exists would lock the operator out, so only a readable adminConfigured
+# decides (true: skip, false: set, anything else: warn and skip).
+if STATUS_JSON=$("$OMNI" status --json --root "$ROOT") \
+  && printf '%s\n' "$STATUS_JSON" \
+    | grep -Eq '"adminConfigured"[[:space:]]*:[[:space:]]*(true|false)'; then
+  if printf '%s\n' "$STATUS_JSON" | grep -q '"adminConfigured"[[:space:]]*:[[:space:]]*true'; then
+    :
+  elif [ -n "${OMNI_ADMIN_PASSWORD:-}" ]; then
+    printf '%s\n' "$OMNI_ADMIN_PASSWORD" | "$OMNI" admin set-password --root "$ROOT"
+  elif [ "$ASSUME_YES" = 1 ]; then
+    die "no admin password is set and --yes was given; supply one via OMNI_ADMIN_PASSWORD"
+  elif have_tty; then
+    "$OMNI" admin set-password --root "$ROOT" < /dev/tty
+  else
+    die "no terminal to ask for an admin password; supply one via OMNI_ADMIN_PASSWORD"
+  fi
 else
-  die "no terminal to ask for an admin password; supply one via OMNI_ADMIN_PASSWORD"
+  warn "warning: could not tell whether an admin password is set; skipping. Set one with: omni admin set-password --root $ROOT"
 fi
 
 # --- step 7: service and start ----------------------------------------------
