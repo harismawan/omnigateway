@@ -442,3 +442,33 @@ test("a truncated download (first 60% of bytes) installs nothing under HOME", as
   await Promise.all([new Response(run.stdout).text(), new Response(run.stderr).text(), run.exited]);
   expect(readdirSync(home)).toEqual([]);
 });
+
+test("a user unit file gives the root and npm method; --method binary overrides the method", async () => {
+  const { home, base } = fixture();
+  const root = join(home, "unit-root");
+  const unitDir = join(home, ".config", "systemd", "user");
+  mkdirSync(unitDir, { recursive: true });
+  writeFileSync(
+    join(unitDir, "omnigateway.service"),
+    `[Service]\nWorkingDirectory=${root}\nExecStart=/usr/lib/node_modules/omnigateway/bin/omnigateway\n`,
+  );
+  const run = await runInstall({
+    home,
+    base,
+    args: [
+      "--no-service",
+      "--yes",
+      "--method",
+      "binary",
+      "--base-url",
+      "http://gw.example.test:9000",
+    ],
+    env: {
+      OMNI_ADMIN_PASSWORD: "correct horse battery staple",
+      XDG_CONFIG_HOME: join(home, "xdg-elsewhere"),
+    },
+  });
+  expect(run.exitCode).toBe(0);
+  expect(run.stdout).toContain(`Found an existing installation (root: ${root}, method: binary)`);
+  expect(calls(home)).toContain(`db migrate --root ${root}`);
+});
