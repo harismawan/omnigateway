@@ -127,6 +127,34 @@ sha256_of() {
 
 have_tty() { (: < /dev/tty) 2>/dev/null; }
 
+# Reads .env like omni-cli context.rs: skip blank/# lines, strip an optional
+# `export ` prefix, trim, split on the first =, strip one matching quote pair;
+# the last occurrence wins.
+env_value() {
+  awk -v key="$1" -v sq="'" '
+    {
+      line = $0
+      gsub(/^[ \t\r]+|[ \t\r]+$/, "", line)
+      if (line == "" || line ~ /^#/) next
+      sub(/^export /, "", line)
+      gsub(/^[ \t]+|[ \t]+$/, "", line)
+      eq = index(line, "=")
+      if (eq == 0) next
+      k = substr(line, 1, eq - 1)
+      v = substr(line, eq + 1)
+      gsub(/^[ \t]+|[ \t]+$/, "", k)
+      gsub(/^[ \t]+|[ \t]+$/, "", v)
+      if (k == "") next
+      n = length(v)
+      if (n >= 2 && ((substr(v, 1, 1) == "\"" && substr(v, n, 1) == "\"") ||
+                     (substr(v, 1, 1) == sq && substr(v, n, 1) == sq)))
+        v = substr(v, 2, n - 2)
+      if (k == key) val = v
+    }
+    END { print val }
+  ' "$2"
+}
+
 # --- step 1: detect OS and CPU ----------------------------------------------
 
 OS_RAW=${OMNI_INSTALL_UNAME_S:-$(uname -s)}
@@ -296,9 +324,9 @@ if [ -f "$ENV_FILE" ]; then
   if [ -n "$PORT_FLAG" ] || [ -n "$BASEURL_FLAG" ]; then
     say "note: $ENV_FILE exists and is never rewritten; --port/--base-url are ignored."
   fi
-  PORT=$(sed -n 's/^OMNI_PORT=//p' "$ENV_FILE" | tail -n 1 | tr -d '"')
-  HOST=$(sed -n 's/^OMNI_HOST=//p' "$ENV_FILE" | tail -n 1 | tr -d '"')
-  BASE=$(sed -n 's/^OMNI_BASE_URL=//p' "$ENV_FILE" | tail -n 1 | tr -d '"')
+  PORT=$(env_value OMNI_PORT "$ENV_FILE")
+  HOST=$(env_value OMNI_HOST "$ENV_FILE")
+  BASE=$(env_value OMNI_BASE_URL "$ENV_FILE")
   PORT=${PORT:-9000}
   HOST=${HOST:-0.0.0.0}
 else

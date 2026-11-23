@@ -365,3 +365,24 @@ test("XDG_CONFIG_HOME does not move the root: the CLI hardcodes ~/.config/omniga
   expect(existsSync(join(home, ".config", "omnigateway", ".env"))).toBe(true);
   expect(existsSync(join(home, "xdg-elsewhere", "omnigateway"))).toBe(false);
 });
+
+test("an existing .env is parsed like the CLI: export prefix, quotes, last occurrence wins", async () => {
+  const { home, base } = fixture();
+  const root = join(home, "quoted-root");
+  mkdirSync(root, { recursive: true });
+  const original =
+    "# a comment\n\nOMNI_ENCRYPTION_KEY=keepme\nOMNI_PORT=1111\n" +
+    'export OMNI_PORT="9200"\nOMNI_HOST=0.0.0.0\n' +
+    "OMNI_BASE_URL='http://x.example.test:9200'\n";
+  writeFileSync(join(root, ".env"), original);
+  const run = await runInstall({
+    home,
+    base,
+    args: ["--no-service", "--yes", "--root", root],
+    env: { OMNI_ADMIN_PASSWORD: "correct horse battery staple" },
+  });
+  expect(run.exitCode).toBe(0);
+  expect(envFile(root)).toBe(original);
+  expect(run.stdout).toContain("Dashboard: http://x.example.test:9200");
+  expect(run.stdout).toContain("Port 9200 must be open");
+});
