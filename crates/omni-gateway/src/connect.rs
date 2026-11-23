@@ -3100,6 +3100,21 @@ mod tests {
         Arc<crate::refresh::Refresher>,
         omni_store::credentials::Credential,
     ) {
+        grok_refresh_harness_with(http, r#"{"agentId":"agent-1"}"#).await
+    }
+
+    /// The same host over any stub and any stored providerData, so transport
+    /// failures and a missing agent id can be scripted too.
+    async fn grok_refresh_harness_with(
+        http: Arc<dyn omni_providers::http::HttpClient>,
+        data: &'static str,
+    ) -> (
+        tempfile::TempDir,
+        Arc<omni_store::Store>,
+        omni_crypto::field::FieldKey,
+        Arc<crate::refresh::Refresher>,
+        omni_store::credentials::Credential,
+    ) {
         let dir = tempfile::tempdir().expect("dir");
         let store = Arc::new(
             omni_store::Store::open(
@@ -3133,7 +3148,7 @@ mod tests {
                     id: "g1",
                     provider: "grok",
                     label: "grok",
-                    provider_data: r#"{"agentId":"agent-1"}"#,
+                    provider_data: data,
                     account_email: None,
                     tokens: &tokens,
                     reconnect: false,
@@ -3537,6 +3552,204 @@ mod tests {
         assert!(!error.message.contains("verifier-must-not-be-quoted"));
         assert!(!error.message.contains("code-must-not-be-quoted"));
         assert!(error.message.contains("invalid_grant"), "{}", error.message);
+    }
+
+    #[tokio::test]
+    async fn grok_start_discovers_then_stores_a_pkce_flow() {
+        // The start path's own pieces, composed exactly as ConnectFlows::start
+        // runs them: one bounded discovery GET, then the local PKCE mint.
+        let http = GrokStub::new((200, GROK_OK_TOKEN));
+        let (_dir, host, _holder) = grok_harness(http.clone()).await;
+        let mut runner = crate::oauth_runner::ExchangeRunner::new(
+            host.http.as_ref(),
+            crate::oauth_runner::ExchangeConfig {
+                provider: "grok",
+                step: "start",
+                max_requests: 1,
+                origins: crate::oauth_runner::Origins::Validator(
+                    &omni_providers::grok::oauth::trusted_origin,
+                ),
+            },
+        );
+        let response = runner
+            .send(omni_providers::grok::oauth::discovery_request(), 15)
+            .await
+            .expect("discovery");
+        let endpoints = omni_providers::grok::oauth::discovery_result(response.0, &response.1)
+            .expect("endpoints");
+        let (verifier, challenge) = omni_providers::oauth::pkce();
+        let state = omni_providers::oauth::random_state();
+        let start = omni_providers::grok::oauth::start(
+            &endpoints.authorize_url,
+            GROK_CALLBACK,
+            &verifier,
+            &challenge,
+            &state,
+        )
+        .expect("start");
+        let flows = ConnectFlows::default();
+        let reply = flows
+            .store_flow("grok", string("grok"), None, &start, "pkce", true)
+            .await
+            .expect("reply");
+        let value: serde_json::Value = serde_json::from_str(&reply).expect("json");
+        assert_eq!(value["kind"], "pkce");
+        assert_eq!(value["supportsManualPaste"], true);
+        let url = url::Url::parse(value["authorizeUrl"].as_str().expect("url")).expect("url");
+        assert_eq!(
+            format!("{}{}", url.origin().ascii_serialization(), url.path()),
+            GROK_AUTHORIZE_URL
+        );
+        let param = |name: &str| {
+            url.query_pairs()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.into_owned())
+        };
+        assert_eq!(param("code_challenge").as_deref(), Some(challenge.as_str()));
+        assert_eq!(param("state").as_deref(), Some(state.as_str()));
+        // Exactly one unauthenticated discovery GET: no token endpoint, no
+        // credential on the wire before the operator acts.
+        let calls = http.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].url, GROK_DISCOVERY_URL);
+        assert_eq!(calls[0].method, "GET");
+        assert!(calls[0].body.is_empty());
+        assert!(
+            calls[0]
+                .headers
+                .iter()
+                .any(|(n, v)| (n.as_str(), v.as_str()) == ("Accept", "application/json"))
+        );
+        assert!(
+            !calls[0]
+                .headers
+                .iter()
+                .any(|(n, _)| n.eq_ignore_ascii_case("authorization"))
+        );
+        // The PKCE pair and state are stored on the pending flow.
+        let flow = flows
+            .pending(value["flowId"].as_str().expect("id"), false)
+            .await
+            .expect("stored");
+        assert!(!device_flow(&flow));
+        let pending = pending_value(&flow).expect("pending");
+        assert_eq!(pending.verifier, verifier);
+        assert_eq!(pending.challenge, challenge);
+        assert_eq!(pending.state, state);
+        assert_eq!(pending.redirect_uri, GROK_CALLBACK);
+    }
+
+    #[tokio::test]
+    async fn grok_accepts_a_bare_code_paste_without_a_state_fragment() {
+        // TS exchange splits on "#" and only checks a state when one was
+        // pasted: control/test/oauth/grok.test.ts exchanges bare "auth-code"
+        // and expects the same form body as the "#s" paste.
+        let http = GrokStub::new((200, GROK_OK_TOKEN));
+        let (_dir, host, holder) = grok_harness(http.clone()).await;
+        let pending = pending_value(&grok_flow()).expect("pending");
+        let code = normalize("grok", &pending, "auth-code").expect("bare code");
+        assert_eq!(code, "auth-code");
+        complete(host, holder, grok_flow(), &code)
+            .await
+            .expect("exchange");
+        assert_eq!(http.token_req().body, GROK_EXCHANGE_BODY);
+    }
+
+    #[tokio::test]
+    async fn grok_discovery_trust_edges_trailing_dot_and_apex() {
+        // WHATWG URL keeps the trailing dot (node: new URL(...).hostname is
+        // "auth.x.ai."), so the host is not under `.x.ai` and the endpoint is
+        // refused; the url crate parses it the same way.
+        assert_eq!(
+            url::Url::parse("https://auth.x.ai./oauth2/token")
+                .expect("url")
+                .host_str(),
+            Some("auth.x.ai.")
+        );
+        let discovery = serde_json::json!({
+            "authorization_endpoint": GROK_AUTHORIZE_URL,
+            "token_endpoint": "https://auth.x.ai./oauth2/token",
+        });
+        let http = GrokStub::with_discovery((200, GROK_OK_TOKEN), (200, &discovery.to_string()));
+        let (_dir, host, holder) = grok_harness(http.clone()).await;
+        let error = complete(host, holder, grok_flow(), "auth-code#s")
+            .await
+            .expect_err("trailing dot");
+        assert_eq!(error.code, ErrorCode::Upstream);
+        assert_eq!(
+            error.message,
+            "discovery document token_endpoint is not an x.ai https url"
+        );
+        assert_eq!(http.calls().len(), 1);
+        // The apex itself is trusted: `host === "x.ai"` is the rule's first arm.
+        let http = GrokStub::with_discovery(
+            (200, GROK_OK_TOKEN),
+            (
+                200,
+                r#"{"authorization_endpoint":"https://x.ai/oauth2/auth","token_endpoint":"https://x.ai/oauth2/token"}"#,
+            ),
+        );
+        let (_dir, host, holder) = grok_harness(http.clone()).await;
+        complete(host, holder, grok_flow(), "auth-code#s")
+            .await
+            .expect("apex");
+        assert_eq!(http.token_req().url, "https://x.ai/oauth2/token");
+    }
+
+    #[tokio::test]
+    async fn grok_refresh_transport_failures_are_upstream_and_keep_enabled() {
+        // A discovery throw and a token-endpoint network error are bad
+        // minutes, not repudiations: UPSTREAM "threw", never AUTH, and the
+        // refresher's disable-on-AUTH path never sees them.
+        for replies in [
+            vec![KiloReply::Reset],
+            vec![KiloReply::Response(200, GROK_DISCOVERY), KiloReply::Reset],
+        ] {
+            let http = KiloStub::new(replies);
+            let (_dir, store, key, host, credential) =
+                grok_refresh_harness_with(http.clone(), r#"{"agentId":"agent-1"}"#).await;
+            let error = host.refresh(&credential).await.expect_err("transport");
+            assert_eq!(error.code, ErrorCode::Upstream);
+            assert_eq!(error.message, "grok oauth refresh threw");
+            let stored = store
+                .credential(&key, "g1")
+                .await
+                .expect("read")
+                .expect("present");
+            assert!(stored.enabled);
+        }
+    }
+
+    #[tokio::test]
+    async fn grok_refresh_mints_a_missing_agent_id_once_and_carries_it() {
+        // agentIdFrom mints when the stored record has none, and the minted
+        // id is frozen onto providerData so the next refresh carries it.
+        let http = GrokStub::new((200, GROK_OK_TOKEN));
+        let (_dir, store, key, host, credential) = grok_refresh_harness_with(http, "{}").await;
+        host.refresh(&credential).await.expect("refresh");
+        let stored = store
+            .credential(&key, "g1")
+            .await
+            .expect("read")
+            .expect("present");
+        let minted = stored.provider_data["agentId"]
+            .as_str()
+            .expect("agentId")
+            .to_owned();
+        assert_eq!(minted.len(), 36);
+        assert!(
+            minted
+                .chars()
+                .all(|c| c == '-' || (c.is_ascii_hexdigit() && !c.is_ascii_uppercase()))
+        );
+        // A second refresh reads the stored id back instead of minting another.
+        host.refresh(&stored).await.expect("second refresh");
+        let again = store
+            .credential(&key, "g1")
+            .await
+            .expect("read")
+            .expect("present");
+        assert_eq!(again.provider_data["agentId"], minted);
     }
 
     // --- muse device flow + key mint ------------------------------------------
@@ -4958,6 +5171,79 @@ mod tests {
         let error = host.refresh(&credential).await.expect_err("denied");
         assert_eq!(error.code, ErrorCode::Auth);
         assert_eq!(error.message, "Qoder model listing failed");
+        let stored = store
+            .credential(&key, "q1")
+            .await
+            .expect("read")
+            .expect("present");
+        assert!(!stored.enabled);
+    }
+
+    #[tokio::test]
+    async fn qoder_first_exchange_discovery_outage_propagates_without_a_fallback() {
+        // No previous providerData exists on a first exchange, so a transient
+        // discovery failure has no last-good origin to fall back to: the error
+        // travels and no credential is invented (TS finish's catch requires
+        // lastGood before it tolerates UPSTREAM/TIMEOUT/RATE_LIMIT).
+        for (status, code) in [
+            (503, ErrorCode::Upstream),
+            (408, ErrorCode::Timeout),
+            (429, ErrorCode::RateLimit),
+        ] {
+            let http = KiloStub::new(vec![
+                KiloReply::Response(200, QODER_TOKEN),
+                KiloReply::Response(200, QODER_USER),
+                KiloReply::Response(status, "{}"),
+            ]);
+            let (_dir, host, holder, flows) = kilo_harness(http.clone(), QODER_FLOW).await;
+            let error = finish_flow(&flows, host.clone(), holder, "dev", "")
+                .await
+                .expect_err("outage");
+            assert_eq!(error.code, code, "{status}");
+            assert_eq!(error.message, "Qoder endpoint discovery failed", "{status}");
+            assert_eq!(error.upstream_status, Some(status), "{status}");
+            // poll, userinfo, v5 discovery — no listing, no v3 retry on a 5xx.
+            let sent = http.requests();
+            assert_eq!(sent.len(), 3, "{status}");
+            assert!(sent[2].url.contains("/api/v5/service/region/endpoints"));
+            assert!(
+                host.store
+                    .list_credentials(&host.key)
+                    .await
+                    .expect("rows")
+                    .is_empty(),
+                "{status}"
+            );
+            assert!(flows.pending("dev", false).await.is_err(), "{status}");
+        }
+    }
+
+    #[tokio::test]
+    async fn qoder_refresh_both_discovery_legs_denied_is_auth_and_disables() {
+        // v5 401 elects the anonymous v3 leg; a second 401 is a repudiation,
+        // not a bad minute — the last-good origin never covers an AUTH error.
+        let http = KiloStub::new(vec![
+            KiloReply::Response(200, r#"{"device_token":"new-dummy-token"}"#),
+            KiloReply::Response(200, QODER_USER),
+            KiloReply::Response(401, "{}"),
+            KiloReply::Response(401, "{}"),
+        ]);
+        let (_dir, store, key, host, credential) =
+            qoder_refresh_harness(http.clone(), QODER_DATA).await;
+        let error = host.refresh(&credential).await.expect_err("denied");
+        assert_eq!(error.code, ErrorCode::Auth);
+        assert_eq!(error.message, "Qoder endpoint discovery failed");
+        let sent = http.requests();
+        assert_eq!(sent.len(), 4);
+        assert!(sent[2].url.contains("/api/v5/service/region/endpoints"));
+        assert!(sent[3].url.contains("/api/v3/service/region/endpoints"));
+        // The anonymous leg carries no bearer.
+        assert!(
+            !sent[3]
+                .headers
+                .iter()
+                .any(|(n, _)| n.eq_ignore_ascii_case("authorization"))
+        );
         let stored = store
             .credential(&key, "q1")
             .await

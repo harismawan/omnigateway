@@ -846,4 +846,175 @@ mod tests {
             }
         }
     }
+
+    /// Independent MD5 hex, so the signature assertions below are not the
+    /// signing function checking itself.
+    fn md5_hex(input: &str) -> String {
+        use md5::{Digest as _, Md5};
+        Md5::digest(input.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn finish_pins_the_golden_request_headers_and_cosy_signature() {
+        let mut exchange = Scripted::new(vec![
+            ok(USER),
+            Ok((401, "{}".into())),
+            ok(r#"{"inferNodes":["https://api2.qoder.sh"]}"#),
+            ok(MODELS),
+        ]);
+        let clock = || 1_000_000.0;
+        let result = finish(
+            &mut exchange,
+            &token(),
+            "machine-1",
+            &clock,
+            "state-seed",
+            &Map::new(),
+        )
+        .await
+        .expect("finish");
+        // userinfo: bearer first, then Accept, then the profile's User-Agent.
+        assert_eq!(
+            exchange.seen[0].url,
+            "https://openapi.qoder.sh/api/v1/userinfo"
+        );
+        assert_eq!(exchange.seen[0].method, "GET");
+        assert_eq!(
+            exchange.seen[0].headers,
+            vec![
+                ("Authorization".into(), "Bearer device-tok".into()),
+                ("Accept".into(), "application/json".into()),
+                ("User-Agent".into(), "qoder/1.1.82".into()),
+            ]
+        );
+        // v5 election: the account identity rides x-gw-user-id, and the machine
+        // identity is both Cosy-MachineId and Cosy-MachineToken.
+        assert_eq!(
+            exchange.seen[1].url,
+            "https://center.qoder.sh/algo/api/v5/service/region/endpoints"
+        );
+        assert_eq!(
+            exchange.seen[1].headers,
+            vec![
+                ("Authorization".into(), "Bearer device-tok".into()),
+                ("Accept".into(), "application/json".into()),
+                ("User-Agent".into(), "qoder/1.1.82".into()),
+                ("x-gw-user-id".into(), "u1".into()),
+                ("Cosy-MachineId".into(), "machine-1".into()),
+                ("Cosy-MachineToken".into(), "machine-1".into()),
+            ]
+        );
+        // The anonymous v3 leg: Appcode/Date/Signature, no bearer, and the
+        // signature is the independent MD5 of the TS constant and the date.
+        assert_eq!(
+            exchange.seen[2].url,
+            "https://center.qoder.sh/algo/api/v3/service/region/endpoints"
+        );
+        let date = "Thu, 01 Jan 1970 00:16:40 GMT";
+        let anonymous = md5_hex(&format!("cosy&d2FyLCB3YXIgbmV2ZXIgY2hhbmdlcw==&{date}"));
+        assert_eq!(anonymous, "d351fa13ded178b3ae0c742a73a80901");
+        assert_eq!(
+            exchange.seen[2].headers,
+            vec![
+                ("Accept".into(), "application/json".into()),
+                ("User-Agent".into(), "qoder/1.1.82".into()),
+                ("Appcode".into(), "cosy".into()),
+                ("Date".into(), date.into()),
+                ("Signature".into(), anonymous),
+                ("Cosy-MachineId".into(), "machine-1".into()),
+            ]
+        );
+        // The signed listing, in the profile's exact order.
+        let listing = &exchange.seen[3];
+        assert_eq!(
+            listing.url,
+            "https://api2.qoder.sh/algo/api/v2/model/list?Encode=1"
+        );
+        let bundle = bundle_of(&result);
+        let auth = header(listing, "Authorization").expect("authorization");
+        let parts: Vec<_> = auth.trim_start_matches("Bearer COSY.").split('.').collect();
+        assert_eq!(parts.len(), 2);
+        // authBase64 is the TS object literal's field order, with the
+        // deterministic requestId over the flow's randomState seed.
+        let request_id = omni_crypto::codex::uuid_v4_from("state-seed");
+        let info = bundle["encryptUserInfo"].as_str().expect("info");
+        assert_eq!(
+            String::from_utf8(B64.decode(parts[0]).expect("auth base64")).expect("utf8"),
+            format!(
+                r#"{{"version":"v1","requestId":"{request_id}","info":"{info}","cosyVersion":"1.1.82","ideVersion":""}}"#
+            )
+        );
+        let key = header(listing, "Cosy-Key").expect("key");
+        assert_eq!(key, bundle["key"].as_str().expect("key"));
+        assert_eq!(B64.decode(key).expect("wrapped key").len(), 128);
+        // Independent MD5 over [authBase64, key, date, body, path].join("\n"),
+        // with the canonical path — never the /algo-prefixed request path.
+        let signature = md5_hex(&format!(
+            "{}\n{}\n1000\n\n/api/v2/model/list",
+            parts[0], key
+        ));
+        assert_eq!(parts[1], signature);
+        assert_eq!(
+            listing.headers,
+            vec![
+                ("Authorization".into(), auth.into()),
+                ("Accept".into(), "application/json".into()),
+                ("User-Agent".into(), "qoder/1.1.82".into()),
+                ("Cosy-Key".into(), key.into()),
+                ("Cosy-Date".into(), "1000".into()),
+                ("Cosy-User".into(), "u1".into()),
+                ("Cosy-MachineId".into(), "machine-1".into()),
+                ("Cosy-MachineToken".into(), "machine-1".into()),
+                ("Cosy-Version".into(), "1.1.82".into()),
+                ("Cosy-ClientType".into(), "5".into()),
+                ("Cosy-Scene".into(), "assistant".into()),
+                ("Login-Version".into(), "v2".into()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_untrusted_stored_origin_never_seeds_the_discovery_fallback() {
+        // The last-good fallback only honours the three shipped inference
+        // origins; a stored value outside them is not a fallback, even when
+        // the discovery failure is transient (TS trustedInferenceOrigin).
+        for origin in [
+            "https://evil.example",
+            "https://api4.qoder.sh",
+            "http://api1.qoder.sh",
+            "https://api1.qoder.sh.evil.test",
+            "https://api1.qoder.sh/path",
+        ] {
+            let mut exchange = Scripted::new(vec![
+                ok(USER),
+                Err(GatewayError::new(
+                    ErrorCode::Upstream,
+                    "qoder oauth refresh threw",
+                )),
+            ]);
+            let previous = json!({"inferenceOrigin": origin})
+                .as_object()
+                .cloned()
+                .unwrap();
+            let clock = || 1_000_000.0;
+            let error = finish(
+                &mut exchange,
+                &token(),
+                "machine-1",
+                &clock,
+                "state-seed",
+                &previous,
+            )
+            .await
+            .err()
+            .expect(origin);
+            assert_eq!(error.code, ErrorCode::Upstream, "{origin}");
+            assert_eq!(error.message, "qoder oauth refresh threw", "{origin}");
+            // userinfo and the v5 attempt only: no listing was ever signed.
+            assert_eq!(exchange.seen.len(), 2, "{origin}");
+        }
+    }
 }

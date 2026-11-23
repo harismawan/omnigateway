@@ -677,6 +677,29 @@ fn translates_the_clients_response_format_into_a_json_schema_spec() {
 }
 
 #[test]
+fn a_schema_too_deep_to_serialize_is_dropped_with_a_named_degradation() {
+    // 64 subschema levels is one past the serialization cap (MAX_DEPTH): the
+    // reader refuses, the wire drops response_format, and the drop is named
+    // verbatim as TS kilo/wire.ts notes it — never silently.
+    let mut schema = json!({"type": "string"});
+    for _ in 0..64 {
+        schema = json!({"type": "object", "properties": {"n": schema}});
+    }
+    let req = request(json!({
+        "model": "pool",
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+        "stream": true,
+        "vendor": {"openai": {"response_format": {"type": "json_schema", "json_schema": {"name": "out", "schema": schema}}}}
+    }));
+    let encoded = to_kilo_wire(&req, MODEL);
+    assert!(encoded.body.get("response_format").is_none());
+    assert_eq!(
+        encoded.degradations,
+        ["kilo:response-schema-too-deep".to_owned()]
+    );
+}
+
+#[test]
 fn the_kilo_vendor_bag_overrides_in_place_and_appends_the_rest() {
     let req = request(json!({
         "model": "pool",

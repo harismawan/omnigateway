@@ -1184,6 +1184,113 @@ async fn kilo_retryable_failure_before_commit_fails_over() {
     flush(h).await;
 }
 
+#[tokio::test]
+async fn kilo_oauth_401_never_refreshes_and_never_disables() {
+    // Kilo issues neither a refresh token nor an expiry (kilo/oauth.ts), and
+    // the AUTH retry gate requires hasRefreshToken (dispatch/index.ts): a 401
+    // is the attempt's error, not a refresh, and nothing disables the row.
+    let f = fixture(&["c0"]);
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute(
+        "UPDATE credentials SET provider='kilo',auth_type='oauth',access_token=api_key,provider_data='{}',refresh_token=NULL,expires_at=NULL",
+        [],
+    )
+    .expect("provider");
+    let h = harness(
+        &f,
+        vec![status(401, "{\"error\":{\"message\":\"denied\"}}")],
+    );
+    let mut d = dispatch(h.deps.clone(), req("kilo/anthropic/claude-sonnet-5"));
+    let events = drain(&mut d).await;
+    // AUTH is failover-retryable, so a lone candidate exhausts into
+    // AllCandidatesFailed carrying the upstream's own message — the same
+    // terminal shape TS dispatch yields when no candidate is left.
+    assert!(
+        matches!(
+            events.last(),
+            Some(StreamEvent::Error {
+                code: ErrorCode::AllCandidatesFailed,
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    assert_eq!(
+        d.log.lock().expect("log").error_code.as_deref(),
+        Some("ALL_CANDIDATES_FAILED")
+    );
+    // Exactly the one inference call: no refresh leg before or after it.
+    assert_eq!(h.script.calls(), 1);
+    assert!(h.deps.holder.load().routing.credentials[0].enabled);
+    assert_eq!(rows(&f.path, "SELECT enabled FROM credentials"), [["1"]]);
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn kilo_oauth_null_expiry_is_never_due_for_the_sweep() {
+    // The scheduler's due() requires expiresAt !== null (oauth/scheduler.ts);
+    // kilo's permanent null expiry must keep it out of the sweep even with a
+    // refresh token present — reaching run() would disable it on the refusal.
+    let f = fixture(&["c0"]);
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute(
+        "UPDATE credentials SET provider='kilo',auth_type='oauth',access_token=api_key,provider_data='{}',refresh_token=?,expires_at=NULL",
+        [omni_crypto::field::encrypt(&key(), "refresh")],
+    )
+    .expect("provider");
+    let h = harness(&f, vec![]);
+    let outcome = h.deps.refresher.sweep(None).await.expect("sweep");
+    assert_eq!((outcome.refreshed, outcome.touched), (0, 0));
+    assert_eq!(h.script.calls(), 0);
+    assert!(h.deps.holder.load().routing.credentials[0].enabled);
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn kilo_api_key_dispatches_the_gateway_path_and_decodes_the_stream() {
+    let f = fixture(&["c0"]);
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute(
+        "UPDATE credentials SET provider='kilo',provider_data='{}'",
+        [],
+    )
+    .expect("provider");
+    let h = harness(&f, vec![sse_ok(2)]);
+    let mut d = dispatch(h.deps.clone(), req("kilo/anthropic/claude-sonnet-5"));
+    let events = drain(&mut d).await;
+    assert!(matches!(events.first(), Some(StreamEvent::Start { .. })));
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    let log = d.log.lock().expect("log").clone();
+    assert_eq!(
+        (
+            log.status,
+            log.attempts,
+            log.input_tokens,
+            log.output_tokens
+        ),
+        (200, 1, 10, 4)
+    );
+    {
+        let calls = h.script.seen.lock().expect("seen");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].provider, "kilo");
+        // An apiKey credential goes to the gateway path, not the OpenRouter one.
+        assert_eq!(
+            calls[0].url,
+            "https://api.kilo.ai/api/gateway/chat/completions"
+        );
+        assert!(
+            calls[0]
+                .headers
+                .contains(&("Authorization".into(), "Bearer sk-up".into()))
+        );
+    }
+    flush(h).await;
+}
+
 /// A Responses-shaped SSE turn for the grok proxy.
 fn grok_sse() -> Reply {
     Reply::Http(
