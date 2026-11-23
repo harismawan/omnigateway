@@ -249,6 +249,7 @@ fn to_result(
             .map(JsValue::String)
             .or_else(|| fallback.map(|s| JsValue::String(s.encode_utf16().collect()))),
         id_token: None,
+        api_key: None,
         expires_at: token.expires_in.map(|n| now + n * 1000.0),
         account_email: None,
         provider_data: omni_ir::deep::clone_map(provider_data),

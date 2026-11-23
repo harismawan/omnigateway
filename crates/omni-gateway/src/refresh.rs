@@ -300,6 +300,11 @@ impl Refresher {
             // Two requests: discovery, then the token POST to the endpoint it
             // published. A discovery failure is UPSTREAM, never AUTH.
             grok_refresh(self, c, token).await
+        } else if c.provider == "muse" {
+            // Two requests: the refresh grant, then the key mint. Muse does
+            // not issue refresh tokens today, so this path is kept for the
+            // day it does rather than reached by the expiry sweep.
+            muse_refresh(self, token).await
         } else {
             let request = match c.provider.as_str() {
                 "anthropic" => omni_providers::anthropic::oauth::refresh_request(token),
@@ -399,7 +404,7 @@ impl Refresher {
         let update = omni_store::credentials::TokenUpdate {
             access_token: Some(access),
             refresh_token: refresh,
-            api_key: None,
+            api_key: result.api_key.as_ref().map(|s| String::from_utf16_lossy(s)),
             id_token: result
                 .id_token
                 .as_ref()
@@ -489,6 +494,36 @@ async fn grok_refresh(
     let now = (host.now)() as f64;
     let agent_id = omni_providers::grok::oauth::agent_id_from(c.provider_data.as_object());
     omni_providers::grok::oauth::token_result(response.0, &response.1, Some(token), &agent_id, now)
+}
+/// muse's two-step refresh: the refresh grant, then the key mint spent on the
+/// NEW access token. The old refresh token is the fallback when the response
+/// omits a rotated one.
+async fn muse_refresh(
+    host: &Refresher,
+    token: &str,
+) -> std::result::Result<omni_providers::oauth::FlowResult, GatewayError> {
+    let mut runner = crate::oauth_runner::ExchangeRunner::new(
+        host.http.as_ref(),
+        crate::oauth_runner::ExchangeConfig {
+            provider: "muse",
+            step: "refresh",
+            max_requests: 2,
+            origins: crate::oauth_runner::Origins::Allowlist(
+                omni_providers::muse::oauth::AUTH_ORIGINS,
+            ),
+        },
+    );
+    let response = runner
+        .send(omni_providers::muse::oauth::refresh_request(token), 30)
+        .await?;
+    let grant = omni_providers::muse::oauth::refresh_token_result(response.0, &response.1)?;
+    let access = String::from_utf16_lossy(&grant.access_token);
+    let (status, text) = runner
+        .send(omni_providers::muse::oauth::mint_request(&access), 30)
+        .await?;
+    #[allow(clippy::cast_precision_loss)]
+    let now = (host.now)() as f64;
+    omni_providers::muse::oauth::exchange_result(grant, status, &text, Some(token), now)
 }
 // The sweep timer keeps its phase; callbacks while `running` simply return.
 fn next_sweep(previous: tokio::time::Instant, now: tokio::time::Instant) -> tokio::time::Instant {

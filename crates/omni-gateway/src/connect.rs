@@ -21,6 +21,7 @@ const PROVIDERS: &[(&str, &str)] = &[
     ("kimi", ""),
     ("kilo", ""),
     ("grok", "http://127.0.0.1:56121/callback"),
+    ("muse", ""),
 ];
 fn bad(s: &str) -> GatewayError {
     GatewayError::new(ErrorCode::BadRequest, s)
@@ -238,6 +239,27 @@ impl ConnectFlows {
             #[allow(clippy::cast_precision_loss)]
             let now = (app.deps.refresher.now)() as f64;
             let start = omni_providers::kilo::oauth::begin_result(response.0, &response.1, now)?;
+            return self
+                .store_flow(provider, label, credential, &start, "device", false)
+                .await;
+        }
+        if *provider == "muse" {
+            // Device begin: Muse mints no client identity and needs no PKCE
+            // pair, so the whole start of the flow is this single POST.
+            let request = omni_providers::muse::oauth::begin_request();
+            let mut runner = crate::oauth_runner::ExchangeRunner::new(
+                app.deps.refresher.http.as_ref(),
+                crate::oauth_runner::ExchangeConfig {
+                    provider: "muse",
+                    step: "begin",
+                    max_requests: 1,
+                    origins: crate::oauth_runner::Origins::Allowlist(
+                        omni_providers::muse::oauth::AUTH_ORIGINS,
+                    ),
+                },
+            );
+            let response = runner.send(request, 30).await?;
+            let start = omni_providers::muse::oauth::begin_result(response.0, &response.1)?;
             return self
                 .store_flow(provider, label, credential, &start, "device", false)
                 .await;
@@ -512,6 +534,34 @@ async fn device_exchange(
             }
             Ok(result)
         }
+        "muse" => {
+            let request = omni_providers::muse::oauth::exchange_request(pending)?;
+            // Two requests: the device poll, then the key mint. Only reached
+            // once the operator has approved, so a mint failure is a fact
+            // about the account rather than a step still in progress.
+            let mut runner = crate::oauth_runner::ExchangeRunner::new(
+                host.http.as_ref(),
+                crate::oauth_runner::ExchangeConfig {
+                    provider: "muse",
+                    step: "exchange",
+                    max_requests: 2,
+                    origins: crate::oauth_runner::Origins::Allowlist(
+                        omni_providers::muse::oauth::AUTH_ORIGINS,
+                    ),
+                },
+            );
+            let response = runner.send(request, 30).await?;
+            let token = omni_providers::muse::oauth::poll_token(response.0, &response.1)?;
+            let access = String::from_utf16_lossy(&token.access_token);
+            let (status, text) = runner
+                .send(omni_providers::muse::oauth::mint_request(&access), 30)
+                .await?;
+            #[allow(clippy::cast_precision_loss)]
+            let now = (host.now)() as f64;
+            Ok(omni_providers::muse::oauth::exchange_result(
+                token, status, &text, None, now,
+            )?)
+        }
         #[cfg(test)]
         "device-fixture" => tests::device_fixture(host, pending, prior).await,
         _ => {
@@ -743,7 +793,7 @@ async fn persist_flow_result(
     let tokens = omni_store::credentials::TokenUpdate {
         access_token: Some(String::from_utf16_lossy(&result.access_token)),
         refresh_token: result.refresh_token.as_ref().map(crate::refresh::js_text),
-        api_key: None,
+        api_key: result.api_key.as_ref().map(|s| String::from_utf16_lossy(s)),
         id_token: result
             .id_token
             .as_ref()
@@ -3367,5 +3417,735 @@ mod tests {
         assert!(!error.message.contains("verifier-must-not-be-quoted"));
         assert!(!error.message.contains("code-must-not-be-quoted"));
         assert!(error.message.contains("invalid_grant"), "{}", error.message);
+    }
+
+    // --- muse device flow + key mint ------------------------------------------
+    // Mirrors control/test/oauth/muse.test.ts against the real host wiring:
+    // the two-stage poll+mint, the mint's refusal ladder (which is not the
+    // token endpoint's), and the refresh grant that re-mints. `KiloStub` is
+    // the shared sequence stub: replies are consumed in order and an
+    // unexpected extra request panics rather than being handed a valid mint.
+
+    const MUSE_CLIENT_ID: &str = "1031625952748946";
+    const MUSE_DEVICE_URL: &str = "https://auth.meta.com/oidc/device/authorization/";
+    const MUSE_TOKEN_URL: &str = "https://auth.meta.com/oidc/device/token/";
+    const MUSE_MINT_URL: &str = "https://api.meta.ai/muse-code/key";
+    const MUSE_FLOW: &str = r#"{"provider":"muse","label":"muse","pending":{"verifier":"","challenge":"","state":"","redirectUri":"","deviceCode":"dc-1","interval":5}}"#;
+    const MUSE_EXCHANGE_BODY: &str = "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code&device_code=dc-1&client_id=1031625952748946";
+    const MUSE_TOKEN: &str =
+        r#"{"access_token":"oauth-tok","refresh_token":"oauth-refresh","expires_in":3600}"#;
+    /// Shaped on a live `muse-code/key` response with identifying values
+    /// replaced: the full field set, `base_url` among them.
+    const MUSE_MINTED: &str = r#"{"api_key":"meta-key","base_url":"https://api.meta.ai/v1","user_email":"dev@example.com","user_full_name":"A Developer","is_subs_active":true,"subs_tier_id":"tier-2","subs_tier_name":"Muse Pro","is_subs_upgrade_available":false,"has_payment_method":true,"require_payment":false,"can_subscribe":false,"show_subs_upsell":false,"payment_method":null,"action_url":"https://dev.meta.ai/billing/","subs_usage":{"window":{"used_percent":40,"resets_at":1700000600,"window_duration_mins":300},"weekly":{"used_percent":9,"resets_at":1700086400}}}"#;
+
+    #[test]
+    fn muse_is_registered_as_a_device_flow_that_cannot_be_pasted() {
+        assert!(PROVIDERS.contains(&("muse", "")));
+        // The launcher sends `client_id` and nothing else on any leg: no
+        // device identity is demanded before the first request.
+        let request = omni_providers::muse::oauth::begin_request();
+        assert_eq!(request.body, format!("client_id={MUSE_CLIENT_ID}"));
+    }
+
+    #[tokio::test]
+    async fn muse_begin_request_bytes_and_reply_shape() {
+        let request = omni_providers::muse::oauth::begin_request();
+        assert_eq!(request.url, MUSE_DEVICE_URL);
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.body, format!("client_id={MUSE_CLIENT_ID}"));
+        for pair in [
+            ("Content-Type", "application/x-www-form-urlencoded"),
+            // JSON, not the profile's `text/event-stream`: these endpoints
+            // answer JSON and asking for SSE would be a lie.
+            ("Accept", "application/json"),
+            ("x-api-version", "1.0.0"),
+        ] {
+            assert!(
+                request
+                    .headers
+                    .contains(&(pair.0.to_owned(), pair.1.to_owned())),
+                "{pair:?} missing from {:?}",
+                request.headers
+            );
+        }
+
+        let start = omni_providers::muse::oauth::begin_result(
+            200,
+            r#"{"device_code":"dc-1","user_code":"WDJB-MJHT","verification_uri":"https://auth.meta.com/device","verification_uri_complete":"https://auth.meta.com/device?code=WDJB-MJHT","interval":5}"#,
+        )
+        .expect("begin result");
+        assert_eq!(start.user_code.as_deref(), Some("WDJB-MJHT"));
+        // The complete uri wins: it embeds the code, so the operator approves
+        // in one click instead of retyping it.
+        assert_eq!(
+            start.authorize_url,
+            "https://auth.meta.com/device?code=WDJB-MJHT"
+        );
+        assert_eq!(start.pending.device_code.as_deref(), Some("dc-1"));
+        assert_eq!(start.pending.interval, Some(5.0));
+
+        let flows = ConnectFlows::default();
+        let reply = flows
+            .store_flow("muse", string("muse"), None, &start, "device", false)
+            .await
+            .expect("reply");
+        let value: serde_json::Value = serde_json::from_str(&reply).expect("json");
+        assert_eq!(value["kind"], "device");
+        assert_eq!(value["userCode"], "WDJB-MJHT");
+        assert_eq!(value["supportsManualPaste"], false);
+        assert_eq!(value["pollIntervalMs"], 5000);
+        assert_eq!(
+            value["authorizeUrl"],
+            "https://auth.meta.com/device?code=WDJB-MJHT"
+        );
+        let flow = flows
+            .pending(value["flowId"].as_str().expect("id"), false)
+            .await
+            .expect("stored");
+        assert!(device_flow(&flow));
+        let pending = pending_value(&flow).expect("pending");
+        assert_eq!(pending.device_code.as_deref(), Some("dc-1"));
+        assert_eq!(pending.interval, Some(5.0));
+    }
+
+    #[test]
+    fn muse_begin_defaults_the_interval_and_verification_url() {
+        // No interval: fall back rather than polling flat out.
+        let start = omni_providers::muse::oauth::begin_result(
+            200,
+            r#"{"device_code":"dc-1","user_code":"WDJB-MJHT"}"#,
+        )
+        .expect("begin result");
+        assert_eq!(start.pending.interval, Some(5.0));
+        assert_eq!(start.authorize_url, "https://auth.meta.com/oauth/device/");
+        // The bare uri is the fallback when the complete one is absent.
+        let bare = omni_providers::muse::oauth::begin_result(
+            200,
+            r#"{"device_code":"dc-1","user_code":"WDJB-MJHT","verification_uri":"https://auth.meta.com/device"}"#,
+        )
+        .expect("begin result");
+        assert_eq!(bare.authorize_url, "https://auth.meta.com/device");
+    }
+
+    #[test]
+    fn muse_begin_rejects_a_response_missing_the_codes() {
+        let error =
+            match omni_providers::muse::oauth::begin_result(200, r#"{"user_code":"WDJB-MJHT"}"#) {
+                Err(error) => error,
+                Ok(_) => panic!("expected an unusable response"),
+            };
+        assert_eq!(error.code, ErrorCode::Auth);
+        assert_eq!(
+            error.message,
+            "device authorization response missing user_code or verification_uri"
+        );
+    }
+
+    #[tokio::test]
+    async fn muse_poll_pending_keeps_flow_and_never_mints() {
+        let http = KiloStub::new(vec![
+            KiloReply::Response(400, r#"{"error":"authorization_pending"}"#),
+            KiloReply::Response(400, r#"{"error":"authorization_pending"}"#),
+        ]);
+        let (_dir, host, holder, flows) = kilo_harness(http.clone(), MUSE_FLOW).await;
+        let error = flows
+            .poll(host.clone(), holder.clone(), "dev".into())
+            .await
+            .expect_err("pending");
+        assert_eq!(error.message, PENDING_MARKER);
+        assert_eq!(
+            poll_reply(Err(error)).expect("reply"),
+            r#"{"status":"pending"}"#
+        );
+        // One request, not two: minting on an unapproved token would spend a
+        // poll interval on a call that cannot succeed.
+        let sent = http.requests();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].url, MUSE_TOKEN_URL);
+        assert_eq!(sent[0].body, MUSE_EXCHANGE_BODY);
+        assert!(flows.pending("dev", false).await.is_ok());
+        // A second poll runs a fresh exchange against the kept flow.
+        let again = flows
+            .poll(host, holder, "dev".into())
+            .await
+            .expect_err("pending");
+        assert_eq!(again.message, PENDING_MARKER);
+        assert_eq!(http.requests().len(), 2);
+        assert!(flows.pending("dev", false).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn muse_poll_slow_down_is_also_pending() {
+        let http = KiloStub::new(vec![KiloReply::Response(400, r#"{"error":"slow_down"}"#)]);
+        let (_dir, host, holder, flows) = kilo_harness(http, MUSE_FLOW).await;
+        let error = flows
+            .poll(host, holder, "dev".into())
+            .await
+            .expect_err("pending");
+        assert_eq!(error.message, PENDING_MARKER);
+        assert!(flows.pending("dev", false).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn muse_poll_expired_code_is_terminal_and_consumes_the_flow() {
+        let http = KiloStub::new(vec![KiloReply::Response(
+            400,
+            r#"{"error":"expired_token"}"#,
+        )]);
+        let (_dir, host, holder, flows) = kilo_harness(http, MUSE_FLOW).await;
+        let error = flows
+            .poll(host, holder, "dev".into())
+            .await
+            .expect_err("expired");
+        assert_eq!(error.code, ErrorCode::Auth);
+        assert_eq!(
+            error.message,
+            "muse device code expired; start the authorization again"
+        );
+        assert!(poll_reply(Err(error)).is_err());
+        assert!(flows.pending("dev", false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn muse_exchange_without_a_device_code_is_a_programming_error() {
+        let http = KiloStub::new(Vec::new());
+        let (_dir, host, _holder, _flows) = kilo_harness(http.clone(), MUSE_FLOW).await;
+        let pending = PendingFlow {
+            verifier: String::new(),
+            challenge: String::new(),
+            state: String::new(),
+            redirect_uri: String::new(),
+            device_code: None,
+            interval: None,
+            extra: serde_json::Map::new(),
+        };
+        match device_exchange("muse", &host, &pending, &serde_json::Value::Null).await {
+            Err(DeviceError::Gateway(error)) => {
+                assert_eq!(error.code, ErrorCode::Internal);
+                assert_eq!(
+                    error.message,
+                    "muse exchange requires a pending flow produced by begin()"
+                );
+            }
+            Err(DeviceError::Pending) => panic!("expected internal error, got pending"),
+            Ok(_) => panic!("expected internal error, got a completed flow"),
+        }
+        assert!(http.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn muse_poll_blank_access_token_never_reaches_the_mint() {
+        let http = KiloStub::new(vec![KiloReply::Response(200, r#"{"access_token":""}"#)]);
+        let (_dir, host, holder, flows) = kilo_harness(http.clone(), MUSE_FLOW).await;
+        let error = flows
+            .poll(host, holder, "dev".into())
+            .await
+            .expect_err("blank token");
+        assert_eq!(error.code, ErrorCode::Auth);
+        assert_eq!(error.message, "token endpoint returned no access_token");
+        assert_eq!(http.requests().len(), 1);
+        assert!(flows.pending("dev", false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn muse_approved_poll_buys_a_token_then_mints_the_key() {
+        let http = KiloStub::new(vec![
+            KiloReply::Response(200, MUSE_TOKEN),
+            KiloReply::Response(200, MUSE_MINTED),
+        ]);
+        let (_dir, host, holder, flows) = kilo_harness(http.clone(), MUSE_FLOW).await;
+        let id = flows
+            .poll(host.clone(), holder.clone(), "dev".into())
+            .await
+            .expect("approved");
+        assert_eq!(
+            poll_reply(Ok(id.clone())).expect("reply"),
+            serde_json::json!({"status":"complete","id":id}).to_string()
+        );
+        let sent = http.requests();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0].url, MUSE_TOKEN_URL);
+        assert_eq!(sent[0].body, MUSE_EXCHANGE_BODY);
+        // The mint is the one call the OAuth token is for, and it is sent an
+        // empty object, never an empty body (the live endpoint refuses "").
+        assert_eq!(sent[1].url, MUSE_MINT_URL);
+        assert_eq!(sent[1].body, "{}");
+        for pair in [
+            ("Authorization", "Bearer oauth-tok"),
+            ("Content-Type", "application/json"),
+        ] {
+            assert!(
+                sent[1]
+                    .headers
+                    .contains(&(pair.0.to_owned(), pair.1.to_owned())),
+                "{pair:?} missing from {:?}",
+                sent[1].headers
+            );
+        }
+        // All three secrets: the key for every request, the pair for renewing.
+        let rows = host.store.list_credentials(&host.key).await.expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].provider, "muse");
+        assert_eq!(rows[0].secrets.access_token.as_deref(), Some("oauth-tok"));
+        assert_eq!(
+            rows[0].secrets.refresh_token.as_deref(),
+            Some("oauth-refresh")
+        );
+        assert_eq!(rows[0].secrets.api_key.as_deref(), Some("meta-key"));
+        assert_eq!(rows[0].account_email.as_deref(), Some("dev@example.com"));
+        assert_eq!(
+            rows[0].provider_data,
+            serde_json::json!({
+                "subscriptionTier": "Muse Pro",
+                "subscriptionActive": true,
+                "baseUrl": "https://api.meta.ai/v1",
+            })
+        );
+        // The OAuth token's expiry, not the key's, which Meta states nowhere.
+        let connected = &holder.load().routing.credentials[0];
+        assert_eq!(connected.id, id);
+        assert_eq!(connected.expires_at, Some(1_000_000.0 + 3_600_000.0));
+        assert!(flows.pending("dev", false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn muse_mint_refuses_an_account_with_no_payment_method() {
+        // AUTH disables the credential, which is right: no amount of retrying
+        // adds a payment method.
+        let http = KiloStub::new(vec![
+            KiloReply::Response(200, MUSE_TOKEN),
+            KiloReply::Response(200, r#"{"require_payment":true,"api_key":"unused"}"#),
+        ]);
+        let (_dir, host, holder, flows) = kilo_harness(http, MUSE_FLOW).await;
+        let error = flows
+            .poll(host, holder, "dev".into())
+            .await
+            .expect_err("no payment method");
+        assert_eq!(error.code, ErrorCode::Auth);
+        assert_eq!(
+            error.message,
+            "muse requires a payment method on the Meta account; add one at https://dev.meta.ai and reconnect"
+        );
+        assert!(flows.pending("dev", false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn muse_mint_refuses_a_200_with_no_key() {
+        // What an account that has not finished Model API onboarding gets.
+        // Storing it would produce a credential the codec refuses on every
+        // request.
+        let http = KiloStub::new(vec![
+            KiloReply::Response(200, MUSE_TOKEN),
+            KiloReply::Response(200, r#"{"api_key":""}"#),
+        ]);
+        let (_dir, host, holder, flows) = kilo_harness(http, MUSE_FLOW).await;
+        let error = flows
+            .poll(host, holder, "dev".into())
+            .await
+            .expect_err("no key");
+        assert_eq!(error.code, ErrorCode::Auth);
+        assert_eq!(
+            error.message,
+            "muse key mint returned an empty api key; finish onboarding at https://dev.meta.ai and reconnect"
+        );
+        assert!(flows.pending("dev", false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn muse_mint_status_ladder_is_not_the_token_endpoints() {
+        // Only 401 and 403 are Meta looking at the credential and refusing
+        // it; every other 4xx but 429 is a wrong request or endpoint, and
+        // must not permanently disable a healthy account.
+        for (status, code, message) in [
+            (
+                401,
+                ErrorCode::Auth,
+                "muse rejected the saved login; reconnect the account or use a different one"
+                    .to_owned(),
+            ),
+            (
+                403,
+                ErrorCode::Auth,
+                "muse rejected the saved login; reconnect the account or use a different one"
+                    .to_owned(),
+            ),
+            (
+                429,
+                ErrorCode::RateLimit,
+                "muse rate limited the key mint: http_429".to_owned(),
+            ),
+            (
+                400,
+                ErrorCode::Upstream,
+                "muse key mint failed: http_400".to_owned(),
+            ),
+            (
+                404,
+                ErrorCode::Upstream,
+                "muse key mint failed: http_404".to_owned(),
+            ),
+            (
+                408,
+                ErrorCode::Upstream,
+                "muse key mint failed: http_408".to_owned(),
+            ),
+            (
+                422,
+                ErrorCode::Upstream,
+                "muse key mint failed: http_422".to_owned(),
+            ),
+            (
+                503,
+                ErrorCode::Upstream,
+                "muse key mint failed: http_503".to_owned(),
+            ),
+        ] {
+            let http = KiloStub::new(vec![
+                KiloReply::Response(200, MUSE_TOKEN),
+                KiloReply::Response(status, "{}"),
+            ]);
+            let (_dir, host, holder, flows) = kilo_harness(http, MUSE_FLOW).await;
+            let error = flows
+                .poll(host, holder, "dev".into())
+                .await
+                .expect_err("classified");
+            assert_eq!(error.code, code, "{status}");
+            assert_eq!(error.message, message, "{status}");
+            // A terminal failure consumes the flow.
+            assert!(flows.pending("dev", false).await.is_err(), "{status}");
+        }
+    }
+
+    #[tokio::test]
+    async fn muse_mint_unusable_response_is_upstream() {
+        // A non-JSON body is a real answer — an HTML error page, an empty
+        // 502 — not a repudiation of the login.
+        for body in ["<html>", "null"] {
+            let http = KiloStub::new(vec![
+                KiloReply::Response(200, MUSE_TOKEN),
+                KiloReply::Response(200, body),
+            ]);
+            let (_dir, host, holder, flows) = kilo_harness(http, MUSE_FLOW).await;
+            let error = flows
+                .poll(host, holder, "dev".into())
+                .await
+                .expect_err("unusable");
+            assert_eq!(error.code, ErrorCode::Upstream, "{body}");
+            assert_eq!(error.message, "muse key mint returned an unusable response");
+        }
+    }
+
+    #[tokio::test]
+    async fn muse_mint_base_url_outside_meta_ai_is_not_stored() {
+        // This value decides where a decrypted key is sent, so a response
+        // cannot redirect it. `.meta.ai` with the dot, so `evilmeta.ai` is
+        // refused too. Absent rather than stored-and-ignored: the codec
+        // falls back on absence.
+        for base in [
+            "https://evilmeta.ai/v1",
+            "https://api.meta.ai.attacker.example/v1",
+            "http://api.meta.ai/v1",
+            "not a url",
+        ] {
+            let minted = serde_json::json!({"api_key": "meta-key", "base_url": base}).to_string();
+            let http = KiloStub::new(vec![
+                KiloReply::Response(200, MUSE_TOKEN),
+                KiloReply::Response(200, Box::leak(minted.into_boxed_str())),
+            ]);
+            let (_dir, host, holder, flows) = kilo_harness(http, MUSE_FLOW).await;
+            flows
+                .poll(host.clone(), holder, "dev".into())
+                .await
+                .expect("approved");
+            let rows = host.store.list_credentials(&host.key).await.expect("rows");
+            assert_eq!(
+                rows[0].provider_data,
+                serde_json::json!({"subscriptionActive": false}),
+                "{base}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn muse_grant_without_refresh_or_expiry_is_stored_as_exactly_that() {
+        // The live shape: `access_token` and `token_type`, nothing else. A
+        // null expiry keeps the refresher asleep; a null refresh token makes
+        // refresh unreachable. The key serves traffic regardless.
+        let http = KiloStub::new(vec![
+            KiloReply::Response(200, r#"{"access_token":"oauth-tok","token_type":"Bearer"}"#),
+            KiloReply::Response(200, MUSE_MINTED),
+        ]);
+        let (_dir, host, holder, flows) = kilo_harness(http, MUSE_FLOW).await;
+        flows
+            .poll(host.clone(), holder.clone(), "dev".into())
+            .await
+            .expect("approved");
+        let rows = host.store.list_credentials(&host.key).await.expect("rows");
+        assert_eq!(rows[0].secrets.refresh_token.as_deref(), None);
+        assert_eq!(rows[0].expires_at, None);
+        assert_eq!(rows[0].secrets.api_key.as_deref(), Some("meta-key"));
+        assert_eq!(holder.load().routing.credentials[0].expires_at, None);
+        // The expiry sweep never touches it.
+        assert_eq!(
+            host.sweep(Some(&holder)).await.expect("sweep"),
+            crate::refresh::SweepOutcome {
+                refreshed: 0,
+                touched: 0
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn muse_exchange_runner_caps_requests_at_two() {
+        let http = Scripted {
+            status: 200,
+            body: "{}",
+        };
+        let mut runner = crate::oauth_runner::ExchangeRunner::new(
+            &http,
+            crate::oauth_runner::ExchangeConfig {
+                provider: "muse",
+                step: "exchange",
+                max_requests: 2,
+                origins: crate::oauth_runner::Origins::Allowlist(
+                    omni_providers::muse::oauth::AUTH_ORIGINS,
+                ),
+            },
+        );
+        runner
+            .send(omni_providers::muse::oauth::begin_request(), 30)
+            .await
+            .expect("first");
+        runner
+            .send(omni_providers::muse::oauth::mint_request("tok"), 30)
+            .await
+            .expect("second");
+        let error = runner
+            .send(omni_providers::muse::oauth::mint_request("tok"), 30)
+            .await
+            .expect_err("third");
+        assert_eq!(error.code, ErrorCode::Upstream);
+        assert_eq!(
+            error.message,
+            "muse oauth exchange asked for more than 2 requests"
+        );
+    }
+
+    #[tokio::test]
+    async fn muse_exchange_runner_refuses_undeclared_origins() {
+        let http = Scripted {
+            status: 200,
+            body: "{}",
+        };
+        let mut runner = crate::oauth_runner::ExchangeRunner::new(
+            &http,
+            crate::oauth_runner::ExchangeConfig {
+                provider: "muse",
+                step: "exchange",
+                max_requests: 2,
+                origins: crate::oauth_runner::Origins::Allowlist(
+                    omni_providers::muse::oauth::AUTH_ORIGINS,
+                ),
+            },
+        );
+        let error = runner
+            .send(
+                omni_providers::oauth::AuthRequest {
+                    url: "https://evil.example/muse-code/key".into(),
+                    method: "POST".into(),
+                    headers: Vec::new(),
+                    body: "{}".into(),
+                },
+                30,
+            )
+            .await
+            .expect_err("undeclared origin");
+        assert_eq!(error.code, ErrorCode::Upstream);
+        assert_eq!(
+            error.message,
+            "muse oauth exchange described a request to an origin its manifest does not declare"
+        );
+    }
+
+    /// A stored muse credential plus a refresher driven by the sequence stub.
+    async fn muse_refresh_harness(
+        http: Arc<KiloStub>,
+    ) -> (
+        tempfile::TempDir,
+        Arc<omni_store::Store>,
+        omni_crypto::field::FieldKey,
+        Arc<crate::refresh::Refresher>,
+        omni_store::credentials::Credential,
+    ) {
+        let dir = tempfile::tempdir().expect("dir");
+        let store = Arc::new(
+            omni_store::Store::open(
+                omni_store::StoreConfig::Sqlite {
+                    path: dir.path().join("db"),
+                },
+                0,
+            )
+            .await
+            .expect("store"),
+        );
+        let key = omni_crypto::field::derive_key("test-key");
+        let host = Arc::new(crate::refresh::Refresher::new(
+            store.clone(),
+            key.clone(),
+            http,
+            || 1_000_000,
+        ));
+        let tokens = omni_store::credentials::TokenUpdate {
+            access_token: Some("oauth-tok".into()),
+            refresh_token: Some("refresh-1".into()),
+            api_key: Some("meta-key".into()),
+            id_token: None,
+            expires_at: Some(2_000_000.0),
+            updated_at: 0,
+        };
+        store
+            .save_oauth(
+                &key,
+                &omni_store::credentials::OAuthCredential {
+                    id: "m1",
+                    provider: "muse",
+                    label: "muse",
+                    provider_data: r#"{"baseUrl":"https://api.meta.ai/v1"}"#,
+                    account_email: None,
+                    tokens: &tokens,
+                    reconnect: false,
+                },
+            )
+            .await
+            .expect("save");
+        let credential = store
+            .credential(&key, "m1")
+            .await
+            .expect("read")
+            .expect("present");
+        (dir, store, key, host, credential)
+    }
+
+    #[tokio::test]
+    async fn muse_refresh_renews_the_token_and_mints_a_fresh_key() {
+        let http = KiloStub::new(vec![
+            KiloReply::Response(
+                200,
+                r#"{"access_token":"tok-2","refresh_token":"refresh-2","expires_in":60}"#,
+            ),
+            KiloReply::Response(200, r#"{"api_key":"key-2","is_subs_active":true}"#),
+        ]);
+        let (_dir, store, key, host, credential) = muse_refresh_harness(http.clone()).await;
+        let secrets = host.refresh(&credential).await.expect("refresh");
+        assert_eq!(secrets.access_token.as_deref(), Some("tok-2"));
+        assert_eq!(secrets.refresh_token.as_deref(), Some("refresh-2"));
+        assert_eq!(secrets.api_key.as_deref(), Some("key-2"));
+        let sent = http.requests();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0].url, MUSE_TOKEN_URL);
+        assert_eq!(
+            sent[0].body,
+            format!("grant_type=refresh_token&refresh_token=refresh-1&client_id={MUSE_CLIENT_ID}")
+        );
+        // The *new* token mints the new key: minting with the old one would
+        // leave the credential authenticating with a stale key.
+        assert_eq!(sent[1].url, MUSE_MINT_URL);
+        assert!(
+            sent[1]
+                .headers
+                .contains(&("Authorization".to_owned(), "Bearer tok-2".to_owned()))
+        );
+        let stored = store
+            .credential(&key, "m1")
+            .await
+            .expect("read")
+            .expect("present");
+        assert_eq!(stored.expires_at, Some(1_000_000.0 + 60_000.0));
+        // The mint's metadata merges over the stored provider data.
+        assert_eq!(
+            stored.provider_data,
+            serde_json::json!({"baseUrl":"https://api.meta.ai/v1","subscriptionActive":true})
+        );
+    }
+
+    #[tokio::test]
+    async fn muse_refresh_keeps_the_stored_refresh_token_when_omitted() {
+        // Reading the omission as null would destroy a working credential on
+        // its first refresh.
+        let http = KiloStub::new(vec![
+            KiloReply::Response(200, r#"{"access_token":"tok-2","expires_in":60}"#),
+            KiloReply::Response(200, r#"{"api_key":"key-2"}"#),
+        ]);
+        let (_dir, _store, _key, host, credential) = muse_refresh_harness(http).await;
+        let secrets = host.refresh(&credential).await.expect("refresh");
+        assert_eq!(secrets.access_token.as_deref(), Some("tok-2"));
+        assert_eq!(secrets.refresh_token.as_deref(), Some("refresh-1"));
+        assert_eq!(secrets.api_key.as_deref(), Some("key-2"));
+    }
+
+    #[tokio::test]
+    async fn muse_refresh_classifies_token_endpoint_failures() {
+        for (status, body, code) in [
+            (400, r#"{"error":"invalid_grant"}"#, ErrorCode::Auth),
+            (500, r#"{"error":"internal_error"}"#, ErrorCode::Upstream),
+            (503, "{}", ErrorCode::Upstream),
+            (429, r#"{"error":"rate_limited"}"#, ErrorCode::RateLimit),
+        ] {
+            let http = KiloStub::new(vec![KiloReply::Response(status, body)]);
+            let (_dir, store, key, host, credential) = muse_refresh_harness(http).await;
+            let error = host.refresh(&credential).await.expect_err("classified");
+            assert_eq!(error.code, code, "{status} {body}");
+            let stored = store
+                .credential(&key, "m1")
+                .await
+                .expect("read")
+                .expect("present");
+            assert_eq!(stored.enabled, code != ErrorCode::Auth, "{status} {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn muse_refresh_classifies_mint_failures_without_disabling_on_outage() {
+        // A 500 from the mint must not read as AUTH: that would permanently
+        // disable healthy accounts during an outage. Only 401/403 disable.
+        for (status, code) in [
+            (401, ErrorCode::Auth),
+            (403, ErrorCode::Auth),
+            (429, ErrorCode::RateLimit),
+            (400, ErrorCode::Upstream),
+            (503, ErrorCode::Upstream),
+        ] {
+            let http = KiloStub::new(vec![
+                KiloReply::Response(200, r#"{"access_token":"tok-2","expires_in":60}"#),
+                KiloReply::Response(status, "{}"),
+            ]);
+            let (_dir, store, key, host, credential) = muse_refresh_harness(http).await;
+            let error = host.refresh(&credential).await.expect_err("classified");
+            assert_eq!(error.code, code, "{status}");
+            let stored = store
+                .credential(&key, "m1")
+                .await
+                .expect("read")
+                .expect("present");
+            assert_eq!(stored.enabled, code != ErrorCode::Auth, "{status}");
+        }
+    }
+
+    #[tokio::test]
+    async fn muse_refresh_pending_answer_is_a_failure_not_a_poll() {
+        // The host cannot poll on the refresh path, so a pending answer
+        // surfaces verbatim rather than looping.
+        let http = KiloStub::new(vec![KiloReply::Response(
+            400,
+            r#"{"error":"authorization_pending"}"#,
+        )]);
+        let (_dir, _store, _key, host, credential) = muse_refresh_harness(http.clone()).await;
+        let error = host.refresh(&credential).await.expect_err("pending");
+        assert_eq!(error.code, ErrorCode::Auth);
+        assert_eq!(
+            error.message,
+            "authorization not yet complete: authorization_pending"
+        );
+        assert_eq!(http.requests().len(), 1);
     }
 }

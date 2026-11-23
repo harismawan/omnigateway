@@ -284,6 +284,7 @@ fn to_result(token: Token, device: &KimiDevice, fallback: Option<&str>, now: f64
             .map(JsValue::String)
             .or_else(|| fallback.map(|s| JsValue::String(s.encode_utf16().collect()))),
         id_token: None,
+        api_key: None,
         expires_at: token.expires_in.map(|n| now + n * 1000.0),
         account_email: token.email.map(JsValue::String),
         provider_data: device.map(),

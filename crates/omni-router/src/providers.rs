@@ -126,7 +126,9 @@ impl Providers {
         let mut antigravity = descriptor(all, &["gemini-"]);
         antigravity.catalog = catalog("antigravity");
         p.register("antigravity", antigravity);
-        p.register("muse", descriptor(all, &["muse-", "muse-spark"]));
+        let mut muse = descriptor(all, &["muse-", "muse-spark"]);
+        muse.catalog = catalog("muse");
+        p.register("muse", muse);
         p.register("qoder", descriptor(all, &[]));
         p.register("custom", descriptor(all, &[]));
         p

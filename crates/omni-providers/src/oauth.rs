@@ -85,6 +85,10 @@ pub struct FlowResult {
     pub provider_data: serde_json::Map<String, Value>,
     pub access_token: Vec<u16>,
     pub refresh_token: Option<omni_ir::jsjson::JsValue>,
+    /// A provider-minted inference key (muse): the OAuth grant buys this key,
+    /// and the key is what the inference host accepts. Lossless UTF-16 like
+    /// `access_token`; `None` for flows that mint nothing.
+    pub api_key: Option<Vec<u16>>,
     pub expires_at: Option<f64>,
     pub account_email: Option<omni_ir::jsjson::JsValue>,
 }
@@ -95,6 +99,7 @@ impl Clone for FlowResult {
             provider_data: omni_ir::deep::clone_map(&self.provider_data),
             access_token: self.access_token.clone(),
             refresh_token: self.refresh_token.clone(),
+            api_key: self.api_key.clone(),
             expires_at: self.expires_at,
             account_email: self.account_email.clone(),
         }

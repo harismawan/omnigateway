@@ -237,7 +237,7 @@ impl Quota {
         if c.auth_type != AuthType::OAuth
             || !matches!(
                 c.provider.as_str(),
-                "openai" | "anthropic" | "antigravity" | "kimi"
+                "openai" | "anthropic" | "antigravity" | "kimi" | "muse"
             )
         {
             return json!({"kind":"unsupported","credentialId":id});

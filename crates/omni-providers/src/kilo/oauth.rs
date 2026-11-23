@@ -179,6 +179,7 @@ pub fn poll_result(status: u16, text: &str) -> Result<FlowResult, DeviceError> {
         // cannot work.
         refresh_token: None,
         id_token: None,
+        api_key: None,
         expires_at: None,
         account_email: string_from(&body, "userEmail").map(|s| JsValue::String(s.clone())),
         provider_data: serde_json::Map::new(),

@@ -171,6 +171,11 @@ const ALLOW: &[(&str, &str, &str)] = &[
         "non-JSON collection: scalar indices, strings, or shallow typed entries",
     ),
     (
+        "omni-providers/src/muse/wire.rs",
+        "input.insert(i + 1, output);",
+        "Vec<Value> insertion moves elements, including deep JSON; nothing is displaced",
+    ),
+    (
         "omni-providers/src/custom/decode/responses.rs",
         "self.indices.insert(key, assigned);",
         "non-JSON collection: scalar indices, strings, or shallow typed entries",

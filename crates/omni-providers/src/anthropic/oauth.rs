@@ -118,6 +118,7 @@ pub fn token_result(
         })?;
     Ok(FlowResult {
         id_token: None,
+        api_key: None,
         provider_data: serde_json::Map::new(),
         access_token: access.clone(),
         refresh_token: present(get(&body, "refresh_token"))

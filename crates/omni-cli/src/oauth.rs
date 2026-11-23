@@ -69,7 +69,7 @@ pub fn connect(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
         .ok_or((2, "provider is required".into()))?;
     if !matches!(
         provider.as_str(),
-        "openai" | "anthropic" | "antigravity" | "kimi" | "kilo" | "grok"
+        "openai" | "anthropic" | "antigravity" | "kimi" | "kilo" | "grok" | "muse"
     ) {
         return Err((
             2,
@@ -91,7 +91,7 @@ pub fn connect(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
             return Err((1, "BAD_REQUEST: invalid credential for reconnect".into()));
         }
     }
-    let result = if provider == "kimi" || provider == "kilo" {
+    let result = if provider == "kimi" || provider == "kilo" || provider == "muse" {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -275,6 +275,10 @@ pub fn connect(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
             .refresh_token
             .as_ref()
             .map(|v| omni_crypto::field::encrypt(&key, &text(v)));
+        let api_key = result
+            .api_key
+            .as_ref()
+            .map(|v| omni_crypto::field::encrypt(&key, &String::from_utf16_lossy(v)));
         let id_token = result
             .id_token
             .as_ref()
@@ -285,7 +289,7 @@ pub fn connect(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
             &result.provider_data,
         )));
         let at = now();
-        s.connection().execute("INSERT INTO credentials(id,provider,label,auth_type,enabled,tier,weight,access_token,refresh_token,api_key,id_token,expires_at,account_email,provider_data,disabled_reason,disabled_at,created_at,updated_at) VALUES(?,?,?,'oauth',1,1,1,?,?,NULL,?,?,?,?,NULL,NULL,?,?)",rusqlite::params![id,provider,label,access,refresh,id_token,result.expires_at,email,data,at,at]).map_err(error)?;
+        s.connection().execute("INSERT INTO credentials(id,provider,label,auth_type,enabled,tier,weight,access_token,refresh_token,api_key,id_token,expires_at,account_email,provider_data,disabled_reason,disabled_at,created_at,updated_at) VALUES(?,?,?,'oauth',1,1,1,?,?,?,?,?,?,?,NULL,NULL,?,?)",rusqlite::params![id,provider,label,access,refresh,api_key,id_token,result.expires_at,email,data,at,at]).map_err(error)?;
     } else {
         // Reconnect deliberately keeps the secrets-write / metadata-write boundary.
         persist(&s, &key, &id, &empty, &result, None)?;
@@ -311,6 +315,12 @@ async fn device_connect(provider: &str, json: bool) -> Result<FlowResult> {
         #[allow(clippy::cast_precision_loss)]
         let at = now() as f64;
         kilo::begin_result(response.0, &response.1, at).map_err(gateway)?
+    } else if provider == "muse" {
+        // Muse mints no client identity and needs no PKCE pair: begin is one
+        // form POST carrying only the public client id.
+        use omni_providers::muse::oauth as muse;
+        let response = send(&client, provider, muse::begin_request(), "begin").await?;
+        muse::begin_result(response.0, &response.1).map_err(gateway)?
     } else {
         use omni_providers::kimi::oauth as kimi;
         let initial = kimi::start();
@@ -338,6 +348,24 @@ async fn device_connect(provider: &str, json: bool) -> Result<FlowResult> {
             let request = kilo::exchange_request(&start.pending, at).map_err(gateway)?;
             let response = send(&client, provider, request, "exchange").await?;
             kilo::poll_result(response.0, &response.1)
+        } else if provider == "muse" {
+            use omni_providers::muse::oauth as muse;
+            let request = muse::exchange_request(&start.pending).map_err(gateway)?;
+            let response = send(&client, provider, request, "exchange").await?;
+            match muse::poll_token(response.0, &response.1) {
+                Ok(token) => {
+                    // Only reached once the operator has approved, so a mint
+                    // failure is a fact about the account, not a pending step.
+                    let access = String::from_utf16_lossy(&token.access_token);
+                    let (status, text) =
+                        send(&client, provider, muse::mint_request(&access), "exchange").await?;
+                    #[allow(clippy::cast_precision_loss)]
+                    let at = now() as f64;
+                    muse::exchange_result(token, status, &text, None, at)
+                        .map_err(omni_providers::oauth::DeviceError::Gateway)
+                }
+                Err(e) => Err(e),
+            }
         } else {
             use omni_providers::kimi::oauth as kimi;
             let (request, device) = kimi::exchange_request(&start.pending).map_err(gateway)?;
@@ -505,6 +533,7 @@ fn persist(
     let seal = |v: Option<String>| v.map(|v| omni_crypto::field::encrypt(key, &v));
     let access = seal(Some(String::from_utf16_lossy(&result.access_token)));
     let refresh = seal(result.refresh_token.as_ref().map(text));
+    let api_key = seal(result.api_key.as_ref().map(|s| String::from_utf16_lossy(s)));
     let id_token = seal(
         result
             .id_token
@@ -512,9 +541,9 @@ fn persist(
             .map(|s| String::from_utf16_lossy(s)),
     );
     let written = if let Some(version) = expected {
-        s.connection().execute("UPDATE credentials SET access_token=?,refresh_token=?,api_key=NULL,id_token=?,expires_at=?,updated_at=?,token_version=token_version+1 WHERE id=? AND token_version=?",rusqlite::params![access,refresh,id_token,result.expires_at,now(),id,version])
+        s.connection().execute("UPDATE credentials SET access_token=?,refresh_token=?,api_key=?,id_token=?,expires_at=?,updated_at=?,token_version=token_version+1 WHERE id=? AND token_version=?",rusqlite::params![access,refresh,api_key,id_token,result.expires_at,now(),id,version])
     } else {
-        s.connection().execute("UPDATE credentials SET access_token=?,refresh_token=?,api_key=NULL,id_token=?,expires_at=?,updated_at=?,token_version=token_version+1 WHERE id=?",rusqlite::params![access,refresh,id_token,result.expires_at,now(),id])
+        s.connection().execute("UPDATE credentials SET access_token=?,refresh_token=?,api_key=?,id_token=?,expires_at=?,updated_at=?,token_version=token_version+1 WHERE id=?",rusqlite::params![access,refresh,api_key,id_token,result.expires_at,now(),id])
     }.map_err(error)?;
     if expected.is_some() && written == 0 {
         // CAS loser opens the winning row's secrets, never writes stale metadata.
@@ -666,6 +695,7 @@ pub fn refresh(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
         "anthropic" => omni_providers::anthropic::oauth::refresh_request(&token),
         "antigravity" => omni_providers::antigravity::oauth::refresh_request(&token),
         "grok" => omni_providers::grok::oauth::discovery_request(),
+        "muse" => omni_providers::muse::oauth::refresh_request(&token),
         "kimi" => omni_providers::kimi::oauth::refresh_request(
             &token,
             kimi_device
@@ -708,6 +738,22 @@ pub fn refresh(flags: &HashMap<String, String>, args: &[String]) -> Result<Strin
                 at,
             )
             .map_err(gateway)?
+        } else if provider == "muse" {
+            // Two requests: the refresh grant, then the key mint spent on the
+            // NEW access token. The old refresh token is the fallback.
+            use omni_providers::muse::oauth as muse;
+            let grant = muse::refresh_token_result(response.0, &response.1).map_err(gateway)?;
+            let access = String::from_utf16_lossy(&grant.access_token);
+            let (status, text) = send(
+                &Client::new(),
+                &provider,
+                muse::mint_request(&access),
+                "refresh",
+            )
+            .await?;
+            #[allow(clippy::cast_precision_loss)]
+            let at = now() as f64;
+            muse::exchange_result(grant, status, &text, Some(&token), at).map_err(gateway)?
         } else if provider == "kimi" {
             #[allow(clippy::cast_precision_loss)]
             let at = now() as f64;

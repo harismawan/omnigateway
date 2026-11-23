@@ -289,6 +289,7 @@ pub fn token_result(
             .map(JsValue::String)
             .or_else(|| fallback_refresh.map(|s| JsValue::String(s.encode_utf16().collect()))),
         id_token,
+        api_key: None,
         expires_at: expires_in.map(|n| now + n * 1000.0),
         account_email: email.map(JsValue::String),
         provider_data,

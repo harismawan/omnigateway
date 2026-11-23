@@ -17,6 +17,7 @@ pub mod http;
 pub mod http_error;
 pub mod kilo;
 pub mod kimi;
+pub mod muse;
 pub mod oauth;
 pub mod openai;
 pub mod response_format;

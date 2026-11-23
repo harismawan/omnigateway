@@ -6,6 +6,7 @@ fn result(value: Value) -> FlowResult {
         provider_data: serde_json::Map::from_iter([("deep".into(), value)]),
         access_token: vec![97],
         refresh_token: None,
+        api_key: None,
         expires_at: Some(1.0),
         account_email: None,
     }

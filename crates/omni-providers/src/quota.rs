@@ -36,6 +36,16 @@ pub fn request(
             http: crate::kimi::oauth::usage_request(token, &device),
         });
     }
+    if (provider, operation) == ("muse", "usage") {
+        // The mint is the only endpoint that carries `subs_usage`, so the
+        // probe is a mint — a read of the account's existing key, not an
+        // issue of a new one. The returned key is deliberately dropped:
+        // `usage` has no channel to persist one.
+        return Some(QuotaRequest {
+            timeout: std::time::Duration::from_secs(15),
+            http: crate::muse::oauth::mint_request(token),
+        });
+    }
     let url = match (provider, operation) {
         ("openai", "usage") => "https://chatgpt.com/backend-api/wham/usage".into(),
         ("openai", "list") => {
@@ -103,7 +113,7 @@ pub fn request(
 fn encode(v: &Value) -> String {
     omni_ir::jsjson::to_string(v)
 }
-fn num(v: &Value, keys: &[&str]) -> Option<f64> {
+pub(crate) fn num(v: &Value, keys: &[&str]) -> Option<f64> {
     keys.iter().find_map(|k| {
         v[k].as_f64()
             .or_else(|| {
@@ -126,6 +136,41 @@ fn date(v: &Value) -> Option<f64> {
     }
 }
 fn window(v: &Value, kind: &str, now: f64) -> Option<Value> {
+    let seconds = num(
+        v,
+        &[
+            "limit_window_seconds",
+            "limitWindowSeconds",
+            "window_seconds",
+            "windowSeconds",
+        ],
+    )
+    .filter(|n| *n > 0.0);
+    let kind = seconds.map_or(kind, |s| {
+        if s <= 21600.0 {
+            "fiveHour"
+        } else if s <= 129600.0 {
+            "daily"
+        } else {
+            "weekly"
+        }
+    });
+    window_from(v, kind, now, seconds.map(|s| s * 1000.0))
+}
+/// `windowFrom`: one provider window object as a report. `window_ms` is
+/// passed in rather than read here because only the caller knows where its
+/// provider states a duration — the key differs per payload, and most
+/// providers state none. `kind` is not re-derived from it.
+pub(crate) fn window_from(
+    v: &Value,
+    kind: &str,
+    now: f64,
+    window_ms: Option<f64>,
+) -> Option<Value> {
+    // `recordOf`: arrays excluded.
+    if !v.is_object() {
+        return None;
+    }
     let used = num(v, &["used", "used_units", "usage", "consumed"]);
     let limit = num(v, &["limit", "limit_units", "total", "quota", "allowed"]);
     let (used, limit) = if let Some(n) = used {
@@ -175,30 +220,18 @@ fn window(v: &Value, kind: &str, now: f64) -> Option<Value> {
         )
         .map(|n| now + (n * 1000.0).round())
     });
-    let seconds = num(
-        v,
-        &[
-            "limit_window_seconds",
-            "limitWindowSeconds",
-            "window_seconds",
-            "windowSeconds",
-        ],
-    )
-    .filter(|n| *n > 0.0);
-    let kind = seconds.map_or(kind, |s| {
-        if s <= 21600.0 {
-            "fiveHour"
-        } else if s <= 129600.0 {
-            "daily"
-        } else {
-            "weekly"
-        }
-    });
-    Some(
-        json!({"windowType":kind,"used":used,"limit":limit,"resetsAt":reset,"windowMs":seconds.map(|s|s*1000.0)}),
-    )
+    Some(json!({"windowType":kind,"used":used,"limit":limit,"resetsAt":reset,"windowMs":window_ms}))
 }
 pub fn usage(provider: &str, v: &Value, now: f64) -> Vec<Value> {
+    if provider == "muse" {
+        // `subs_usage` is absent on an account with no active subscription —
+        // a pay-as-you-go key gets no usage — so an empty report is the
+        // ordinary answer for those, and the account reads as unknown.
+        if !v.is_object() {
+            return Vec::new();
+        }
+        return crate::muse::oauth::parse_usage(v.get("subs_usage").unwrap_or(&Value::Null), now);
+    }
     if provider == "kimi" {
         // One plan window under `usage`, counters as strings. The sibling
         // `limits` array is per-minute burst ceilings, not the plan window:
