@@ -20,6 +20,7 @@ pub mod kimi;
 pub mod muse;
 pub mod oauth;
 pub mod openai;
+pub mod qoder;
 pub mod response_format;
 pub mod sse;
 pub mod system;

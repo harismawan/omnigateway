@@ -305,6 +305,10 @@ impl Refresher {
             // not issue refresh tokens today, so this path is kept for the
             // day it does rather than reached by the expiry sweep.
             muse_refresh(self, token).await
+        } else if c.provider == "qoder" {
+            // The refresh grant, then the finish chain: userinfo, endpoint
+            // election and the signed model listing, under one runner.
+            qoder_refresh(self, c, token).await
         } else {
             let request = match c.provider.as_str() {
                 "anthropic" => omni_providers::anthropic::oauth::refresh_request(token),
@@ -524,6 +528,41 @@ async fn muse_refresh(
     #[allow(clippy::cast_precision_loss)]
     let now = (host.now)() as f64;
     omni_providers::muse::oauth::exchange_result(grant, status, &text, Some(token), now)
+}
+/// qoder's multi-step refresh: the refresh grant, then userinfo, endpoint
+/// election and the signed model listing. The stored providerData seeds the
+/// last-good origin and catalog when a transient failure would lose them.
+async fn qoder_refresh(
+    host: &Refresher,
+    c: &Credential,
+    token: &str,
+) -> std::result::Result<omni_providers::oauth::FlowResult, GatewayError> {
+    let (request, machine_id) =
+        omni_providers::qoder::oauth::refresh_request(token, c.provider_data.as_object())?;
+    let mut runner = crate::oauth_runner::ExchangeRunner::new(
+        host.http.as_ref(),
+        crate::oauth_runner::ExchangeConfig {
+            provider: "qoder",
+            step: "refresh",
+            max_requests: 5,
+            origins: crate::oauth_runner::Origins::Allowlist(
+                omni_providers::qoder::oauth::AUTH_ORIGINS,
+            ),
+        },
+    );
+    let response = runner.send(request, 30).await?;
+    let merged =
+        omni_providers::qoder::oauth::refresh_token_result(response.0, &response.1, token)?;
+    #[allow(clippy::cast_precision_loss)]
+    let now = (host.now)() as f64;
+    let state = omni_providers::oauth::random_state();
+    let previous = c
+        .provider_data
+        .as_object()
+        .map(omni_ir::deep::clone_map)
+        .unwrap_or_default();
+    omni_providers::qoder::oauth::finish(&mut runner, &merged, &machine_id, now, &state, &previous)
+        .await
 }
 // The sweep timer keeps its phase; callbacks while `running` simply return.
 fn next_sweep(previous: tokio::time::Instant, now: tokio::time::Instant) -> tokio::time::Instant {

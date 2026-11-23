@@ -111,6 +111,20 @@ impl Drop for FlowResult {
     }
 }
 
+/// The boxed answer of one [`AuthExchange::exchange`] call: status and body.
+pub type ExchangeFuture<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<(u16, String), GatewayError>> + Send + 'a>,
+>;
+
+/// A bounded request channel a multi-step flow drives from the provider
+/// crate. The host implements it (origin allowlist, request cap, deadline
+/// ceiling); the flow only describes requests and reads answers, exactly as
+/// a codec does for inference. `seconds` is the flow's own deadline for the
+/// call, clamped by the host.
+pub trait AuthExchange: Send {
+    fn exchange<'a>(&'a mut self, request: AuthRequest, seconds: u64) -> ExchangeFuture<'a>;
+}
+
 pub fn token_error(status: u16, body: &Value) -> GatewayError {
     let code = match status {
         429 => ErrorCode::RateLimit,

@@ -1434,3 +1434,189 @@ async fn muse_retryable_failure_before_commit_fails_over() {
     }
     flush(h).await;
 }
+
+// --- qoder: the Cosy-signed, body-encoded chat wire -------------------------
+// The credential's accessToken is the JSON bundle the device flow mints; the
+// codec Cosy-signs every request from it, so the fake upstream only records
+// the request shape and answers a plain Chat Completions SSE stream.
+
+const QODER_BUNDLE: &str = r#"{"version":1,"deviceToken":"device-token","uid":"u1","machineId":"machine-1","encryptUserInfo":"ZW5jcnlwdGVk","key":"0123456789abcdef","origin":"https://api2.qoder.sh","models":[{"key":"synthetic","displayName":"Synthetic","images":true,"reasoning":false,"maxInputTokens":1234}],"issuedAt":1700000000000}"#;
+const QODER_CHAT_URL: &str = "https://api2.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1";
+
+fn qoder_fixture(f: &Fixture) {
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute(
+        "UPDATE credentials SET provider='qoder',auth_type='oauth',access_token=?,provider_data='{}'",
+        [omni_crypto::field::encrypt(&key(), QODER_BUNDLE)],
+    )
+    .expect("provider");
+}
+
+#[tokio::test]
+async fn qoder_registered_codec_dispatches_the_cosy_stream() {
+    let f = fixture(&["c0"]);
+    qoder_fixture(&f);
+    let h = harness(&f, vec![sse_ok(2)]);
+    // The router catalog is deliberately empty: `provider/model` shorthand
+    // resolves against the registered provider, and the bundle carries the
+    // model metadata the wire needs.
+    let mut d = dispatch(h.deps.clone(), req("qoder/synthetic"));
+    let events = drain(&mut d).await;
+    assert!(matches!(events.first(), Some(StreamEvent::Start { .. })));
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    let log = d.log.lock().expect("log").clone();
+    assert_eq!(
+        (
+            log.status,
+            log.attempts,
+            log.input_tokens,
+            log.output_tokens
+        ),
+        (200, 1, 10, 4)
+    );
+    {
+        let calls = h.script.seen.lock().expect("seen");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].provider, "qoder");
+        assert_eq!(calls[0].url, QODER_CHAT_URL);
+        let auth = calls[0]
+            .headers
+            .iter()
+            .find(|(n, _)| n == "Authorization")
+            .map(|(_, v)| v.clone())
+            .expect("authorization");
+        assert!(auth.starts_with("Bearer COSY."), "{auth}");
+        for pair in [
+            ("Cosy-Key", "0123456789abcdef"),
+            ("Cosy-User", "u1"),
+            ("Cosy-MachineId", "machine-1"),
+            ("Cosy-MachineToken", "machine-1"),
+            ("Accept", "text/event-stream"),
+        ] {
+            assert!(
+                calls[0]
+                    .headers
+                    .contains(&(pair.0.to_owned(), pair.1.to_owned())),
+                "{pair:?} missing from {:?}",
+                calls[0].headers
+            );
+        }
+        // The body is Cosy-encoded, not plaintext JSON.
+        assert!(serde_json::from_str::<serde_json::Value>(&calls[0].body).is_err());
+        let decoded = omni_crypto::qoder::decode_body(&calls[0].body).expect("decoded");
+        let sent: serde_json::Value = serde_json::from_str(&decoded).expect("body");
+        assert_eq!(sent["stream"], true);
+        assert_eq!(sent["model_config"]["key"], "synthetic");
+        assert_eq!(sent["model_config"]["display_name"], "Synthetic");
+        assert_eq!(sent["model_config"]["max_input_tokens"], 1234);
+        // Text-only content travels as a plain string on this wire.
+        assert_eq!(sent["messages"][0]["content"], "hi");
+    }
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn qoder_non_streaming_client_is_served_by_collecting_the_stream() {
+    let f = fixture(&["c0"]);
+    qoder_fixture(&f);
+    let h = harness(&f, vec![sse_ok(1)]);
+    let request = Request {
+        request: chat("qoder/synthetic", false),
+        request_id: "req_t".into(),
+        api_key_id: Some("k1".into()),
+        route_started_at: 1_000,
+    };
+    let mut d = dispatch(h.deps.clone(), request);
+    let events = drain(&mut d).await;
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    {
+        let calls = h.script.seen.lock().expect("seen");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].url, QODER_CHAT_URL);
+        let decoded = omni_crypto::qoder::decode_body(&calls[0].body).expect("decoded");
+        let sent: serde_json::Value = serde_json::from_str(&decoded).expect("body");
+        // The request going out streams either way; the host collects it.
+        assert_eq!(sent["stream"], true);
+    }
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn qoder_exceed_quota_mid_stream_is_rate_limit_without_failover() {
+    let f = fixture(&["c0", "c1"]);
+    qoder_fixture(&f);
+    let h = harness(
+        &f,
+        vec![
+            Reply::Http(
+                200,
+                vec![("content-type".into(), "text/event-stream".into())],
+                vec![
+                    "data: {\"id\":\"u1\",\"model\":\"up\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n".into(),
+                    "data: [EXCEED_QUOTA]\n\n".into(),
+                ],
+            ),
+            sse_ok(1),
+        ],
+    );
+    let mut d = dispatch(h.deps.clone(), req("qoder/synthetic"));
+    let events = drain(&mut d).await;
+    // The delta committed the attempt: the quota sentinel is an in-stream
+    // error, not a failover to the second credential.
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::BlockDelta { .. }))
+    );
+    match events.last() {
+        Some(StreamEvent::Error { code, message, .. }) => {
+            assert_eq!(*code, ErrorCode::RateLimit);
+            assert_eq!(message, "Qoder quota exceeded");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(h.script.calls(), 1);
+    let log = d.log.lock().expect("log").clone();
+    assert_eq!(
+        (log.status, log.error_code.as_deref()),
+        (429, Some("RATE_LIMIT"))
+    );
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn qoder_retryable_failure_before_commit_fails_over() {
+    let f = fixture(&["c0", "c1"]);
+    set_setting(&f.path, "routingStrategy", "\"priority\"");
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute(
+        "UPDATE credentials SET provider='qoder',auth_type='oauth',access_token=?,provider_data='{}',tier=CASE id WHEN 'c0' THEN 1 ELSE 2 END",
+        [omni_crypto::field::encrypt(&key(), QODER_BUNDLE)],
+    )
+    .expect("provider");
+    let h = harness(
+        &f,
+        vec![status(500, "{\"error\":{\"message\":\"boom\"}}"), sse_ok(1)],
+    );
+    let mut d = dispatch(h.deps.clone(), req("qoder/synthetic"));
+    let events = drain(&mut d).await;
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    let log = d.log.lock().expect("log").clone();
+    assert_eq!((log.status, log.attempts), (200, 2));
+    assert_eq!(log.credential_id.as_deref(), Some("c1"));
+    {
+        let calls = h.script.seen.lock().expect("seen");
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|c| c.provider == "qoder"));
+    }
+    flush(h).await;
+}

@@ -22,6 +22,7 @@ const PROVIDERS: &[(&str, &str)] = &[
     ("kilo", ""),
     ("grok", "http://127.0.0.1:56121/callback"),
     ("muse", ""),
+    ("qoder", ""),
 ];
 fn bad(s: &str) -> GatewayError {
     GatewayError::new(ErrorCode::BadRequest, s)
@@ -295,6 +296,30 @@ impl ConnectFlows {
                 .store_flow(provider, label, credential, &start, "pkce", true)
                 .await;
         }
+        if *provider == "qoder" {
+            // Local begin: PKCE and a synthetic machine identity, zero HTTP.
+            // A reconnect keeps the identity the credential was minted with.
+            let prior = if let Some(id) = &credential {
+                app.deps
+                    .refresher
+                    .store
+                    .credential(&app.credential_key, id)
+                    .await
+                    .map_err(|_| internal())?
+                    .map(|c| c.provider_data)
+            } else {
+                None
+            };
+            #[allow(clippy::cast_precision_loss)]
+            let now = (app.deps.refresher.now)() as f64;
+            let start = omni_providers::qoder::oauth::begin(
+                prior.as_ref().and_then(serde_json::Value::as_object),
+                now,
+            );
+            return self
+                .store_flow(provider, label, credential, &start, "device", false)
+                .await;
+        }
         let (verifier, challenge) = omni_providers::oauth::pkce();
         let state = omni_providers::oauth::random_state();
         let start = if *provider == "openai" {
@@ -561,6 +586,41 @@ async fn device_exchange(
             Ok(omni_providers::muse::oauth::exchange_result(
                 token, status, &text, None, now,
             )?)
+        }
+        "qoder" => {
+            #[allow(clippy::cast_precision_loss)]
+            let now = (host.now)() as f64;
+            let (request, machine_id) =
+                omni_providers::qoder::oauth::exchange_request(pending, now)?;
+            // Five requests at most: the poll, userinfo, endpoint election
+            // (v5 plus the anonymous v3 fallback) and the signed model list.
+            let mut runner = crate::oauth_runner::ExchangeRunner::new(
+                host.http.as_ref(),
+                crate::oauth_runner::ExchangeConfig {
+                    provider: "qoder",
+                    step: "exchange",
+                    max_requests: 5,
+                    origins: crate::oauth_runner::Origins::Allowlist(
+                        omni_providers::qoder::oauth::AUTH_ORIGINS,
+                    ),
+                },
+            );
+            let response = runner.send(request, 15).await?;
+            let token = omni_providers::qoder::oauth::poll_result(response.0, &response.1)?;
+            let state = omni_providers::oauth::random_state();
+            // A first exchange carries no previous state, reconnect or not:
+            // the TS flow passes `{}` here and providerData only on refresh.
+            let previous = serde_json::Map::new();
+            omni_providers::qoder::oauth::finish(
+                &mut runner,
+                &token,
+                &machine_id,
+                now,
+                &state,
+                &previous,
+            )
+            .await
+            .map_err(DeviceError::Gateway)
         }
         #[cfg(test)]
         "device-fixture" => tests::device_fixture(host, pending, prior).await,
@@ -4147,5 +4207,797 @@ mod tests {
             "authorization not yet complete: authorization_pending"
         );
         assert_eq!(http.requests().len(), 1);
+    }
+
+    // --- qoder local-begin device flow ---------------------------------------
+    // Mirrors control/test/oauth/qoder.test.ts against the real host wiring:
+    // the zero-HTTP begin, the 404 poll, the local deadline, the finish chain
+    // (userinfo cross-check, v5→v3 election, signed listing), the bounded
+    // runner, and the refresh that carries the machine identity. `KiloStub`
+    // is the shared sequence stub: an unexpected extra request panics.
+
+    const QODER_NOW: f64 = 1_000_000.0;
+    const QODER_CLIENT_ID: &str = "e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb";
+    const QODER_POLL_URL: &str = "https://openapi.qoder.sh/api/v1/deviceToken/poll?nonce=nonce-1&verifier=qoder-verifier&challenge_method=S256";
+    const QODER_FLOW: &str = r#"{"provider":"qoder","label":"qoder","pending":{"verifier":"qoder-verifier","challenge":"qoder-challenge","state":"nonce-1","redirectUri":"","deviceCode":"","interval":1,"extra":{"machineId":"synthetic-stable","deadline":1300000}}}"#;
+    const QODER_EXPIRED_FLOW: &str = r#"{"provider":"qoder","label":"qoder","pending":{"verifier":"qoder-verifier","challenge":"qoder-challenge","state":"nonce-1","redirectUri":"","deviceCode":"","interval":1,"extra":{"machineId":"synthetic-stable","deadline":999999}}}"#;
+    const QODER_TOKEN: &str = r#"{"token":"dummy-token","user_id":"u1","user_name":"Synthetic","refresh_token":"dummy-refresh","expires_in":3600}"#;
+    const QODER_USER: &str = r#"{"id":"u1","name":"Synthetic","email":"synthetic@example.test"}"#;
+    const QODER_ENDPOINTS: &str = r#"{"inferNodes":[{"url":"https://evil.test"},{"url":"https://api2.qoder.sh","type":"public"}]}"#;
+    const QODER_MODELS: &str = r#"{"assistant":[{"key":"synthetic","display_name":"Synthetic","is_vl":true,"max_input_tokens":1234}]}"#;
+    /// The providerData a successful first exchange writes, reused as the
+    /// stored last-good state on the refresh path.
+    const QODER_DATA: &str = r#"{"machineId":"synthetic-stable","uid":"u1","inferenceOrigin":"https://api2.qoder.sh","catalogStatus":"available","modelCatalog":{"version":1,"models":[{"id":"synthetic","name":"Synthetic","pricing":null,"limits":{"contextWindow":1234}}]},"inferenceModels":[{"key":"synthetic","display_name":"Synthetic","is_vl":true,"is_reasoning":false,"max_input_tokens":1234}]}"#;
+
+    fn qoder_login() -> Vec<KiloReply> {
+        vec![
+            KiloReply::Response(200, QODER_TOKEN),
+            KiloReply::Response(200, QODER_USER),
+            KiloReply::Response(200, QODER_ENDPOINTS),
+            KiloReply::Response(200, QODER_MODELS),
+        ]
+    }
+
+    fn qoder_bundle(access: Option<&str>) -> omni_providers::qoder::credential::Bundle {
+        omni_providers::qoder::credential::parse(access.expect("access token")).expect("bundle")
+    }
+
+    #[tokio::test]
+    async fn qoder_begin_is_local_and_binds_pkce_and_identity() {
+        // `begin` takes no transport at all: the browser URL is minted
+        // locally, so a connect start cannot reach the network before the
+        // operator acts. A reconnect keeps the stored machine identity.
+        let prior = serde_json::json!({"machineId":"synthetic-stable"});
+        let start = omni_providers::qoder::oauth::begin(prior.as_object(), QODER_NOW);
+        let url = url::Url::parse(&start.authorize_url).expect("url");
+        assert_eq!(
+            format!("{}{}", url.origin().ascii_serialization(), url.path()),
+            "https://qoder.com/device/selectAccounts"
+        );
+        let param = |name: &str| {
+            url.query_pairs()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.into_owned())
+        };
+        assert_eq!(
+            param("challenge").as_deref(),
+            Some(start.pending.challenge.as_str())
+        );
+        assert_eq!(param("challenge_method").as_deref(), Some("S256"));
+        assert_eq!(param("client_id").as_deref(), Some(QODER_CLIENT_ID));
+        assert_eq!(param("machine_id").as_deref(), Some("synthetic-stable"));
+        assert!(param("machine_token").is_none());
+        let nonce = param("nonce").expect("nonce");
+        assert_eq!(nonce, start.pending.state);
+        // UUIDv4 shape: version nibble 4, variant nibble 8..b.
+        assert_eq!(nonce.len(), 36);
+        assert_eq!(nonce.as_bytes()[14], b'4');
+        assert!(matches!(nonce.as_bytes()[19], b'8'..=b'b'));
+        assert_eq!(start.pending.interval, Some(1.0));
+        assert_eq!(start.user_code, None);
+        assert_eq!(
+            start
+                .pending
+                .extra
+                .get("deadline")
+                .and_then(serde_json::Value::as_f64),
+            Some(QODER_NOW + 300_000.0)
+        );
+        // A first connect mints a fresh identity instead of demanding one.
+        let fresh = omni_providers::qoder::oauth::begin(None, QODER_NOW);
+        let minted = fresh
+            .pending
+            .extra
+            .get("machineId")
+            .and_then(serde_json::Value::as_str)
+            .expect("minted");
+        assert_eq!(minted.len(), 36);
+        assert!(
+            url::Url::parse(&fresh.authorize_url)
+                .expect("url")
+                .query_pairs()
+                .any(|(k, v)| k == "machine_id" && v == minted)
+        );
+
+        let flows = ConnectFlows::default();
+        let reply = flows
+            .store_flow("qoder", string("qoder"), None, &start, "device", false)
+            .await
+            .expect("reply");
+        let value: serde_json::Value = serde_json::from_str(&reply).expect("json");
+        assert_eq!(value["kind"], "device");
+        assert_eq!(value["userCode"], serde_json::Value::Null);
+        assert_eq!(value["supportsManualPaste"], false);
+        assert_eq!(value["pollIntervalMs"], 1000);
+        let flow = flows
+            .pending(value["flowId"].as_str().expect("id"), false)
+            .await
+            .expect("stored");
+        // The empty device code is the marker the host keys device flows on.
+        assert!(device_flow(&flow));
+        let pending = pending_value(&flow).expect("pending");
+        assert_eq!(pending.device_code.as_deref(), Some(""));
+        assert_eq!(
+            pending
+                .extra
+                .get("machineId")
+                .and_then(serde_json::Value::as_str),
+            Some("synthetic-stable")
+        );
+    }
+
+    #[tokio::test]
+    async fn qoder_poll_404_is_pending_and_keeps_flow() {
+        let http = KiloStub::new(vec![
+            KiloReply::Response(404, "{}"),
+            KiloReply::Response(404, "{}"),
+        ]);
+        let (_dir, host, holder, flows) = kilo_harness(http.clone(), QODER_FLOW).await;
+        let error = flows
+            .poll(host.clone(), holder.clone(), "dev".into())
+            .await
+            .expect_err("pending");
+        assert_eq!(error.message, PENDING_MARKER);
+        assert_eq!(
+            poll_reply(Err(error)).expect("reply"),
+            r#"{"status":"pending"}"#
+        );
+        let sent = http.requests();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].url, QODER_POLL_URL);
+        assert_eq!(sent[0].method, "GET");
+        // The poll is anonymous: the verifier rides the query, not a bearer.
+        assert!(
+            !sent[0]
+                .headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+        );
+        assert!(flows.pending("dev", false).await.is_ok());
+        // A second poll runs a fresh exchange against the kept flow.
+        let again = flows
+            .poll(host, holder, "dev".into())
+            .await
+            .expect_err("pending");
+        assert_eq!(again.message, PENDING_MARKER);
+        assert_eq!(http.requests().len(), 2);
+        assert!(flows.pending("dev", false).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn qoder_poll_past_deadline_is_terminal_before_http() {
+        // The stub panics on any request: the expiry pre-check must answer
+        // without touching the transport, and the flow is consumed.
+        let http = KiloStub::new(Vec::new());
+        let (_dir, host, holder, flows) = kilo_harness(http.clone(), QODER_EXPIRED_FLOW).await;
+        let error = flows
+            .poll(host, holder, "dev".into())
+            .await
+            .expect_err("expired");
+        assert_eq!(error.code, ErrorCode::Auth);
+        assert_eq!(error.message, "Qoder authorization expired");
+        assert!(poll_reply(Err(error)).is_err());
+        assert!(http.requests().is_empty());
+        assert!(flows.pending("dev", false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn qoder_approved_poll_persists_bundle_and_public_catalog() {
+        let http = KiloStub::new(qoder_login());
+        let (_dir, host, holder, flows) = kilo_harness(http.clone(), QODER_FLOW).await;
+        let id = flows
+            .poll(host.clone(), holder.clone(), "dev".into())
+            .await
+            .expect("approved");
+        assert_eq!(
+            poll_reply(Ok(id.clone())).expect("reply"),
+            serde_json::json!({"status":"complete","id":id}).to_string()
+        );
+        let sent = http.requests();
+        assert_eq!(sent.len(), 4);
+        assert_eq!(sent[0].url, QODER_POLL_URL);
+        assert_eq!(sent[1].url, "https://openapi.qoder.sh/api/v1/userinfo");
+        assert!(
+            sent[1]
+                .headers
+                .contains(&("Authorization".to_owned(), "Bearer dummy-token".to_owned()))
+        );
+        assert_eq!(
+            sent[2].url,
+            "https://center.qoder.sh/algo/api/v5/service/region/endpoints"
+        );
+        // The signed listing goes to the elected trusted origin, never to
+        // the untrusted candidate the endpoints reply listed first.
+        assert_eq!(
+            sent[3].url,
+            "https://api2.qoder.sh/algo/api/v2/model/list?Encode=1"
+        );
+        let rows = host.store.list_credentials(&host.key).await.expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].provider, "qoder");
+        let bundle = qoder_bundle(rows[0].secrets.access_token.as_deref());
+        assert_eq!(bundle.device_token, "dummy-token");
+        assert_eq!(bundle.uid, "u1");
+        assert_eq!(bundle.machine_id, "synthetic-stable");
+        assert_eq!(bundle.origin, "https://api2.qoder.sh");
+        assert_eq!(bundle.models.len(), 1);
+        assert_eq!(bundle.models[0].key, "synthetic");
+        assert_eq!(bundle.models[0].max_input_tokens, Some(1234.0));
+        assert!(
+            sent[3]
+                .headers
+                .iter()
+                .any(|(k, v)| k == "Authorization" && v.starts_with("Bearer COSY.")),
+            "{:?}",
+            sent[3].headers
+        );
+        assert!(
+            sent[3]
+                .headers
+                .contains(&("Cosy-Key".to_owned(), bundle.key.clone()))
+        );
+        assert!(
+            sent[3]
+                .headers
+                .contains(&("Cosy-MachineId".to_owned(), "synthetic-stable".to_owned()))
+        );
+        assert_eq!(
+            rows[0].secrets.refresh_token.as_deref(),
+            Some("dummy-refresh")
+        );
+        assert_eq!(rows[0].secrets.api_key.as_deref(), None);
+        assert_eq!(rows[0].secrets.id_token.as_deref(), None);
+        assert_eq!(
+            rows[0].account_email.as_deref(),
+            Some("synthetic@example.test")
+        );
+        assert_eq!(
+            rows[0].provider_data,
+            serde_json::from_str::<serde_json::Value>(QODER_DATA).expect("data")
+        );
+        // No secret crosses into the public providerData.
+        let public = rows[0].provider_data.to_string();
+        for secret in [
+            "dummy-token",
+            "dummy-refresh",
+            &bundle.key,
+            &bundle.encrypt_user_info,
+        ] {
+            assert!(!public.contains(secret), "{secret} leaked");
+        }
+        let connected = &holder.load().routing.credentials[0];
+        assert_eq!(connected.id, id);
+        assert_eq!(connected.expires_at, Some(QODER_NOW + 3_600_000.0));
+        assert!(flows.pending("dev", false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn qoder_uid_cross_check_refuses_mismatched_or_missing_identity() {
+        for replies in [
+            vec![
+                KiloReply::Response(200, QODER_TOKEN),
+                KiloReply::Response(200, r#"{"id":"another-user"}"#),
+            ],
+            vec![
+                KiloReply::Response(200, QODER_TOKEN),
+                KiloReply::Response(200, "{}"),
+            ],
+            vec![
+                KiloReply::Response(200, r#"{"token":"dummy-token"}"#),
+                KiloReply::Response(200, "{}"),
+            ],
+        ] {
+            let http = KiloStub::new(replies);
+            let (_dir, host, holder, flows) = kilo_harness(http.clone(), QODER_FLOW).await;
+            let error = flows
+                .poll(host, holder, "dev".into())
+                .await
+                .expect_err("identity");
+            assert_eq!(error.code, ErrorCode::Upstream);
+            assert_eq!(error.message, "Invalid Qoder account identity");
+            assert!(http.requests().len() <= 2);
+            assert!(flows.pending("dev", false).await.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn qoder_malformed_token_replies_are_upstream() {
+        for (body, message) in [
+            ("{}", "Qoder returned no device token"),
+            ("<html>", "Invalid Qoder response"),
+        ] {
+            let http = KiloStub::new(vec![KiloReply::Response(200, body)]);
+            let (_dir, host, holder, flows) = kilo_harness(http.clone(), QODER_FLOW).await;
+            let error = flows
+                .poll(host, holder, "dev".into())
+                .await
+                .expect_err("malformed");
+            assert_eq!(error.code, ErrorCode::Upstream, "{body}");
+            assert_eq!(error.message, message);
+            assert_eq!(http.requests().len(), 1);
+            assert!(flows.pending("dev", false).await.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn qoder_token_rejection_differs_from_transient_failures() {
+        for (status, code) in [
+            (401, ErrorCode::Auth),
+            (403, ErrorCode::Auth),
+            (429, ErrorCode::RateLimit),
+            (500, ErrorCode::Upstream),
+        ] {
+            let http = KiloStub::new(vec![KiloReply::Response(status, "{}")]);
+            let (_dir, host, holder, flows) = kilo_harness(http, QODER_FLOW).await;
+            let error = flows
+                .poll(host, holder, "dev".into())
+                .await
+                .expect_err("classified");
+            assert_eq!(error.code, code, "{status}");
+            assert_eq!(error.message, "Qoder device authorization failed");
+            assert_eq!(error.upstream_status, Some(status));
+            assert!(flows.pending("dev", false).await.is_err(), "{status}");
+        }
+    }
+
+    #[tokio::test]
+    async fn qoder_endpoint_denial_falls_back_to_anonymous_v3() {
+        let http = KiloStub::new(vec![
+            KiloReply::Response(200, QODER_TOKEN),
+            KiloReply::Response(200, QODER_USER),
+            KiloReply::Response(403, "{}"),
+            KiloReply::Response(
+                200,
+                r#"{"inferNodes":["https://evil.test","https://api1.qoder.sh"]}"#,
+            ),
+            KiloReply::Response(200, QODER_MODELS),
+        ]);
+        let (_dir, host, holder, flows) = kilo_harness(http.clone(), QODER_FLOW).await;
+        flows
+            .poll(host.clone(), holder, "dev".into())
+            .await
+            .expect("approved");
+        let sent = http.requests();
+        assert_eq!(sent.len(), 5);
+        assert_eq!(
+            sent[3].url,
+            "https://center.qoder.sh/algo/api/v3/service/region/endpoints"
+        );
+        // The anonymous leg is signed, never bearer-authenticated.
+        assert!(
+            sent[3]
+                .headers
+                .contains(&("Appcode".to_owned(), "cosy".to_owned()))
+        );
+        assert!(sent[3].headers.iter().any(|(k, _)| k == "Signature"));
+        assert!(
+            !sent[3]
+                .headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+        );
+        let rows = host.store.list_credentials(&host.key).await.expect("rows");
+        assert_eq!(
+            qoder_bundle(rows[0].secrets.access_token.as_deref()).origin,
+            "https://api1.qoder.sh"
+        );
+    }
+
+    #[tokio::test]
+    async fn qoder_untrusted_origin_is_refused() {
+        let http = KiloStub::new(vec![
+            KiloReply::Response(200, QODER_TOKEN),
+            KiloReply::Response(200, QODER_USER),
+            KiloReply::Response(200, r#"{"inferNodes":[{"url":"https://evil.test"}]}"#),
+        ]);
+        let (_dir, host, holder, flows) = kilo_harness(http, QODER_FLOW).await;
+        let error = flows
+            .poll(host, holder, "dev".into())
+            .await
+            .expect_err("untrusted");
+        assert_eq!(error.code, ErrorCode::Upstream);
+        assert_eq!(
+            error.message,
+            "Qoder returned no trusted inference endpoint"
+        );
+        assert!(flows.pending("dev", false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn qoder_initial_listing_outage_allows_manual_models() {
+        let http = KiloStub::new(vec![
+            KiloReply::Response(200, QODER_TOKEN),
+            KiloReply::Response(200, QODER_USER),
+            KiloReply::Response(200, QODER_ENDPOINTS),
+            KiloReply::Response(503, "{}"),
+        ]);
+        let (_dir, host, holder, flows) = kilo_harness(http, QODER_FLOW).await;
+        flows
+            .poll(host.clone(), holder, "dev".into())
+            .await
+            .expect("approved");
+        let rows = host.store.list_credentials(&host.key).await.expect("rows");
+        assert!(
+            qoder_bundle(rows[0].secrets.access_token.as_deref())
+                .models
+                .is_empty()
+        );
+        assert_eq!(rows[0].provider_data["catalogStatus"], "unavailable");
+        assert!(rows[0].provider_data.get("modelCatalog").is_none());
+        assert_eq!(
+            rows[0].provider_data["inferenceModels"],
+            serde_json::json!([])
+        );
+    }
+
+    #[tokio::test]
+    async fn qoder_listing_transport_failure_keeps_the_token() {
+        let http = KiloStub::new(vec![
+            KiloReply::Response(200, QODER_TOKEN),
+            KiloReply::Response(200, QODER_USER),
+            KiloReply::Response(200, QODER_ENDPOINTS),
+            KiloReply::Reset,
+        ]);
+        let (_dir, host, holder, flows) = kilo_harness(http, QODER_FLOW).await;
+        flows
+            .poll(host.clone(), holder, "dev".into())
+            .await
+            .expect("approved");
+        let rows = host.store.list_credentials(&host.key).await.expect("rows");
+        assert_eq!(
+            qoder_bundle(rows[0].secrets.access_token.as_deref()).device_token,
+            "dummy-token"
+        );
+        assert_eq!(rows[0].provider_data["catalogStatus"], "unavailable");
+    }
+
+    #[tokio::test]
+    async fn qoder_exchange_runner_caps_requests_at_five() {
+        let http = Scripted {
+            status: 200,
+            body: "{}",
+        };
+        let mut runner = crate::oauth_runner::ExchangeRunner::new(
+            &http,
+            crate::oauth_runner::ExchangeConfig {
+                provider: "qoder",
+                step: "exchange",
+                max_requests: 5,
+                origins: crate::oauth_runner::Origins::Allowlist(
+                    omni_providers::qoder::oauth::AUTH_ORIGINS,
+                ),
+            },
+        );
+        let request = || omni_providers::oauth::AuthRequest {
+            url: "https://openapi.qoder.sh/api/v1/userinfo".into(),
+            method: "GET".into(),
+            headers: Vec::new(),
+            body: String::new(),
+        };
+        for _ in 0..5 {
+            runner.send(request(), 15).await.expect("within cap");
+        }
+        let error = runner.send(request(), 15).await.expect_err("sixth");
+        assert_eq!(error.code, ErrorCode::Upstream);
+        assert_eq!(
+            error.message,
+            "qoder oauth exchange asked for more than 5 requests"
+        );
+    }
+
+    #[tokio::test]
+    async fn qoder_exchange_runner_refuses_undeclared_origins() {
+        let http = Scripted {
+            status: 200,
+            body: "{}",
+        };
+        let mut runner = crate::oauth_runner::ExchangeRunner::new(
+            &http,
+            crate::oauth_runner::ExchangeConfig {
+                provider: "qoder",
+                step: "exchange",
+                max_requests: 5,
+                origins: crate::oauth_runner::Origins::Allowlist(
+                    omni_providers::qoder::oauth::AUTH_ORIGINS,
+                ),
+            },
+        );
+        let error = runner
+            .send(
+                omni_providers::oauth::AuthRequest {
+                    url: "https://evil.test/api/v1/userinfo".into(),
+                    method: "GET".into(),
+                    headers: Vec::new(),
+                    body: String::new(),
+                },
+                15,
+            )
+            .await
+            .expect_err("undeclared origin");
+        assert_eq!(error.code, ErrorCode::Upstream);
+        assert_eq!(
+            error.message,
+            "qoder oauth exchange described a request to an origin its manifest does not declare"
+        );
+    }
+
+    /// A stored qoder credential plus a refresher driven by the sequence stub.
+    async fn qoder_refresh_harness(
+        http: Arc<KiloStub>,
+        data: &'static str,
+    ) -> (
+        tempfile::TempDir,
+        Arc<omni_store::Store>,
+        omni_crypto::field::FieldKey,
+        Arc<crate::refresh::Refresher>,
+        omni_store::credentials::Credential,
+    ) {
+        let dir = tempfile::tempdir().expect("dir");
+        let store = Arc::new(
+            omni_store::Store::open(
+                omni_store::StoreConfig::Sqlite {
+                    path: dir.path().join("db"),
+                },
+                0,
+            )
+            .await
+            .expect("store"),
+        );
+        let key = omni_crypto::field::derive_key("test-key");
+        let host = Arc::new(crate::refresh::Refresher::new(
+            store.clone(),
+            key.clone(),
+            http,
+            || 1_000_000,
+        ));
+        let tokens = omni_store::credentials::TokenUpdate {
+            access_token: Some("old-bundle".into()),
+            refresh_token: Some("dummy-refresh".into()),
+            api_key: None,
+            id_token: None,
+            expires_at: Some(2_000_000.0),
+            updated_at: 0,
+        };
+        store
+            .save_oauth(
+                &key,
+                &omni_store::credentials::OAuthCredential {
+                    id: "q1",
+                    provider: "qoder",
+                    label: "qoder",
+                    provider_data: data,
+                    account_email: None,
+                    tokens: &tokens,
+                    reconnect: false,
+                },
+            )
+            .await
+            .expect("save");
+        let credential = store
+            .credential(&key, "q1")
+            .await
+            .expect("read")
+            .expect("present");
+        (dir, store, key, host, credential)
+    }
+
+    #[tokio::test]
+    async fn qoder_refresh_rotates_origin_and_keeps_missing_rotation() {
+        let http = KiloStub::new(vec![
+            KiloReply::Response(
+                200,
+                r#"{"device_token":"new-dummy-token","expires_at":1700007200}"#,
+            ),
+            KiloReply::Response(200, QODER_USER),
+            KiloReply::Response(200, r#"{"inferNodes":[{"url":"https://api3.qoder.sh"}]}"#),
+            KiloReply::Response(200, QODER_MODELS),
+        ]);
+        let (_dir, store, key, host, credential) =
+            qoder_refresh_harness(http.clone(), QODER_DATA).await;
+        let secrets = host.refresh(&credential).await.expect("refresh");
+        let bundle = qoder_bundle(secrets.access_token.as_deref());
+        assert_eq!(bundle.origin, "https://api3.qoder.sh");
+        assert_eq!(bundle.device_token, "new-dummy-token");
+        // The response did not rotate the refresh token: the old one stands.
+        assert_eq!(secrets.refresh_token.as_deref(), Some("dummy-refresh"));
+        let sent = http.requests();
+        assert_eq!(sent.len(), 4);
+        assert_eq!(
+            sent[0].url,
+            "https://openapi.qoder.sh/api/v1/deviceToken/refresh"
+        );
+        assert_eq!(sent[0].method, "POST");
+        // The machine identity is part of the grant itself.
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&sent[0].body).expect("body"),
+            serde_json::json!({"refresh_token":"dummy-refresh","machine_id":"synthetic-stable"})
+        );
+        let stored = store
+            .credential(&key, "q1")
+            .await
+            .expect("read")
+            .expect("present");
+        // Absolute expires_at in seconds, read as milliseconds.
+        assert_eq!(stored.expires_at, Some(1_700_007_200_000.0));
+        assert_eq!(
+            stored.provider_data["inferenceOrigin"],
+            "https://api3.qoder.sh"
+        );
+        assert_eq!(stored.provider_data["catalogStatus"], "available");
+        assert!(stored.enabled);
+    }
+
+    #[tokio::test]
+    async fn qoder_refresh_without_machine_id_is_refused_before_http() {
+        let http = KiloStub::new(Vec::new());
+        let (_dir, store, key, host, credential) = qoder_refresh_harness(http.clone(), "{}").await;
+        let error = host.refresh(&credential).await.expect_err("no identity");
+        assert_eq!(error.code, ErrorCode::Auth);
+        assert_eq!(
+            error.message,
+            "Qoder device identity missing; reconnect required"
+        );
+        assert!(http.requests().is_empty());
+        let stored = store
+            .credential(&key, "q1")
+            .await
+            .expect("read")
+            .expect("present");
+        assert!(!stored.enabled);
+    }
+
+    #[tokio::test]
+    async fn qoder_refresh_transient_listing_keeps_last_good_catalog() {
+        // A bad minute on the listing keeps the account enabled with the
+        // last-good public catalog; only a repudiation disables.
+        for status in [503, 408, 429] {
+            let http = KiloStub::new(vec![
+                KiloReply::Response(
+                    200,
+                    r#"{"device_token":"new-dummy-token","refresh_token":"rotated"}"#,
+                ),
+                KiloReply::Response(200, QODER_USER),
+                KiloReply::Response(200, QODER_ENDPOINTS),
+                KiloReply::Response(status, "{}"),
+            ]);
+            let (_dir, store, key, host, credential) =
+                qoder_refresh_harness(http, QODER_DATA).await;
+            let secrets = host.refresh(&credential).await.expect("refresh");
+            assert_eq!(secrets.refresh_token.as_deref(), Some("rotated"));
+            let bundle = qoder_bundle(secrets.access_token.as_deref());
+            assert_eq!(bundle.models.len(), 1, "{status}");
+            assert_eq!(bundle.models[0].key, "synthetic");
+            assert_eq!(bundle.models[0].max_input_tokens, Some(1234.0));
+            let stored = store
+                .credential(&key, "q1")
+                .await
+                .expect("read")
+                .expect("present");
+            assert!(stored.enabled, "{status}");
+            assert_eq!(stored.provider_data["catalogStatus"], "unavailable");
+            let previous: serde_json::Value = serde_json::from_str(QODER_DATA).expect("data");
+            assert_eq!(
+                stored.provider_data["modelCatalog"], previous["modelCatalog"],
+                "{status}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn qoder_refresh_listing_denial_is_auth() {
+        let http = KiloStub::new(vec![
+            KiloReply::Response(200, r#"{"device_token":"new-dummy-token"}"#),
+            KiloReply::Response(200, QODER_USER),
+            KiloReply::Response(200, QODER_ENDPOINTS),
+            KiloReply::Response(401, "{}"),
+        ]);
+        let (_dir, store, key, host, credential) = qoder_refresh_harness(http, QODER_DATA).await;
+        let error = host.refresh(&credential).await.expect_err("denied");
+        assert_eq!(error.code, ErrorCode::Auth);
+        assert_eq!(error.message, "Qoder model listing failed");
+        let stored = store
+            .credential(&key, "q1")
+            .await
+            .expect("read")
+            .expect("present");
+        assert!(!stored.enabled);
+    }
+
+    #[tokio::test]
+    async fn qoder_refresh_discovery_outage_keeps_last_good_origin() {
+        for status in [503, 408] {
+            let http = KiloStub::new(vec![
+                KiloReply::Response(
+                    200,
+                    r#"{"device_token":"rotated-token","refresh_token":"rotated-refresh","expires_at":"2026-11-04T12:00:00Z"}"#,
+                ),
+                KiloReply::Response(200, QODER_USER),
+                KiloReply::Response(status, "{}"),
+                KiloReply::Response(200, QODER_MODELS),
+            ]);
+            let (_dir, store, key, host, credential) =
+                qoder_refresh_harness(http, QODER_DATA).await;
+            let secrets = host.refresh(&credential).await.expect("refresh");
+            assert_eq!(
+                qoder_bundle(secrets.access_token.as_deref()).origin,
+                "https://api2.qoder.sh",
+                "{status}"
+            );
+            assert_eq!(secrets.refresh_token.as_deref(), Some("rotated-refresh"));
+            let stored = store
+                .credential(&key, "q1")
+                .await
+                .expect("read")
+                .expect("present");
+            assert!(stored.enabled, "{status}");
+            // The string date is read as an absolute expiry.
+            assert_eq!(stored.expires_at, Some(1_793_793_600_000.0));
+            assert_eq!(stored.provider_data["catalogStatus"], "available");
+        }
+    }
+
+    #[tokio::test]
+    async fn qoder_reconnect_keeps_the_original_machine_identity() {
+        let http = KiloStub::new(qoder_login());
+        let (_dir, host, holder, flows) = kilo_harness(http.clone(), QODER_FLOW).await;
+        let tokens = omni_store::credentials::TokenUpdate {
+            access_token: Some("old-bundle".into()),
+            refresh_token: Some("old-refresh".into()),
+            api_key: None,
+            id_token: None,
+            expires_at: None,
+            updated_at: 0,
+        };
+        host.store
+            .save_oauth(
+                &host.key,
+                &omni_store::credentials::OAuthCredential {
+                    id: "q1",
+                    provider: "qoder",
+                    label: "reconnected",
+                    provider_data: r#"{"machineId":"synthetic-original"}"#,
+                    account_email: None,
+                    tokens: &tokens,
+                    reconnect: false,
+                },
+            )
+            .await
+            .expect("save");
+        // The reconnect begin reads the stored identity, exactly as the host
+        // start path does before calling `begin`.
+        let prior = serde_json::json!({"machineId":"synthetic-original"});
+        let start = omni_providers::qoder::oauth::begin(prior.as_object(), QODER_NOW);
+        assert!(
+            url::Url::parse(&start.authorize_url)
+                .expect("url")
+                .query_pairs()
+                .any(|(k, v)| k == "machine_id" && v == "synthetic-original")
+        );
+        let reply = flows
+            .store_flow(
+                "qoder",
+                string("reconnected"),
+                Some("q1".into()),
+                &start,
+                "device",
+                false,
+            )
+            .await
+            .expect("reply");
+        let value: serde_json::Value = serde_json::from_str(&reply).expect("json");
+        let id = flows
+            .poll(
+                host.clone(),
+                holder,
+                value["flowId"].as_str().expect("id").to_owned(),
+            )
+            .await
+            .expect("approved");
+        assert_eq!(id, "q1");
+        let rows = host.store.list_credentials(&host.key).await.expect("rows");
+        assert_eq!(rows.len(), 1);
+        let bundle = qoder_bundle(rows[0].secrets.access_token.as_deref());
+        assert_eq!(bundle.machine_id, "synthetic-original");
+        assert_eq!(bundle.device_token, "dummy-token");
     }
 }

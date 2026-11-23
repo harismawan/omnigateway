@@ -50,6 +50,7 @@ pub fn report(store: &omni_store::SqliteStore) -> Result<Value, String> {
         "kilo",
         "grok",
         "muse",
+        "qoder",
         "custom",
     ] {
         if let Some(descriptor) = catalog.get(id) {

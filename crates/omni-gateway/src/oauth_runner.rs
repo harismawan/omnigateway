@@ -98,6 +98,16 @@ impl<'a> ExchangeRunner<'a> {
     }
 }
 
+impl omni_providers::oauth::AuthExchange for ExchangeRunner<'_> {
+    fn exchange<'a>(
+        &'a mut self,
+        request: AuthRequest,
+        seconds: u64,
+    ) -> omni_providers::oauth::ExchangeFuture<'a> {
+        Box::pin(self.send(request, seconds))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
