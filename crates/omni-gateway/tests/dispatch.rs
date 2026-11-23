@@ -1287,3 +1287,150 @@ async fn grok_non_streaming_client_is_served_by_collecting_the_stream() {
     }
     flush(h).await;
 }
+
+/// A Responses-shaped SSE turn for Meta's Model API front door.
+fn muse_sse() -> Reply {
+    Reply::Http(
+        200,
+        vec![("content-type".into(), "text/event-stream".into())],
+        vec![
+            "event: response.created\ndata: {\"response\":{\"id\":\"r1\",\"model\":\"muse-spark-1.3\"}}\n\n".into(),
+            "event: response.content_part.added\ndata: {\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"output_text\"}}\n\n".into(),
+            "event: response.output_text.delta\ndata: {\"output_index\":0,\"content_index\":0,\"delta\":\"hello\"}\n\n".into(),
+            "event: response.content_part.done\ndata: {\"output_index\":0,\"content_index\":0}\n\n".into(),
+            "event: response.completed\ndata: {\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}\n\n".into(),
+        ],
+    )
+}
+
+#[tokio::test]
+async fn muse_registered_codec_dispatches_the_responses_stream() {
+    let f = fixture(&["c0"]);
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    // The minted api key (the fixture's `api_key` column) is what inference
+    // carries; the OAuth token belongs to the mint and the usage probe alone.
+    conn.execute(
+        "UPDATE credentials SET provider='muse',auth_type='oauth',access_token=?,provider_data='{}'",
+        [omni_crypto::field::encrypt(&key(), "oauth-tok")],
+    )
+    .expect("provider");
+    let h = harness(&f, vec![muse_sse()]);
+    let mut d = dispatch(h.deps.clone(), req("muse-spark-1.3"));
+    let events = drain(&mut d).await;
+    assert!(matches!(events.first(), Some(StreamEvent::Start { .. })));
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    let log = d.log.lock().expect("log").clone();
+    assert_eq!(
+        (
+            log.status,
+            log.attempts,
+            log.input_tokens,
+            log.output_tokens
+        ),
+        (200, 1, 10, 4)
+    );
+    {
+        let calls = h.script.seen.lock().expect("seen");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].provider, "muse");
+        // No stored baseUrl: the codec's compiled default stands.
+        assert_eq!(calls[0].url, "https://api.meta.ai/v1/responses");
+        // The minted key authenticates, never the device-flow token.
+        assert!(
+            calls[0]
+                .headers
+                .contains(&("Authorization".into(), "Bearer sk-up".into()))
+        );
+        assert!(
+            calls[0]
+                .headers
+                .contains(&("Accept".into(), "text/event-stream".into()))
+        );
+        let sent: serde_json::Value = serde_json::from_str(&calls[0].body).expect("body");
+        assert_eq!(sent["model"], "muse-spark-1.3");
+        assert_eq!(sent["stream"], true);
+        assert_eq!(sent["store"], false);
+        // The session header and the body's cache key name the same
+        // conversation.
+        let session = calls[0]
+            .headers
+            .iter()
+            .find(|(n, _)| n == "x-meta-ai-gateway-session-id")
+            .map(|(_, v)| v.clone())
+            .expect("session header");
+        assert_eq!(sent["prompt_cache_key"], session);
+    }
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn muse_non_streaming_client_is_served_by_collecting_the_stream() {
+    let f = fixture(&["c0"]);
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    // A stored baseUrl is honoured (trailing slash normalized away).
+    conn.execute(
+        "UPDATE credentials SET provider='muse',auth_type='oauth',access_token=?,provider_data='{\"baseUrl\":\"https://api.meta.ai/v1/\"}'",
+        [omni_crypto::field::encrypt(&key(), "oauth-tok")],
+    )
+    .expect("provider");
+    let h = harness(&f, vec![muse_sse()]);
+    let request = Request {
+        request: chat("muse-spark-1.3", false),
+        request_id: "req_t".into(),
+        api_key_id: Some("k1".into()),
+        route_started_at: 1_000,
+    };
+    let mut d = dispatch(h.deps.clone(), request);
+    let events = drain(&mut d).await;
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    {
+        let calls = h.script.seen.lock().expect("seen");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].url, "https://api.meta.ai/v1/responses");
+        let sent: serde_json::Value = serde_json::from_str(&calls[0].body).expect("body");
+        // The request going out streams either way; a non-streaming upstream
+        // would return JSON the SSE parser yields nothing from.
+        assert_eq!(sent["stream"], true);
+    }
+    flush(h).await;
+}
+
+#[tokio::test]
+async fn muse_retryable_failure_before_commit_fails_over() {
+    let f = fixture(&["c0", "c1"]);
+    set_setting(&f.path, "routingStrategy", "\"priority\"");
+    let conn = rusqlite::Connection::open(&f.path).expect("db");
+    conn.execute(
+        "UPDATE credentials SET provider='muse',auth_type='oauth',access_token=?,provider_data='{}',tier=CASE id WHEN 'c0' THEN 1 ELSE 2 END",
+        [omni_crypto::field::encrypt(&key(), "oauth-tok")],
+    )
+    .expect("provider");
+    let h = harness(
+        &f,
+        vec![
+            status(500, "{\"error\":{\"message\":\"boom\"}}"),
+            muse_sse(),
+        ],
+    );
+    let mut d = dispatch(h.deps.clone(), req("muse-spark-1.3"));
+    let events = drain(&mut d).await;
+    assert!(
+        matches!(events.last(), Some(StreamEvent::End { .. })),
+        "{events:?}"
+    );
+    let log = d.log.lock().expect("log").clone();
+    assert_eq!((log.status, log.attempts), (200, 2));
+    assert_eq!(log.credential_id.as_deref(), Some("c1"));
+    {
+        let calls = h.script.seen.lock().expect("seen");
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|c| c.provider == "muse"));
+    }
+    flush(h).await;
+}
