@@ -35,13 +35,14 @@ impl ProviderCodec for QoderCodec {
 }
 
 fn build_request(input: &CodecInput<'_>) -> Result<CodecRequest<()>, GatewayError> {
-    let bundle = super::credential::parse_shared(input.credentials.access_token.as_deref().unwrap_or(""))
-        .map_err(|_| {
-            GatewayError::new(
-                ErrorCode::Auth,
-                "Invalid Qoder credential; reconnect required",
-            )
-        })?;
+    let bundle =
+        super::credential::parse_shared(input.credentials.access_token.as_deref().unwrap_or(""))
+            .map_err(|_| {
+                GatewayError::new(
+                    ErrorCode::Auth,
+                    "Invalid Qoder credential; reconnect required",
+                )
+            })?;
     let wire = super::wire::to_qoder_wire(input, &bundle);
     let body = super::profile::order_fields(wire.body, super::profile::BODY_ORDER);
     let request_id = body

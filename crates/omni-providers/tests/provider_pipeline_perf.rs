@@ -50,7 +50,10 @@ fn responses_provider(name: &'static str, decoder: fn() -> Box<dyn StreamDecoder
         name,
         decoder,
         init: vec![
-            msg("response.created", r#"{"response":{"id":"r1","model":"m"}}"#),
+            msg(
+                "response.created",
+                r#"{"response":{"id":"r1","model":"m"}}"#,
+            ),
             msg(
                 "response.output_item.added",
                 r#"{"output_index":0,"item":{"id":"m1","type":"message","role":"assistant","content":[]}}"#,
@@ -84,7 +87,11 @@ fn encoder_for(dialect: &str) -> StreamEncoder {
 }
 
 /// Drive like the host: finish() only when no message returned Flow::Stop.
-fn drive(decoder: &mut dyn StreamDecoder, messages: &[SseMessage], out: &mut VecDeque<StreamEvent>) {
+fn drive(
+    decoder: &mut dyn StreamDecoder,
+    messages: &[SseMessage],
+    out: &mut VecDeque<StreamEvent>,
+) {
     for m in messages {
         if decoder.message(m, out).expect("decode") == Flow::Stop {
             return;
@@ -128,7 +135,9 @@ fn provider_pipeline() {
             events.back()
         );
         assert!(
-            !events.iter().any(|e| matches!(e, StreamEvent::Error { .. })),
+            !events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::Error { .. })),
             "{} preflight emitted an error",
             provider.name
         );
