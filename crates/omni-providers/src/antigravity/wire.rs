@@ -43,22 +43,42 @@ fn fingerprints_text(system: &Text, note: &mut impl FnMut(String)) -> Text {
         }
     }
     paragraphs.push(&bytes[start..]);
-    let (mut preamble, mut billing) = (false, false);
+    let (mut preamble, mut billing, mut identity) = (false, false, false);
     paragraphs.retain(|p| {
         let p = Text::from_utf16(p.to_vec());
         let utf8 = p.to_utf8_lossy();
         let text = js::trim(&utf8);
-        if text == crate::anthropic::body::AGENT_PREAMBLE {
+        if text == crate::agent_identity::AGENT_PREAMBLE {
             preamble = true;
             false
         } else if text.starts_with(omni_crypto::cch::BILLING_PREFIX) {
             billing = true;
             false
+        } else if crate::agent_identity::banned(&utf8) {
+            identity = true;
+            false
         } else {
             true
         }
     });
-    if !preamble && !billing {
+    if !preamble && !billing && !identity {
+        // REWRITES patterns are ASCII, so the lossy probe cannot miss or invent a match.
+        let utf8 = system.to_utf8_lossy();
+        if !crate::agent_identity::REWRITES
+            .iter()
+            .any(|(from, _)| utf8.contains(from))
+        {
+            return system.clone();
+        }
+    }
+    let mut units = paragraphs.join(&[10u16, 10][..]);
+    let mut rewritten = false;
+    for (from, to) in crate::agent_identity::REWRITES {
+        let next = replace_units(&units, from, to);
+        rewritten |= next != units;
+        units = next;
+    }
+    if !preamble && !billing && !identity && !rewritten {
         return system.clone();
     }
     if preamble {
@@ -67,7 +87,31 @@ fn fingerprints_text(system: &Text, note: &mut impl FnMut(String)) -> Text {
     if billing {
         note("antigravity:billing-header-dropped".into());
     }
-    Text::from_utf16(paragraphs.join(&[10u16, 10][..]))
+    if identity {
+        note("antigravity:agent-identity-dropped".into());
+    }
+    if rewritten {
+        note("antigravity:agent-text-rewritten".into());
+    }
+    Text::from_utf16(units)
+}
+
+fn replace_units(units: &[u16], from: &str, to: &str) -> Vec<u16> {
+    debug_assert!(!from.is_empty());
+    let from: Vec<u16> = from.encode_utf16().collect();
+    let to: Vec<u16> = to.encode_utf16().collect();
+    let mut out = Vec::with_capacity(units.len());
+    let mut i = 0;
+    while i < units.len() {
+        if units[i..].starts_with(&from) {
+            out.extend_from_slice(&to);
+            i += from.len();
+        } else {
+            out.push(units[i]);
+            i += 1;
+        }
+    }
+    out
 }
 
 fn at<'a>(value: Option<&'a Value>, key: &str, index: usize) -> Option<&'a Value> {

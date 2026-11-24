@@ -8,6 +8,7 @@
 //! - [`custom`]: the custom OpenAI-compatible provider.
 
 pub mod adapter;
+pub mod agent_identity;
 pub mod anthropic;
 pub mod antigravity;
 pub mod codec;

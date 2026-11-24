@@ -165,6 +165,7 @@ omni-providers/src/adapter.rs :: fn bounded_degradations(entries: &[String]) -> 
 omni-providers/src/adapter.rs :: fn code(&self) -> ErrorCode	borrows request/credentials; provider codec scopes assembly; returned events own iterative Drop
 omni-providers/src/adapter.rs :: fn is_sendable_url(value: &str) -> bool	borrows request/credentials; provider codec scopes assembly; returned events own iterative Drop
 omni-providers/src/adapter.rs :: fn new(request: &'a ChatRequest, model: &'a str, credentials: &'a Credentials) -> Self	borrows request/credentials; provider codec scopes assembly; returned events own iterative Drop
+omni-providers/src/agent_identity.rs :: fn banned(paragraph: &str) -> bool	string predicate only; borrows paragraph text, returns bool, no JSON ownership
 omni-providers/src/anthropic/body.rs :: fn apply_system(system: &[Value], first_user_text: &str) -> Vec<Value>	internal: caller must be inside a deep scope; production entry points are the codec and ingest
 omni-providers/src/anthropic/cloak.rs :: fn build(request: &ChatRequest) -> Self	borrows IR names only; produces string maps, never clones/releases nested JSON
 omni-providers/src/antigravity/cloak.rs :: fn build(request: &ChatRequest) -> Self	borrows IR names only; produces string maps, never clones/releases nested JSON

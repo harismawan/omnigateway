@@ -462,6 +462,8 @@ mod tests {
         assert_eq!(gateway_at(&standalone), None);
         let server = root.join("omnigateway");
         fs::write(&server, "").unwrap();
+        // gateway_at canonicalizes; macOS temp dirs sit under the /var symlink.
+        let server = fs::canonicalize(&server).unwrap();
         assert_eq!(gateway_at(&standalone), Some(server.clone()));
         #[cfg(unix)]
         {
