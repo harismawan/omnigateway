@@ -679,7 +679,6 @@ impl ResponsesStream {
                     }
                     Delta::ProviderNative { .. } if item.kind == Kind::Native => {
                         self.native_delta(event, Merge::Borrowed, out);
-                        return;
                     }
                     _ => {}
                 }
