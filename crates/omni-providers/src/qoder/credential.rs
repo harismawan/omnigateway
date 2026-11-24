@@ -2,6 +2,9 @@
 //! this is the read that attaches a signed credential to an origin, so every
 //! field is validated here rather than trusted from storage.
 
+use std::cell::RefCell;
+use std::sync::Arc;
+
 use omni_ir::jsjson::{JsValue, parse_js};
 
 use super::endpoint::trusted_inference_origin;
@@ -123,5 +126,42 @@ pub fn parse(value: &str) -> Result<Bundle, InvalidCredential> {
         issued_at,
         origin,
         models,
+    })
+}
+
+/// Per-worker memo of successful parses. The bundle is multi-KB and strict
+/// parsing is two full passes, paid per request otherwise. A refresh rewrites
+/// the entire token string, so a content key invalidates itself; errors are
+/// never cached. Four slots cover multi-account workers without LRU cost.
+struct Memo {
+    slots: [Option<(String, Arc<Bundle>)>; 4],
+    next: usize,
+}
+
+thread_local! {
+    static MEMO: RefCell<Memo> = const {
+        RefCell::new(Memo {
+            slots: [None, None, None, None],
+            next: 0,
+        })
+    };
+}
+
+pub(crate) fn parse_shared(value: &str) -> Result<Arc<Bundle>, InvalidCredential> {
+    MEMO.with(|memo| {
+        let mut memo = memo.borrow_mut();
+        if let Some(bundle) = memo.slots.iter().find_map(|slot| {
+            slot.as_ref()
+                .and_then(|(token, bundle)| (token == value).then(|| Arc::clone(bundle)))
+        }) {
+            return Ok(bundle);
+        }
+        let bundle = Arc::new(parse(value)?);
+        let next = memo.next;
+        memo.next = (next + 1) % memo.slots.len();
+        if let Some(slot) = memo.slots.get_mut(next) {
+            *slot = Some((value.to_owned(), Arc::clone(&bundle)));
+        }
+        Ok(bundle)
     })
 }

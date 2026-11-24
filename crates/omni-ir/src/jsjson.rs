@@ -641,13 +641,13 @@ fn write_serde_number(n: &serde_json::Number, out: &mut String) {
             if i < 0 {
                 out.push('-');
             }
-            push_u64(i.unsigned_abs(), out);
+            write_u64(i.unsigned_abs(), out);
             return;
         }
     } else if let Some(u) = n.as_u64()
         && u <= (1u64 << 53)
     {
-        push_u64(u, out);
+        write_u64(u, out);
         return;
     }
     write_number(number_as_f64(n), out);
@@ -663,8 +663,9 @@ fn push_escape_unit(unit: u16, out: &mut String) {
     }
 }
 
-/// Decimal digits of `value`, without going through `fmt`.
-fn push_u64(mut value: u64, out: &mut String) {
+/// Decimal digits of `value`, without going through `fmt`. The exact bytes
+/// `JSON.stringify` prints for an integer below 2^53.
+pub fn write_u64(mut value: u64, out: &mut String) {
     let mut buf = [0u8; 20];
     let mut at = buf.len();
     loop {

@@ -31,8 +31,9 @@ fn env(name: &str, fallback: &str) -> String {
 }
 
 /// `QODER_VERSION`: the CLI version every Cosy header claims.
-pub(crate) fn version() -> String {
-    env("OMNI_QODER_CLI_VERSION", "1.1.82")
+pub(crate) fn version() -> &'static str {
+    static VERSION: OnceLock<String> = OnceLock::new();
+    VERSION.get_or_init(|| env("OMNI_QODER_CLI_VERSION", "1.1.82"))
 }
 
 /// `qoderProfile.headers` merged with the caller's protocol headers, then
@@ -74,16 +75,20 @@ fn ordered(
             base.push(pair);
         }
     }
-    let parts: Vec<_> = raw("OMNI_ORDER_QODER")
-        .unwrap_or("")
-        .split(',')
-        .map(omni_ir::js::trim)
-        .filter(|s| safe(s))
-        .collect();
-    let order = if parts.is_empty() {
-        default
+    static ORDER_PARTS: OnceLock<Vec<String>> = OnceLock::new();
+    let parts = ORDER_PARTS.get_or_init(|| {
+        raw("OMNI_ORDER_QODER")
+            .unwrap_or("")
+            .split(',')
+            .map(omni_ir::js::trim)
+            .filter(|s| safe(s))
+            .map(str::to_owned)
+            .collect()
+    });
+    let order: Vec<&str> = if parts.is_empty() {
+        default.to_vec()
     } else {
-        parts.as_slice()
+        parts.iter().map(String::as_str).collect()
     };
     let mut out = Vec::new();
     for name in order {

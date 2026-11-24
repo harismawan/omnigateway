@@ -35,7 +35,7 @@ impl ProviderCodec for QoderCodec {
 }
 
 fn build_request(input: &CodecInput<'_>) -> Result<CodecRequest<()>, GatewayError> {
-    let bundle = super::credential::parse(input.credentials.access_token.as_deref().unwrap_or(""))
+    let bundle = super::credential::parse_shared(input.credentials.access_token.as_deref().unwrap_or(""))
         .map_err(|_| {
             GatewayError::new(
                 ErrorCode::Auth,
@@ -56,7 +56,7 @@ fn build_request(input: &CodecInput<'_>) -> Result<CodecRequest<()>, GatewayErro
     let mut auth = Map::new();
     omni_ir::deep::insert(&mut auth, "version".into(), json!("v1"));
     omni_ir::deep::insert(&mut auth, "requestId".into(), json!(request_id));
-    omni_ir::deep::insert(&mut auth, "info".into(), json!(bundle.encrypt_user_info));
+    omni_ir::deep::insert(&mut auth, "info".into(), json!(&bundle.encrypt_user_info));
     omni_ir::deep::insert(&mut auth, "cosyVersion".into(), json!(version));
     omni_ir::deep::insert(&mut auth, "ideVersion".into(), json!(""));
     let auth_base64 = B64.encode(omni_ir::jsjson::to_string(&Value::Object(auth)));
@@ -71,7 +71,7 @@ fn build_request(input: &CodecInput<'_>) -> Result<CodecRequest<()>, GatewayErro
         ("Cosy-Key".into(), bundle.key.clone()),
         ("Cosy-Date".into(), date),
         ("Cosy-User".into(), bundle.uid.clone()),
-        ("Cosy-Version".into(), version),
+        ("Cosy-Version".into(), version.into()),
         ("Cosy-MachineId".into(), bundle.machine_id.clone()),
         ("Cosy-MachineToken".into(), bundle.machine_id.clone()),
         ("Cosy-ClientIp".into(), bundle.machine_id.clone()),
