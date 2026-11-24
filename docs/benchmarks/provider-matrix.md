@@ -160,7 +160,9 @@ comma-separated exact names or `*` globs, e.g. `'custom-*'` or `'*.responses.*'`
 An empty selection is an error. Without `--matrix`, existing scenarios and
 the legacy JSON schema are preserved, including exact-only `--only` selection.
 
-Available: `custom-chat`, `custom-responses`, `anthropic-key`, `anthropic-oauth`.
+Available: `openai-key`, `openai-oauth`, `custom-chat`, `custom-responses`,
+`anthropic-key`, `anthropic-oauth`, `kimi-key`, `kilo-key`, `grok-key`,
+`muse-key`, `qoder-oauth`.
 The custom variants use CLI-created
 custom credentials on distinct endpoint IDs, upstream model
 `mock-c<chunks>-d0`, and a two-process upstream on port 18100. Both codecs always
@@ -185,8 +187,16 @@ mock model names pass through unchanged. Matrix cluster setup is rejected.
 Run the complete matrix through `bash scripts/bench-matrix.sh`: it creates a
 private network/mount namespace, hosts override and TLS certificate trusted only
 through `NODE_EXTRA_CA_CERTS` and `SSL_CERT_FILE`. Two pinned stub processes share
-each origin. New providers need a table entry and scripted upstream plus a seed
-helper only if their credential is unavailable through `credentials add-key`.
+each origin. The shared TLS stub also serves the kimi/kilo chat-completions paths,
+grok/muse through the existing `/v1/responses` handler, and the qoder
+`agent_chat_generation` path: it decodes the Cosy body encoding (the inverse of
+`omni-crypto`'s `encode_body`, checked against the pinned CLI vectors) to read
+`model_config.key`, checks the `Bearer COSY.` prefix and ignores the signature.
+The qoder credential is seeded as an encrypted JSON bundle in `access_token`
+with expiry 2100, like the other OAuth entries; its `models` list is empty and
+unknown model keys pass through. New providers need a table entry and scripted
+upstream plus a seed helper only if their credential is unavailable through
+`credentials add-key`.
 
 ## Functional checks
 

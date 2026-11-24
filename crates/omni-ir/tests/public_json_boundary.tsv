@@ -131,6 +131,7 @@ omni-ir/src/jsjson.rs :: fn write_map(map: &serde_json::Map<String, serde_json::
 omni-ir/src/jsjson.rs :: fn write_number(value: f64, out: &mut String)	stack-growing writer/parser; JsValue has iterative Drop; borrowed map entries do not release JSON
 omni-ir/src/jsjson.rs :: fn write_spread( map: &serde_json::Map<String, serde_json::Value>, key: &str, value: &str, spread: Spread, out: &mut String, )	stack-growing writer/parser; JsValue has iterative Drop; borrowed map entries do not release JSON
 omni-ir/src/jsjson.rs :: fn write_str(s: &str, out: &mut String)	stack-growing writer/parser; JsValue has iterative Drop; borrowed map entries do not release JSON
+omni-ir/src/jsjson.rs :: fn write_u64(mut value: u64, out: &mut String)	scalar decimal-digit writer; appends ASCII digits to the caller's String, releases no JSON
 omni-ir/src/jsjson.rs :: fn write_utf16(units: &[u16], out: &mut String)	stack-growing writer/parser; JsValue has iterative Drop; borrowed map entries do not release JSON
 omni-ir/src/jsjson.rs :: fn write_value(value: &serde_json::Value, out: &mut String)	stack-growing writer/parser; JsValue has iterative Drop; borrowed map entries do not release JSON
 omni-ir/src/jsjson.rs :: fn write_value_pretty(value: &serde_json::Value, out: &mut String)	stack-growing writer/parser; JsValue has iterative Drop; borrowed map entries do not release JSON

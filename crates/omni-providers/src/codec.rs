@@ -20,10 +20,23 @@ use crate::sse::SseMessage;
 
 // A bounded-depth iterator stack, rather than a pending node per sibling.
 pub(crate) fn needs_scope(value: &Value) -> bool {
-    fn children(value: &Value) -> Option<Box<dyn Iterator<Item = &Value> + '_>> {
+    enum Kids<'a> {
+        Arr(std::slice::Iter<'a, Value>),
+        Obj(serde_json::map::Values<'a>),
+    }
+    impl<'a> Iterator for Kids<'a> {
+        type Item = &'a Value;
+        fn next(&mut self) -> Option<&'a Value> {
+            match self {
+                Kids::Arr(iter) => iter.next(),
+                Kids::Obj(iter) => iter.next(),
+            }
+        }
+    }
+    fn children(value: &Value) -> Option<Kids<'_>> {
         match value {
-            Value::Array(a) => Some(Box::new(a.iter())),
-            Value::Object(m) => Some(Box::new(m.values())),
+            Value::Array(a) => Some(Kids::Arr(a.iter())),
+            Value::Object(m) => Some(Kids::Obj(m.values())),
             _ => None,
         }
     }

@@ -561,7 +561,7 @@ pub async fn finish(
                     ("Cosy-User", &uid),
                     ("Cosy-MachineId", machine_id),
                     ("Cosy-MachineToken", machine_id),
-                    ("Cosy-Version", &super::profile::version()),
+                    ("Cosy-Version", super::profile::version()),
                     ("Cosy-ClientType", "5"),
                     ("Cosy-Scene", "assistant"),
                     ("Login-Version", "v2"),

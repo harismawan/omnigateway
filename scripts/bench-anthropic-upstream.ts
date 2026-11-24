@@ -15,6 +15,44 @@ if (!values.cert || !values.key) throw Error("--cert and --key required");
 const encoder = new TextEncoder();
 const frame = (type: string, data: object) =>
   encoder.encode(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
+const chatFrame = (v: object) => encoder.encode(`data: ${JSON.stringify(v)}\n\n`);
+function chatSse(model: string, chunks: number): Response {
+  const base = { id: "chatcmpl-bench", object: "chat.completion.chunk", created: 0, model };
+  const delta = chatFrame({ ...base, choices: [{ index: 0, delta: { content: "lorem ipsum " } }] });
+  return new Response(
+    Buffer.concat([
+      chatFrame({ ...base, choices: [{ index: 0, delta: { role: "assistant", content: "" } }] }),
+      ...Array.from({ length: chunks }, () => delta),
+      chatFrame({ ...base, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] }),
+      chatFrame({
+        ...base,
+        choices: [],
+        usage: { prompt_tokens: 64, completion_tokens: chunks * 2, total_tokens: 64 + chunks * 2 },
+      }),
+      encoder.encode("data: [DONE]\n\n"),
+    ]),
+    { headers: { "content-type": "text/event-stream" } },
+  );
+}
+// Inverse of omni-crypto's qoder encode_body: swap_thirds is its own inverse.
+const B64_STD = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
+const B64_QOD = "_doRTgHZBKcGVjlvpC,@aFSx#DPuNJme&i*MzLOEn)sUrthbf%Y^w.(kIQyXqWA!$";
+function decodeQoderBody(encoded: string): string {
+  const n = Math.floor(encoded.length / 3);
+  const swapped =
+    n === 0
+      ? encoded
+      : encoded.slice(encoded.length - n) +
+        encoded.slice(n, encoded.length - n) +
+        encoded.slice(0, n);
+  let std = "";
+  for (const ch of swapped) {
+    const i = B64_QOD.indexOf(ch);
+    if (i < 0) throw Error("invalid qoder encoding");
+    std += B64_STD[i];
+  }
+  return Buffer.from(std, "base64").toString("utf8");
+}
 Bun.serve({
   hostname: "127.0.0.1",
   port: Number(values.port),
@@ -93,6 +131,34 @@ Bun.serve({
         refresh_token: "bench-refresh",
         expires_in: 86400,
       });
+    }
+    if (
+      ["/coding/v1/chat/completions", "/api/gateway/chat/completions"].includes(path) &&
+      req.method === "POST"
+    ) {
+      const body = (await req.json()) as { model?: string; stream?: boolean };
+      const match = /^mock-c(\d+)-d0$/.exec(body.model ?? "");
+      if (!match || body.stream !== true || !req.headers.get("authorization"))
+        return Response.json(
+          { error: { message: "expected mock-c<chunks>-d0 and stream:true" } },
+          { status: 400 },
+        );
+      return chatSse(body.model ?? "", Number(match[1]));
+    }
+    if (path === "/algo/api/v2/service/pro/sse/agent_chat_generation" && req.method === "POST") {
+      const body = JSON.parse(decodeQoderBody(await req.text()));
+      const model = body.model_config?.key ?? "";
+      const match = /^mock-c(\d+)-d0$/.exec(model);
+      if (
+        !match ||
+        body.stream !== true ||
+        !req.headers.get("authorization")?.startsWith("Bearer COSY.")
+      )
+        return Response.json(
+          { error: { message: "expected encoded mock-c<chunks>-d0 body and Cosy auth" } },
+          { status: 400 },
+        );
+      return chatSse(model, Number(match[1]));
     }
     if (path !== "/v1/messages" || req.method !== "POST")
       return Response.json({ error: { type: "not_found", message: path } }, { status: 404 });

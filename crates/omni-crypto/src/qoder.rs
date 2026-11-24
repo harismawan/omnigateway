@@ -29,21 +29,37 @@ fn swap_thirds(value: &[u8]) -> Vec<u8> {
     out
 }
 
-fn translate(input: &[u8], from: &[u8; 65], to: &[u8; 65]) -> Result<Vec<u8>, InvalidEncoding> {
+/// Byte → byte alphabet maps, indexed directly. Every alphabet byte is
+/// nonzero ASCII, so `0` marks a byte outside the alphabet.
+const fn alphabet_table(from: &[u8; 65], to: &[u8; 65]) -> [u8; 256] {
+    let mut table = [0u8; 256];
+    let mut i = 0;
+    while i < 65 {
+        table[from[i] as usize] = to[i];
+        i += 1;
+    }
+    table
+}
+const TO_QODER: [u8; 256] = alphabet_table(STANDARD, QODER);
+const TO_STANDARD: [u8; 256] = alphabet_table(QODER, STANDARD);
+
+fn translate(input: &[u8], table: &[u8; 256]) -> Result<Vec<u8>, InvalidEncoding> {
     input
         .iter()
-        .map(|c| {
-            from.iter()
-                .position(|f| f == c)
-                .map(|i| to[i])
-                .ok_or(InvalidEncoding)
+        .map(|&c| {
+            let mapped = table[c as usize];
+            if mapped == 0 {
+                Err(InvalidEncoding)
+            } else {
+                Ok(mapped)
+            }
         })
         .collect()
 }
 
 pub fn encode_body(plain: &str) -> String {
     let base64 = B64.encode(plain.as_bytes());
-    let swapped = translate(base64.as_bytes(), STANDARD, QODER).unwrap_or_default();
+    let swapped = translate(base64.as_bytes(), &TO_QODER).unwrap_or_default();
     String::from_utf8(swap_thirds(&swapped)).unwrap_or_default()
 }
 
@@ -53,7 +69,7 @@ pub fn decode_body(encoded: &str) -> Result<String, InvalidEncoding> {
     if !encoded.len().is_multiple_of(4) {
         return Err(InvalidEncoding);
     }
-    let chars = translate(&swap_thirds(encoded.as_bytes()), QODER, STANDARD)?;
+    let chars = translate(&swap_thirds(encoded.as_bytes()), &TO_STANDARD)?;
     // `=` may only appear as one or two trailing pads.
     let body_len = chars.iter().rposition(|c| *c != b'=').map_or(0, |i| i + 1);
     if chars[..body_len].contains(&b'=') || chars.len() - body_len > 2 {
@@ -72,7 +88,14 @@ fn md5_hex(input: &str) -> String {
 
 /// The request signature: MD5 hex over the five fields joined by `\n`.
 pub fn sign_auth(auth_base64: &str, key: &str, date: &str, body: &str, path: &str) -> String {
-    md5_hex(&[auth_base64, key, date, body, path].join("\n"))
+    let mut hasher = Md5::new();
+    for (i, part) in [auth_base64, key, date, body, path].iter().enumerate() {
+        if i > 0 {
+            hasher.update(b"\n");
+        }
+        hasher.update(part.as_bytes());
+    }
+    crate::hex_lower(&hasher.finalize())
 }
 
 /// The anonymous endpoint-election signature the shipped CLI uses.

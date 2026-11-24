@@ -20,6 +20,7 @@ use omni_ir::stream::StreamEvent;
 use omni_providers::codec::{CodecInput, Credentials, ProviderCodec, StreamDecoder};
 use omni_providers::custom::CustomCodec;
 use omni_providers::custom::decode::ChatDecoder;
+use omni_providers::qoder::codec::QoderCodec;
 use omni_providers::sse::{SseMessage, SseParser};
 
 /// As the binary: `OMNI_STAGE_SYSTEM_ALLOC=1` is not offered; rebuild without
@@ -106,6 +107,34 @@ fn chunks(sse: &[u8]) -> Vec<&[u8]> {
     sse.chunks(16 * 1024).collect()
 }
 
+/// A realistic inference bundle: ~1 KB device token, RSA-wrapped key shape,
+/// encrypted userinfo and a 20-row dynamic catalog.
+fn qoder_bundle_json() -> String {
+    let models: Vec<serde_json::Value> = (0..20)
+        .map(|i| {
+            serde_json::json!({
+                "key": format!("qoder-model-{i}"),
+                "displayName": format!("Qoder Model {i}"),
+                "images": true,
+                "reasoning": false,
+                "maxInputTokens": 128_000,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "version": 1,
+        "deviceToken": format!("eyJhbGciOiJSUzI1NiJ9.{}", "a".repeat(1000)),
+        "uid": "u-bench",
+        "machineId": "11111111-1111-4111-8111-111111111111",
+        "encryptUserInfo": "ZW5jcnlwdGVk".repeat(20),
+        "key": "A".repeat(172),
+        "origin": "https://api2.qoder.sh",
+        "models": models,
+        "issuedAt": 1_700_000_000_000.0,
+    })
+    .to_string()
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let agent = std::fs::read_to_string(&args[1]).expect("agent.json");
@@ -183,6 +212,52 @@ fn main() {
     let built = CustomCodec.build_request(&input).expect("build");
     println!("  upstream body {} bytes", built.request.body.len());
     time("ChatRequest clone", 2000, || chat.clone());
+
+    println!("== qoder build ==");
+    let bundle = qoder_bundle_json();
+    println!("  credential bundle {} bytes", bundle.len());
+    let qcreds = Credentials {
+        access_token: Some(bundle.clone()),
+        api_key: None,
+        provider_data: serde_json::Map::new(),
+    };
+    let qinput = CodecInput {
+        request: &chat,
+        model: "mock-c1-d0",
+        credentials: &qcreds,
+        request_id: Some("r"),
+        auto_cache_enabled: Some(false),
+        max_output_tokens: None,
+        request_started_at: Some(0.0),
+    };
+    time("qoder credential::parse (cold)", 2000, || {
+        omni_providers::qoder::credential::parse(&bundle).expect("parse")
+    });
+    time("qoder build_request total", 2000, || {
+        QoderCodec.build_request(&qinput).expect("build")
+    });
+    if std::env::var("OMNI_STAGE_SAMPLE").as_deref() == Ok("qoder") {
+        sample(|| QoderCodec.build_request(&qinput).expect("build"));
+    }
+    let qbuilt = QoderCodec.build_request(&qinput).expect("build");
+    let plain = omni_crypto::qoder::decode_body(&qbuilt.request.body).expect("decode");
+    println!(
+        "  upstream body {} bytes (plain {} bytes)",
+        qbuilt.request.body.len(),
+        plain.len()
+    );
+    time("qoder encode_body", 2000, || {
+        omni_crypto::qoder::encode_body(&plain)
+    });
+    time("qoder sign_auth", 2000, || {
+        omni_crypto::qoder::sign_auth(
+            "auth",
+            "key",
+            "0",
+            &qbuilt.request.body,
+            "/api/v2/service/pro/sse/agent_chat_generation",
+        )
+    });
 
     println!("== many-chunks decode ({} bytes) ==", sse.len());
     let parts = chunks(&sse);

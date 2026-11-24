@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use omni_ir::error::ErrorCode;
-use omni_ir::jsjson::{JsValue, write_js_value, write_number, write_str};
+use omni_ir::jsjson::{JsValue, write_js_value, write_number, write_str, write_u64};
 use omni_ir::stream::{
     CollectedBlock, CollectedResponse, ContentBlockStart, Delta, NativeFold, StopReason,
     StreamEvent, Usage,
@@ -85,6 +85,9 @@ struct Item {
     /// A native item's `type`; its payload is `{ type, ...native }`.
     block_type: String,
     native: JsValue,
+    /// The delta frame's fields after `sequence_number`, rendered once at
+    /// block open: `,"item_id":…,"output_index":…,…,"delta":`.
+    delta_suffix: String,
 }
 
 /// `customToolInput`: the program inside `{"input": "<program>"}`, else raw.
@@ -100,10 +103,11 @@ fn write_item(item: &Item, status: &str, out: &mut String) {
     let head = |t: &str, out: &mut String| {
         out.push_str(r#"{"id":"#);
         item.id.write_json(out);
-        out.push_str(r#","type":"#);
-        write_str(t, out);
-        out.push_str(r#","status":"#);
-        write_str(status, out);
+        out.push_str(r#","type":""#);
+        push_static(t, out);
+        out.push_str(r#"","status":""#);
+        push_static(status, out);
+        out.push('"');
     };
     match item.kind {
         Kind::Message => {
@@ -212,11 +216,29 @@ struct Fields<'a> {
     out: &'a mut String,
 }
 
+/// A static identifier with no escapable bytes, written without the scan.
+fn push_static(s: &str, out: &mut String) {
+    debug_assert!(s.bytes().all(|b| b >= 0x20 && b != b'"' && b != b'\\'));
+    out.push_str(s);
+}
+
+/// `sequence_number` bytes: decimal digits below 2^53, the `JSON.stringify`
+/// f64 rendering above it.
+fn write_sequence(sequence: u64, out: &mut String) {
+    if sequence <= 1u64 << 53 {
+        write_u64(sequence, out);
+    } else {
+        #[allow(clippy::cast_precision_loss)]
+        write_number(sequence as f64, out);
+    }
+}
+
 impl Fields<'_> {
     fn key(&mut self, k: &str) -> &mut String {
         self.out.push(',');
-        write_str(k, self.out);
-        self.out.push(':');
+        self.out.push('"');
+        push_static(k, self.out);
+        self.out.push_str("\":");
         self.out
     }
     fn text(&mut self, k: &str, v: &Text) -> &mut Self {
@@ -224,10 +246,21 @@ impl Fields<'_> {
         self
     }
     fn num(&mut self, k: &str, v: u32) -> &mut Self {
-        let out = self.key(k);
-        write_number(f64::from(v), out);
+        write_u64(u64::from(v), self.key(k));
         self
     }
+}
+
+/// The steady-state delta frame: a static head, the sequence digits, the
+/// item's precomputed field suffix, then the escaped delta text. No per-delta
+/// allocation or static-text scanning.
+fn delta_frame(sequence: &mut u64, head: &str, item: &Item, text: &Text, out: &mut String) {
+    *sequence += 1;
+    out.push_str(head);
+    write_sequence(*sequence, out);
+    out.push_str(&item.delta_suffix);
+    text.write_json(out);
+    out.push_str("}\n\n");
 }
 
 impl ResponsesStream {
@@ -244,13 +277,23 @@ impl ResponsesStream {
     }
 
     fn frame(&mut self, event: &str, out: &mut String, fields: impl FnOnce(&mut Fields<'_>)) {
-        self.sequence += 1;
+        Self::frame_at(&mut self.sequence, event, out, fields);
+    }
+
+    /// [`Self::frame`] against a disjoint sequence borrow, so the open item
+    /// can stay borrowed while its frame is written.
+    fn frame_at(
+        sequence: &mut u64,
+        event: &str,
+        out: &mut String,
+        fields: impl FnOnce(&mut Fields<'_>),
+    ) {
+        *sequence += 1;
         begin_frame(event, out);
-        out.push_str(r#"{"type":"#);
-        write_str(event, out);
-        out.push_str(r#","sequence_number":"#);
-        #[allow(clippy::cast_precision_loss)]
-        write_number(self.sequence as f64, out);
+        out.push_str(r#"{"type":""#);
+        push_static(event, out);
+        out.push_str(r#"","sequence_number":"#);
+        write_sequence(*sequence, out);
         fields(&mut Fields { out: &mut *out });
         out.push('}');
         end_frame(out);
@@ -266,9 +309,9 @@ impl ResponsesStream {
         out.push_str(r#","object":"response","created_at":"#);
         #[allow(clippy::cast_precision_loss)]
         write_number(self.render.created as f64, out);
-        out.push_str(r#","status":"#);
-        write_str(status, out);
-        out.push_str(r#","model":"#);
+        out.push_str(r#","status":""#);
+        push_static(status, out);
+        out.push_str(r#"","model":"#);
         self.model.write_json(out);
         out.push_str(r#","output":["#);
         out.push_str(&self.output);
@@ -287,11 +330,10 @@ impl ResponsesStream {
     ) {
         self.sequence += 1;
         begin_frame(event, out);
-        out.push_str(r#"{"type":"#);
-        write_str(event, out);
-        out.push_str(r#","sequence_number":"#);
-        #[allow(clippy::cast_precision_loss)]
-        write_number(self.sequence as f64, out);
+        out.push_str(r#"{"type":""#);
+        push_static(event, out);
+        out.push_str(r#"","sequence_number":"#);
+        write_sequence(self.sequence, out);
         out.push_str(r#","response":"#);
         self.write_snapshot(status, extra, out);
         out.push('}');
@@ -318,6 +360,29 @@ impl ResponsesStream {
         } else {
             call_id.surrounded(&format!("{}_", kind.prefix()), "")
         };
+        let mut delta_suffix = String::new();
+        match kind {
+            Kind::Message | Kind::Reasoning => {
+                let mut f = Fields {
+                    out: &mut delta_suffix,
+                };
+                f.text("item_id", &id).num("output_index", output_index);
+                if kind == Kind::Message {
+                    f.num("content_index", 0);
+                } else {
+                    f.num("summary_index", 0);
+                }
+                f.key("delta");
+            }
+            Kind::FunctionCall => {
+                let mut f = Fields {
+                    out: &mut delta_suffix,
+                };
+                f.text("item_id", &id).num("output_index", output_index);
+                f.key("delta");
+            }
+            Kind::CustomToolCall | Kind::Native => {}
+        }
         self.open = Some(Item {
             ir_index,
             output_index,
@@ -328,6 +393,7 @@ impl ResponsesStream {
             call_id: call_id.clone(),
             block_type: block_type.to_string(),
             native,
+            delta_suffix,
         });
     }
 
@@ -430,7 +496,7 @@ impl ResponsesStream {
             _ => None,
         };
         match merge {
-            None => self.push(&event, out),
+            None => self.push_inner(&event, out),
             Some(data) => self.native_delta(&event, Merge::Moved(data), out),
         }
     }
@@ -572,53 +638,50 @@ impl ResponsesStream {
                 self.open = Some(item);
             }
             StreamEvent::BlockDelta { index, delta } => {
-                let Some(mut item) = self.open.take() else {
+                let Some(item) = self.open.as_mut() else {
                     return;
                 };
                 if item.ir_index != *index {
-                    self.open = Some(item);
                     return;
                 }
-                let (oi, kind) = (item.output_index, item.kind);
                 match delta {
-                    Delta::Text { text } if kind == Kind::Message => {
+                    Delta::Text { text } if item.kind == Kind::Message => {
                         item.text.push(text);
-                        let id = &item.id;
-                        self.frame("response.output_text.delta", out, |f| {
-                            f.text("item_id", id)
-                                .num("output_index", oi)
-                                .num("content_index", 0);
-                            f.text("delta", text);
-                        });
+                        delta_frame(
+                            &mut self.sequence,
+                            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"sequence_number\":",
+                            item,
+                            text,
+                            out,
+                        );
                     }
-                    Delta::Thinking { text } if kind == Kind::Reasoning => {
+                    Delta::Thinking { text } if item.kind == Kind::Reasoning => {
                         item.text.push(text);
-                        let id = &item.id;
-                        self.frame("response.reasoning_summary_text.delta", out, |f| {
-                            f.text("item_id", id)
-                                .num("output_index", oi)
-                                .num("summary_index", 0);
-                            f.text("delta", text);
-                        });
+                        delta_frame(
+                            &mut self.sequence,
+                            "event: response.reasoning_summary_text.delta\ndata: {\"type\":\"response.reasoning_summary_text.delta\",\"sequence_number\":",
+                            item,
+                            text,
+                            out,
+                        );
                     }
                     Delta::ToolJson { partial } => {
                         item.text.push(partial);
-                        if kind == Kind::FunctionCall {
-                            let id = &item.id;
-                            self.frame("response.function_call_arguments.delta", out, |f| {
-                                f.text("item_id", id).num("output_index", oi);
-                                f.text("delta", partial);
-                            });
+                        if item.kind == Kind::FunctionCall {
+                            delta_frame(
+                                &mut self.sequence,
+                                "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"sequence_number\":",
+                                item,
+                                partial,
+                                out,
+                            );
                         }
                     }
-                    Delta::ProviderNative { .. } if kind == Kind::Native => {
-                        self.open = Some(item);
+                    Delta::ProviderNative { .. } if item.kind == Kind::Native => {
                         self.native_delta(event, Merge::Borrowed, out);
-                        return;
                     }
                     _ => {}
                 }
-                self.open = Some(item);
             }
             StreamEvent::BlockEnd { index } => {
                 if self.open.as_ref().is_some_and(|o| o.ir_index == *index) {
@@ -705,6 +768,7 @@ pub(crate) fn write_response(
             call_id: call_id.clone(),
             block_type: String::new(),
             native: JsValue::Object(Vec::new()),
+            delta_suffix: String::new(),
         };
         let rendered = match block {
             CollectedBlock::Text { text, .. } => item(
