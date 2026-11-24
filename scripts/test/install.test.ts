@@ -173,9 +173,10 @@ function wgetOnlyBin(dir: string): string {
 }
 
 /**
- * A fake `ip` answering the one query install.sh makes with chosen global
- * IPv4 addresses, so the detected default host is deterministic. Unlinks
- * first: in wgetOnlyBin the name is a symlink to the real system binary.
+ * A fake ip command answering the one query install.sh makes with chosen
+ * global IPv4 addresses, so the detected default host is deterministic.
+ * Unlinks first: in wgetOnlyBin the name is a symlink to the real system
+ * binary.
  */
 function writeIpStub(bin: string, addrs: string[]): void {
   mkdirSync(bin, { recursive: true });
