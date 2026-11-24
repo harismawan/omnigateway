@@ -1,14 +1,6 @@
 //! System prompt rewriting and billing block preparation before serialization.
+use crate::agent_identity::{AGENT_PREAMBLE, REWRITES, banned};
 use serde_json::{Value, json};
-pub const AGENT_PREAMBLE: &str = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
-const BANNED: &[&str] = &[
-    "github.com/anomalyco/opencode",
-    "opencode.ai/docs",
-    "github.com/cline/cline",
-    "github.com/getcursor/cursor",
-    "continue.dev",
-    "hermes-agent.nousresearch.com",
-];
 
 pub fn apply_system(system: &[Value], first_user_text: &str) -> Vec<Value> {
     let version = super::profile::env(
@@ -49,21 +41,15 @@ pub fn apply_system(system: &[Value], first_user_text: &str) -> Vec<Value> {
         let kept: Vec<_> = paragraphs
             .into_iter()
             .filter(|p| {
-                !BANNED.iter().any(|s| p.contains(s))
-                    && !["You are OpenCode", "You are Hermes Agent"]
-                        .iter()
-                        .any(|s| omni_ir::js::trim(p).starts_with(s))
+                !banned(p)
                     && !p.contains(omni_crypto::cch::BILLING_PREFIX)
                     && omni_ir::js::trim(p) != AGENT_PREAMBLE
             })
             .collect();
-        let rewritten = kept
-            .join("\n\n")
-            .replace("if OpenCode honestly", "if the assistant honestly")
-            .replace(
-                "Here is some useful information about the environment you are running in:",
-                "Environment context you are running in:",
-            );
+        let mut rewritten = kept.join("\n\n");
+        for (from, to) in REWRITES {
+            rewritten = rewritten.replace(from, to);
+        }
         if !omni_ir::js::trim(&rewritten).is_empty() {
             let mut value = json!({"type":"text","text":rewritten});
             if let Some(cache) = block.get("cache_control") {

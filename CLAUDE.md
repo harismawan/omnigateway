@@ -116,9 +116,7 @@ check in `.github/workflows/ci.yml` (`rust` and `verify` jobs).
    for types only (see its `Cargo.toml`). Unpinned beyond the dependency lists.
 2. Provider wire formats, headers, signing, stream decoding stay in `crates/omni-providers`. A
    provider directory does not reach into another; shared helpers at crate root (`http/`, `sse.rs`,
-   `codec.rs`, `response_format.rs`, `tool_result_files.rs`). **Divergence:**
-   `anthropic/codec.rs` calls `custom::codec::needs_scope`, `antigravity/wire.rs` reads
-   `anthropic::body::AGENT_PREAMBLE`.
+   `codec.rs`, `response_format.rs`, `tool_result_files.rs`, `agent_identity.rs`).
 3. Dispatch (`omni-gateway/src/dispatch.rs`) owns side effects, retries, refresh, deadlines,
    failover, commit point (first `BlockDelta`, or the pending cap `PENDING_MAX_EVENTS`/`_BYTES`).
    Pins: `crates/omni-gateway/tests/dispatch.rs`.

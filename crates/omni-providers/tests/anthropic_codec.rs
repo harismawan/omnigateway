@@ -1,4 +1,39 @@
 use omni_providers::codec::ProviderCodec;
+
+#[test]
+fn system_cloaking_drops_agent_identity_and_rewrites_phrases() {
+    use omni_providers::{
+        anthropic::codec::AnthropicCodec,
+        codec::{CodecInput, Credentials},
+    };
+    let request: omni_ir::request::ChatRequest = serde_json::from_str(
+        r#"{"model":"m","stream":true,"max_tokens":64,"system":[{"type":"text","text":"You are OpenCode, an agent.\n\nSee github.com/anomalyco/opencode for docs.\n\nAnswer if OpenCode honestly can.\n\nKeep this rule."}],"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}"#,
+    )
+    .expect("request");
+    let credentials = Credentials {
+        access_token: None,
+        api_key: Some("k".into()),
+        provider_data: Default::default(),
+    };
+    let built = AnthropicCodec
+        .build_request(&CodecInput {
+            request: &request,
+            model: "m",
+            credentials: &credentials,
+            request_id: None,
+            auto_cache_enabled: None,
+            max_output_tokens: None,
+            request_started_at: None,
+        })
+        .expect("build");
+    let body = &built.request.body;
+    assert!(body.contains("Keep this rule."));
+    assert!(body.contains("if the assistant honestly"));
+    assert!(!body.contains("OpenCode"));
+    assert!(!body.contains("opencode"));
+    assert!(body.contains("You are a Claude agent"));
+}
+
 #[test]
 fn fingerprint_hook_preserves_hints_and_only_matches_http_400() {
     use omni_ir::error::{ErrorCode, GatewayError};
