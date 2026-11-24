@@ -3,9 +3,9 @@ import { matches, matrixScenarios, responseVerdict } from "./bench-matrix";
 
 test("matrix has distinct scenarios and selects globs literally", () => {
   const cases = matrixScenarios();
-  expect(cases).toHaveLength(48);
-  expect(new Set(cases.map((c) => c.name)).size).toBe(48);
-  expect(cases.filter((c) => matches(c.name, "*.responses.*"))).toHaveLength(12);
+  expect(cases).toHaveLength(88);
+  expect(new Set(cases.map((c) => c.name)).size).toBe(88);
+  expect(cases.filter((c) => matches(c.name, "*.responses.*"))).toHaveLength(22);
   expect(matches("custom-chat.chat.json", "custom-*")).toBe(true);
   expect(matches("custom-chatXchatXjson", "custom-chat.chat.json")).toBe(false);
 });

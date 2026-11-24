@@ -43,6 +43,24 @@ export async function seedOAuth(path: string, secret: string, label: string) {
         }),
         label,
       ]);
+    if (label === "qoder-oauth") {
+      // Qoder's access_token is a JSON bundle, not a bearer token.
+      const bundle = JSON.stringify({
+        version: 1,
+        deviceToken: "device-token",
+        uid: "u1",
+        machineId: "machine-1",
+        encryptUserInfo: "ZW5jcnlwdGVk",
+        key: "0123456789abcdef",
+        origin: "https://api2.qoder.sh",
+        models: [],
+        issuedAt: 1700000000000,
+      });
+      db.run("UPDATE credentials SET access_token=?, provider_data='{}' WHERE label=?", [
+        await encrypt(bundle),
+        label,
+      ]);
+    }
   } finally {
     db.close();
   }
