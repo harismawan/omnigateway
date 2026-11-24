@@ -84,7 +84,6 @@ if [ "$spider" = 1 ]; then
 fi
 case $url in
   */health) exit 0 ;;
-  */public-ip) printf '203.0.113.7'; exit 0 ;;
 esac
 name=\${url##*/}
 if [ "$out" = - ]; then
@@ -124,7 +123,6 @@ function serveRelease(assets: string): string {
       if (path === "/latest") {
         return new Response(null, { status: 302, headers: { Location: `/tag/${TAG}` } });
       }
-      if (path === "/public-ip") return new Response("203.0.113.7");
       if (path.startsWith("/download/")) {
         const name = path.slice("/download/".length).split("/")[1];
         if (name && existsSync(join(assets, name))) {
@@ -174,6 +172,21 @@ function wgetOnlyBin(dir: string): string {
   return bin;
 }
 
+/**
+ * A fake `ip` answering the one query install.sh makes with chosen global
+ * IPv4 addresses, so the detected default host is deterministic. Unlinks
+ * first: in wgetOnlyBin the name is a symlink to the real system binary.
+ */
+function writeIpStub(bin: string, addrs: string[]): void {
+  mkdirSync(bin, { recursive: true });
+  const lines = addrs
+    .map((a, i) => `'${i + 2}: eth${i}    inet ${a}/24 scope global eth${i}'`)
+    .join(" ");
+  rmSync(join(bin, "ip"), { force: true });
+  writeFileSync(join(bin, "ip"), `#!/bin/sh\nprintf '%s\\n' ${lines}\n`);
+  chmodSync(join(bin, "ip"), 0o755);
+}
+
 // Async spawn: the fake release server shares this process's event loop, which
 // a spawnSync would block while curl waits for it.
 async function runInstall(options: {
@@ -199,7 +212,6 @@ async function runInstall(options: {
       OMNI_INSTALL_BASE_URL: base,
       OMNI_INSTALL_UNAME_S: "Linux",
       OMNI_INSTALL_UNAME_M: "x86_64",
-      OMNI_INSTALL_PUBLIC_IP_URL: `${base}/public-ip`,
       OMNI_STUB_LOG: join(home, "calls.log"),
       OMNI_STUB_STDIN: join(home, "stdin.log"),
       OMNI_STUB_ADMIN_CONFIGURED: "false",
@@ -281,17 +293,37 @@ test("a bare --base-url host becomes http://host:port and --port is written", as
   expect(env).toContain("OMNI_BASE_URL=http://192.0.2.10:9100");
 });
 
-test("--yes without --base-url takes the detected public address", async () => {
-  const { home, base } = fixture();
+test("--yes without --base-url prefers a public address on an interface", async () => {
+  const { dir, home, base } = fixture();
+  const bin = join(dir, "ip-bin");
+  writeIpStub(bin, ["10.20.30.40", "203.0.113.7"]);
   const run = await runInstall({
     home,
     base,
     args: ["--no-service", "--yes"],
     env: { OMNI_ADMIN_PASSWORD: "correct horse battery staple" },
+    pathPrepend: bin,
   });
   expect(run.exitCode).toBe(0);
   expect(envFile(join(home, ".config", "omnigateway"))).toContain(
     "OMNI_BASE_URL=http://203.0.113.7:9000",
+  );
+});
+
+test("--yes without --base-url falls back to the first private address", async () => {
+  const { dir, home, base } = fixture();
+  const bin = join(dir, "ip-bin");
+  writeIpStub(bin, ["192.168.1.50", "10.0.0.9"]);
+  const run = await runInstall({
+    home,
+    base,
+    args: ["--no-service", "--yes"],
+    env: { OMNI_ADMIN_PASSWORD: "correct horse battery staple" },
+    pathPrepend: bin,
+  });
+  expect(run.exitCode).toBe(0);
+  expect(envFile(join(home, ".config", "omnigateway"))).toContain(
+    "OMNI_BASE_URL=http://192.168.1.50:9000",
   );
 });
 
@@ -326,12 +358,15 @@ test("a pre-existing .env is never rewritten; --port/--base-url are ignored with
 });
 
 test("no set-password when adminConfigured is true", async () => {
-  const { home, base } = fixture();
+  const { dir, home, base } = fixture();
+  const bin = join(dir, "ip-bin");
+  writeIpStub(bin, ["192.168.1.50"]);
   const run = await runInstall({
     home,
     base,
     args: ["--no-service", "--yes"],
     env: { OMNI_STUB_ADMIN_CONFIGURED: "true" },
+    pathPrepend: bin,
   });
   expect(run.exitCode).toBe(0);
   expect(calls(home).some((c) => c.startsWith("admin set-password"))).toBe(false);
@@ -496,7 +531,6 @@ test("a truncated download (first 60% of bytes) installs nothing under HOME", as
         OMNI_INSTALL_BASE_URL: base,
         OMNI_INSTALL_UNAME_S: "Linux",
         OMNI_INSTALL_UNAME_M: "x86_64",
-        OMNI_INSTALL_PUBLIC_IP_URL: `${base}/public-ip`,
         OMNI_STUB_LOG: join(home, "calls.log"),
         OMNI_STUB_STDIN: join(home, "stdin.log"),
         OMNI_ADMIN_PASSWORD: "correct horse battery staple",
@@ -558,7 +592,7 @@ test("GNU wget spider output resolves the tag, not the '[following]' line", asyn
     home,
     base,
     args: ["--no-service", "--yes", "--base-url", "http://gw.example.test:9000"],
-    env: { ...wgetEnv(home, assets), OMNI_INSTALL_PUBLIC_IP_URL: "" },
+    env: wgetEnv(home, assets),
     pathOverride: wgetOnlyBin(dir),
   });
   expect(run.stderr).toBe("");
@@ -570,25 +604,25 @@ test("GNU wget spider output resolves the tag, not the '[following]' line", asyn
   expect(wgetCalls(home).some((l) => l.includes(`omnigateway-${TAG}-linux-x64.tar.gz`))).toBe(true);
 });
 
-test("wget health probe and public-IP lookup pass -t 1", async () => {
+test("wget health probe passes -t 1 and no external address lookup is made", async () => {
   const { dir, home, assets, base } = fixture();
+  const bin = wgetOnlyBin(dir);
+  writeIpStub(bin, ["203.0.113.7"]);
   const run = await runInstall({
     home,
     base,
     args: ["--version", TAG, "--yes"],
     env: wgetEnv(home, assets),
-    pathOverride: wgetOnlyBin(dir),
+    pathOverride: bin,
   });
   expect(run.exitCode).toBe(0);
   expect(envFile(join(home, ".config", "omnigateway"))).toContain(
     "OMNI_BASE_URL=http://203.0.113.7:9000",
   );
-  const ip = wgetCalls(home).find((l) => l.includes("/public-ip"));
   const health = wgetCalls(home).find((l) => l.includes("/health"));
-  expect(ip).toBeDefined();
-  expect(ip).toContain("-t 1");
   expect(health).toBeDefined();
   expect(health).toContain("-t 1");
+  expect(wgetCalls(home).some((l) => /ipify|public-ip/.test(l))).toBe(false);
 });
 
 test("a failing omni status skips the password step with a warning, never resets", async () => {

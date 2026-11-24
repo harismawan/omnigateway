@@ -19,8 +19,7 @@
 # OMNI_ADMIN_PASSWORD supplies the admin password without a prompt.
 #
 # Test-only overrides (not for normal use): OMNI_INSTALL_BASE_URL (release
-# download base), OMNI_INSTALL_UNAME_S / OMNI_INSTALL_UNAME_M (fake uname),
-# OMNI_INSTALL_PUBLIC_IP_URL (public-IP lookup; empty disables it).
+# download base), OMNI_INSTALL_UNAME_S / OMNI_INSTALL_UNAME_M (fake uname).
 #
 # Design: docs/superpowers/specs/2026-11-23-install-script-design.md
 
@@ -35,7 +34,6 @@ DEFAULT_VERSION=latest
 main() {
 
 RELEASE_BASE_URL=${OMNI_INSTALL_BASE_URL:-https://github.com/harismawan/omnigateway/releases}
-PUBLIC_IP_URL=${OMNI_INSTALL_PUBLIC_IP_URL-https://api.ipify.org}
 
 say() { printf '%s\n' "$*"; }
 warn() { printf '%s\n' "$*" >&2; }
@@ -368,19 +366,18 @@ else
       *) BASE=http://$BASEURL_FLAG:$PORT ;;
     esac
   else
-    PUBLIC_IP=
-    if [ -n "$PUBLIC_IP_URL" ]; then
-      if [ "$DOWNLOADER" = curl ]; then
-        PUBLIC_IP=$(curl -fsSL -m 4 "$PUBLIC_IP_URL" 2>/dev/null || true)
-      else
-        PUBLIC_IP=$(wget -q -t 1 -T 4 -O - "$PUBLIC_IP_URL" 2>/dev/null || true)
-      fi
-      case $PUBLIC_IP in
-        *[!0-9.]*|'') PUBLIC_IP= ;;
-      esac
-    fi
-    FIRST_PRIVATE=$(printf '%s\n' "$LOCAL_IPS" | head -n 1)
-    DEFAULT_HOST=${PUBLIC_IP:-${FIRST_PRIVATE:-$(hostname 2>/dev/null || echo localhost)}}
+    # A globally routable address on an interface (a VPS with its public IP
+    # on the NIC) beats a private one; everything is read locally, no
+    # external lookup is made.
+    DEFAULT_HOST=$(printf '%s\n' "$LOCAL_IPS" | awk -F. '
+      NF != 4 { next }
+      $1 == 10 || $1 == 127 || ($1 == 172 && $2 >= 16 && $2 <= 31) ||
+      ($1 == 192 && $2 == 168) || ($1 == 169 && $2 == 254) ||
+      ($1 == 100 && $2 >= 64 && $2 <= 127) { if (!priv) priv = $0; next }
+      { if (!pub) pub = $0 }
+      END { if (pub) print pub; else if (priv) print priv }
+    ')
+    DEFAULT_HOST=${DEFAULT_HOST:-$(hostname 2>/dev/null || echo localhost)}
     if [ "$ASSUME_YES" = 1 ]; then
       BASE=http://$DEFAULT_HOST:$PORT
     elif have_tty; then

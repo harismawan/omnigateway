@@ -149,10 +149,10 @@ script fails with a message naming `OMNI_ADMIN_PASSWORD`.
    gateway derives `http://0.0.0.0:<port>` (`crates/omni-control/src/config.rs`),
    which `omni setup *` and the console's agent setup write into client
    configs, useless from another machine. Candidates: non-loopback IPv4
-   addresses of the machine, plus the public address when one can be learned
-   (a single best-effort HTTPS lookup with a short timeout; failure just drops
-   the candidate). Default = the public address if found, else the first
-   private one. The prompt reads "Address your laptop uses to reach this
+   addresses of the machine, read locally from `ip addr` (or `ifconfig`);
+   no external lookup is made. Default = a globally routable address
+   assigned to an interface if present (a VPS with its public IP on the
+   NIC), else the first private one. The prompt reads "Address your laptop uses to reach this
    server" and accepts a bare host/IP (becomes `http://<host>:<port>`) or a
    full URL. `--base-url` answers it; with `--yes` and no flag the default is
    taken.
