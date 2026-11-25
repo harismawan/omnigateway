@@ -13,6 +13,7 @@ permissions:
 
 jobs:
   rust-binaries:
+    name: build ${{ matrix.asset }}
     permissions:
       contents: read
     strategy:
